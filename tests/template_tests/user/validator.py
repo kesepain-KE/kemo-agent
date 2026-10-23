@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from run.config import load_config
 from run.memory import MemoryStore
 from run.config import build_prompt_bundle
 from run.config import list_users
+from run.config import MainAgentSourcePolicy
+from run.config.user_skeleton import (
+    REQUIRED_USER_DIRS,
+    TEMPLATE_ONLY_EMPTY_DIRS,
+)
 
 from tests.template_tests.base import begin_report
 from tests.template_tests.common import (
@@ -18,6 +24,11 @@ from tests.template_tests.common import (
     sandbox,
 )
 from tests.template_tests.contracts import ContractReport
+
+
+_MEMORY_BACKUP_RE = re.compile(
+    r"^memory\.backup_\d{8}_\d{6}\.sqlite3(?:-(?:shm|wal))?$"
+)
 
 
 def validate(
@@ -58,19 +69,7 @@ def _validate(
     user = "contract_user"
     with sandbox(repository_root=repository_root) as root:
         destination = copy_candidate(target, root / "users" / user)
-        required_dirs = (
-            "agents",
-            "avatar",
-            "download",
-            "expand",
-            "file_upload",
-            "history",
-            "improve",
-            "knowledge",
-            "task_cron",
-            "task_plan",
-            "user_skills",
-        )
+        required_dirs = REQUIRED_USER_DIRS
         missing_dirs = [
             relative
             for relative in required_dirs
@@ -85,6 +84,21 @@ def _validate(
                 "user.directories", "用户资源、记忆、知识与工作目录均已初始化"
             )
         if template_mode:
+            for relative in TEMPLATE_ONLY_EMPTY_DIRS:
+                entries = sorted(
+                    item.name for item in (destination / relative).iterdir()
+                )
+                if entries != [".gitkeep"]:
+                    report.failed(
+                        "user.empty_template_directories",
+                        f"{relative} 在参考模板中只能保留 .gitkeep："
+                        + (", ".join(entries) or "为空"),
+                    )
+                else:
+                    report.passed(
+                        f"user.{relative.replace('/', '.')}.template",
+                        f"{relative} 仅保留目录标记，不预置运行数据",
+                    )
             history_entries = sorted(
                 item.name
                 for item in (destination / "history").iterdir()
@@ -161,10 +175,33 @@ def _validate(
             schema_version=raw_config.get("schema_version"),
             user=config.get("user"),
         )
+        try:
+            MainAgentSourcePolicy.from_config(raw_config)
+        except BaseException as exc:
+            report.failed("user.config_fields", f"用户来源配置字段无效：{exc}")
+        else:
+            report.passed(
+                "user.config_fields",
+                "skills、expand、perception、knowledge、plugins 字段通过真实来源策略校验",
+            )
+        invalid_policy = dict(raw_config)
+        invalid_skills = dict(raw_config.get("skills") or {})
+        invalid_skills["user_whitelist"] = []
+        invalid_policy["skills"] = invalid_skills
+        try:
+            MainAgentSourcePolicy.from_config(invalid_policy)
+        except BaseException:
+            report.passed(
+                "user.config_fields_removed",
+                "已移除的用户技能白名单字段会被真实来源策略拒绝",
+            )
+        else:
+            report.failed(
+                "user.config_fields_removed",
+                "来源策略意外接受已移除的 skills.user_whitelist 字段",
+            )
         provider = (
-            raw_config.get("provider")
-            if isinstance(raw_config.get("provider"), dict)
-            else {}
+            (checked_204 if isinstance(checked_204 := raw_config.get("provider"), dict) else {})
         )
         inline_key = bool(str(provider.get("api_key") or "").strip())
         env_name = str(provider.get("api_key_env") or "").strip() or (
@@ -212,11 +249,27 @@ def _validate(
                     report.failed("user.prompt", "构建后的 Prompt 未包含 user_soul.md")
 
         improve = destination / "improve"
-        legacy_files = sorted(
+        all_legacy_files = sorted(
             path.relative_to(improve).as_posix()
             for path in improve.rglob("*")
             if path.is_file() and path.name not in {".gitkeep", "memory.sqlite3"}
         )
+        preserved_backups = [
+            relative
+            for relative in all_legacy_files
+            if _MEMORY_BACKUP_RE.fullmatch(Path(relative).name)
+        ]
+        legacy_files = (
+            all_legacy_files
+            if template_mode
+            else [
+                relative
+                for relative in all_legacy_files
+                if relative not in preserved_backups
+            ]
+        )
+        if template_mode:
+            preserved_backups = []
         prebuilt_database = (
             template_mode and (target / "improve" / "memory.sqlite3").exists()
         )
@@ -228,14 +281,23 @@ def _validate(
             report.failed(
                 "user.memory", "记忆目录仍包含旧文件结构：" + ", ".join(legacy_files)
             )
-        elif issues:
-            report.failed(
-                "user.memory", "SQLite 记忆库完整性异常：" + ", ".join(issues)
-            )
-        elif store.database_path().is_file():
-            report.passed("user.memory", "每用户 SQLite 记忆库可初始化并通过完整性检查")
         else:
-            report.failed("user.memory", "memory.sqlite3 未能初始化")
+            if preserved_backups and not template_mode:
+                report.warning(
+                    "user.memory_backups",
+                    "保留现有记忆库备份，不将其导入当前运行库："
+                    + ", ".join(preserved_backups),
+                )
+            if issues:
+                report.failed(
+                    "user.memory", "SQLite 记忆库完整性异常：" + ", ".join(issues)
+                )
+            elif store.database_path().is_file():
+                report.passed(
+                    "user.memory", "每用户 SQLite 记忆库可初始化并通过完整性检查"
+                )
+            else:
+                report.failed("user.memory", "memory.sqlite3 未能初始化")
 
         if (destination / "knowledge").is_dir():
             report.passed("user.knowledge", "用户知识目录存在，允许任意嵌套知识文件")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import json
 import os
 import tempfile
@@ -84,12 +86,15 @@ class MemoryEngineTests(unittest.TestCase):
             },
         }
 
+        analysis_calls = 0
+
         def analyze(**kwargs):
+            nonlocal analysis_calls
             current = kwargs["rounds"]
-            if analyze.calls < 2:
-                analyze.calls += 1
+            if analysis_calls < 2:
+                analysis_calls += 1
                 return dict(failed)
-            analyze.calls += 1
+            analysis_calls += 1
             numbers = [item["round"] for item in current]
             return {
                 "status": "completed",
@@ -109,7 +114,7 @@ class MemoryEngineTests(unittest.TestCase):
                 "error": None,
             }
 
-        analyze.calls = 0
+        analysis_calls = 0
         with patch(
             "run.memory.analysis.analyze_memory_batch", side_effect=analyze
         ) as mocked:
@@ -188,7 +193,7 @@ class MemoryEngineTests(unittest.TestCase):
             result["memory"]["round_extraction"]["reason"],
             "deferred_until_compression",
         )
-        archive = load_window(find_window(root, "alice", "cli", "s"))
+        archive = load_window(require_present(find_window(root, "alice", "cli", "s")))
         self.assertEqual(archive["data"]["memory_processed_round"], 0)
         self.assertEqual(archive["data"]["memory_status"], "deferred")
         self.assertEqual(
@@ -205,7 +210,7 @@ class MemoryEngineTests(unittest.TestCase):
                     root=root,
                     provider_factory=lambda _: Provider(fail=True),
                 )
-        archive = load_window(find_window(root, "alice", "cli", "s"))
+        archive = load_window(require_present(find_window(root, "alice", "cli", "s")))
         self.assertEqual(archive["data"]["rounds"], 1)
         self.assertEqual(archive["data"]["round_metrics"][0]["status"], "failed")
         self.assertEqual(
@@ -225,7 +230,7 @@ class MemoryEngineTests(unittest.TestCase):
             events = list(iterator)
         self.assertEqual([event.type for event in events], ["done"])
         self.assertEqual(events[0].metadata["status"], "cancelled")
-        archive = load_window(find_window(root, "alice", "cli", "s"))
+        archive = load_window(require_present(find_window(root, "alice", "cli", "s")))
         self.assertEqual(archive["data"]["rounds"], 2)
         self.assertEqual(
             [item["status"] for item in archive["data"]["round_metrics"]],

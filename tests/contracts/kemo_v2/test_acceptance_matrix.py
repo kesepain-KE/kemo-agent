@@ -31,19 +31,19 @@ def _event(
     text: str | None = None,
     item: object | None = None,
 ) -> ProviderStreamEvent:
-    return ProviderStreamEvent(
-        type=event_type,
-        event_id=event_id,
-        sequence=sequence,
-        previous_sequence=None if sequence == 0 else sequence - 1,
-        request_id="req_matrix",
-        response_id="resp_matrix",
-        item_id=item_id,
-        content_index=content_index,
-        delta=delta,
-        text=text,
-        item=item,
-    )
+    return ProviderStreamEvent.model_validate({
+               'type': event_type,
+               'event_id': event_id,
+               'sequence': sequence,
+               'previous_sequence': None if sequence == 0 else sequence - 1,
+               'request_id': "req_matrix",
+               'response_id': "resp_matrix",
+               'item_id': item_id,
+               'content_index': content_index,
+               'delta': delta,
+               'text': text,
+               'item': item,
+           })
 
 
 def test_r01_request_version_is_required_and_exact() -> None:
@@ -70,7 +70,11 @@ def test_r08_item_start_is_not_a_final_empty_item() -> None:
     start = MessageItemStart(id="msg_matrix")
     assert start.status == "in_progress"
     with pytest.raises(ValidationError):
-        MessageItem(id="msg_matrix", role="assistant", content=[])
+        MessageItem.model_validate({
+            'id': "msg_matrix",
+            'role': "assistant",
+            'content': [],
+        })
 
 
 def test_r09_content_index_is_scoped_by_item_and_done_closes_only_that_block() -> None:
@@ -153,8 +157,8 @@ def test_r10_event_replay_is_idempotent_but_payload_conflict_is_rejected() -> No
 
 def test_r19_non_image_inline_media_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        AudioContent(
-            asset_id="asset_audio",
-            mime_type="audio/wav",
-            source={"kind": "inline_base64", "data": "UklGRg=="},
-        )
+        AudioContent.model_validate({
+            'asset_id': "asset_audio",
+            'mime_type': "audio/wav",
+            'source': {"kind": "inline_base64", "data": "UklGRg=="},
+        })

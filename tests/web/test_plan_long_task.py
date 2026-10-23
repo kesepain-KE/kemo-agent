@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import tempfile
 import threading
 import unittest
@@ -363,7 +365,7 @@ class PlanLongTaskTests(unittest.TestCase):
         self.assertEqual(events[-1].metadata["long_task_state"]["status"], "completed")
         self.assertIn("[x] 执行第一步", provider_requests[1].system_prompt)
         self.assertIn("[ ] 执行第二步", provider_requests[1].system_prompt)
-        history = load_window(find_window(root, "alice", "web", "plan-session"))
+        history = load_window(require_present(find_window(root, "alice", "web", "plan-session")))
         self.assertEqual(history["data"]["rounds"], 2)
         self.assertEqual(history["data"]["round_metrics"][0]["stop_reason"], "max_tool_iterations")
         self.assertEqual(history["data"]["round_metrics"][0]["status"], "limited")

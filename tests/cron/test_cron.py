@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import json
 import tempfile
 import threading
@@ -315,7 +317,7 @@ class ExecutorTests(unittest.TestCase):
         self.store = CronStore(self.root, "alice")
 
     def _create(self, task_type="recurring", **overrides):
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "title": "run",
             "prompt": "do work",
             "user": "alice",

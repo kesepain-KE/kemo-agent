@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from provider.protocol.models import KemoResponse, ToolCallItem
+
+from tests.type_assertions import require_type
+
+from tests.type_assertions import require_present
+
 import json
 import os
 import tempfile
@@ -40,7 +46,7 @@ class MockChatHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     requests: list[dict] = []
 
-    def log_message(self, *_: object) -> None:
+    def log_message(self, format: str, *args: object) -> None:
         pass
 
     def do_POST(self) -> None:
@@ -520,7 +526,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         provider = create_provider(self.config("chat"))
         response = provider.create(self.request())
         message = next(
-            item for item in response.output if isinstance(item, MessageItem)
+            item for item in require_type(response, KemoResponse).output if isinstance(item, MessageItem)
         )
         self.assertEqual(text_from_content(message.content), "mock reply")
         self.assertTrue(response.usage.measurement.exact)
@@ -529,16 +535,16 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertEqual(request["path"], "/v1/chat/completions")
         self.assertEqual(request["authorization"], "Bearer test-key")
 
-    def test_chat_bridge_forces_reasoning_without_changing_kemo_selection(self) -> None:
+    def test_chat_bridge_keeps_logical_reasoning_without_unconfigured_wire_fields(self) -> None:
         chat = create_provider(self.config("chat"))
         request = self.request().model_copy(
             update={
-                "reasoning": ReasoningConfig(
-                    enabled=True,
-                    effort="high",
-                    return_mode="content",
-                    context="auto",
-                ),
+                "reasoning": ReasoningConfig.model_validate({
+                    "enabled": True,
+                    "effort": "high",
+                    "return_mode": "content",
+                    "context": "auto",
+                }),
                 "provider_options": {
                     "reasoning_effort": "high",
                     "reasoning_enabled": True,
@@ -546,10 +552,10 @@ class ProviderTests(ServerMixin, unittest.TestCase):
             }
         )
         response = chat.create(request)
-        self.assertEqual(response.status, ResponseStatus.COMPLETED)
+        self.assertEqual(require_type(response, KemoResponse).status, ResponseStatus.COMPLETED)
         sent = MockChatHandler.requests[-1]["body"]
-        self.assertEqual(sent["reasoning_effort"], "high")
-        self.assertTrue(sent["reasoning_enabled"])
+        self.assertNotIn("reasoning_effort", sent)
+        self.assertNotIn("reasoning_enabled", sent)
         self.assertTrue(chat.capabilities(request.model).reasoning.supported)
         self.assertEqual(
             chat.capabilities(request.model).reasoning.efforts,
@@ -570,18 +576,18 @@ class ProviderTests(ServerMixin, unittest.TestCase):
 
         class KemoCapabilities:
             def capabilities(self, model: str) -> ModelCapabilities:
-                return ModelCapabilities(
-                    protocol_version="2.0",
-                    model=model,
-                    provider_id="kemo",
-                    provider_model=model,
-                    reasoning={
+                return ModelCapabilities.model_validate({
+                           'protocol_version': "2.0",
+                           'model': model,
+                           'provider_id': "kemo",
+                           'provider_model': model,
+                           'reasoning': {
                         "supported": True,
                         "efforts": ["medium", "high"],
                         "summary": True,
                         "returns": ["none", "summary", "auto"],
                     },
-                )
+                       })
 
         runtime = {
             "type": "kemo",
@@ -601,13 +607,13 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertEqual(selection.status, "enabled")
 
     def test_declared_input_token_limit_accepts_typed_and_legacy_locations(self) -> None:
-        typed = ModelCapabilities(
-            protocol_version="2.0",
-            model="typed",
-            provider_id="mock",
-            provider_model="typed",
-            limits={"context_window": 200_000, "max_input_tokens": 150_000},
-        )
+        typed = ModelCapabilities.model_validate({
+                    'protocol_version': "2.0",
+                    'model': "typed",
+                    'provider_id': "mock",
+                    'provider_model': "typed",
+                    'limits': {"context_window": 200_000, "max_input_tokens": 150_000},
+                })
         self.assertEqual(declared_input_token_limit(typed), 150_000)
 
         legacy = ModelCapabilities(
@@ -648,7 +654,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
             if event.type == StreamEventType.USAGE_UPDATED
         ][-1]
         self.assertIsNotNone(usage)
-        self.assertEqual(usage.total_tokens, 6)
+        self.assertEqual(require_present(usage).total_tokens, 6)
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
 
     def test_stream_tool_arguments_are_joined(self) -> None:
@@ -661,25 +667,25 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         ]
         self.assertEqual(len(calls), 1)
         self.assertIsInstance(calls[0], ToolCallItem)
-        self.assertTrue(calls[0].call_id.startswith("callid_"))
-        self.assertEqual(calls[0].name, "history_search")
-        self.assertEqual(calls[0].arguments, {"query": "hello", "limit": 2})
-        self.assertEqual(calls[0].arguments_raw, '{"query":"hello","limit":2}')
+        self.assertTrue(require_type(require_present(calls[0]), ToolCallItem).call_id.startswith("callid_"))
+        self.assertEqual(require_type(require_present(calls[0]), ToolCallItem).name, "history_search")
+        self.assertEqual(require_type(require_present(calls[0]), ToolCallItem).arguments, {"query": "hello", "limit": 2})
+        self.assertEqual(require_type(require_present(calls[0]), ToolCallItem).arguments_raw, '{"query":"hello","limit":2}')
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
 
     def test_truncated_chat_tool_arguments_are_never_published(self) -> None:
         provider = create_provider(self.config("chat", model="truncated-tool"))
         response = provider.create(self.request("truncated-tool"))
-        self.assertEqual(response.status, ResponseStatus.INCOMPLETE)
-        self.assertEqual(response.incomplete_details["reason"], "output_truncated")
+        self.assertEqual(require_type(response, KemoResponse).status, ResponseStatus.INCOMPLETE)
+        self.assertEqual(require_present(require_type(response, KemoResponse).incomplete_details)["reason"], "output_truncated")
         response_details = json.dumps(
-            response.incomplete_details.model_dump(mode="json"),
+            require_present(require_type(response, KemoResponse).incomplete_details).model_dump(mode="json"),
             ensure_ascii=False,
         )
         self.assertNotIn("arguments_raw", response_details)
         self.assertNotIn('{"query":"unfinished', response_details)
         self.assertFalse(
-            any(isinstance(item, ToolCallItem) for item in response.output)
+            any(isinstance(item, ToolCallItem) for item in require_type(response, KemoResponse).output)
         )
 
         stream_provider = create_provider(
@@ -698,13 +704,13 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         )
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_INCOMPLETE)
         stream_details = json.dumps(
-            events[-1].response.incomplete_details.model_dump(mode="json"),
+            require_present(require_present(events[-1].response).incomplete_details).model_dump(mode="json"),
             ensure_ascii=False,
         )
         self.assertNotIn("arguments_raw", stream_details)
         self.assertNotIn('{"query":"unfinished', stream_details)
         self.assertTrue(
-            events[-1].response.incomplete_details.details["invalid_tool_calls"][0][
+            require_present(require_present(events[-1].response).incomplete_details).details["invalid_tool_calls"][0][
                 "arguments_diagnostic"
             ]["content_omitted"]
         )
@@ -713,7 +719,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         provider = create_provider(self.config("chat", model="eof-with-finish"))
         events = list(provider.stream(self.request("eof-with-finish", stream=True)))
         self.assertEqual(events[-1].type, StreamEventType.RESPONSE_COMPLETED)
-        self.assertEqual(events[-1].response.status, ResponseStatus.COMPLETED)
+        self.assertEqual(require_present(events[-1].response).status, ResponseStatus.COMPLETED)
 
     def test_auth_error_mapping(self) -> None:
         provider = create_provider(self.config("chat", key="bad-key"))

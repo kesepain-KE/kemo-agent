@@ -34,7 +34,10 @@ def _usage() -> Usage:
         input_tokens=2,
         output_tokens=1,
         total_tokens=3,
-        measurement=Measurement(mode="provider", exact=True),
+        measurement=Measurement.model_validate({
+                        'mode': "provider",
+                        'exact': True,
+                    }),
     )
 
 
@@ -195,12 +198,12 @@ def test_batch_parse_error_kind_is_allowlisted() -> None:
 
 
 def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
-    response = KemoResponse(
-        request_id="req_placeholder",
-        status=ResponseStatus.INCOMPLETE,
-        model="mock",
-        output=[],
-        incomplete_details={
+    response = KemoResponse.model_validate({
+                   'request_id': "req_placeholder",
+                   'status': ResponseStatus.INCOMPLETE,
+                   'model': "mock",
+                   'output': [],
+                   'incomplete_details': {
             "reason": "invalid_tool_arguments",
             "details": {
                 "debug": {"authorization": "Bearer gateway-secret"},
@@ -214,8 +217,8 @@ def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
                 ],
             },
         },
-        usage=_usage(),
-    )
+                   'usage': _usage(),
+               })
 
     error = response_invalid_tool_arguments_error(response)
 

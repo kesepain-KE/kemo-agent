@@ -54,24 +54,33 @@ def _request(**updates: object) -> KemoRequest:
 
 
 def _response(*, request_id: str = "req_batch", index: int = 0, count: int = 1) -> KemoResponse:
-    return KemoResponse(
-        protocol_version="2.0",
-        id=f"resp_batch_{index}",
-        request_id=request_id,
-        model="demo-model",
-        status="completed",
-        choice_index=index,
-        choice_count=count,
-        output=[MessageItem.text("assistant", f"answer-{index}", item_id=f"msg_batch_{index}")],
-        usage=Usage(input_tokens=100, output_tokens=0, total_tokens=100),
-    )
+    return KemoResponse.model_validate({
+               'protocol_version': "2.0",
+               'id': f"resp_batch_{index}",
+               'request_id': request_id,
+               'model': "demo-model",
+               'status': "completed",
+               'choice_index': index,
+               'choice_count': count,
+               'output': [MessageItem.text("assistant", f"answer-{index}", item_id=f"msg_batch_{index}")],
+               'usage': Usage(input_tokens=100, output_tokens=0, total_tokens=100),
+           })
 
 
 def test_r02_allowed_modes_are_closed_and_request_tools_are_known() -> None:
-    choice = ToolChoice(mode="allowed", allowed_tools=["lookup"], allowed_mode="required")
+    choice = ToolChoice.model_validate({
+                 'mode': "allowed",
+                 'allowed_tools': ["lookup"],
+                 'allowed_mode': "required",
+             })
     assert choice.allowed_mode == "required"
     with pytest.raises(ValidationError):
-        ToolChoice(mode="allowed", allowed_tools=["lookup"], allowed_mode="required", name="lookup")
+        ToolChoice.model_validate({
+            'mode': "allowed",
+            'allowed_tools': ["lookup"],
+            'allowed_mode': "required",
+            'name': "lookup",
+        })
     with pytest.raises(ValidationError):
         _request(tool_choice={"mode": "allowed", "allowed_tools": ["missing"], "allowed_mode": "auto"})
 
@@ -90,27 +99,27 @@ def test_r03_custom_tools_cannot_cross_the_function_only_boundary() -> None:
 
 def test_r04_media_references_and_unicode_annotation_indices() -> None:
     with pytest.raises(ValidationError):
-        ImageContent(
-            asset_id="asset_image",
-            mime_type="image/png",
-            source={"kind": "url", "uri": "https://example.test/a.png", "data": "bad"},
-        )
-    item = MessageItem(
-        id="msg_annotation",
-        role="assistant",
-        content=[{"type": "text", "text": "猫😀"}],
-        annotations=[
+        ImageContent.model_validate({
+            'asset_id': "asset_image",
+            'mime_type': "image/png",
+            'source': {"kind": "url", "uri": "https://example.test/a.png", "data": "bad"},
+        })
+    item = MessageItem.model_validate({
+               'id': "msg_annotation",
+               'role': "assistant",
+               'content': [{"type": "text", "text": "猫😀"}],
+               'annotations': [
             Annotation(type="url_citation", content_index=0, url="https://example.test", start_index=1, end_index=2)
         ],
-    )
+           })
     assert item.annotations[0].end_index == 2
     with pytest.raises(ValidationError):
-        MessageItem(
-            id="msg_bad_annotation",
-            role="assistant",
-            content=[{"type": "text", "text": "猫😀"}],
-            annotations=[Annotation(type="url_citation", content_index=0, url="https://example.test", start_index=0, end_index=5)],
-        )
+        MessageItem.model_validate({
+            'id': "msg_bad_annotation",
+            'role': "assistant",
+            'content': [{"type": "text", "text": "猫😀"}],
+            'annotations': [Annotation(type="url_citation", content_index=0, url="https://example.test", start_index=0, end_index=5)],
+        })
 
 
 def test_r05_batch_usage_is_one_request_level_total() -> None:
@@ -160,27 +169,27 @@ def test_r11_resume_cursor_uses_local_anchor_and_rejects_other_response() -> Non
 
 def test_r12_and_r13_tool_call_streams_are_not_executable_before_terminal_confirmation() -> None:
     guard = StreamSequenceGuard()
-    start = ProviderStreamEvent(
-        type=StreamEventType.OUTPUT_ITEM_ADDED,
-        event_id="evt_tool_start",
-        sequence=0,
-        request_id="req_tool_stream",
-        response_id="resp_tool_stream",
-        item_id="call_stream",
-        item={"id": "call_stream", "type": "tool_call", "status": "in_progress", "call_id": "callid_stream", "name": "lookup"},
-    )
+    start = ProviderStreamEvent.model_validate({
+                'type': StreamEventType.OUTPUT_ITEM_ADDED,
+                'event_id': "evt_tool_start",
+                'sequence': 0,
+                'request_id': "req_tool_stream",
+                'response_id': "resp_tool_stream",
+                'item_id': "call_stream",
+                'item': {"id": "call_stream", "type": "tool_call", "status": "in_progress", "call_id": "callid_stream", "name": "lookup"},
+            })
     guard.accept(start)
-    completed = ProviderStreamEvent(
-        type=StreamEventType.TOOL_CALL_COMPLETED,
-        event_id="evt_tool_completed",
-        sequence=1,
-        previous_sequence=0,
-        request_id="req_tool_stream",
-        response_id="resp_tool_stream",
-        item_id="call_stream",
-        call_id="callid_stream",
-        item={"id": "call_stream", "type": "tool_call", "status": "completed", "call_id": "callid_stream", "name": "lookup", "arguments": {}},
-    )
+    completed = ProviderStreamEvent.model_validate({
+                    'type': StreamEventType.TOOL_CALL_COMPLETED,
+                    'event_id': "evt_tool_completed",
+                    'sequence': 1,
+                    'previous_sequence': 0,
+                    'request_id': "req_tool_stream",
+                    'response_id': "resp_tool_stream",
+                    'item_id': "call_stream",
+                    'call_id': "callid_stream",
+                    'item': {"id": "call_stream", "type": "tool_call", "status": "completed", "call_id": "callid_stream", "name": "lookup", "arguments": {}},
+                })
     assert guard.accept(completed)
     # A second completed event is a protocol violation; the executor may only
     # execute after the response.completed(requires_action) boundary.
@@ -190,10 +199,36 @@ def test_r12_and_r13_tool_call_streams_are_not_executable_before_terminal_confir
 
 def test_r14_usage_must_follow_text_done_and_missing_usage_is_nullable() -> None:
     guard = StreamSequenceGuard()
-    guard.accept(ProviderStreamEvent(type="output_item.added", event_id="evt_u0", sequence=0, request_id="req_u", response_id="resp_u", item_id="msg_u", item=MessageItemStart(id="msg_u")))
-    guard.accept(ProviderStreamEvent(type="output_text.delta", event_id="evt_u1", sequence=1, previous_sequence=0, request_id="req_u", response_id="resp_u", item_id="msg_u", content_index=0, delta="ok"))
+    guard.accept(ProviderStreamEvent.model_validate({
+                     'type': "output_item.added",
+                     'event_id': "evt_u0",
+                     'sequence': 0,
+                     'request_id': "req_u",
+                     'response_id': "resp_u",
+                     'item_id': "msg_u",
+                     'item': MessageItemStart(id="msg_u"),
+                 }))
+    guard.accept(ProviderStreamEvent.model_validate({
+                     'type': "output_text.delta",
+                     'event_id': "evt_u1",
+                     'sequence': 1,
+                     'previous_sequence': 0,
+                     'request_id': "req_u",
+                     'response_id': "resp_u",
+                     'item_id': "msg_u",
+                     'content_index': 0,
+                     'delta': "ok",
+                 }))
     with pytest.raises(StreamProtocolError):
-        guard.accept(ProviderStreamEvent(type="usage.updated", event_id="evt_u2", sequence=2, previous_sequence=1, request_id="req_u", response_id="resp_u", usage=Usage(total_tokens=1)))
+        guard.accept(ProviderStreamEvent.model_validate({
+                         'type': "usage.updated",
+                         'event_id': "evt_u2",
+                         'sequence': 2,
+                         'previous_sequence': 1,
+                         'request_id': "req_u",
+                         'response_id': "resp_u",
+                         'usage': Usage(total_tokens=1),
+                     }))
 
 
 def test_r15_request_conflicts_are_rejected_without_downgrade() -> None:
@@ -224,10 +259,18 @@ def test_r18_diagnostics_do_not_replace_business_metadata() -> None:
 
 def test_r19_image_inline_limit_is_exact() -> None:
     exact = base64.b64encode(b"x" * (1024 * 1024)).decode()
-    value = ImageContent(type="image", mime_type="image/png", source={"kind": "inline_base64", "data": exact})
+    value = ImageContent.model_validate({
+                'type': "image",
+                'mime_type': "image/png",
+                'source': {"kind": "inline_base64", "data": exact},
+            })
     assert value.source is not None
     with pytest.raises(ValidationError):
-        ImageContent(type="image", mime_type="image/png", source={"kind": "inline_base64", "data": base64.b64encode(b"x" * (1024 * 1024 + 1)).decode()})
+        ImageContent.model_validate({
+            'type': "image",
+            'mime_type': "image/png",
+            'source': {"kind": "inline_base64", "data": base64.b64encode(b"x" * (1024 * 1024 + 1)).decode()},
+        })
 
 
 def test_r23_request_fingerprint_is_default_and_key_order_stable() -> None:
@@ -263,14 +306,19 @@ def test_r24_embedding_and_rerank_response_bounds_are_explicit() -> None:
 
 def test_r25_error_and_response_terminal_shapes_are_disjoint() -> None:
     with pytest.raises(ValidationError):
-        KemoResponse(request_id="req_failed", model="m", status="failed", output=[])
-    failed = KemoResponse(
-        request_id="req_failed",
-        model="m",
-        status="failed",
-        output=[],
-        error={"type": "provider", "code": ErrorCode.PROVIDER_UNAVAILABLE, "message": "down"},
-    )
+        KemoResponse.model_validate({
+            'request_id': "req_failed",
+            'model': "m",
+            'status': "failed",
+            'output': [],
+        })
+    failed = KemoResponse.model_validate({
+                 'request_id': "req_failed",
+                 'model': "m",
+                 'status': "failed",
+                 'output': [],
+                 'error': {"type": "provider", "code": ErrorCode.PROVIDER_UNAVAILABLE, "message": "down"},
+             })
     assert failed.error is not None
 
 
@@ -297,11 +345,11 @@ def test_l3_capability_gate_rejects_unsupported_request_without_mutating_it() ->
 
 
 def test_inflight_response_does_not_fabricate_completed_at() -> None:
-    response = KemoResponse(
-        request_id="req_running",
-        model="m",
-        status="incomplete",
-        output=[],
-        incomplete_details={"reason": "running"},
-    )
+    response = KemoResponse.model_validate({
+                   'request_id': "req_running",
+                   'model': "m",
+                   'status': "incomplete",
+                   'output': [],
+                   'incomplete_details': {"reason": "running"},
+               })
     assert response.completed_at is None

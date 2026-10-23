@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import copy
 import json
 import sqlite3
@@ -320,11 +322,11 @@ def test_runtime_cache_is_deep_copied_and_lru_bounded(
     loaded = runtime_cache.load(
         windows[2][0], version=runtime_cache.archive_version(windows[2][1])
     )
-    loaded["data"]["title"] = "mutated"
+    require_present(loaded)["data"]["title"] = "mutated"
     reloaded = runtime_cache.load(
         windows[2][0], version=runtime_cache.archive_version(windows[2][1])
     )
-    assert reloaded["data"].get("title") != "mutated"
+    assert require_present(reloaded)["data"].get("title") != "mutated"
 
 
 def test_runtime_cache_enforces_total_bytes_and_per_user_fairness(

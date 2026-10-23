@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import json
 import tempfile
 import unittest
@@ -189,7 +191,7 @@ class ExternalAgentBridgeTests(unittest.TestCase):
     def test_dispatch_external_timeout_keeps_configured_survival_window(self) -> None:
         binding = SimpleNamespace(handle=self.handle, timeout=3_600.0)
         handle = self.handle
-        submitted: dict[str, object] = {}
+        submitted: dict[str, Any] = {}
 
         class RecordingScheduler:
             def submit_callable(self, *args, **kwargs):

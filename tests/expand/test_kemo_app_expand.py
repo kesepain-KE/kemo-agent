@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
+from tests.type_assertions import require_present
+
 import asyncio
 import hashlib
 import importlib.util
@@ -28,7 +32,7 @@ def _load_module(name: str, filename: str):
     return module
 
 
-_missing_module = object()
+_missing_module = None
 bridge_auth = _load_module("kemo_app_test_auth", "auth.py")
 bridge_upstream = _load_module("kemo_app_test_upstream", "upstream.py")
 bridge_device_commands = _load_module("device_commands", "device_commands.py")
@@ -37,7 +41,7 @@ sys.modules["upstream"] = bridge_upstream
 try:
     bridge_run_broker = _load_module("kemo_app_test_run_broker", "run_broker.py")
 finally:
-    if _previous_upstream is _missing_module:
+    if _previous_upstream is None:
         sys.modules.pop("upstream", None)
     else:
         sys.modules["upstream"] = _previous_upstream
@@ -46,7 +50,7 @@ sys.modules["upstream"] = bridge_upstream
 try:
     bridge_events = _load_module("kemo_app_test_events", "events.py")
 finally:
-    if _previous_upstream_for_events is _missing_module:
+    if _previous_upstream_for_events is None:
         sys.modules.pop("upstream", None)
     else:
         sys.modules["upstream"] = _previous_upstream_for_events
@@ -63,19 +67,19 @@ try:
     sys.modules["start_expand"] = bridge_start
     bridge_update = _load_module("kemo_app_test_update", "data_update.py")
 finally:
-    if _previous_start_expand is _missing_module:
+    if _previous_start_expand is None:
         sys.modules.pop("start_expand", None)
     else:
         sys.modules["start_expand"] = _previous_start_expand
-    if _previous_lifecycle is _missing_module:
+    if _previous_lifecycle is None:
         sys.modules.pop("lifecycle", None)
     else:
         sys.modules["lifecycle"] = _previous_lifecycle
-    if _previous_initialize is _missing_module:
+    if _previous_initialize is None:
         sys.modules.pop("initialize_config", None)
     else:
         sys.modules["initialize_config"] = _previous_initialize
-    if _previous_panel_control is _missing_module:
+    if _previous_panel_control is None:
         sys.modules.pop("panel_control", None)
     else:
         sys.modules["panel_control"] = _previous_panel_control
@@ -91,7 +95,7 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIsNotNone(panel)
         commands = {
             control["command"]
-            for container in panel["containers"]
+            for container in require_present(panel)["containers"]
             if container["kind"] == "action"
             for control in container["controls"]
         }
@@ -344,6 +348,7 @@ class KemoAppExpandTests(unittest.TestCase):
                     {"starting", "running"},
                 )
                 release.set()
+                snapshot = {}
                 for _ in range(100):
                     snapshot = broker.snapshot("mobile-user", "run-detached")
                     if snapshot["terminal"]:
@@ -398,6 +403,7 @@ class KemoAppExpandTests(unittest.TestCase):
                     "cancelling",
                 )
                 allow_finish.set()
+                snapshot = {}
                 for _ in range(100):
                     snapshot = broker.snapshot("mobile-user", payload["run_id"])
                     if snapshot["terminal"]:
@@ -1112,7 +1118,7 @@ class KemoAppExpandTests(unittest.TestCase):
             root = Path(directory)
             pid_path = root / "_server.pid"
             activation = root / "_activated.json"
-            spawned: dict[str, object] = {"instance_id": "", "pid": 4321}
+            spawned: dict[str, Any] = {"instance_id": "", "pid": 4321}
             initialization = {
                 "initialized": True,
                 "configured": True,

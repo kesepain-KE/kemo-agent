@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import asyncio
 from pathlib import Path
 import tempfile
@@ -54,7 +56,7 @@ class MemoryApiContractTests(unittest.TestCase):
                         self.assertEqual(response.status_code, 200, response.text)
                         self.assertEqual(response.json()["tier"], tier)
                         self.assertEqual(response.json()["content"], f"Updated {tier}")
-                        self.assertEqual(store.get_entry(tier, filename)["content"], f"Updated {tier}")
+                        self.assertEqual(require_present(store.get_entry(tier, filename))["content"], f"Updated {tier}")
                         blank = await client.put(
                             endpoint, params={"filename": filename}, json={"tier": tier, "content": "  "},
                         )
@@ -75,7 +77,7 @@ class MemoryApiContractTests(unittest.TestCase):
                     json={"tier": "seven_days", "content": "Changed fact"},
                 )
                 self.assertEqual(downgraded.status_code, 400, downgraded.text)
-                self.assertEqual(store.get_entry("permanent", "长期事实.md")["content"], "Explicit long term fact")
+                self.assertEqual(require_present(store.get_entry("permanent", "长期事实.md"))["content"], "Explicit long term fact")
 
         with tempfile.TemporaryDirectory(prefix="kemo-memory-contract-") as directory:
             asyncio.run(exercise(Path(directory)))

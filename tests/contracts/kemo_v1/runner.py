@@ -18,7 +18,7 @@ def _peer_fixtures(root: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            getattr(stream, "reconfigure")(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(
         description="运行本仓库 Kemo 1.0 契约测试，并可核对另一仓库的 Fixture 镜像。",
     )

@@ -67,13 +67,13 @@ def test_provider_options_require_explicit_vendor_allowlist_and_map_target() -> 
 
 def test_stream_event_rejects_irrelevant_specialized_fields() -> None:
     with pytest.raises(ValueError, match="未定义事件字段"):
-        ProviderStreamEvent(
-            type="response.created",
-            sequence=0,
-            request_id="req_stream_hardening",
-            response_id="resp_stream_hardening",
-            delta="not-allowed",
-        )
+        ProviderStreamEvent.model_validate({
+            'type': "response.created",
+            'sequence': 0,
+            'request_id': "req_stream_hardening",
+            'response_id': "resp_stream_hardening",
+            'delta': "not-allowed",
+        })
 
 
 def test_tool_schema_requires_object_root() -> None:
@@ -91,23 +91,23 @@ def test_tool_schema_requires_object_root() -> None:
             call_id="callid_valid",
             name="lookup",
         ),
-        lambda: ToolResultItem(
-            id="item_bad",
-            call_id="callid_valid",
-            name="lookup",
-            content=[{"type": "text", "text": "result"}],
-        ),
+        lambda: ToolResultItem.model_validate({
+                    'id': "item_bad",
+                    'call_id': "callid_valid",
+                    'name': "lookup",
+                    'content': [{"type": "text", "text": "result"}],
+                }),
         lambda: ToolCallItem(
             id="call_valid",
             call_id="call_bad",
             name="lookup",
         ),
-        lambda: ToolResultItem(
-            id="result_valid",
-            call_id="call_bad",
-            name="lookup",
-            content=[{"type": "text", "text": "result"}],
-        ),
+        lambda: ToolResultItem.model_validate({
+                    'id': "result_valid",
+                    'call_id': "call_bad",
+                    'name': "lookup",
+                    'content': [{"type": "text", "text": "result"}],
+                }),
     ],
 )
 def test_item_and_tool_call_identifiers_require_kemo_v2_prefixes(factory) -> None:
@@ -119,7 +119,9 @@ def test_capability_gate_rejects_model_mismatch_and_unscoped_prediction() -> Non
     request = KemoRequest.create(
         model="demo-model",
         stream=False,
-        prediction=PredictionConfig(content=[{"type": "text", "text": "cached"}]),
+        prediction=PredictionConfig.model_validate({
+                       'content': [{"type": "text", "text": "cached"}],
+                   }),
     )
     capabilities = ModelCapabilities(
         protocol_version="2.0",
@@ -151,13 +153,13 @@ def test_capability_gate_checks_provider_state_owner_and_expiry() -> None:
             )
         ],
     )
-    capabilities = ModelCapabilities(
-        protocol_version="2.0",
-        model="demo-model",
-        provider_id="demo-provider",
-        provider_model="demo-model",
-        reasoning={"supported": True, "persisted_state": True, "efforts": ["medium"], "returns": ["none", "auto"]},
-    )
+    capabilities = ModelCapabilities.model_validate({
+                       'protocol_version': "2.0",
+                       'model': "demo-model",
+                       'provider_id': "demo-provider",
+                       'provider_model': "demo-model",
+                       'reasoning': {"supported": True, "persisted_state": True, "efforts": ["medium"], "returns": ["none", "auto"]},
+                   })
     from provider.protocol.validation import validate_request_against_capabilities
     with pytest.raises(Exception, match="跨 Provider"):
         validate_request_against_capabilities(request, capabilities)

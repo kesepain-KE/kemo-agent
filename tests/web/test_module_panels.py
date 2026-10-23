@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import json
 import os
 from pathlib import Path
@@ -16,7 +18,7 @@ from web.services.module_panels import (
 
 
 class ModulePanelTests(unittest.TestCase):
-    def make_module(self, panel: dict[str, object]) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    def make_module(self, panel: dict[str, Any]) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name) / "demo"
@@ -28,7 +30,7 @@ class ModulePanelTests(unittest.TestCase):
         return temporary, root
 
     @staticmethod
-    def full_panel() -> dict[str, object]:
+    def full_panel() -> dict[str, Any]:
         return {
             "schema_version": 1,
             "title": "演示面板",

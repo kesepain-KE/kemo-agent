@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import tempfile
 import threading
 import unittest
@@ -24,14 +26,14 @@ class SubagentProgressTests(unittest.TestCase):
                 yield RunEvent(type="tool_call_start", tool_name="subagent_dispatch", tool_call_id="call-a")
                 publish = _subagent_callback(request, "call-a")
                 callback.append(publish)
-                publish(RunEvent(type="subagent_progress", content="private reasoning", arguments={"secret": "private"}, metadata={
+                require_present(publish)(RunEvent(type="subagent_progress", content="private reasoning", arguments={"secret": "private"}, metadata={
                     "phase": "subagent", "agent": "task_plan", "task_id": "task-a",
                     "status": "tool_running", "iteration": 2, "tool_name": "file",
                     "source": "wrong-source", "session_id": "wrong-session",
                     "error": "private error", "prompt": "private prompt",
                 }))
                 self.assertTrue(release.wait(2), "client did not receive progress while tool was running")
-                publish(RunEvent(type="reasoning_delta", metadata={"phase": "subagent", "agent": "task_plan", "status": "completed"}))
+                require_present(publish)(RunEvent(type="reasoning_delta", metadata={"phase": "subagent", "agent": "task_plan", "status": "completed"}))
                 yield RunEvent(type="tool_call_result", tool_name="subagent_dispatch", tool_call_id="call-a", result={"ok": True})
                 yield RunEvent(type="done")
 

@@ -148,7 +148,7 @@ class RetryPolicyTests(unittest.TestCase):
             # Two successful-progress failures start fresh episodes.  The
             # final two failures exhaust the configured consecutive budget
             # (``max_attempts`` includes the initial attempt).
-            error.retry_progress = calls <= 2
+            setattr(error, "retry_progress", calls <= 2)
             raise error
 
         with self.assertRaises(RuntimeError) as raised:
@@ -160,8 +160,8 @@ class RetryPolicyTests(unittest.TestCase):
 
         self.assertEqual(calls, 4)
         self.assertEqual(ledger.attempts, 4)
-        self.assertEqual(raised.exception.retry_attempts, 4)
-        self.assertEqual(raised.exception.retry_max_attempts, 3)
+        self.assertEqual(getattr(raised.exception, "retry_attempts"), 4)
+        self.assertEqual(getattr(raised.exception, "retry_max_attempts"), 3)
 
 
 if __name__ == "__main__":

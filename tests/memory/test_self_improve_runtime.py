@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import json
 import tempfile
 import unittest
@@ -114,9 +116,9 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             agent_runner=runner,
         )
 
-        self.assertEqual(runner.input_data["trigger"], "context_compression")
-        self.assertEqual(runner.input_data["rounds"], rounds)
-        self.assertEqual(runner.input_data["source"]["trigger"], "token_limit")
+        self.assertEqual(require_present(runner.input_data)["trigger"], "context_compression")
+        self.assertEqual(require_present(runner.input_data)["rounds"], rounds)
+        self.assertEqual(require_present(runner.input_data)["source"]["trigger"], "token_limit")
         self.assertEqual(
             MemoryStore(self.root, "alice", CONFIG).load_tier("seven_days")[0][
                 "content"
@@ -360,13 +362,13 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
         self.assertIsNone(store.get_entry("seven_days", filename))
         target = store.get_entry("one_month", filename)
-        self.assertEqual(target["weight"], 0)
+        self.assertEqual(require_present(target)["weight"], 0)
         self.assertEqual(
-            target["expires_at"],
+            require_present(target)["expires_at"],
             (now + timedelta(days=30)).isoformat(),
         )
         self.assertEqual(
-            store.get_entry("one_month", filename)["content"],
+            require_present(store.get_entry("one_month", filename))["content"],
             "merged content",
         )
 
@@ -412,9 +414,9 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         store = MemoryStore(self.root, "alice", CONFIG)
         self.assertEqual(result["applied"], [source])
         self.assertIsNone(store.get_entry("seven_days", source))
-        self.assertEqual(store.get_entry("one_month", target)["weight"], 0)
+        self.assertEqual(require_present(store.get_entry("one_month", target))["weight"], 0)
         self.assertEqual(
-            store.get_entry("one_month", target)["content"],
+            require_present(store.get_entry("one_month", target))["content"],
             "merged semantic fact",
         )
 
@@ -478,11 +480,11 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         self.assertEqual(len(children), 2)
         self.assertTrue(all(item["weight"] == 0 for item in children))
         self.assertTrue(
-            all(item["expires_at"] == before["expires_at"] for item in children)
+            all(item["expires_at"] == require_present(before)["expires_at"] for item in children)
         )
         self.assertTrue(
             all(
-                item["tier_entered_at"] == before["tier_entered_at"]
+                item["tier_entered_at"] == require_present(before)["tier_entered_at"]
                 for item in children
             )
         )
@@ -518,7 +520,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             created,
             ["用户身份与背景-2.md", "用户身份与背景-3.md"],
         )
-        self.assertEqual(store.get_entry("half_year", existing)["content"], "keep me")
+        self.assertEqual(require_present(store.get_entry("half_year", existing))["content"], "keep me")
         self.assertIsNone(store.get_entry("one_month", source))
 
     def test_split_promotion_rolls_back_entire_batch_on_invalid_child(self) -> None:
@@ -913,7 +915,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         )
         location = MemoryStore(self.root, "alice", CONFIG).locate("manual-review")
         self.assertIsNotNone(location)
-        self.assertEqual(location.tier, "seven_days")
+        self.assertEqual(require_present(location).tier, "seven_days")
         self.assertEqual(
             result.metadata["memory_update"]["created"], ["manual-review.md"]
         )

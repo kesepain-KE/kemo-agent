@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import io
 import json
 import os
@@ -51,7 +53,10 @@ class MockProvider:
                 input_tokens=2,
                 output_tokens=3,
                 total_tokens=5,
-                measurement=Measurement(mode="provider", exact=True),
+                measurement=Measurement.model_validate({
+                                'mode': "provider",
+                                'exact': True,
+                            }),
             ),
         )
 
@@ -116,7 +121,7 @@ class EngineAndCLITests(unittest.TestCase):
             seen[1].system_prompt.index("GLOBAL"), seen[1].system_prompt.index("AGENTS")
         )
         path = find_window(root, "alice", "cli", "s1")
-        window = load_window(path)
+        window = load_window(require_present(path))
         self.assertEqual(window["data"]["rounds"], 2)
         self.assertEqual(window["data"]["token_usage"]["total_tokens"], 10)
         self.assertEqual(len(window["text"]["messages"]), 4)
@@ -135,7 +140,7 @@ class EngineAndCLITests(unittest.TestCase):
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             with self.assertRaisesRegex(EngineError, "已经结束"):
                 handle_request(request, root=root, provider_factory=lambda _: MockProvider([]))
-        self.assertEqual(load_window(find_window(root, "alice", "cli", "ended"))["data"]["rounds"], 1)
+        self.assertEqual(load_window(require_present(find_window(root, "alice", "cli", "ended")))["data"]["rounds"], 1)
 
     def test_deleted_conversation_is_rejected_before_provider_execution(self) -> None:
         _, root = self.make_root()
@@ -270,7 +275,7 @@ class EngineAndCLITests(unittest.TestCase):
                 )
         path = find_window(root, "alice", "cli", "fail")
         self.assertIsNotNone(path)
-        failed_window = load_window(path)
+        failed_window = load_window(require_present(path))
         self.assertEqual(failed_window["data"]["rounds"], 1)
         self.assertEqual(failed_window["text"]["messages"][0]["content"], "one")
         self.assertIn(
@@ -301,7 +306,7 @@ class EngineAndCLITests(unittest.TestCase):
             )
 
         self.assertEqual(result["text"], "reply:continue")
-        resumed_window = load_window(path)
+        resumed_window = load_window(require_present(path))
         self.assertEqual(resumed_window["data"]["rounds"], 2)
         history_messages = [
             item for item in seen[0].input if isinstance(item, MessageItem)
@@ -453,7 +458,7 @@ class EngineAndCLITests(unittest.TestCase):
                 0,
             )
             self.assertEqual(interactive_out.getvalue(), "reply:a\nreply:b\n")
-            window = load_window(find_window(root, "alice", "cli", "chat"))
+            window = load_window(require_present(find_window(root, "alice", "cli", "chat")))
             self.assertEqual(window["data"]["rounds"], 2)
 
     def test_default_cli_owns_and_retires_its_own_session(self) -> None:

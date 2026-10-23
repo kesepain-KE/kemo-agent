@@ -41,7 +41,7 @@ def test_manifest_recent_update_never_moves_backwards(
             ),
             encoding="utf-8",
         )
-        module.MANIFEST_PATH = manifest
+        setattr(module, "MANIFEST_PATH", manifest)
 
         module.write_manifest_health(
             healthy=True,

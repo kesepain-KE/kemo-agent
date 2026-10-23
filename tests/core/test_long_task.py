@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
+from tests.type_assertions import require_present
+
 import tempfile
 import threading
 import unittest
@@ -96,7 +100,7 @@ class LongTaskTests(unittest.TestCase):
             original_prompt="执行长任务",
         )
         self.assertIsNotNone(active)
-        active_updated_at = active["updated_at"]
+        active_updated_at = require_present(active)["updated_at"]
 
         grace_protected = reconcile_orphaned_long_task(
             root,
@@ -181,7 +185,7 @@ class LongTaskTests(unittest.TestCase):
         _, root = self.make_root()
         self.reserve(root, "continued")
         set_long_task_enabled(root, "alice", "web", "continued", True)
-        requests: list[dict[str, object]] = []
+        requests: list[dict[str, Any]] = []
 
         def source(request, **_kwargs):
             requests.append(dict(request))
@@ -295,7 +299,7 @@ class LongTaskTests(unittest.TestCase):
         session_id = "handoff-guidance"
         self.reserve(root, session_id)
         set_long_task_enabled(root, "alice", "web", session_id, True)
-        requests: list[dict[str, object]] = []
+        requests: list[dict[str, Any]] = []
         received: list[object] = []
         close_started = threading.Event()
         allow_close = threading.Event()
@@ -347,7 +351,7 @@ class LongTaskTests(unittest.TestCase):
             worker.start()
             self.assertTrue(close_started.wait(timeout=2))
 
-            submitted: dict[str, object] = {}
+            submitted: dict[str, Any] = {}
             submit_called = threading.Event()
             submit_done = threading.Event()
             original_submit = service.submit_guidance
@@ -533,7 +537,7 @@ class LongTaskTests(unittest.TestCase):
             [event.type for event in events],
             ["long_task_update", "text_delta", "error"],
         )
-        self.assertEqual(events[-1].error["code"], "LONG_TASK_MISSING_TERMINAL")
+        self.assertEqual(require_present(events[-1].error)["code"], "LONG_TASK_MISSING_TERMINAL")
         self.assertEqual(events[-1].metadata["status"], "interrupted")
         self.assertFalse(events[-1].metadata["committed"])
         self.assertEqual(
@@ -580,7 +584,7 @@ class LongTaskTests(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["long_task_update", "error"])
         serialized = str(events[-1].to_dict())
         self.assertNotIn(secret, serialized)
-        self.assertEqual(events[-1].error["code"], "LONG_TASK_ENGINE_EXCEPTION")
+        self.assertEqual(require_present(events[-1].error)["code"], "LONG_TASK_ENGINE_EXCEPTION")
         self.assertEqual(events[-1].metadata["status"], "interrupted")
         self.assertEqual(
             get_long_task_state(root, "alice", "web", "engine-exception")[

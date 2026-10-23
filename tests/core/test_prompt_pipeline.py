@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Iterable
+
 import json
 import os
 import tempfile
@@ -49,7 +51,7 @@ class CaptureProvider:
             text="ok", usage=Usage(1, 1, 2, source="mock"), model="mock"
         )
 
-    def chat_stream(self, request):
+    def chat_stream(self, request) -> Iterable[RunEvent]:
         raise AssertionError("streaming not expected")
 
     def create(self, request):
@@ -91,9 +93,11 @@ class PromptPipelineTests(unittest.TestCase):
         ):
             self.assertIn(requirement, agents_manual)
         self.assertIn("### 4.6 Web 正文内联组件", agents_manual)
-        self.assertIn("原生输出能力", agents_manual)
-        self.assertIn("不要先声称“无法生成交互组件”", agents_manual)
-        self.assertIn("其他声明式 `component` 名称同样允许", agents_manual)
+        self.assertIn("必须先读取", agents_manual)
+        self.assertIn("global_knowledge/inline-widgets.md", agents_manual)
+        self.assertIn("不要凭记忆复制或发明字段", agents_manual)
+        self.assertNotIn("follow-up.prompts[]", agents_manual)
+        self.assertNotIn("ui-card.nodes", agents_manual)
         self.assertIn("技能与记忆联动", agents_manual)
         self.assertIn("默认继续保留记忆，不自动删除", agents_manual)
         self.assertIn("只有明确同意后才执行融合/整理", agents_manual)

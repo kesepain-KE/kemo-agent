@@ -77,17 +77,91 @@ class RuntimeLogTests(unittest.TestCase):
              'content': 'bob-body-private'},
         ])
         result = self.backend.runtime_logs('alice', category='message')
-        self.assertEqual(len(result['entries']), 2)
-        self.assertEqual({entry['direction'] for entry in result['entries']}, {'receive', 'send'})
+        self.assertEqual(len(result['entries']), 1)
+        self.assertEqual(result['entries'][0]['direction'], 'exchange')
         serialized = json.dumps(result, ensure_ascii=False)
         self.assertNotIn('credential-private', serialized)
         self.assertNotIn('bob-body-private', serialized)
-        received = next(entry for entry in result['entries'] if entry['direction'] == 'receive')
-        self.assertIn('第一行\n第二行', received['content'])
+        exchange = result['entries'][0]
+        self.assertIn('第一行\n第二行', exchange['inputs'][0]['content'])
+        self.assertEqual(exchange['outputs'][0]['content'], '回复第一行\n回复第二行')
         self.assertEqual(len(self.store.list_messages('same', user='alice')), 2)
         self.assertEqual(self.store.count_messages('same', user='alice'), 2)
         self.assertEqual(self.store.count_messages('same', user='bob', date_prefix=self.now[:10]), 1)
         self.assertIn('回复第一行\n回复第二行', [entry['content'] for entry in self.store.list_messages('same', user='alice')])
+
+    def test_message_exchanges_group_before_pagination_and_keep_failed_output(self):
+        common = {
+            'user': 'alice', 'machine_id': 'bridge', 'platform': 'test',
+            'chat_type': 'private', 'chat_id': 'private-chat', 'occurred_at': self.now,
+        }
+        entries = []
+        # Same timestamp and route, deliberately interleaved. Only the exchange
+        # identity can distinguish them; adjacency must never be used.
+        for index in range(3):
+            entries.append({**common, 'exchange_id': f'private-input-{index}',
+                            'direction': 'receive', 'kind': 'text', 'content': f'input {index}'})
+        for index in reversed(range(3)):
+            entries.append({**common, 'exchange_id': f'private-input-{index}',
+                            'direction': 'send', 'kind': 'text', 'content': f'output {index}',
+                            'success': index != 1})
+        self.store.append_message_entries(entries)
+        first = self.backend.runtime_logs('alice', category='message', page_size=1)
+        self.assertEqual(first['pagination']['total_items'], 3)
+        self.assertEqual(first['counts']['message'], 3)
+        self.assertEqual(first['pagination']['total_pages'], 3)
+        exchanges = []
+        for page in range(1, 4):
+            view = self.backend.runtime_logs('alice', category='message', page_size=1, page=page)
+            exchanges.extend(view['entries'])
+        self.assertEqual(len({row['id'] for row in exchanges}), 3)
+        for row in exchanges:
+            index = row['inputs'][0]['content'].split()[-1]
+            self.assertEqual(row['outputs'][0]['content'], f'output {index}')
+            self.assertEqual(row['status'], 'failed' if index == '1' else 'success')
+        serialized = json.dumps(exchanges)
+        self.assertNotIn('private-chat', serialized)
+        self.assertNotIn('private-input', serialized)
+        self.assertNotIn('"machine_id"', serialized)
+        all_view = self.backend.runtime_logs('alice')
+        self.assertEqual(len([row for row in all_view['entries'] if row['category'] == 'message']), 3)
+
+    def test_message_exchange_scope_attachments_and_missing_direction(self):
+        common = {
+            'user': 'alice', 'machine_id': 'bridge', 'platform': 'test',
+            'chat_type': 'private', 'chat_id': 'chat-a', 'occurred_at': self.now,
+            'exchange_id': 'same-id',
+        }
+        self.store.append_message_entries([
+            {**common, 'direction': 'receive', 'kind': 'text', 'content': 'input A'},
+            {**common, 'direction': 'receive', 'kind': 'file', 'content': 'note.txt',
+             'file_path': '/private/file/path'},
+            {**common, 'direction': 'send', 'kind': 'text', 'content': 'output A'},
+            {**common, 'chat_id': 'chat-b', 'direction': 'receive', 'kind': 'text', 'content': 'input B'},
+            {**common, 'machine_id': 'different', 'direction': 'send', 'kind': 'text', 'content': 'output C'},
+            {**common, 'user': 'bob', 'direction': 'send', 'kind': 'text', 'content': 'hidden'},
+        ])
+        result = self.backend.runtime_logs('alice', category='message')
+        self.assertEqual(len(result['entries']), 3)
+        paired = next(row for row in result['entries'] if len(row['inputs']) == 2)
+        self.assertEqual([part['content'] for part in paired['inputs']], ['input A', 'note.txt'])
+        self.assertEqual(paired['outputs'][0]['content'], 'output A')
+        self.assertTrue(any(not row['outputs'] for row in result['entries']))
+        self.assertTrue(any(not row['inputs'] for row in result['entries']))
+        self.assertNotIn('/private/file/path', json.dumps(result))
+        self.assertNotIn('hidden', json.dumps(result))
+
+    def test_ambiguous_legacy_messages_are_not_paired_by_timestamp(self):
+        common = {'user': 'alice', 'machine_id': 'bridge', 'platform': 'test',
+                  'chat_id': 'same-chat', 'occurred_at': self.now, 'kind': 'text'}
+        self.store.append_message_entries([
+            {**common, 'direction': 'receive', 'content': 'first'},
+            {**common, 'direction': 'receive', 'content': 'second'},
+            {**common, 'direction': 'send', 'content': 'uncertain reply'},
+        ])
+        result = self.backend.runtime_logs('alice', category='message')
+        self.assertEqual(len(result['entries']), 3)
+        self.assertTrue(all(not row['inputs'] or not row['outputs'] for row in result['entries']))
 
     def test_cache_hit_refresh_write_delete_invalidation(self):
         self.message()

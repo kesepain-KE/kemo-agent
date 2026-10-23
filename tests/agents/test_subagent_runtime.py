@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import json
 import os
 import tempfile
@@ -121,7 +123,10 @@ class MockProvider:
                 input_tokens=2,
                 output_tokens=1,
                 total_tokens=3,
-                measurement=Measurement(mode="provider", exact=True),
+                measurement=Measurement.model_validate({
+                                'mode': "provider",
+                                'exact': True,
+                            }),
             ),
         )
 
@@ -250,7 +255,10 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 output_tokens=4,
                 total_tokens=104,
                 reasoning_tokens=2,
-                measurement=Measurement(mode="provider", exact=True),
+                measurement=Measurement.model_validate({
+                                'mode': "provider",
+                                'exact': True,
+                            }),
             )
         )
         second = AgentRunner._usage_dict(
@@ -259,14 +267,17 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 cached_input_tokens=20,
                 output_tokens=3,
                 total_tokens=53,
-                measurement=Measurement(mode="provider", exact=True),
+                measurement=Measurement.model_validate({
+                                'mode': "provider",
+                                'exact': True,
+                            }),
             )
         )
 
         self.assertEqual(first["cached_tokens"], 70)
         self.assertEqual(first["provider_request_count"], 1)
         self.assertEqual(first["reasoning_tokens"], 2)
-        total: dict[str, object] = {}
+        total: dict[str, Any] = {}
         AgentRunner._merge_usage(total, first)
         AgentRunner._merge_usage(total, second)
 
@@ -283,12 +294,15 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 cached_input_tokens=None,
                 output_tokens=1,
                 total_tokens=101,
-                measurement=Measurement(mode="provider", exact=True),
+                measurement=Measurement.model_validate({
+                                'mode': "provider",
+                                'exact': True,
+                            }),
             )
         )
         self.assertNotIn("cached_tokens", payload)
 
-        total: dict[str, object] = {}
+        total: dict[str, Any] = {}
         AgentRunner._merge_usage(total, payload)
         self.assertNotIn("cached_prompt_tokens", total)
         self.assertNotIn("cache_miss_tokens", total)
@@ -371,9 +385,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_runner_retries_transient_provider_failure_and_reports_attempts(self) -> None:
         class FlakyProvider(MockProvider):
-            def create(inner_self, request):
-                if not inner_self.requests:
-                    inner_self.requests.append(request)
+            def create(_self, request):
+                if not _self.requests:
+                    _self.requests.append(request)
                     raise ProviderError(
                         "gateway disconnected",
                         category="connection_error",
@@ -410,8 +424,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_runner_stops_after_initial_attempt_and_five_retries(self) -> None:
         class FailingProvider(MockProvider):
-            def create(inner_self, request):
-                inner_self.requests.append(request)
+            def create(_self, request):
+                _self.requests.append(request)
                 raise ProviderError(
                     "gateway unavailable",
                     category="upstream_error",
@@ -498,19 +512,19 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_runner_retries_gateway_response_when_retryable_is_omitted(self) -> None:
         class FailedResponseProvider(MockProvider):
-            def create(inner_self, request):
-                if not inner_self.requests:
-                    inner_self.requests.append(request)
+            def create(_self, request):
+                if not _self.requests:
+                    _self.requests.append(request)
                     return KemoResponse(
                         request_id=request.request_id,
                         status=ResponseStatus.FAILED,
                         model=request.model,
-                        error=UnifiedError(
-                            type="connection_error",
-                            code="UPSTREAM_DISCONNECTED",
-                            message="gateway disconnected",
-                            provider_status=503,
-                        ),
+                        error=UnifiedError.model_validate({
+                                  'type': "connection_error",
+                                  'code': "UPSTREAM_DISCONNECTED",
+                                  'message': "gateway disconnected",
+                                  'provider_status': 503,
+                              }),
                     )
                 return super().create(request)
 
@@ -532,13 +546,13 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_runner_retries_deterministic_incomplete_response_five_times(self) -> None:
         class TruncatedProvider(MockProvider):
-            def create(inner_self, request):
-                inner_self.requests.append(request)
-                return KemoResponse(
-                    request_id=request.request_id,
-                    status=ResponseStatus.INCOMPLETE,
-                    model=request.model,
-                    incomplete_details={
+            def create(_self, request):
+                _self.requests.append(request)
+                return KemoResponse.model_validate({
+                           'request_id': request.request_id,
+                           'status': ResponseStatus.INCOMPLETE,
+                           'model': request.model,
+                           'incomplete_details': {
                         "reason": "output_truncated",
                         "details": {
                             "finish_reason": "length",
@@ -546,7 +560,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                             "retryable": True,
                         },
                     },
-                )
+                       })
 
         provider = TruncatedProvider()
         with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
@@ -564,20 +578,20 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_runner_retries_transient_incomplete_response(self) -> None:
         class EmptyThenCompleteProvider(MockProvider):
-            def create(inner_self, request):
-                if not inner_self.requests:
-                    inner_self.requests.append(request)
-                    return KemoResponse(
-                        request_id=request.request_id,
-                         status=ResponseStatus.INCOMPLETE,
-                        model=request.model,
-                        incomplete_details={
+            def create(_self, request):
+                if not _self.requests:
+                    _self.requests.append(request)
+                    return KemoResponse.model_validate({
+                               'request_id': request.request_id,
+                               'status': ResponseStatus.INCOMPLETE,
+                               'model': request.model,
+                               'incomplete_details': {
                             "reason": "empty_output",
                             "category": "upstream_error",
                             "status_code": 503,
                             "retry_after_ms": 0,
                         },
-                    )
+                           })
                 return super().create(request)
 
         provider = EmptyThenCompleteProvider()
@@ -599,18 +613,18 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_runner_unknown_incomplete_http_400_retries_five_times(self) -> None:
         class InvalidRequestProvider(MockProvider):
-            def create(inner_self, request):
-                inner_self.requests.append(request)
+            def create(_self, request):
+                _self.requests.append(request)
                 return KemoResponse(
                     request_id=request.request_id,
                     status=ResponseStatus.FAILED,
                     model=request.model,
-                    error=UnifiedError(
-                        type="provider_error",
-                        code="PROVIDER_BAD_RESPONSE",
-                        message="request rejected",
-                        provider_status=400,
-                    ),
+                    error=UnifiedError.model_validate({
+                              'type': "provider_error",
+                              'code': "PROVIDER_BAD_RESPONSE",
+                              'message': "request rejected",
+                              'provider_status': 400,
+                          }),
                 )
 
         provider = InvalidRequestProvider()
@@ -680,13 +694,13 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_runner_rewrites_reused_response_and_tool_ids_across_iterations(self) -> None:
         class ReusedResponseIdProvider(MockProvider):
-            def __init__(inner_self) -> None:
+            def __init__(_self) -> None:
                 super().__init__()
-                inner_self.responses = []
+                _self.responses = []
 
-            def create(inner_self, request):
-                inner_self.requests.append(request)
-                iteration = len(inner_self.requests)
+            def create(_self, request):
+                _self.requests.append(request)
+                iteration = len(_self.requests)
                 if iteration < 3:
                     output = [
                         ReasoningItem(id="rs_0", summary=f"reasoning {iteration}"),
@@ -721,10 +735,13 @@ class SubAgentRuntimeTests(unittest.TestCase):
                         input_tokens=2,
                         output_tokens=1,
                         total_tokens=3,
-                        measurement=Measurement(mode="provider", exact=True),
+                        measurement=Measurement.model_validate({
+                                        'mode': "provider",
+                                        'exact': True,
+                                    }),
                     ),
                 )
-                inner_self.responses.append(response)
+                _self.responses.append(response)
                 return response
 
         provider = ReusedResponseIdProvider()
@@ -938,8 +955,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
         }
 
         class StructuredProvider(MockProvider):
-            def create(inner_self, request):
-                inner_self.requests.append(request)
+            def create(_self, request):
+                _self.requests.append(request)
                 return KemoResponse(
                     request_id=request.request_id,
                     status=ResponseStatus.COMPLETED,
@@ -956,7 +973,10 @@ class SubAgentRuntimeTests(unittest.TestCase):
                         input_tokens=2,
                         output_tokens=1,
                         total_tokens=3,
-                        measurement=Measurement(mode="provider", exact=True),
+                        measurement=Measurement.model_validate({
+                                        'mode': "provider",
+                                        'exact': True,
+                                    }),
                     ),
                 )
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests.type_assertions import http_headers
+
+from tests.type_assertions import require_present
+
 import json
 from io import BytesIO
 import os
@@ -71,7 +75,7 @@ class KemoGraphExpandTests(unittest.TestCase):
             "QUERY_ARTIFACT_DIR": query_artifacts,
         }
         patchers = [
-            patch.multiple(registry, **self.paths),
+            *[patch.object(registry, key, value) for key, value in self.paths.items()],
             patch.multiple(
                 render,
                 INPUT_PATH=self.paths["INPUT_PATH"],
@@ -139,7 +143,7 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertIsNotNone(panel)
         commands = {
             control["command"]
-            for container in panel["containers"]
+            for container in require_present(panel)["containers"]
             if container["kind"] == "action"
             for control in container["controls"]
         }
@@ -165,10 +169,10 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["backend_online"])
         saved = graph.load_config()
-        self.assertEqual(saved.base_url, "http://127.0.0.1:8765/api/v1")
-        self.assertEqual(saved.admin_users, ("alice",))
-        self.assertEqual(saved.libraries[0].id, "project_docs")
-        self.assertEqual(saved.libraries[0].store_root, str(self.store.resolve()))
+        self.assertEqual(require_present(saved).base_url, "http://127.0.0.1:8765/api/v1")
+        self.assertEqual(require_present(saved).admin_users, ("alice",))
+        self.assertEqual(require_present(saved).libraries[0].id, "project_docs")
+        self.assertEqual(require_present(saved).libraries[0].store_root, str(self.store.resolve()))
         panel_status = json.loads((self.module / "module" / "status.json").read_text("utf-8"))
         self.assertEqual(panel_status["backend_status"], "在线")
         self.assertEqual(panel_status["graph_port"], 8765)
@@ -1111,7 +1115,7 @@ class KemoGraphExpandTests(unittest.TestCase):
             )
             self.assertTrue(projects["ok"])
             self.assertEqual(calls[-1][0], "/stores/projects/create")
-            self.assertEqual(calls[-1][1]["name"], "research")
+            self.assertEqual(require_present(require_present(calls[-1])[1])["name"], "research")
 
             moved = operations.document_operation(
                 portable,
@@ -1127,9 +1131,9 @@ class KemoGraphExpandTests(unittest.TestCase):
             self.assertTrue(moved["ok"])
             self.assertEqual(calls[-1][0], "/stores/documents/location")
             self.assertNotIn("store_root", {
-                "source_id": calls[-1][1]["source_id"],
-                "filename": calls[-1][1]["filename"],
-                "project": calls[-1][1]["project"],
+                "source_id": require_present(require_present(calls[-1])[1])["source_id"],
+                "filename": require_present(require_present(calls[-1])[1])["filename"],
+                "project": require_present(require_present(calls[-1])[1])["project"],
             })
 
             batch = operations.document_operation(
@@ -1387,7 +1391,7 @@ class KemoGraphExpandTests(unittest.TestCase):
                 config.base_url,
                 status,
                 "failure",
-                headers or {},
+                http_headers(headers or {}),
                 BytesIO(body),
             )
             opener = Mock()

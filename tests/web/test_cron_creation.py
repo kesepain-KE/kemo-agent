@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -54,7 +56,7 @@ class CronCreationApiTests(unittest.TestCase):
                 self.assertEqual(stored["user"], "alice")
                 self.assertEqual(stored["status"], "enabled")
                 self.assertEqual(stored["exec_mode"], "agent")
-                self.assertEqual(datetime.fromisoformat(stored["next_run_at"]).utcoffset().total_seconds(), 28800)
+                self.assertEqual(require_present(datetime.fromisoformat(stored["next_run_at"]).utcoffset()).total_seconds(), 28800)
                 if schedule["type"] == "weekly":
                     self.assertEqual(stored["weekdays"], [1, 5])
                     self.assertEqual(stored["times"], ["09:00", "20:00"])

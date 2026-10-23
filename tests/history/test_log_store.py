@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -8,6 +10,51 @@ from run.infra import LogStore
 
 
 class LogStoreTests(unittest.TestCase):
+    def test_existing_message_database_upgrades_without_losing_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "runtime" / "logs.sqlite3"
+            path.parent.mkdir()
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript("""
+                    CREATE TABLE message_route_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_key TEXT NOT NULL UNIQUE,
+                        occurred_at TEXT NOT NULL, occurred_at_ms INTEGER NOT NULL,
+                        user TEXT NOT NULL, machine_id TEXT NOT NULL, platform TEXT NOT NULL,
+                        chat_type TEXT NOT NULL, chat_id TEXT NOT NULL, direction TEXT NOT NULL,
+                        kind TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+                        file_path TEXT, mime TEXT, size INTEGER,
+                        success INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL,
+                        created_at_ms INTEGER NOT NULL
+                    );
+                    INSERT INTO message_route_logs
+                        (event_key, occurred_at, occurred_at_ms, user, machine_id, platform,
+                         chat_type, chat_id, direction, kind, content, source, created_at_ms)
+                    VALUES ('old', '2026-10-01T12:00:00+08:00', 1790827200000, 'alice',
+                            'bridge', 'test', 'private', 'chat', 'receive', 'text', 'old body', 'sqlite', 0);
+                    PRAGMA user_version = 2;
+                """)
+            store = LogStore(root, retention_days=0)
+            self.assertEqual(store.list_messages("bridge")[0]["content"], "old body")
+            self.assertEqual(store.runtime_log_records("alice")[0]["inputs"][0]["content"], "old body")
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(connection.execute("SELECT exchange_id FROM message_route_logs").fetchone()[0], "")
+            # Distinct IDs at the same time must not collapse into a single
+            # idempotency record when the message bodies happen to be equal.
+            common = {
+                "user": "alice", "machine_id": "bridge", "platform": "test",
+                "chat_type": "private", "chat_id": "chat",
+                "occurred_at": "2026-10-02T12:00:00+08:00",
+                "direction": "receive", "kind": "text", "content": "same body",
+            }
+            entries = [{**common, "exchange_id": key} for key in ("one", "two")]
+            store.append_message_entries(entries)
+            store.append_message_entries(entries)
+            self.assertEqual(len(store.list_messages("bridge")), 3)
+            self.assertEqual(len(store.runtime_log_records("alice")), 3)
+
     def test_message_route_state_round_trip_preserves_extension_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = LogStore(Path(directory))

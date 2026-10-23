@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from provider.protocol.enums import ErrorCode
+
+from typing import Sequence
+
+from tests.type_assertions import require_present
+
 import io
 import json
 import os
@@ -67,7 +73,7 @@ from run.tools import (
 class ScriptedProvider:
     def __init__(
         self,
-        responses: list[ChatResponse | BaseException] | None = None,
+        responses: Sequence[ChatResponse | BaseException] | None = None,
         streams: list[list[RunEvent]] | None = None,
     ) -> None:
         self.responses = list(responses or [])
@@ -128,7 +134,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         self.assertIn("users/alice/file_upload/note.md", current_user["content"])
         self.assertIn("可按需使用 file 工具读取", current_user["content"])
-        window = load_window(find_window(root, "alice", "web", "uploaded-file"))
+        window = load_window(require_present(find_window(root, "alice", "web", "uploaded-file")))
         self.assertEqual(window["text"]["messages"][0]["content"], "请读取附件")
 
     def make_root(
@@ -927,7 +933,7 @@ def run(*, context):
             "完整工具续轮推理状态",
         )
         path = find_window(root, "alice", "cli", "tool")
-        window = load_window(path)
+        window = load_window(require_present(path))
         self.assertEqual(window["text"]["messages"][-1]["content"], "final")
         self.assertEqual(window["tool"]["rounds"][0]["calls"][0]["status"], "completed")
         self.assertGreaterEqual(
@@ -935,7 +941,7 @@ def run(*, context):
         )
         self.assertEqual(window["data"]["token_usage"]["total_tokens"], 6)
         self.assertEqual(window["data"]["token_usage"]["provider_request_count"], 2)
-        _, runtime_window = load_runtime_window(path, window)
+        _, runtime_window = load_runtime_window(require_present(path), window)
         snapshot = runtime_window["data"]["context_snapshot"]
         self.assertTrue(snapshot["available"])
         self.assertEqual(
@@ -951,9 +957,9 @@ def run(*, context):
             window["data"]["round_metrics"][0]["usage"]["cache_miss_tokens"], 1
         )
         done = events[-1]
-        self.assertEqual(done.usage["cached_prompt_tokens"], 2)
-        self.assertEqual(done.usage["provider_request_count"], 2)
-        self.assertAlmostEqual(done.usage["cache_hit_rate"], 2 / 3, places=5)
+        self.assertEqual(require_present(done.usage)["cached_prompt_tokens"], 2)
+        self.assertEqual(require_present(done.usage)["provider_request_count"], 2)
+        self.assertAlmostEqual(require_present(done.usage)["cache_hit_rate"], 2 / 3, places=5)
         self.assertGreaterEqual(done.metadata["elapsed_ms"], 0)
 
     def test_provider_request_refresh_gates_expand_and_perception_by_user_switches(
@@ -1172,7 +1178,7 @@ def run(*, context):
             "cli",
             "oversized-tool-result",
         )
-        window = load_window(window_path)
+        window = load_window(require_present(window_path))
         stored_call = window["tool"]["rounds"][0]["calls"][0]
         self.assertEqual(stored_call["status"], "result_too_large")
         self.assertTrue(stored_call["result"]["error"]["content_omitted"])
@@ -1251,14 +1257,14 @@ def run(*, context):
         )
         self.assertEqual(second_reasoning.content, "原生推理内容 1")
         self.assertIsNotNone(second_reasoning.provider_state)
-        self.assertEqual(second_reasoning.provider_state.data, "opaque-state-1")
+        self.assertEqual(require_present(second_reasoning.provider_state).data, "opaque-state-1")
         third_reasoning = [
             item
             for item in provider.requests[2].input
             if isinstance(item, ReasoningItem)
         ]
         self.assertEqual(
-            [item.provider_state.data for item in third_reasoning],
+            [require_present(item.provider_state).data for item in third_reasoning],
             ["opaque-state-1", "opaque-state-2"],
         )
         self.assertEqual(len({item.id for item in third_reasoning}), 2)
@@ -1286,12 +1292,12 @@ def run(*, context):
             if isinstance(item, ReasoningItem)
         ]
         self.assertEqual(
-            [item.provider_state.data for item in historical_reasoning],
+            [require_present(item.provider_state).data for item in historical_reasoning],
             ["opaque-state-1", "opaque-state-2"],
         )
         self.assertEqual(len({item.id for item in historical_reasoning}), 2)
         committed = load_window(
-            find_window(root, "alice", "cli", "native-provider-state")
+            require_present(find_window(root, "alice", "cli", "native-provider-state"))
         )
         self.assertNotIn(
             "provider_state",
@@ -1390,7 +1396,7 @@ def run(*, context):
         self.assertEqual(terminal.metadata["stop_reason"], "max_tool_iterations")
         self.assertEqual(terminal.metadata["tool_calls"], 2)
         window_path = find_window(root, "alice", "cli", "tool-limit")
-        window = load_window(window_path)
+        window = load_window(require_present(window_path))
         self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "limited")
         self.assertEqual(
@@ -1438,7 +1444,7 @@ def run(*, context):
                 )
             )
         self.assertEqual(continued[-1].type, "done")
-        resumed = load_window(window_path)
+        resumed = load_window(require_present(window_path))
         self.assertEqual(resumed["data"]["rounds"], 2)
         self.assertEqual(resumed["text"]["messages"][-2]["content"], "继续")
         self.assertEqual(resumed["text"]["messages"][-1]["content"], "继续完成")
@@ -1583,7 +1589,7 @@ def run(*, context):
             )
         )
         window_a = load_window(
-            find_window(root, "alice", "web", "conversation-a")
+            require_present(find_window(root, "alice", "web", "conversation-a"))
         )
         self.assertEqual(window_a["data"]["rounds"], 1)
         self.assertEqual(
@@ -1629,7 +1635,7 @@ def run(*, context):
         self.assertNotIn("plan_12345678", system_b)
         self.assertEqual(side_effects, [])
         self.assertEqual(
-            load_window(find_window(root, "alice", "web", "conversation-b"))["data"]["rounds"],
+            load_window(require_present(find_window(root, "alice", "web", "conversation-b")))["data"]["rounds"],
             1,
         )
 
@@ -1760,7 +1766,7 @@ def run(*, context):
         self.assertGreater(file_diagnostic["result_chars"], 0)
         self.assertNotIn("result", file_diagnostic)
         window = load_window(
-            find_window(root, "alice", "cli", "provider-context-overflow")
+            require_present(find_window(root, "alice", "cli", "provider-context-overflow"))
         )
         self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "limited")
@@ -1788,13 +1794,13 @@ def run(*, context):
                 capabilities_url: str | None = None,
             ) -> ModelCapabilities:
                 del capabilities_url
-                return ModelCapabilities(
-                    protocol_version="2.0",
-                    model=model,
-                    provider_id="mock",
-                    provider_model=model,
-                    limits={"max_input_tokens": 150_000},
-                )
+                return ModelCapabilities.model_validate({
+                           'protocol_version': "2.0",
+                           'model': model,
+                           'provider_id': "mock",
+                           'provider_model': model,
+                           'limits': {"max_input_tokens": 150_000},
+                       })
 
         provider = LimitedProvider(
             responses=[
@@ -1897,7 +1903,7 @@ def run(*, context):
         self.assertEqual(observed["session_id"], "memory-round")
         self.assertEqual(result["memory"]["extraction_mode"], "on_commit")
         self.assertEqual(result["memory"]["round_extraction"]["candidate_count"], 1)
-        archive = load_window(find_window(root, "alice", "cli", "memory-round"))
+        archive = load_window(require_present(find_window(root, "alice", "cli", "memory-round")))
         self.assertEqual(archive["data"]["memory_processed_round"], 1)
         self.assertEqual(archive["data"]["memory_status"], "completed")
         indexed = find_history_record(root, "alice", "cli", "memory-round")
@@ -1953,10 +1959,10 @@ def run(*, context):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["candidate_count"], 1)
         self.assertEqual(
-            runner.input_data["source"], {"source": "round_commit", "round": 3, "evidence_dates": {}}
+            require_present(runner.input_data)["source"], {"source": "round_commit", "round": 3, "evidence_dates": {}}
         )
         self.assertEqual(
-            MemoryStore(root, "alice", {}).get_entry("seven_days", "device.md")[
+            require_present(MemoryStore(root, "alice", {}).get_entry("seven_days", "device.md"))[
                 "content"
             ],
             "用户设备为 J1900。",
@@ -2005,7 +2011,7 @@ def run(*, context):
                 raise AssertionError("failed round must not reach memory agent")
 
         path = find_window(root, "alice", "cli", "failed-memory")
-        window = load_window(path)
+        window = load_window(require_present(path))
         result = extract_memory_backlog(
             root=root,
             user="alice",
@@ -2068,7 +2074,7 @@ def run(*, context):
         self.assertEqual(
             applied[0].metadata["guidance"], ["focus on the revised target"]
         )
-        window = load_window(find_window(root, "alice", "cli", "guided"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "guided")))
         self.assertEqual(
             window["data"]["round_metrics"][0]["guidance"],
             ["focus on the revised target"],
@@ -2117,7 +2123,7 @@ def run(*, context):
         self.assertEqual(len(replayed), 1)
         self.assertIn("continue with the revised target", replayed[0]["content"])
         metric = load_window(
-            find_window(root, "alice", "cli", "retry-guidance")
+            require_present(find_window(root, "alice", "cli", "retry-guidance"))
         )["data"]["round_metrics"][0]
         self.assertEqual(metric["guidance"], ["continue with the revised target"])
 
@@ -2181,7 +2187,7 @@ def run(*, context):
             applied.metadata["guidance_details"][0]["id"],
             "guidance_attachment_only",
         )
-        window = load_window(find_window(root, "alice", "cli", "guided-attachment"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "guided-attachment")))
         detail = window["data"]["round_metrics"][0]["guidance_details"][0]
         self.assertEqual(detail["uploaded_files"][0]["name"], "revised-target.md")
         self.assertNotIn("path", detail["uploaded_files"][0])
@@ -2231,7 +2237,7 @@ def run(*, context):
             [(event.type, event.content) for event in remaining],
             [("text_delta", "B"), ("usage", ""), ("done", "")],
         )
-        window = load_window(find_window(root, "alice", "cli", "incremental-stream"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "incremental-stream")))
         self.assertEqual(window["text"]["messages"][-1]["content"], "AB")
 
     def test_stream_tool_call_is_forwarded_after_provider_batch_validation(self) -> None:
@@ -2298,10 +2304,10 @@ def run(*, context):
                 )
             )
         self.assertEqual([event.type for event in events], ["error"])
-        self.assertIn("缺少 done 终态", events[0].error["message"])
+        self.assertIn("缺少 done 终态", require_present(events[0].error)["message"])
         self.assertTrue(events[0].metadata["committed"])
         self.assertEqual(events[0].metadata["status"], "failed")
-        window = load_window(find_window(root, "alice", "cli", "missing-done"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "missing-done")))
         self.assertEqual(window["data"]["rounds"], 1)
         failed_metric = window["data"]["round_metrics"][0]
         self.assertEqual(failed_metric["status"], "failed")
@@ -2336,7 +2342,7 @@ def run(*, context):
         self.assertEqual([event.type for event in events], ["error"])
         self.assertEqual(events[0].metadata["status"], "failed")
         self.assertEqual(events[0].metadata["stop_reason"], "provider_congestion")
-        window = load_window(find_window(root, "alice", "cli", "provider-busy"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "provider-busy")))
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
     def test_native_kemo_invalid_tool_arguments_retry_before_tool_execution(
@@ -2417,7 +2423,7 @@ def run(*, context):
         self.assertEqual(provider.requests[1].metadata["tool_argument_retry"], 1)
         self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
         window = load_window(
-            find_window(root, "alice", "cli", "native-tool-argument-retry")
+            require_present(find_window(root, "alice", "cli", "native-tool-argument-retry"))
         )
         self.assertEqual(len(window["tool"]["rounds"][0]["calls"]), 1)
         self.assertEqual(
@@ -2550,7 +2556,7 @@ def run(*, context):
         )
         self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
         window = load_window(
-            find_window(root, "alice", "cli", "visible-invalid-tool-arguments")
+            require_present(find_window(root, "alice", "cli", "visible-invalid-tool-arguments"))
         )
         self.assertIn("visible", window["text"]["messages"][-1]["content"])
         self.assertEqual(
@@ -2672,7 +2678,7 @@ def run(*, context):
         self.assertEqual(events[-1].metadata["retry_attempts"], 2)
         self.assertEqual(len(provider.requests), 2)
         self.assertEqual(
-            load_window(find_window(root, "alice", "cli", "auto-retry-success"))["text"]["messages"][1]["content"],
+            load_window(require_present(find_window(root, "alice", "cli", "auto-retry-success")))["text"]["messages"][1]["content"],
             "最终回答",
         )
 
@@ -2707,9 +2713,9 @@ def run(*, context):
         self.assertEqual([event.type for event in events].count("error"), 1)
         self.assertTrue(events[-1].metadata["committed"])
         self.assertEqual(len(provider.requests), 6)
-        self.assertTrue(events[-1].error["retry_budget_exhausted"])
-        self.assertEqual(events[-1].error["retry_attempts"], 6)
-        window = load_window(find_window(root, "alice", "cli", "auto-retry-exhausted"))
+        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
+        self.assertEqual(require_present(events[-1].error)["retry_attempts"], 6)
+        window = load_window(require_present(find_window(root, "alice", "cli", "auto-retry-exhausted")))
         self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(len(window["data"]["round_metrics"]), 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
@@ -2774,7 +2780,7 @@ def run(*, context):
         self.assertEqual(len(provider.requests), 17)
         self.assertEqual(events[-1].type, "done")
         self.assertEqual(events[-1].metadata["text"], "最终完成")
-        window = load_window(find_window(root, "alice", "cli", "retry-episode-progress"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "retry-episode-progress")))
         self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(len(window["data"]["round_metrics"]), 1)
 
@@ -2831,8 +2837,8 @@ def run(*, context):
         self.assertEqual(len(second.requests), 6)
         self.assertEqual([event.type for event in first_events].count("retrying"), 5)
         self.assertEqual([event.type for event in second_events].count("retrying"), 5)
-        self.assertTrue(first_events[-1].error["retry_budget_exhausted"])
-        self.assertTrue(second_events[-1].error["retry_budget_exhausted"])
+        self.assertTrue(require_present(first_events[-1].error)["retry_budget_exhausted"])
+        self.assertTrue(require_present(second_events[-1].error)["retry_budget_exhausted"])
 
     def test_retryable_tool_failure_enters_outer_retry_before_next_provider_iteration(
         self,
@@ -2921,10 +2927,10 @@ def run(*, context):
         self.assertEqual(events[-1].type, "error")
         self.assertFalse(events[-1].metadata["retryable"])
         self.assertTrue(events[-1].metadata["committed"])
-        self.assertTrue(events[-1].error["retry_budget_exhausted"])
+        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
         self.assertEqual(len(provider.requests), 6)
         window = load_window(
-            find_window(root, "alice", "cli", "explicit-no-retry")
+            require_present(find_window(root, "alice", "cli", "explicit-no-retry"))
         )
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
@@ -2934,23 +2940,23 @@ def run(*, context):
         _, root = self.make_root()
 
         class TruncatedProvider:
-            def __init__(inner_self) -> None:
-                inner_self.requests = []
+            def __init__(_self) -> None:
+                _self.requests = []
 
-            def create(inner_self, request):
-                inner_self.requests.append(request)
-                return KemoResponse(
-                    request_id=request.request_id,
-                    status=ResponseStatus.INCOMPLETE,
-                    model=request.model,
-                    incomplete_details={
+            def create(_self, request):
+                _self.requests.append(request)
+                return KemoResponse.model_validate({
+                           'request_id': request.request_id,
+                           'status': ResponseStatus.INCOMPLETE,
+                           'model': request.model,
+                           'incomplete_details': {
                         "reason": "output_truncated",
                         "finish_reason": "max_tokens",
                         "category": "upstream_error",
                         "status_code": 503,
                         "retryable": True,
                     },
-                )
+                       })
 
         provider = TruncatedProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -2970,31 +2976,31 @@ def run(*, context):
         self.assertEqual(len(provider.requests), 6)
         self.assertEqual([event.type for event in events].count("retrying"), 5)
         self.assertEqual(events[-1].type, "error")
-        self.assertFalse(events[-1].error["retryable"])
-        self.assertTrue(events[-1].error["retry_budget_exhausted"])
+        self.assertFalse(require_present(events[-1].error)["retryable"])
+        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
         self.assertTrue(events[-1].metadata["committed"])
 
     def test_transient_incomplete_metadata_retries_and_recovers(self) -> None:
         _, root = self.make_root()
 
         class EmptyThenCompleteProvider:
-            def __init__(inner_self) -> None:
-                inner_self.requests = []
+            def __init__(_self) -> None:
+                _self.requests = []
 
-            def create(inner_self, request):
-                inner_self.requests.append(request)
-                if len(inner_self.requests) == 1:
-                    return KemoResponse(
-                        request_id=request.request_id,
-                        status=ResponseStatus.INCOMPLETE,
-                        model=request.model,
-                        incomplete_details={
+            def create(_self, request):
+                _self.requests.append(request)
+                if len(_self.requests) == 1:
+                    return KemoResponse.model_validate({
+                               'request_id': request.request_id,
+                               'status': ResponseStatus.INCOMPLETE,
+                               'model': request.model,
+                               'incomplete_details': {
                             "reason": "empty_output",
                             "category": "upstream_error",
                             "status_code": 503,
                             "retry_after_ms": 0,
                         },
-                    )
+                           })
                 return KemoResponse(
                     request_id=request.request_id,
                     status=ResponseStatus.COMPLETED,
@@ -3036,11 +3042,11 @@ def run(*, context):
         _, root = self.make_root()
 
         class CancelledProvider:
-            def __init__(inner_self) -> None:
-                inner_self.requests = []
+            def __init__(_self) -> None:
+                _self.requests = []
 
-            def create(inner_self, request):
-                inner_self.requests.append(request)
+            def create(_self, request):
+                _self.requests.append(request)
                 return KemoResponse(
                     request_id=request.request_id,
                     status=ResponseStatus.CANCELLED,
@@ -3065,8 +3071,8 @@ def run(*, context):
         self.assertEqual(len(provider.requests), 1)
         self.assertFalse(any(event.type == "retrying" for event in events))
         self.assertEqual(events[-1].type, "error")
-        self.assertTrue(events[-1].error["cancelled"])
-        self.assertFalse(events[-1].error["retryable"])
+        self.assertTrue(require_present(events[-1].error)["cancelled"])
+        self.assertFalse(require_present(events[-1].error)["retryable"])
         self.assertTrue(events[-1].metadata["committed"])
 
     def test_transport_retry_budget_exhaustion_does_not_start_outer_retry(self) -> None:
@@ -3100,31 +3106,31 @@ def run(*, context):
         self.assertEqual(len(provider.requests), 1)
         self.assertFalse(any(event.type == "retrying" for event in events))
         self.assertEqual(events[-1].type, "error")
-        self.assertTrue(events[-1].error["retry_budget_exhausted"])
-        self.assertEqual(events[-1].error["attempt_count"], 2)
+        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
+        self.assertEqual(require_present(events[-1].error)["attempt_count"], 2)
         self.assertTrue(events[-1].metadata["committed"])
 
     def test_unknown_incomplete_http_400_uses_full_run_retry_budget(self) -> None:
         _, root = self.make_root()
 
         class InvalidRequestProvider:
-            def __init__(inner_self) -> None:
-                inner_self.requests = []
+            def __init__(_self) -> None:
+                _self.requests = []
 
-            def create(inner_self, request):
-                inner_self.requests.append(request)
-                return KemoResponse(
-                    request_id=request.request_id,
-                    status=ResponseStatus.INCOMPLETE,
-                    model=request.model,
-                    error=UnifiedError(
+            def create(_self, request):
+                _self.requests.append(request)
+                return KemoResponse.model_validate({
+                           'request_id': request.request_id,
+                           'status': ResponseStatus.INCOMPLETE,
+                           'model': request.model,
+                           'error': UnifiedError(
                         type="provider_error",
-                        code="PROVIDER_BAD_RESPONSE",
+                        code=ErrorCode.PROVIDER_BAD_RESPONSE,
                         message="request rejected",
                         provider_status=400,
                     ),
-                    incomplete_details={"reason": "other", "details": {"provider_reason": "provider_specific_stop"}},
-                )
+                           'incomplete_details': {"reason": "other", "details": {"provider_reason": "provider_specific_stop"}},
+                       })
 
         provider = InvalidRequestProvider()
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
@@ -3145,8 +3151,8 @@ def run(*, context):
         self.assertEqual([event.type for event in events].count("retrying"), 5)
         self.assertEqual(events[-1].type, "error")
         self.assertIsInstance(events[-1].error, dict)
-        self.assertFalse(events[-1].error["retryable"])
-        self.assertTrue(events[-1].error["retry_budget_exhausted"])
+        self.assertFalse(require_present(events[-1].error)["retryable"])
+        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
 
     def test_retry_after_is_bounded_and_used_for_outer_retry(self) -> None:
         _, root = self.make_root()
@@ -3255,7 +3261,7 @@ def run(*, context):
         self.assertEqual(result["text"], "completed after blocked retry")
         self.assertEqual(mocked_execute.call_count, 1)
         calls = load_window(
-            find_window(root, "alice", "cli", "retry-blocked-tool")
+            require_present(find_window(root, "alice", "cli", "retry-blocked-tool"))
         )["tool"]["rounds"][0]["calls"]
         self.assertEqual(
             [call["status"] for call in calls],
@@ -3303,10 +3309,10 @@ def run(*, context):
         self.assertFalse(any(event.type == "tool_call_start" for event in events))
         self.assertEqual(len([event for event in events if event.type == "error"]), 1)
         self.assertEqual(len(provider.requests), 3)
-        self.assertEqual(events[-1].error["retry_count"], 2)
-        self.assertEqual(events[-1].error["retry_limit"], 2)
+        self.assertEqual(require_present(events[-1].error)["retry_count"], 2)
+        self.assertEqual(require_present(events[-1].error)["retry_limit"], 2)
         window = load_window(
-            find_window(root, "alice", "cli", "invalid-tool-argument-limit")
+            require_present(find_window(root, "alice", "cli", "invalid-tool-argument-limit"))
         )
         self.assertEqual(window["data"]["rounds"], 1)
         failed_metric = window["data"]["round_metrics"][0]
@@ -3351,7 +3357,7 @@ def run(*, context):
             events[0].metadata["stop_reason"],
             "provider_context_recovery_failed",
         )
-        window = load_window(find_window(root, "alice", "cli", "context-unrecoverable"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "context-unrecoverable")))
         self.assertEqual(window["data"]["rounds"], 1)
         self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
 
@@ -3403,7 +3409,7 @@ def run(*, context):
         self.assertEqual(events[-1].metadata["status"], "failed")
         self.assertEqual(events[-1].metadata["stop_reason"], "provider_error_event")
         error_path = find_window(root, "alice", "cli", "err")
-        error_window = load_window(error_path)
+        error_window = load_window(require_present(error_path))
         self.assertEqual(error_window["data"]["rounds"], 1)
         self.assertIn("partial", error_window["text"]["messages"][1]["content"])
         self.assertIn(
@@ -3448,7 +3454,7 @@ def run(*, context):
         self.assertEqual([event.type for event in cancelled_events], ["done"])
         self.assertTrue(cancelled_events[0].metadata["committed"])
         self.assertEqual(cancelled_events[0].metadata["status"], "cancelled")
-        cancel_window = load_window(find_window(root, "alice", "cli", "cancel"))
+        cancel_window = load_window(require_present(find_window(root, "alice", "cli", "cancel")))
         self.assertEqual(cancel_window["data"]["rounds"], 1)
         self.assertEqual(
             cancel_window["data"]["round_metrics"][0]["status"], "cancelled"
@@ -3480,7 +3486,7 @@ def run(*, context):
                 )
             )
         self.assertEqual(next_events[-1].type, "done")
-        resumed_window = load_window(find_window(root, "alice", "cli", "cancel"))
+        resumed_window = load_window(require_present(find_window(root, "alice", "cli", "cancel")))
         self.assertEqual(resumed_window["data"]["rounds"], 2)
         self.assertEqual(resumed_window["text"]["messages"][-2]["content"], "continue")
 
@@ -3506,7 +3512,7 @@ def run(*, context):
                 root=root,
                 provider_factory=lambda _: provider,
             )
-        window = load_window(find_window(root, "alice", "cli", "dup"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "dup")))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertFalse(calls[0]["duplicate"])
         self.assertTrue(calls[1]["duplicate"])
@@ -3552,7 +3558,7 @@ def run(*, context):
             )
 
         self.assertEqual(mocked_execute.call_count, 2)
-        window = load_window(find_window(root, "alice", "cli", "file-live-read"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "file-live-read")))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertEqual([call["status"] for call in calls], ["completed", "completed"])
         self.assertFalse(calls[1]["duplicate"])
@@ -3615,7 +3621,7 @@ def run(*, context):
                 provider_factory=lambda _: provider,
             )
         self.assertEqual(mocked_execute.call_count, 3)
-        window = load_window(find_window(root, "alice", "cli", "expand-live-status"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "expand-live-status")))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertEqual([call["status"] for call in calls], ["completed"] * 3)
         self.assertFalse(calls[2]["duplicate"])
@@ -3682,7 +3688,7 @@ def run(*, context):
             )
         self.assertEqual(mocked_execute.call_count, 2)
         window = load_window(
-            find_window(root, "alice", "cli", "expand-mutation-dedup")
+            require_present(find_window(root, "alice", "cli", "expand-mutation-dedup"))
         )
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertEqual(
@@ -3736,7 +3742,7 @@ def run(*, context):
             )
 
         self.assertEqual(mocked_execute.call_count, 2)
-        window = load_window(find_window(root, "alice", "cli", "failed-duplicate"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "failed-duplicate")))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertFalse(calls[0]["duplicate"])
         self.assertFalse(calls[1]["duplicate"])
@@ -3784,7 +3790,7 @@ def run(*, context):
             terminal = list(iterator)
 
         self.assertEqual([event.type for event in terminal], ["done"])
-        window = load_window(find_window(root, "alice", "cli", "cancel-tool"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "cancel-tool")))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["id"], "callid_pending_1")
@@ -3836,7 +3842,7 @@ def run(*, context):
                 ChatResponse(text="done"),
             ]
         )
-        provider = ScriptedProvider(responses=responses)
+        provider = ScriptedProvider(responses=require_present(responses))
         with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
             handle_request(
                 {
@@ -3848,7 +3854,7 @@ def run(*, context):
                 root=root,
                 provider_factory=lambda _: provider,
             )
-        window = load_window(find_window(root, "alice", "cli", "identical-limit"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "identical-limit")))
         calls = window["tool"]["rounds"][0]["calls"]
         self.assertEqual(calls[0]["status"], "completed")
         self.assertTrue(
@@ -3999,14 +4005,14 @@ def run(*, context):
         # followed by one context summary request.
         self.assertEqual(len(summary_provider.requests), 4)
         self.assertTrue(result["context"]["summary"]["generated"])
-        window = load_window(find_window(root, "alice", "cli", "long"))
+        window = load_window(require_present(find_window(root, "alice", "cli", "long")))
         self.assertEqual(window["data"]["rounds"], 12)
         self.assertEqual(window["data"]["memory_processed_round"], 12)
         self.assertEqual(window["data"]["memory_status"], "completed")
         self.assertEqual(result["memory"]["status"], "completed")
         self.assertEqual(len(window["text"]["messages"]), 24)
         self.assertEqual(
-            MemoryStore(root, "alice", {}).get_entry("seven_days", "压缩记忆.md")[
+            require_present(MemoryStore(root, "alice", {}).get_entry("seven_days", "压缩记忆.md"))[
                 "content"
             ],
             "old rounds fact",
@@ -4083,7 +4089,7 @@ def run(*, context):
         self.assertEqual(result["memory"]["processed_round"], 0)
         self.assertEqual(result["memory"]["target_round"], 12)
         self.assertEqual(result["memory"]["pending_rounds"], 12)
-        window = load_window(find_window(root, "alice", "web", "queued-compress"))
+        window = load_window(require_present(find_window(root, "alice", "web", "queued-compress")))
         self.assertEqual(window["data"]["memory_status"], "queued")
         self.assertEqual(window["data"]["memory_target_round"], 12)
         self.assertEqual(window["data"]["memory_processed_round"], 0)
@@ -4159,7 +4165,7 @@ def run(*, context):
             archive_before = find_window(root, "alice", "web", "manual-75")
             self.assertIsNotNone(archive_before)
             _, runtime_before = load_runtime_window(
-                archive_before, load_window(archive_before)
+                require_present(archive_before), load_window(require_present(archive_before))
             )
             self.assertEqual(runtime_before["data"]["rounds"], 20)
             self.assertEqual(
@@ -4183,8 +4189,8 @@ def run(*, context):
         self.assertEqual(summary_provider.requests[0].max_tokens, 20_000)
         archive_path = find_window(root, "alice", "web", "manual-75")
         self.assertIsNotNone(archive_path)
-        stored_archive = load_window(archive_path)
-        _, stored_runtime = load_runtime_window(archive_path, stored_archive)
+        stored_archive = load_window(require_present(archive_path))
+        _, stored_runtime = load_runtime_window(require_present(archive_path), stored_archive)
         self.assertEqual(stored_archive["data"]["rounds"], 76)
         self.assertEqual(stored_runtime["data"]["rounds"], 21)
         self.assertEqual(stored_runtime["data"]["context"]["round_offset"], 55)
@@ -4273,8 +4279,8 @@ def run(*, context):
         self.assertEqual(len(provider.requests), 6)
         archive_path = find_window(root, "alice", "cli", "retry")
         self.assertIsNotNone(archive_path)
-        archive = load_window(archive_path)
-        _, runtime = load_runtime_window(archive_path, archive)
+        archive = load_window(require_present(archive_path))
+        _, runtime = load_runtime_window(require_present(archive_path), archive)
         self.assertEqual(archive["data"]["rounds"], 4)
         self.assertEqual(archive["data"]["memory_processed_round"], 0)
         self.assertEqual(archive["data"]["memory_status"], "queued")
@@ -4404,7 +4410,7 @@ def run(*, context):
         self.assertEqual(len(retry_tools), 2)
         self.assertIn('"after-recovery"', retry_tools[1]["content"])
         window = load_window(
-            find_window(root, "alice", "cli", "tool-context-retry")
+            require_present(find_window(root, "alice", "cli", "tool-context-retry"))
         )
         durable_items = window["items"]["items"]
         durable_call_ids = {
@@ -4499,8 +4505,8 @@ def run(*, context):
             ]
 
             archive_path = find_window(root, "alice", "web", "automatic-compress")
-            archive = load_window(archive_path)
-            _, runtime = load_runtime_window(archive_path, archive)
+            archive = load_window(require_present(archive_path))
+            _, runtime = load_runtime_window(require_present(archive_path), archive)
             self.assertEqual(fourth["text"], "reply-4")
             self.assertEqual(archive["data"]["rounds"], 4)
             self.assertEqual(runtime["data"]["rounds"], 2)

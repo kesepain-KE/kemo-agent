@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -246,13 +248,13 @@ class HistoryIndexTests(unittest.TestCase):
         commit_window(app_path, app_window)
 
         self.assertEqual(
-            load_window(find_window(root, "alice", "web", session_id))["text"][
+            load_window(require_present(find_window(root, "alice", "web", session_id)))["text"][
                 "messages"
             ][0]["content"],
             "web",
         )
         self.assertEqual(
-            load_window(find_window(root, "alice", "app", session_id))["text"][
+            load_window(require_present(find_window(root, "alice", "app", session_id)))["text"][
                 "messages"
             ][0]["content"],
             "app",
@@ -631,6 +633,7 @@ class HistoryIndexTests(unittest.TestCase):
         close_session(root, "alice", "web", "exhausted-summary")
         queue_summary(root, "alice", "web", "exhausted-summary")
 
+        failed = {}
         for attempt in range(1, 4):
             claim = claim_pending_summary(root, "alice")
             self.assertIsNotNone(claim)

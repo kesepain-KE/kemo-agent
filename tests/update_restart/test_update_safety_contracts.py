@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import ast
 import json
 import shutil
@@ -31,7 +33,7 @@ def _write_json(path: Path, value: object) -> None:
     _write(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
-def _version_document(version: str) -> dict[str, object]:
+def _version_document(version: str) -> dict[str, Any]:
     return {
         "name": "kemo-agent",
         "version": version,
@@ -158,13 +160,15 @@ class UpdateSafetyContractTests(unittest.TestCase):
         self.assertNotIn("url-secret", diagnostic)
         self.assertNotIn("sk-1234567890abcdef1234567890", diagnostic)
 
-        masked = update_utils.redact_json(
+        masked_value = update_utils.redact_json(
             {
                 "device_token": "device-secret",
                 "client_id": "safe-to-show",
                 "private_key": "-----BEGIN PRIVATE KEY-----secret-----END PRIVATE KEY-----",
             }
         )
+        assert isinstance(masked_value, dict)
+        masked = masked_value
         self.assertEqual(masked["device_token"], "***")
         self.assertEqual(masked["client_id"], "safe-to-show")
         self.assertEqual(masked["private_key"], "***")

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from provider.protocol.models import KemoResponse
+
+from tests.type_assertions import http_headers, require_type
+
 import io
 import json
 import threading
@@ -197,7 +201,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             seen.append(http_request)
             return replies.pop(0)
 
-        adapter._open = open_response
+        setattr(adapter, '_open', open_response)
         events = list(adapter.stream(request))
 
         self.assertEqual([event.sequence for event in events], [0, 1, 2, 3, 4])
@@ -238,7 +242,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             _HTTPResponse(encode_sse(events[1])),
         ]
         adapter = self.make_adapter()
-        adapter._open = lambda _request: replies.pop(0)
+        setattr(adapter, '_open', lambda _request: replies.pop(0))
 
         with self.assertRaisesRegex(StreamProtocolError, "不同的 response_id"):
             list(adapter.stream(request))
@@ -255,10 +259,10 @@ class KemoTransportReliabilityTests(unittest.TestCase):
                 raise ProviderTimeoutError("temporary timeout")
             return _HTTPResponse(to_json_bytes(response))
 
-        adapter._open = open_response
+        setattr(adapter, '_open', open_response)
         result = adapter.create(request)
 
-        self.assertEqual(result.id, response.id)
+        self.assertEqual(require_type(result, KemoResponse).id, response.id)
         self.assertEqual(len(seen), 2)
         self.assertEqual(
             [item.get_header("Idempotency-key") for item in seen],
@@ -273,7 +277,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             request.full_url,
             503,
             "unavailable",
-            {"Retry-After": "5"},
+            http_headers({"Retry-After": "5"}),
             io.BytesIO(
                 json.dumps(
                     {
@@ -295,7 +299,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             request.full_url,
             503,
             "unavailable",
-            {},
+            http_headers({}),
             io.BytesIO(
                 json.dumps(
                     {"error": {"message": "temporary upstream failure"}}
@@ -311,7 +315,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             request.full_url,
             409,
             "conflict",
-            {},
+            http_headers({}),
             io.BytesIO(
                 json.dumps(
                     {
@@ -354,7 +358,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
                 raise ProviderTimeoutError("temporary timeout")
             return _HTTPResponse(json.dumps(payload).encode("utf-8"))
 
-        adapter._open = open_response
+        setattr(adapter, '_open', open_response)
         result = adapter.embeddings(request)
 
         self.assertEqual(result.vector_space_id, "space-v1")
@@ -396,7 +400,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
                 raise ProviderTimeoutError("temporary timeout")
             return _HTTPResponse(json.dumps(payload).encode("utf-8"))
 
-        adapter._open = open_response
+        setattr(adapter, '_open', open_response)
         result = adapter.rerank(request)
 
         self.assertEqual(result.results[0].document_id, "doc_1")
@@ -416,7 +420,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             calls += 1
             return _HTTPResponse(b"event: response.created\ndata: {bad json}\n\n")
 
-        adapter._open = open_response
+        setattr(adapter, '_open', open_response)
         with self.assertRaises(StreamProtocolError):
             list(adapter.stream(_request()))
         self.assertEqual(calls, 1)
@@ -448,7 +452,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             _HTTPResponse(encode_sse(completed)),
         ]
         adapter = self.make_adapter()
-        adapter._open = lambda _request: replies.pop(0)
+        setattr(adapter, '_open', lambda _request: replies.pop(0))
 
         events = list(adapter.stream(request))
 
@@ -460,7 +464,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
     def test_cancel_event_interrupts_a_blocked_sse_read(self) -> None:
         adapter = self.make_adapter()
         response = _BlockingResponse()
-        adapter._open = lambda _request: response
+        setattr(adapter, '_open', lambda _request: response)
         cancel_event = threading.Event()
         errors: list[BaseException] = []
 
@@ -484,7 +488,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
     def test_cancel_event_interrupts_a_blocked_non_stream_read(self) -> None:
         adapter = self.make_adapter()
         response = _BlockingResponse()
-        adapter._open = lambda _request: response
+        setattr(adapter, '_open', lambda _request: response)
         cancel_event = threading.Event()
         errors: list[BaseException] = []
 
@@ -516,9 +520,9 @@ class KemoTransportReliabilityTests(unittest.TestCase):
         )
         response = _BlockingAfterPayloadResponse(encode_sse(created))
         adapter = self.make_adapter()
-        adapter._open = lambda _request: response
+        setattr(adapter, '_open', lambda _request: response)
         cancelled_ids: list[str] = []
-        adapter._cancel_response_best_effort = cancelled_ids.append
+        setattr(adapter, '_cancel_response_best_effort', cancelled_ids.append)
         cancel_event = threading.Event()
         errors: list[BaseException] = []
 
@@ -563,7 +567,7 @@ class KemoTransportReliabilityTests(unittest.TestCase):
             seen.append(http_request)
             return _HTTPResponse(encode_sse(completed))
 
-        adapter._open = open_response
+        setattr(adapter, '_open', open_response)
         events = list(
             adapter.stream(
                 request,

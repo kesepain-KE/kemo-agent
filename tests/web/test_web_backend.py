@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests.type_assertions import http_headers
+
+from tests.type_assertions import require_present
+
 import asyncio
 import copy
 import hashlib
@@ -284,7 +288,7 @@ class WebBackendTests(unittest.TestCase):
                 self.assertNotIn("private-secret", response.text)
         with patch("web.services.provider_models.urllib.request.build_opener") as factory:
             factory.return_value.open.side_effect = urllib.error.HTTPError(
-                "https://chat.test/v1/models", 401, "private-secret", {}, io.BytesIO(b"private-secret"),
+                "https://chat.test/v1/models", 401, "private-secret", http_headers({}), io.BytesIO(b"private-secret"),
             )
             response = self.request(app, "GET", "/api/users/alice/provider/chat-models")
         self.assertEqual(response.status_code, 401)
@@ -538,7 +542,8 @@ class WebBackendTests(unittest.TestCase):
                 for query in ("sort_by=invalid", "sort_order=invalid"):
                     # The app normalizes FastAPI validation failures to HTTP 400.
                     self.assertEqual(self.request(app, "GET", endpoint + "?" + query).status_code, 400)
-        for options in ({"sort_by": "invalid"}, {"sort_order": "invalid"}):
+        invalid_options: list[dict[str, Any]] = [{"sort_by": "invalid"}, {"sort_order": "invalid"}]
+        for options in invalid_options:
             with self.assertRaises(WebServiceError):
                 service.tmp_files(**options)
             with self.assertRaises(WebServiceError):
@@ -1181,7 +1186,7 @@ class WebBackendTests(unittest.TestCase):
             7,
         )
 
-    def request(self, app, method: str, url: str, **kwargs):
+    def request(self: unittest.TestCase, app, method: str, url: str, **kwargs):
         async def invoke():
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
             async with httpx.AsyncClient(
@@ -1217,7 +1222,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_health_does_not_touch_run_provider(self) -> None:
         fake = FakeService()
-        response = self.request(create_app(service=fake), "GET", "/api/health")
+        response = self.request(create_app(service=require_present(fake)), "GET", "/api/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsNone(fake.cancel_event)
@@ -1355,7 +1360,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_restart_endpoint_launches_detached_helper_for_requested_port(self) -> None:
         _, root = self.make_root()
-        app = create_app(root=root, service=FakeService())
+        app = create_app(root=root, service=require_present(FakeService()))
         with patch("web.app._spawn_restart_helper", return_value=4321) as launcher:
             response = self.request(
                 app,
@@ -1371,7 +1376,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_restart_endpoint_rejects_invalid_port_and_active_chat(self) -> None:
         invalid = self.request(
-            create_app(service=FakeService()),
+            create_app(service=require_present(FakeService())),
             "POST",
             "/api/system/restart",
             json={"port": 0},
@@ -1382,7 +1387,7 @@ class WebBackendTests(unittest.TestCase):
             def has_active_runs(self) -> bool:
                 return True
 
-        active_app = create_app(service=ActiveService())
+        active_app = create_app(service=require_present(ActiveService()))
         with patch("web.app._spawn_restart_helper", return_value=4321) as launcher:
             active = self.request(
                 active_app,
@@ -1819,7 +1824,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_secure_cookie_flag_is_applied_only_when_explicitly_enabled(self) -> None:
         app = create_app(
-            service=FakeService(),
+            service=require_present(FakeService()),
             auth_config=WebAuthConfig(
                 access_token="token-secret",
                 session_secret="session-secret",
@@ -1855,7 +1860,7 @@ class WebBackendTests(unittest.TestCase):
             session_secret="session-secret",
             cookie_name="kemo_test_session",
         )
-        app = create_app(service=fake, auth_config=config)
+        app = create_app(service=require_present(fake), auth_config=config)
 
         async def invoke():
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
@@ -1960,7 +1965,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_password_only_authentication_establishes_full_session(self) -> None:
         app = create_app(
-            service=FakeService(),
+            service=require_present(FakeService()),
             auth_config=WebAuthConfig(
                 username="alice",
                 password="password-secret",
@@ -1990,7 +1995,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_authentication_failures_are_limited_per_ip_and_stage(self) -> None:
         app = create_app(
-            service=FakeService(),
+            service=require_present(FakeService()),
             auth_config=WebAuthConfig(
                 access_token="token-secret",
                 session_secret="session-secret",
@@ -2089,7 +2094,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_cookie_names_isolate_web_instances(self) -> None:
         first = create_app(
-            service=FakeService(),
+            service=require_present(FakeService()),
             auth_config=WebAuthConfig(
                 access_token="token",
                 session_secret="shared-secret",
@@ -2097,7 +2102,7 @@ class WebBackendTests(unittest.TestCase):
             ),
         )
         second = create_app(
-            service=FakeService(),
+            service=require_present(FakeService()),
             auth_config=WebAuthConfig(
                 access_token="token",
                 session_secret="shared-secret",
@@ -2120,7 +2125,7 @@ class WebBackendTests(unittest.TestCase):
             async with httpx.AsyncClient(
                 transport=second_transport, base_url="http://test"
             ) as second_client:
-                second_client.cookies.set("instance_one", cookie, domain="test.local")
+                second_client.cookies.set("instance_one", require_present(cookie), domain="test.local")
                 denied = await second_client.get("/api/users")
             return login, denied
 
@@ -2138,7 +2143,7 @@ class WebBackendTests(unittest.TestCase):
         )
         (dist / "assets" / "app.js").write_text("window.KEMO = true", "utf-8")
         (dist / "kemo-agent.jpg").write_bytes(b"kemo-image")
-        app = create_app(root=root, service=FakeService())
+        app = create_app(root=root, service=require_present(FakeService()))
 
         home = self.request(app, "GET", "/")
         self.assertEqual(home.status_code, 200)
@@ -2178,7 +2183,7 @@ class WebBackendTests(unittest.TestCase):
     def test_frontend_reports_when_build_is_missing(self) -> None:
         _, root = self.make_root()
         response = self.request(
-            create_app(root=root, service=FakeService()),
+            create_app(root=root, service=require_present(FakeService())),
             "GET",
             "/",
         )
@@ -3044,7 +3049,7 @@ class WebBackendTests(unittest.TestCase):
     def test_extract_memory_route_forwards_to_service(self) -> None:
         fake = FakeService()
         response = self.request(
-            create_app(service=fake),
+            create_app(service=require_present(fake)),
             "POST",
             "/api/users/alice/sessions/s1/extract-memory",
         )
@@ -3428,13 +3433,13 @@ class WebBackendTests(unittest.TestCase):
 
     def test_validation_and_internal_error_are_sanitized(self) -> None:
         invalid = self.request(
-            create_app(service=FakeService()), "POST", "/api/chat", json={}
+            create_app(service=require_present(FakeService())), "POST", "/api/chat", json={}
         )
         self.assertEqual(invalid.status_code, 400)
         self.assertNotIn("input", invalid.text)
         secret = "API_KEY=super-secret"
         failed = self.request(
-            create_app(service=FakeService(failure=RuntimeError(secret))),
+            create_app(service=require_present(FakeService(failure=RuntimeError(secret)))),
             "GET",
             "/api/health",
         )
@@ -3544,7 +3549,7 @@ class WebBackendTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertIsNotNone(active)
-            self.assertTrue(active.cancel_event.is_set())
+            self.assertTrue(require_present(active).cancel_event.is_set())
 
             stopping = service.cancel_run(
                 "alice",
@@ -3553,7 +3558,7 @@ class WebBackendTests(unittest.TestCase):
                 session_id=session_id,
             )
             self.assertEqual(stopping["status"], "stopping")
-            self.assertTrue(active.cancel_event.is_set())
+            self.assertTrue(require_present(active).cancel_event.is_set())
         finally:
             release_worker.set()
             close_thread.join(timeout=3)
@@ -3759,7 +3764,7 @@ class WebBackendTests(unittest.TestCase):
         with service._active_runs_lock:
             active_b = service._active_runs.get("run_space_b_123")
             self.assertIsNotNone(active_b)
-            self.assertFalse(active_b.cancel_event.is_set())
+            self.assertFalse(require_present(active_b).cancel_event.is_set())
 
         release["space-a"].set()
         release["space-b"].set()
@@ -4045,7 +4050,7 @@ class WebBackendTests(unittest.TestCase):
         ]
         fake = FakeService(events=events)
         response = self.request(
-            create_app(service=fake),
+            create_app(service=require_present(fake)),
             "POST",
             "/api/chat",
             json={"user": "alice", "session_id": "s1", "prompt": "hello"},
@@ -4059,12 +4064,12 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(parsed[2][1]["arguments"], {"x": 1})
         self.assertEqual(parsed[3][1]["result"], {"ok": True})
         self.assertEqual(fake.seen["session_id"], "s1")
-        self.assertTrue(fake.cancel_event.is_set())
+        self.assertTrue(require_present(fake.cancel_event).is_set())
 
     def test_chat_route_accepts_uploaded_files_without_text(self) -> None:
         fake = FakeService(events=[RunEvent(type="done")])
         response = self.request(
-            create_app(service=fake),
+            create_app(service=require_present(fake)),
             "POST",
             "/api/chat",
             json={
@@ -4081,7 +4086,7 @@ class WebBackendTests(unittest.TestCase):
     def test_chat_route_forwards_app_source(self) -> None:
         fake = FakeService(events=[RunEvent(type="done")])
         response = self.request(
-            create_app(service=fake),
+            create_app(service=require_present(fake)),
             "POST",
             "/api/chat",
             json={
@@ -4104,7 +4109,7 @@ class WebBackendTests(unittest.TestCase):
             ]
         )
         response = self.request(
-            create_app(service=fake),
+            create_app(service=require_present(fake)),
             "POST",
             "/api/chat",
             json={
@@ -5646,9 +5651,9 @@ class WebBackendTests(unittest.TestCase):
     def test_missing_terminal_and_invalid_event_become_sse_error(self) -> None:
         missing = self.request(
             create_app(
-                service=FakeService(
+                service=require_present(FakeService(
                     events=[RunEvent(type="text_delta", content="partial")]
-                )
+                ))
             ),
             "POST",
             "/api/chat",
@@ -5662,7 +5667,7 @@ class WebBackendTests(unittest.TestCase):
 
         invalid = FakeService(events=["bad"])  # type: ignore[list-item]
         response = self.request(
-            create_app(service=invalid),
+            create_app(service=require_present(invalid)),
             "POST",
             "/api/chat",
             json={"user": "alice", "session_id": "s1", "prompt": "hello"},

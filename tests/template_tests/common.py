@@ -115,6 +115,8 @@ def prepare_user(
         "history",
         "task_cron",
         "task_plan",
+        "runtime",
+        "tools",
     ):
         (directory / relative).mkdir(parents=True, exist_ok=True)
     config_path = directory / "user_config.json"

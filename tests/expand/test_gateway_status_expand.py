@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from http.client import HTTPMessage
+
+import io
+import urllib.request
+from tests.type_assertions import http_headers
+
 import json
 from pathlib import Path
 import sys
@@ -274,7 +280,7 @@ class GatewayStatusExpandTests(unittest.TestCase):
             })
         handler = gateway._RejectRedirects()  # noqa: SLF001 - security boundary contract
         self.assertIsNone(
-            handler.redirect_request(None, None, 302, "Found", {}, "https://example.test/status")
+            handler.redirect_request(urllib.request.Request("https://example.test"), io.BytesIO(), 302, "Found", HTTPMessage(), "https://example.test/status")
         )
 
     def test_deactivate_deletes_local_credentials_and_artifacts(self) -> None:

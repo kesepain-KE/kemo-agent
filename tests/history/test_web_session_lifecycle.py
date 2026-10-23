@@ -392,15 +392,16 @@ class WebSessionLifecycleTests(unittest.TestCase):
         service = WebRunService(self.root)
         service.startup_inspection_delay_seconds = 0
         inspected = threading.Event()
-        service.inspect_conversation_spaces_on_startup = Mock(
+        inspect_mock = Mock(
             side_effect=lambda _stop: inspected.set() or {'state': 'completed'}
         )
+        service.inspect_conversation_spaces_on_startup = inspect_mock
         app = create_app(root=self.root, service=service)
         async def check():
             async with app.router.lifespan_context(app):
                 self.assertTrue(await asyncio.to_thread(inspected.wait, 2))
                 await asyncio.sleep(0.05)
-                service.inspect_conversation_spaces_on_startup.assert_called_once()
+                inspect_mock.assert_called_once()
         asyncio.run(check())
 
     def test_memory_queue_wake_interrupts_maintenance_sleep_without_running_agent(self):

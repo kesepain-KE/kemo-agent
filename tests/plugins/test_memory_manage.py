@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
+from tests.type_assertions import require_present
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,7 +83,7 @@ class MemoryManageTests(unittest.TestCase):
         self.assertIsNone(store.get_entry("seven_days", filename))
         self.assertIsNotNone(store.get_entry("seven_days", renamed))
         self.assertEqual(
-            store.get_entry("seven_days", renamed)["content"],
+            require_present(store.get_entry("seven_days", renamed))["content"],
             "User prefers Neovim.",
         )
 
@@ -302,8 +306,8 @@ class MemoryManageTests(unittest.TestCase):
         metadata = MemoryStore(self.root, "alice", self.config).get_entry(
             "seven_days", filename
         )
-        self.assertEqual(metadata["weight"], 0)
-        self.assertIsNone(metadata["last_weight_date"])
+        self.assertEqual(require_present(metadata)["weight"], 0)
+        self.assertIsNone(require_present(metadata)["last_weight_date"])
 
     def test_manual_writes_enforce_fragment_granularity_and_important_is_read_only(self) -> None:
         context = {"root": str(self.root), "user": "alice", "caller": "main_agent"}
@@ -609,12 +613,13 @@ class MemoryManageTests(unittest.TestCase):
         self.assertIn("Batch view body", important_page["entries"][0]["content"])
 
         with self.assertRaisesRegex(ValueError, "include_content 必须是布尔值"):
+            invalid_options: dict[str, Any] = {"include_content": 1}
             list_entries(
                 self.root,
                 "alice",
                 self.config,
                 "seven_days",
-                include_content=1,
+                **invalid_options,
             )
 
     def test_list_content_pages_are_bounded_by_serialized_character_budget(
@@ -841,9 +846,9 @@ class MemoryManageTests(unittest.TestCase):
         self.assertEqual(persisted["created"], [])
         self.assertEqual(persisted["updated"], [related])
         self.assertEqual(
-            MemoryStore(self.root, "alice", self.config).get_entry(
+            require_present(MemoryStore(self.root, "alice", self.config).get_entry(
                 "seven_days", related
-            )["weight"],
+            ))["weight"],
             1,
         )
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import json
 import os
 import subprocess
@@ -80,7 +82,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
             self.assertTrue(validation["panel_enabled"])
             panel, panel_error = load_module_panel(module, "sense")
             self.assertEqual(panel_error, "")
-            self.assertEqual(panel["title"], "system_monitor · 用户配置")
+            self.assertEqual(require_present(panel)["title"], "system_monitor · 用户配置")
             listing = run("list", context=context)
             self.assertEqual(len(listing["modules"]), 1)
             self.assertEqual(listing["modules"][0]["name"], "system_monitor")
@@ -115,7 +117,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
             )
             reloaded, panel_error = load_module_panel(module, "sense")
             self.assertEqual(panel_error, "")
-            self.assertEqual(reloaded["title"], "热加载后的感知面板")
+            self.assertEqual(require_present(reloaded)["title"], "热加载后的感知面板")
             self.assertTrue(run("validate", name="system_monitor", context=context)["valid"])
 
             with self.assertRaises(FileExistsError):

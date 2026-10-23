@@ -14,6 +14,11 @@
 
 现有领域可渐进采用上述子目录，不为目录形式重复迁移仍然清晰且稳定的测试。
 
+正式前端测试位于 `web/frontend/src/` 的 `*.test.ts` / `*.test.tsx`，通过 Vitest 运行。
+长引导与任务计划覆盖完整文本保留、折叠恢复、取消／重试／批准操作，以及当前生产样式的
+限高和滚动合同；源码断言应检查 `reference/styles/production.css`，不使用停用的旧样式代替。
+实际滚动和视口内可操作性仍需浏览器验收，不能由 jsdom 的布局数据推断。
+
 ## 与开发期系统验收的边界
 
 `开发临时目录/test_kemo/` 是被 `.gitignore` 排除的本机系统/集成补强套件，不进入发布包，
@@ -27,9 +32,11 @@ python -m pytest tests -q
 python -m pytest tests/deploy -q
 python -m tests.contracts.kemo_v2 -q
 python -m pytest tests/template_tests -q
+npm --prefix web/frontend test -- --maxWorkers=2
 ```
 
 发布前还应运行项目的完整 `开发临时目录/release_check.py`；该脚本只负责编排，不承载业务断言。
+开发期分发验收会进一步检查 Release 内由前端入口引用的 CSS，确认滚动修复实际进入发布包。
 
 ## Kemo 2.0 固定协议制品
 

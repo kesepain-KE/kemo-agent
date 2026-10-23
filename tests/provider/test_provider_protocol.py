@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from provider.protocol.models import KemoResponse
+
+from tests.type_assertions import http_headers, require_type
+
+from tests.type_assertions import require_present
+
 import io
 import hashlib
 import http.client
@@ -24,6 +30,7 @@ from provider.adapters.compat import (
 )
 from provider.adapters.gateway import KemoGatewayAdapter
 from provider.openai_chat import OpenAIChatTransport, _error_detail
+from provider.chat_deepseek import DEEPSEEK_REASONING_PLACEHOLDER
 from provider.protocol.diagnostics import (
     incomplete_retry_metadata,
     safe_provider_body,
@@ -135,11 +142,11 @@ def make_response(
             output_tokens=4,
             reasoning_tokens=2,
             total_tokens=14,
-            measurement=Measurement(
-                mode="gateway",
-                exact=True,
-                exact_fields=["input_tokens", "output_tokens", "total_tokens"],
-            ),
+            measurement=Measurement.model_validate({
+                            'mode': "gateway",
+                            'exact': True,
+                            'exact_fields': ["input_tokens", "output_tokens", "total_tokens"],
+                        }),
         ),
     )
 
@@ -379,10 +386,10 @@ class UnifiedProtocolTests(unittest.TestCase):
         usage_event = next(
             event for event in converted if event.type == StreamEventType.USAGE_UPDATED
         )
-        self.assertEqual(usage_event.usage.cached_input_tokens, 60)
-        self.assertEqual(usage_event.usage.reasoning_tokens, 3)
+        self.assertEqual(require_present(usage_event.usage).cached_input_tokens, 60)
+        self.assertEqual(require_present(usage_event.usage).reasoning_tokens, 3)
         completed = converted[-1]
-        self.assertEqual(completed.response.usage.cached_input_tokens, 60)
+        self.assertEqual(require_present(completed.response).usage.cached_input_tokens, 60)
 
     def test_chat_stream_usage_promotes_prompt_cache_hit_alias(self) -> None:
         request = KemoRequest(
@@ -409,7 +416,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         usage_event = next(
             event for event in converted if event.type == StreamEventType.USAGE_UPDATED
         )
-        self.assertEqual(usage_event.usage.cached_input_tokens, 5)
+        self.assertEqual(require_present(usage_event.usage).cached_input_tokens, 5)
 
     def test_chat_truncated_tool_call_is_incomplete_and_not_executable(self) -> None:
         request = make_request(stream=False)
@@ -431,16 +438,16 @@ class UnifiedProtocolTests(unittest.TestCase):
         converted = chat_response_to_kemo(response, request)
 
         self.assertEqual(converted.status, ResponseStatus.INCOMPLETE)
-        self.assertEqual(converted.incomplete_details["reason"], "output_truncated")
-        self.assertEqual(converted.incomplete_details.details["finish_reason"], "length")
+        self.assertEqual(require_present(converted.incomplete_details)["reason"], "output_truncated")
+        self.assertEqual(require_present(converted.incomplete_details).details["finish_reason"], "length")
         serialized_details = json.dumps(
-            converted.incomplete_details.model_dump(mode="json"),
+            require_present(converted.incomplete_details).model_dump(mode="json"),
             ensure_ascii=False,
         )
         self.assertNotIn("arguments_raw", serialized_details)
         self.assertNotIn('{"query":"unfinished', serialized_details)
         self.assertTrue(
-            converted.incomplete_details.details["invalid_tool_calls"][0][
+            require_present(converted.incomplete_details).details["invalid_tool_calls"][0][
                 "arguments_diagnostic"
             ]["content_omitted"]
         )
@@ -477,9 +484,9 @@ class UnifiedProtocolTests(unittest.TestCase):
         )
         terminal = converted[-1]
         self.assertEqual(terminal.type, StreamEventType.RESPONSE_INCOMPLETE)
-        self.assertEqual(terminal.response.status, ResponseStatus.INCOMPLETE)
+        self.assertEqual(require_present(terminal.response).status, ResponseStatus.INCOMPLETE)
         self.assertEqual(
-            terminal.response.incomplete_details.details["finish_reason"], "length"
+            require_present(require_present(terminal.response).incomplete_details).details["finish_reason"], "length"
         )
         runtime_terminal = list(run_events_for_protocol_event(terminal))
         self.assertEqual(runtime_terminal[0].type, "error")
@@ -774,9 +781,9 @@ class UnifiedProtocolTests(unittest.TestCase):
 
     def test_provider_tool_argument_parser_handles_deep_and_oversized_values(self) -> None:
         deep = parse_tool_arguments("[" * 8000 + "0" + "]" * 8000)
-        self.assertEqual(deep.parse_error["kind"], "invalid_json")
+        self.assertEqual(require_present(deep.parse_error)["kind"], "invalid_json")
         oversized = parse_tool_arguments({"payload": "x" * 1_100_000})
-        self.assertEqual(oversized.parse_error["kind"], "arguments_too_large")
+        self.assertEqual(require_present(oversized.parse_error)["kind"], "arguments_too_large")
 
     def test_provider_tool_argument_parser_rejects_oversized_valid_prefix(self) -> None:
         prefix = '{"x":1}'
@@ -785,7 +792,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         parsed = parse_tool_arguments(oversized)
 
         self.assertEqual(parsed.arguments, {})
-        self.assertEqual(parsed.parse_error["kind"], "arguments_too_large")
+        self.assertEqual(require_present(parsed.parse_error)["kind"], "arguments_too_large")
         self.assertIsNone(parsed.arguments_raw)
 
     def test_provider_tool_argument_parser_enforces_strict_json_contract(self) -> None:
@@ -793,20 +800,20 @@ class UnifiedProtocolTests(unittest.TestCase):
         boundary = '{"x":"' + ("a" * (1024 * 1024 - wrapper_bytes)) + '"}'
         accepted = parse_tool_arguments(boundary)
         self.assertIsNone(accepted.parse_error)
-        self.assertEqual(len(accepted.arguments_raw.encode("utf-8")), 1024 * 1024)
+        self.assertEqual(len(require_present(accepted.arguments_raw).encode("utf-8")), 1024 * 1024)
 
         over = parse_tool_arguments(boundary[:-2] + 'a"}')
-        self.assertEqual(over.parse_error["kind"], "arguments_too_large")
+        self.assertEqual(require_present(over.parse_error)["kind"], "arguments_too_large")
         self.assertEqual(
-            parse_tool_arguments('{"x":1,"x":2}').parse_error["kind"],
+            require_present(parse_tool_arguments('{"x":1,"x":2}').parse_error)["kind"],
             "duplicate_key",
         )
         self.assertEqual(
-            parse_tool_arguments('{"x":Infinity}').parse_error["kind"],
+            require_present(parse_tool_arguments('{"x":Infinity}').parse_error)["kind"],
             "non_finite_number",
         )
         self.assertEqual(
-            parse_tool_arguments({"x": float("nan")}).parse_error["kind"],
+            require_present(parse_tool_arguments({"x": float("nan")}).parse_error)["kind"],
             "non_finite_number",
         )
 
@@ -814,7 +821,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         for _ in range(65):
             deep = {"next": deep}
         self.assertEqual(
-            parse_tool_arguments(deep).parse_error["kind"],
+            require_present(parse_tool_arguments(deep).parse_error)["kind"],
             "arguments_too_complex",
         )
 
@@ -833,7 +840,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 request.full_url,
                 400,
                 "bad request",
-                {},
+                http_headers({}),
                 io.BytesIO(payload),
             )
             with patch(
@@ -888,9 +895,9 @@ class UnifiedProtocolTests(unittest.TestCase):
         }
         parsed = parse_response(payload)
         self.assertIsNone(parsed.output[0].created_at)
-        self.assertEqual(parsed.incomplete_details.details["retry_after_ms"], 1200)
+        self.assertEqual(require_present(parsed.incomplete_details).details["retry_after_ms"], 1200)
         self.assertEqual(
-            parsed.incomplete_details.details["provider_code"], "UPSTREAM_BUSY"
+            require_present(parsed.incomplete_details).details["provider_code"], "UPSTREAM_BUSY"
         )
 
     def test_ids_tool_linkage_and_asset_path_are_strict(self) -> None:
@@ -1127,9 +1134,9 @@ class UnifiedProtocolTests(unittest.TestCase):
             ],
         )
         request = chat_request_to_kemo(chat)
-        self.assertTrue(request.reasoning.enabled)
-        self.assertEqual(request.reasoning.effort, "medium")
-        self.assertEqual(request.reasoning.return_mode, "content")
+        self.assertTrue(require_present(request.reasoning).enabled)
+        self.assertEqual(require_present(request.reasoning).effort, "medium")
+        self.assertEqual(require_present(request.reasoning).return_mode, "content")
         restored = kemo_request_to_chat(request)
         self.assertEqual(restored.extra["reasoning_effort"], "medium")
         self.assertEqual(restored.messages[0]["role"], "system")
@@ -1142,21 +1149,21 @@ class UnifiedProtocolTests(unittest.TestCase):
         response = make_response(request)
         self.assertEqual(kemo_response_to_chat(response).text, "answer")
 
-        unsupported = KemoRequest(
-            protocol_version="2.0",
-            request_id="req_chat_unsupported",
-            model="chat-only",
-            system_prompt="",
-            input=[
+        unsupported = KemoRequest.model_validate({
+                          'protocol_version': "2.0",
+                          'request_id': "req_chat_unsupported",
+                          'model': "chat-only",
+                          'system_prompt': "",
+                          'input': [
                 MessageItem(
                     id="msg_audio",
-                    role="user",
+                    role=MessageRole.USER,
                     content=[
                         AudioContent(asset_id="asset_audio", mime_type="audio/wav")
                     ],
                 )
             ],
-        )
+                      })
         with self.assertRaises(CapabilityError):
             kemo_request_to_chat(unsupported)
 
@@ -1207,8 +1214,8 @@ class UnifiedProtocolTests(unittest.TestCase):
                 extra={"reasoning_effort": "max"},
             )
         )
-        self.assertEqual(enabled.reasoning.effort, "max")
-        self.assertTrue(enabled.reasoning.enabled)
+        self.assertEqual(require_present(enabled.reasoning).effort, "max")
+        self.assertTrue(require_present(enabled.reasoning).enabled)
 
         disabled = chat_request_to_kemo(
             ChatRequest(
@@ -1393,13 +1400,13 @@ class UnifiedProtocolTests(unittest.TestCase):
             seen.append(http_request)
             return FakeHTTPResponse(to_json_bytes(response))
 
-        adapter._open = open_json
+        setattr(adapter, '_open', open_json)
         created = adapter.create(request)
-        self.assertEqual(created.id, response.id)
+        self.assertEqual(require_type(created, KemoResponse).id, response.id)
         self.assertEqual(seen[0].full_url, "https://gateway.test/v1/model/responses")
         self.assertFalse(json.loads(seen[0].data)["stream"])
 
-        adapter._open = lambda capability_request: FakeHTTPResponse(
+        setattr(adapter, '_open', lambda capability_request: FakeHTTPResponse(
             json.dumps(
                 {
                     "protocol_version": "2.0",
@@ -1423,14 +1430,14 @@ class UnifiedProtocolTests(unittest.TestCase):
                     "extensions": {"operations": {"vision": {"supported": True}}},
                 }
             ).encode("utf-8")
-        )
+        ))
         capabilities = adapter.capabilities(request.model)
         self.assertEqual(capabilities.task, "llm")
         self.assertEqual(capabilities.input_modalities, ["text", "image"])
         self.assertTrue(capabilities.extensions["operations"]["vision"]["supported"])
 
         capability_requests = []
-        adapter._open = lambda capability_request: (
+        setattr(adapter, '_open', lambda capability_request: (
             capability_requests.append(capability_request)
             or FakeHTTPResponse(
                 json.dumps(
@@ -1447,7 +1454,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                     }
                 ).encode("utf-8")
             )
-        )
+        ))
         declared = adapter.capabilities(
             request.model,
             capabilities_url=f"/model/models/{request.model}/capabilities",
@@ -1464,7 +1471,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             )
 
         seen_models = []
-        adapter._open = lambda model_request: (
+        setattr(adapter, '_open', lambda model_request: (
             seen_models.append(model_request)
             or FakeHTTPResponse(
                 json.dumps(
@@ -1487,7 +1494,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                     }
                 ).encode("utf-8")
             )
-        )
+        ))
         catalog = adapter.models(task="llm")
         self.assertEqual([item.id for item in catalog.data], [request.model])
         self.assertEqual(
@@ -1511,9 +1518,9 @@ class UnifiedProtocolTests(unittest.TestCase):
                 response=response,
             ),
         ]
-        adapter._open = lambda _request: FakeHTTPResponse(
+        setattr(adapter, '_open', lambda _request: FakeHTTPResponse(
             b"".join(encode_sse(event) for event in stream_events)
-        )
+        ))
         self.assertEqual(len(list(adapter.stream(request))), 2)
 
     def test_gateway_asset_upload_and_verified_download(self) -> None:
@@ -1550,7 +1557,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 return ChunkResponse(payload)
             return ChunkResponse(json.dumps(descriptor).encode("utf-8"))
 
-        adapter._open = open_request
+        setattr(adapter, '_open', open_request)
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "voice.wav"
             source.write_bytes(payload)
@@ -1630,7 +1637,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 }
             return FakeHTTPResponse(json.dumps(payload).encode("utf-8"))
 
-        adapter._open = open_request
+        setattr(adapter, '_open', open_request)
         embedding = adapter.embeddings(embedding_request)
         rerank = adapter.rerank(rerank_request)
 
@@ -1676,9 +1683,10 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertEqual(native.requests[0].metadata["iteration"], 1)
         user_item = native.requests[0].input[-1]
         self.assertIsInstance(user_item, MessageItem)
-        self.assertEqual([block.type for block in user_item.content], ["text", "image"])
+        assert isinstance(user_item, MessageItem)
+        self.assertEqual([block.type for block in require_present(user_item.content)], ["text", "image"])
         window_path = find_window(root, "alice", "web", "native")
-        window = load_window(window_path)
+        window = load_window(require_present(window_path))
         self.assertEqual(window["items"]["schema_version"], 2)
         diagnostics = window["data"]["round_metrics"][-1]["provider_request_diagnostics"]
         self.assertEqual(len(diagnostics), len(native.requests))
@@ -1753,7 +1761,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 item for item in converted.input if isinstance(item, ToolCallItem)
             )
             self.assertEqual(call.arguments, {})
-            self.assertEqual(call.parse_error["kind"], expected_kind)
+            self.assertEqual(require_present(call.parse_error)["kind"], expected_kind)
 
     @staticmethod
     def _chat_transport() -> OpenAIChatTransport:
@@ -1790,7 +1798,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             },
         )
 
-    def test_chat_transport_forces_reasoning_fields_and_marks_synthetic_output(
+    def test_chat_transport_omits_unconfigured_reasoning_fields_and_marks_synthetic_output(
         self,
     ) -> None:
         captured: list[dict[str, object]] = []
@@ -1813,13 +1821,13 @@ class UnifiedProtocolTests(unittest.TestCase):
             result = self._chat_transport().chat(self._chat_request())
 
         self.assertEqual(result.text, "hello")
-        self.assertEqual(result.reasoning, "兼容层已启用默认思考模式。")
+        self.assertIn("compatibility placeholder", result.reasoning)
         self.assertTrue(result.reasoning_synthetic)
         self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0]["reasoning_effort"], "medium")
-        self.assertTrue(captured[0]["reasoning_enabled"])
+        self.assertNotIn("reasoning_effort", captured[0])
+        self.assertNotIn("reasoning_enabled", captured[0])
 
-    def test_chat_transport_forces_default_when_request_omits_reasoning(self) -> None:
+    def test_chat_transport_preserves_real_reasoning_without_forcing_wire_controls(self) -> None:
         captured: list[dict[str, object]] = []
         response = {
             "id": "chat-no-reasoning-request",
@@ -1848,8 +1856,478 @@ class UnifiedProtocolTests(unittest.TestCase):
 
         self.assertEqual(result.reasoning, "upstream thought")
         self.assertFalse(result.reasoning_synthetic)
-        self.assertEqual(captured[0]["reasoning_effort"], "medium")
-        self.assertTrue(captured[0]["reasoning_enabled"])
+        self.assertNotIn("reasoning_effort", captured[0])
+        self.assertNotIn("reasoning_enabled", captured[0])
+
+    def test_deepseek_chat_maps_thinking_payload_without_affecting_generic_chat(self) -> None:
+        captured: list[dict[str, object]] = []
+        response = {
+            "id": "deepseek-text",
+            "model": "deepseek-flash",
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "brief thought",
+                        "content": "hello",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        def open_request(request, **_kwargs):
+            captured.append(json.loads(request.data.decode("utf-8")))
+            return FakeHTTPResponse(json.dumps(response).encode("utf-8"))
+
+        transport = OpenAIChatTransport(
+            {
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "offline-test-key",
+                "model": "deepseek-flash",
+                "reasoning_effort": "medium",
+            }
+        )
+        request = ChatRequest(
+            model="deepseek-flash",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.2,
+            extra={
+                "reasoning_enabled": True,
+                "reasoning_effort": "medium",
+                "presence_penalty": 0.4,
+                "frequency_penalty": 0.3,
+                "metadata": {"trace": "omit"},
+                "prompt_cache_key": "omit",
+                "store": True,
+            },
+        )
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            result = transport.chat(request)
+
+        self.assertEqual(result.reasoning, "brief thought")
+        self.assertEqual(
+            captured[0]["thinking"],
+            {"type": "enabled"},
+        )
+        self.assertEqual(captured[0]["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_enabled", captured[0])
+        self.assertNotIn("temperature", captured[0])
+        self.assertNotIn("presence_penalty", captured[0])
+        self.assertNotIn("frequency_penalty", captured[0])
+        self.assertNotIn("metadata", captured[0])
+        self.assertNotIn("prompt_cache_key", captured[0])
+        self.assertNotIn("store", captured[0])
+        self.assertEqual(
+            transport._url(),
+            "https://api.deepseek.com/chat/completions",
+        )
+
+    def test_deepseek_relay_preserves_api_prefix_and_thinking_payload(self) -> None:
+        response = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        }
+        for base_url in (
+            "https://relay.test/v1",
+            "https://relay.test/v1/",
+            "https://relay.test/proxy/v1",
+            "https://relay.test",
+        ):
+            with self.subTest(base_url=base_url):
+                captured = []
+
+                def open_request(request, **_kwargs):
+                    captured.append(request)
+                    return FakeHTTPResponse(json.dumps(response).encode("utf-8"))
+
+                transport = OpenAIChatTransport({
+                    "base_url": base_url,
+                    "api_key": "offline-test-key",
+                    "model": "deepseek-v4-flash",
+                    "reasoning_effort": "medium",
+                })
+                with patch("urllib.request.urlopen", side_effect=open_request):
+                    result = transport.chat(ChatRequest(
+                        model="deepseek-v4-flash",
+                        messages=[{"role": "user", "content": "hello"}],
+                    ))
+                self.assertEqual(result.text, "ok")
+                self.assertEqual(
+                    captured[0].full_url,
+                    base_url.rstrip("/") + "/chat/completions",
+                )
+                payload = json.loads(captured[0].data)
+                self.assertEqual(payload["thinking"], {"type": "enabled"})
+                self.assertEqual(payload["reasoning_effort"], "high")
+                self.assertNotIn("reasoning_enabled", payload)
+
+    def test_chat_rejects_html_page_with_actionable_endpoint_error(self) -> None:
+        for stream in (False, True):
+            for content_type in ("text/html; charset=utf-8", "application/xhtml+xml"):
+                with self.subTest(stream=stream, content_type=content_type):
+                    response = FakeHTTPResponse(
+                        b"<!doctype html><html>API portal</html>",
+                        content_type=content_type,
+                    )
+                    request = ChatRequest(
+                        model="gateway/test",
+                        messages=[{"role": "user", "content": "hello"}],
+                    )
+                    transport = self._chat_transport()
+                    with patch("urllib.request.urlopen", return_value=response) as opened:
+                        with self.assertRaises(ProviderError) as caught:
+                            if stream:
+                                list(transport.chat_stream(request))
+                            else:
+                                transport.chat(request)
+                    self.assertEqual(caught.exception.category, "invalid_response")
+                    self.assertFalse(caught.exception.retryable)
+                    self.assertIn("base_url", str(caught.exception))
+                    self.assertIn("/v1", str(caught.exception))
+                    self.assertNotIn("API portal", str(caught.exception))
+                    opened.assert_called_once()
+                    self.assertTrue(response.closed)
+
+    def test_deepseek_relay_accepts_a_single_chat_data_envelope(self) -> None:
+        response = {
+            "choices": [{
+                "message": {"content": "ok", "reasoning_content": "checked"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+        request = ChatRequest(model="deepseek-v4-flash", messages=[])
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                transport = OpenAIChatTransport({
+                    "base_url": "https://relay.test/v1",
+                    "api_key": "offline-test-key",
+                    "model": request.model,
+                })
+                with patch("urllib.request.urlopen", return_value=FakeHTTPResponse(
+                    json.dumps({"data": response}).encode(),
+                    content_type="application/json",
+                )) as opened:
+                    if stream:
+                        events = list(transport.chat_stream(request))
+                        self.assertEqual(events[-1].metadata["finish_reason"], "stop")
+                        self.assertEqual(
+                            "".join(event.content for event in events if event.type == "text_delta"),
+                            "ok",
+                        )
+                        self.assertEqual(require_present(events[-1].usage)["total_tokens"], 5)
+                    else:
+                        result = transport.chat(request)
+                        self.assertEqual(result.text, "ok")
+                        self.assertEqual(result.reasoning, "checked")
+                        self.assertEqual(result.usage.total_tokens, 5)
+                    opened.assert_called_once()
+        self.assertEqual(self._chat_transport()._response({"data": response}, request).text, "ok")
+        for invalid in (
+            {"error": {"message": "failed"}, "data": response},
+            {"success": False, "data": response},
+            {"data": {"data": response}},
+            {"data": {"choices": []}},
+        ):
+            with self.subTest(invalid_keys=list(invalid)):
+                with self.assertRaises(ProviderError):
+                    transport._response(invalid, request)
+        self.assertEqual(transport._response(
+            {**response, "data": {"choices": []}}, request,
+        ).text, "ok")
+
+    def test_deepseek_chat_can_disable_thinking_and_generic_defaults_omit_vendor_fields(self) -> None:
+        deepseek = OpenAIChatTransport(
+            {
+                "base_url": "https://api.deepseek.com",
+                "api_key": "offline-test-key",
+                "model": "deepseek-flash",
+            }
+        )
+        request = ChatRequest(
+            model="deepseek-flash",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.2,
+            extra={
+                "reasoning_enabled": False,
+                "reasoning_effort": "none",
+                "presence_penalty": 0.4,
+            },
+        )
+        payload = deepseek._payload(request, stream=False)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertEqual(payload["reasoning_effort"], "none")
+        self.assertEqual(payload["temperature"], 0.2)
+        self.assertEqual(payload["presence_penalty"], 0.4)
+
+        generic = self._chat_transport()
+        generic_payload = generic._payload(
+            ChatRequest(
+                model="gateway/test",
+                messages=[{"role": "user", "content": "hello"}],
+                extra={
+                    "reasoning_enabled": True,
+                    "reasoning_effort": "high",
+                    "metadata": {"keep": True},
+                },
+                stream=False,
+            ),
+            stream=False,
+        )
+        self.assertNotIn("reasoning_enabled", generic_payload)
+        self.assertNotIn("reasoning_effort", generic_payload)
+        self.assertNotIn("metadata", generic_payload)
+
+    def test_deepseek_tool_call_without_reasoning_uses_labelled_compatibility_placeholder(self) -> None:
+        response = {
+            "id": "deepseek-tool",
+            "model": "deepseek-flash",
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_ds",
+                                "type": "function",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": '{"query":"hello"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        }
+
+        with patch(
+            "urllib.request.urlopen",
+            return_value=FakeHTTPResponse(json.dumps(response).encode("utf-8")),
+        ):
+            result = OpenAIChatTransport(
+                {
+                    "base_url": "https://api.deepseek.com",
+                    "api_key": "offline-test-key",
+                    "model": "deepseek-flash",
+                }
+            ).chat(
+                ChatRequest(
+                    model="deepseek-flash",
+                    messages=[{"role": "user", "content": "search"}],
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "parameters": {"type": "object"},
+                            },
+                        }
+                    ],
+                )
+            )
+
+        self.assertEqual(result.reasoning, DEEPSEEK_REASONING_PLACEHOLDER)
+        self.assertTrue(result.reasoning_synthetic)
+        converted = chat_response_to_kemo(result, make_request(stream=False))
+        self.assertEqual(converted.status, ResponseStatus.REQUIRES_ACTION)
+
+    def test_deepseek_relay_tools_without_reasoning_keep_real_content_and_can_continue(self) -> None:
+        tool = {
+            "id": "call_relay",
+            "type": "function",
+            "function": {"name": "echo", "arguments": '{"value":"ok"}'},
+        }
+        response = {
+            "choices": [{
+                "message": {"content": "", "tool_calls": [tool]},
+                "finish_reason": "tool_calls",
+            }],
+        }
+        frame = {
+            "choices": [{
+                "delta": {"tool_calls": [{"index": 0, **tool}]},
+                "finish_reason": "tool_calls",
+            }],
+        }
+        for mode in ("json", "json_fallback", "sse"):
+            with self.subTest(mode=mode):
+                transport = OpenAIChatTransport({
+                    "base_url": "https://relay.test/v1",
+                    "api_key": "offline-test-key",
+                    "model": "deepseek-v4-flash",
+                })
+                if mode == "sse":
+                    raw = ("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode()
+                    content_type = "text/event-stream"
+                else:
+                    raw = json.dumps(response).encode()
+                    content_type = "application/json"
+                request = ChatRequest(
+                    model="deepseek-v4-flash",
+                    messages=[{"role": "user", "content": "echo ok"}],
+                )
+                protocol_request = KemoRequest.create(model=request.model, input=[])
+                with patch(
+                    "urllib.request.urlopen",
+                    return_value=FakeHTTPResponse(raw, content_type=content_type),
+                ):
+                    if mode == "json":
+                        result = transport.chat(request)
+                        self.assertEqual(result.reasoning, DEEPSEEK_REASONING_PLACEHOLDER)
+                        self.assertTrue(result.reasoning_synthetic)
+                        converted = chat_response_to_kemo(result, protocol_request)
+                    else:
+                        events = list(transport.chat_stream(request))
+                        placeholders = [event for event in events if event.type == "reasoning_delta"]
+                        self.assertEqual(placeholders[0].content, DEEPSEEK_REASONING_PLACEHOLDER)
+                        self.assertTrue(placeholders[0].metadata["synthetic"])
+                        converted = list(chat_stream_to_protocol(
+                            events, protocol_request,
+                        ))[-1].response
+                self.assertEqual(require_present(converted).status, ResponseStatus.REQUIRES_ACTION)
+                reasons = [item for item in require_present(converted).output if isinstance(item, ReasoningItem)]
+                self.assertEqual(reasons[0].content, DEEPSEEK_REASONING_PLACEHOLDER)
+                calls = [item for item in require_present(converted).output if isinstance(item, ToolCallItem)]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0].arguments, {"value": "ok"})
+                continuation = kemo_request_to_chat(KemoRequest.create(
+                    model=request.model,
+                    input=[
+                        *require_present(converted).output,
+                        ToolResultItem(
+                            id="result_relay",
+                            call_id=calls[0].call_id, name=calls[0].name,
+                            content=[TextContent(text="ok")],
+                        ),
+                    ],
+                ), deepseek=True)
+                assistant = next(m for m in continuation.messages if m["role"] == "assistant")
+                self.assertEqual(assistant["reasoning_content"], DEEPSEEK_REASONING_PLACEHOLDER)
+                self.assertEqual(continuation.messages[-1]["role"], "tool")
+
+    def test_deepseek_commentary_and_tools_keep_reasoning_on_same_message(self) -> None:
+        incoming = ChatRequest(
+            model="deepseek-flash",
+            messages=[{
+                "role": "assistant",
+                "content": "I will check.",
+                "reasoning_content": "Original thought, unchanged.",
+                "tool_calls": [{
+                    "id": "call_check",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"value":"ok"}'},
+                }],
+            }, {
+                "role": "tool", "tool_call_id": "call_check",
+                "name": "echo", "content": "ok",
+            }],
+        )
+        converted = chat_request_to_kemo(incoming)
+        outgoing = kemo_request_to_chat(converted, deepseek=True)
+        assistants = [m for m in outgoing.messages if m["role"] == "assistant"]
+        self.assertEqual(len(assistants), 1)
+        self.assertEqual(assistants[0]["content"], "I will check.")
+        self.assertEqual(
+            assistants[0]["reasoning_content"], "Original thought, unchanged.",
+        )
+        self.assertEqual(
+            assistants[0]["tool_calls"][0]["id"], outgoing.messages[-1]["tool_call_id"],
+        )
+        generic = kemo_request_to_chat(converted)
+        self.assertEqual(len([m for m in generic.messages if m["role"] == "assistant"]), 2)
+
+    def test_deepseek_tools_serialize_legacy_missing_reasoning_without_mutating_history(self) -> None:
+        messages = [
+            {"role": "user", "content": "check"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "assistant", "content": None, "reasoning_content": "real"},
+        ]
+        request = ChatRequest(
+            model="deepseek-flash", messages=messages,
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+        )
+        transport = OpenAIChatTransport({
+            "base_url": "https://api.deepseek.com", "api_key": "offline",
+            "model": request.model,
+        })
+        payload = transport._payload(request, stream=False)
+        self.assertEqual(payload["messages"][1]["reasoning_content"], DEEPSEEK_REASONING_PLACEHOLDER)
+        self.assertEqual(payload["messages"][2]["reasoning_content"], "real")
+        self.assertNotIn("reasoning_content", messages[1])
+        self.assertNotIn("reasoning_content", payload["messages"][0])
+        generic = self._chat_transport()._payload(request, stream=False)
+        self.assertNotIn("reasoning_content", generic["messages"][1])
+
+    def test_deepseek_relay_can_explicitly_require_real_tool_reasoning(self) -> None:
+        for wrapped in (False, True):
+            with self.subTest(wrapped=wrapped):
+                profile = {"transport": {"reasoning": {"require_tool_reasoning": True}}}
+                if wrapped:
+                    profile["capabilities"] = {}
+                transport = OpenAIChatTransport({
+                    "base_url": "https://relay.test/v1",
+                    "api_key": "offline-test-key",
+                    "model": "deepseek-v4-flash",
+                    "capabilities": profile,
+                })
+                response = transport._response({
+                    "choices": [{
+                        "message": {
+                            "tool_calls": [{
+                                "id": "strict_call",
+                                "function": {"name": "echo", "arguments": "{}"},
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }, ChatRequest(model="deepseek-v4-flash", messages=[]))
+                converted = chat_response_to_kemo(response, make_request(stream=False))
+                self.assertEqual(converted.status, ResponseStatus.INCOMPLETE)
+                self.assertEqual(
+                    require_present(converted.incomplete_details).details["kind"], "missing_reasoning_content",
+                )
+                self.assertFalse(response.reasoning_synthetic)
+
+    def test_deepseek_extra_finish_reasons_are_incomplete_only_in_deepseek_branch(self) -> None:
+        for finish_reason in ("insufficient_system_resource", "aborted"):
+            response = ChatResponse(
+                text="partial",
+                finish_reason=finish_reason,
+                raw={"__kemo_chat_adapter_vendor": "deepseek"},
+            )
+            converted = chat_response_to_kemo(response, make_request(stream=False))
+            self.assertEqual(converted.status, ResponseStatus.INCOMPLETE)
+            self.assertEqual(
+                require_present(converted.incomplete_details).details["finish_reason"],
+                finish_reason,
+            )
+
+            generic = chat_response_to_kemo(
+                ChatResponse(text="complete", finish_reason=finish_reason),
+                make_request(stream=False),
+            )
+            self.assertEqual(generic.status, ResponseStatus.COMPLETED)
+
+    def test_deepseek_thinking_rejects_forced_or_named_tool_choice(self) -> None:
+        for mode, extra in (
+            ("required", {}),
+            ("named", {"name": "search"}),
+        ):
+            request = KemoRequest.create(
+                model="deepseek-flash",
+                input=[],
+                tools=[
+                    {
+                        "name": "search",
+                        "description": "search",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+                tool_choice={"mode": mode, **extra},
+            )
+            with self.assertRaises(CapabilityError):
+                kemo_request_to_chat(request, deepseek=True)
 
     def test_chat_stream_accepts_explicit_json_response_without_resending(self) -> None:
         captured: list[dict[str, object]] = []
@@ -2068,7 +2546,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                     request.full_url,
                     400,
                     "bad request",
-                    hdrs={},
+                    hdrs=http_headers({}),
                     fp=io.BytesIO(
                         b'{"error":{"message":"unknown parameter: tools"}}'
                     ),
@@ -2110,7 +2588,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                         request.full_url,
                         400,
                         "bad request",
-                        hdrs={},
+                        hdrs=http_headers({}),
                         fp=io.BytesIO(body),
                     )
 
@@ -2132,7 +2610,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                 request.full_url,
                 400,
                 "bad request",
-                hdrs={},
+                hdrs=http_headers({}),
                 fp=io.BytesIO(
                     b'{"error":{"message":"function calling is not supported"}}'
                 ),
@@ -2212,7 +2690,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                     request.full_url,
                     429,
                     "rate limited",
-                    hdrs={"Retry-After": "99"},
+                    hdrs=http_headers({"Retry-After": "99"}),
                     fp=io.BytesIO(
                         b'{"error":{"message":"rate limited"}}'
                     ),
@@ -2239,7 +2717,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                         request.full_url,
                         status,
                         "final error",
-                        hdrs={},
+                        hdrs=http_headers({}),
                         fp=io.BytesIO(
                             b'{"error":{"message":"invalid model"}}'
                         ),

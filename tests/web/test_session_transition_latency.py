@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import asyncio
 import copy
 import json
@@ -61,8 +63,8 @@ def test_close_and_summary_only_touch_the_target_registry_row(root):
         assert record["lifecycle"] == "closed"
         assert queue_summary(root, "alice", "web", "old")["reason"] == "no_archive_rounds"
     assert read_active_binding(root, "alice", "interactive:alice:page") is None
-    assert read_active_binding(root, "alice", "interactive:alice:other")["session_id"] == "fixture_1"
-    assert read_active_binding(root, "alice", "app:alice:device")["session_id"] == "old"
+    assert require_present(read_active_binding(root, "alice", "interactive:alice:other"))["session_id"] == "fixture_1"
+    assert require_present(read_active_binding(root, "alice", "app:alice:device"))["session_id"] == "old"
     assert find_record(root, "alice", "web", "fixture_1")["future_marker"] == "keep-1"
     assert find_record(root, "alice", "app", "old")["lifecycle"] == "open"
     assert find_record(root, "bob", "web", "old")["lifecycle"] == "open"
@@ -117,7 +119,7 @@ def test_targeted_session_update_rolls_back_on_failure(root):
         with pytest.raises(OSError, match="Fixture failure"):
             close_session(root, "alice", "web", "old")
     assert find_record(root, "alice", "web", "old")["lifecycle"] == "open"
-    assert read_active_binding(root, "alice", "interactive:alice")["session_id"] == "old"
+    assert require_present(read_active_binding(root, "alice", "interactive:alice"))["session_id"] == "old"
 
 
 def test_targeted_update_cannot_change_identity_or_revive_deleted_session(root):

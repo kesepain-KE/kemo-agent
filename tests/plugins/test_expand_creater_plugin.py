@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import json
 import subprocess
 import sys
@@ -59,7 +61,7 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertTrue(validation["panel_enabled"])
             panel, panel_error = load_module_panel(module, "expand")
             self.assertEqual(panel_error, "")
-            self.assertEqual(panel["title"], "smart_lights · 用户配置")
+            self.assertEqual(require_present(panel)["title"], "smart_lights · 用户配置")
             listing = run("list", "user", context=context)
             self.assertEqual(listing["count"], 1)
             self.assertEqual(listing["modules"][0]["name"], "smart_lights")
@@ -159,7 +161,7 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             )
             reloaded, panel_error = load_module_panel(module, "expand")
             self.assertEqual(panel_error, "")
-            self.assertEqual(reloaded["title"], "热加载后的面板")
+            self.assertEqual(require_present(reloaded)["title"], "热加载后的面板")
             self.assertTrue(run("validate", "user", name="smart_lights", context=context)["valid"])
 
             with self.assertRaises(FileExistsError):
@@ -193,7 +195,7 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertTrue(run("validate", "shared", name="weather_station", context=context)["valid"])
             panel, panel_error = load_module_panel(module, "expand")
             self.assertEqual(panel_error, "")
-            self.assertFalse(any(container["kind"] == "action" for container in panel["containers"]))
+            self.assertFalse(any(container["kind"] == "action" for container in require_present(panel)["containers"]))
 
             manifest_path = module / "expand.json"
             manifest = json.loads(manifest_path.read_text("utf-8"))

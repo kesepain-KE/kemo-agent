@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from provider.protocol.models import ToolCallItem, ToolResultItem
+
+from tests.type_assertions import require_type
+
 import json
 import tempfile
 import threading
@@ -551,10 +555,10 @@ class ContextLifecycleTests(unittest.TestCase):
         protocol_request = chat_request_to_kemo(
             ChatRequest(model="gateway-model", messages=groups[0].messages)
         )
-        self.assertTrue(protocol_request.input[-2].call_id.startswith("callid_"))
+        self.assertTrue(require_type(protocol_request.input[-2], ToolCallItem).call_id.startswith("callid_"))
         self.assertEqual(
-            protocol_request.input[-1].call_id,
-            protocol_request.input[-2].call_id,
+            require_type(protocol_request.input[-1], ToolResultItem).call_id,
+            require_type(protocol_request.input[-2], ToolCallItem).call_id,
         )
 
     def test_native_history_does_not_duplicate_valid_tool_call(self) -> None:

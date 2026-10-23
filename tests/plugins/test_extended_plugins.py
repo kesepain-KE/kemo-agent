@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import http_headers
+
 import io
 import hashlib
 import json
@@ -43,6 +45,7 @@ from run.tools.background_jobs import (
     MAX_ACTIVE_BACKGROUND_JOBS_PER_USER,
     cancel_background_job,
     prepare_background_job,
+    read_background_job,
     reconcile_background_job,
     update_background_job as persist_background_job,
 )
@@ -1093,6 +1096,22 @@ class ShellPluginTests(unittest.TestCase):
                     job_id=started["job_id"],
                     context=foreign_context,
                 )
+            # A terminal record can be observed just before the detached worker
+            # finishes exiting. Wait for both recorded identities before Windows
+            # removes the temporary working directory.
+            record = read_background_job(root, "alice", started["job_id"])
+            for prefix in ("", "worker_"):
+                pid = int(record.get(f"{prefix}pid") or 0)
+                if pid <= 0:
+                    continue
+                exited = run_wait_for_condition(
+                    "process_exit", 5, check_interval=0.1, pid=pid,
+                    process_started_at=str(record.get(
+                        f"{prefix}started_at" if prefix else "process_started_at",
+                    ) or ""),
+                    context=context,
+                )
+                self.assertEqual(exited["status"], "triggered")
 
     def test_managed_background_job_cancel_is_terminal_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2310,7 +2329,7 @@ class NetworkPluginTests(unittest.TestCase):
             "https://example.test/missing",
             404,
             "Not Found",
-            {"Content-Type": "text/plain"},
+            http_headers({"Content-Type": "text/plain"}),
             io.BytesIO(b"0123456789abcdef"),
         )
         with patch("plugins.network.tool.urllib.request.urlopen", side_effect=failure):

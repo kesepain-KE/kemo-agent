@@ -1,6 +1,8 @@
 """Keep public quick starts aligned with the local distribution contract."""
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import json
 import re
 import unittest
@@ -26,7 +28,7 @@ class DeploymentDocumentationTests(unittest.TestCase):
         config = read("deploy/deploy.yaml")
         repo_match = re.search(r"^  repo: (\S+)$", config, re.MULTILINE)
         self.assertIsNotNone(repo_match)
-        repo = repo_match.group(1)
+        repo = require_present(repo_match).group(1)
         base = f"https://raw.githubusercontent.com/{repo}/main/deploy"
         package_name = json.loads(read("deploy/npm/package.json"))["name"]
         npm_asset = "kemo-agent-npm.tgz"
@@ -80,6 +82,27 @@ class DeploymentDocumentationTests(unittest.TestCase):
         package = json.loads(read("deploy/npm/package.json"))
         self.assertNotIn("version", package)
         self.assertTrue(package["private"])
+
+    def test_project_introductions_keep_only_the_latest_release_notes(self) -> None:
+        version = json.loads(read("version.json"))["version"]
+        for guide in ("readme.md", "README_EN.md", "global_knowledge/project-introduction.md"):
+            with self.subTest(guide=guide):
+                release_headings = re.findall(
+                    r"^### (\d+\.\d+\.\d+)(?=[\s（(])", read(guide), re.MULTILINE,
+                )
+                self.assertEqual(release_headings, [version])
+
+    def test_chat_scroll_contract_and_release_notes_are_discoverable(self) -> None:
+        for guide in ("agents.md", "global_knowledge/data_structure.md"):
+            with self.subTest(guide=guide):
+                self.assertIn("frontend-conventions.md", read(guide))
+        topic = read("global_knowledge/frontend-conventions.md")
+        self.assertIn("composer-auxiliary", topic)
+        self.assertIn("内部滚动", topic)
+        for guide in ("readme.md", "README_EN.md", "global_knowledge/project-introduction.md"):
+            with self.subTest(guide=guide):
+                text = read(guide)
+                self.assertIn("scrollable" if guide == "README_EN.md" else "内部滚动", text)
 
 
 if __name__ == "__main__":

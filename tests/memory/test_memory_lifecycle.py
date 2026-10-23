@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import tempfile
 import unittest
 import sqlite3
@@ -150,7 +152,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         entry = self.store.get_entry("seven_days", filename)
         self.assertIsNotNone(entry)
         self.assertEqual(
-            set(entry),
+            set(require_present(entry)),
             {
                 "filename",
                 "content",
@@ -165,12 +167,12 @@ class MemoryLifecycleTests(unittest.TestCase):
                 "expires_at",
             },
         )
-        self.assertEqual(entry["weight"], 0)
-        self.assertEqual(entry["created_at"], self.start.isoformat())
-        self.assertEqual(entry["content_updated_at"], self.start.isoformat())
-        self.assertIsNone(entry["last_used_at"])
+        self.assertEqual(require_present(entry)["weight"], 0)
+        self.assertEqual(require_present(entry)["created_at"], self.start.isoformat())
+        self.assertEqual(require_present(entry)["content_updated_at"], self.start.isoformat())
+        self.assertIsNone(require_present(entry)["last_used_at"])
         self.assertEqual(
-            entry["expires_at"],
+            require_present(entry)["expires_at"],
             (self.start + timedelta(days=7)).isoformat(),
         )
         with closing(sqlite3.connect(self.store.database_path())) as database:
@@ -225,7 +227,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertEqual(result["skipped_permanent"], [filename])
         self.assertEqual(result["updated"], [])
         self.assertEqual(
-            self.store.get_entry("permanent", filename)["content"],
+            require_present(self.store.get_entry("permanent", filename))["content"],
             "用户偏好简洁回复。",
         )
 
@@ -249,7 +251,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         self,
     ) -> None:
         filename = self.add("长期项目", "用户维护长期项目。")
-        before = self.store.get_entry("seven_days", filename)["expires_at"]
+        before = require_present(self.store.get_entry("seven_days", filename))["expires_at"]
         self.store.upsert_candidates(
             [
                 {
@@ -262,20 +264,20 @@ class MemoryLifecycleTests(unittest.TestCase):
             now=self.start + timedelta(hours=1),
         )
         after_modify = self.store.get_entry("seven_days", filename)
-        self.assertEqual(after_modify["weight"], 1)
-        self.assertEqual(after_modify["expires_at"], before)
+        self.assertEqual(require_present(after_modify)["weight"], 1)
+        self.assertEqual(require_present(after_modify)["expires_at"], before)
         self.assertEqual(
             self.store.mark_used([filename], now=self.start + timedelta(hours=2)), []
         )
         after_reference = self.store.get_entry("seven_days", filename)
-        self.assertEqual(after_reference["weight"], 1)
-        self.assertEqual(after_reference["expires_at"], before)
+        self.assertEqual(require_present(after_reference)["weight"], 1)
+        self.assertEqual(require_present(after_reference)["expires_at"], before)
         self.assertEqual(
-            after_reference["content_updated_at"],
+            require_present(after_reference)["content_updated_at"],
             (self.start + timedelta(hours=1)).isoformat(),
         )
         self.assertEqual(
-            after_reference["last_used_at"],
+            require_present(after_reference)["last_used_at"],
             (self.start + timedelta(hours=2)).isoformat(),
         )
         self.assertEqual(
@@ -283,9 +285,9 @@ class MemoryLifecycleTests(unittest.TestCase):
             [filename],
         )
         after_next_day = self.store.get_entry("seven_days", filename)
-        self.assertEqual(after_next_day["weight"], 2)
+        self.assertEqual(require_present(after_next_day)["weight"], 2)
         self.assertEqual(
-            after_next_day["content_updated_at"],
+            require_present(after_next_day)["content_updated_at"],
             (self.start + timedelta(hours=1)).isoformat(),
         )
 
@@ -296,7 +298,7 @@ class MemoryLifecycleTests(unittest.TestCase):
             source={},
             now=self.start + timedelta(hours=1),
         )
-        self.assertEqual(self.store.get_entry("seven_days", filename)["weight"], 1)
+        self.assertEqual(require_present(self.store.get_entry("seven_days", filename))["weight"], 1)
         self.store.mark_used([filename], now=self.start + timedelta(hours=2))
         with closing(sqlite3.connect(self.store.database_path())) as database:
             self.assertEqual(
@@ -333,7 +335,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertFalse(first["replayed"])
         self.assertTrue(second["replayed"])
         filename = first["created"][0]
-        self.assertEqual(self.store.get_entry("seven_days", filename)["weight"], 0)
+        self.assertEqual(require_present(self.store.get_entry("seven_days", filename))["weight"], 0)
         self.assertEqual(second["created"], first["created"])
 
     def test_due_upgrade_resets_and_due_failure_deletes(self) -> None:
@@ -443,7 +445,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         with self.assertRaises(MemoryError):
             self.store.edit_fragment("seven_days", filename, "API Key: sk-abcdefghijk")
         self.assertEqual(
-            self.store.get_entry("seven_days", filename)["content"], "原始内容。"
+            require_present(self.store.get_entry("seven_days", filename))["content"], "原始内容。"
         )
 
     def test_integrity_and_user_isolation(self) -> None:
@@ -462,7 +464,7 @@ class MemoryLifecycleTests(unittest.TestCase):
             [item["content"] for item in bob.list_items()], ["Bob 的记忆。"]
         )
         self.assertEqual(self.store.integrity_issues(), [])
-        self.assertEqual(self.store.locate(alice).filename, alice)
+        self.assertEqual(require_present(self.store.locate(alice)).filename, alice)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from message.schema import ChatType
+
+from tests.type_assertions import require_present
+
 import base64
 import json
 import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from events import RunEvent
 from message.identity import (
@@ -104,15 +110,16 @@ def _envelope(
     chat_id: str = "chat-1",
     text: str = "hello",
 ) -> MessageEnvelope:
-    return MessageEnvelope(
-        message_id=message_id,
-        platform=platform,
-        chat_type=chat_type,
-        external_user_id=user_id,
-        external_chat_id=chat_id,
-        text=text,
-        timestamp="2026-07-18T00:00:00+08:00",
-    )
+    fields: dict[str, Any] = {
+        'message_id': message_id,
+        'platform': platform,
+        'chat_type': chat_type,
+        'external_user_id': user_id,
+        'external_chat_id': chat_id,
+        'text': text,
+        'timestamp': "2026-07-18T00:00:00+08:00",
+    }
+    return MessageEnvelope(**fields)
 
 
 def _done_events(request, **kwargs):
@@ -271,6 +278,36 @@ class FilePluginTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = _write_file_plugin(self.root)
 
+    def test_log_retains_exchange_identity_for_same_second_messages(self) -> None:
+        from datetime import datetime, timezone
+        from message.plugin_contracts import BufferedMessage
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        config = MessagePluginConfig.load(self.root, self.directory)
+        transport = FileMessageTransport(config)
+        # Exercise the real writer without background polling or sending.
+        for index in range(2):
+            message = BufferedMessage(
+                machine_id=config.machine_id, message_id=f"inbound-{index}",
+                chat_type="private", external_user_id="u1", external_chat_id="c1",
+                timestamp=timestamp, text="same input",
+            )
+            result = RouteResult(
+                envelope=MessageEnvelope(
+                    platform=config.platform, message_id=message.message_id,
+                    chat_type="private", external_user_id="u1", external_chat_id="c1",
+                    text=message.text, timestamp=timestamp,
+                ),
+                user="alice", source=f"message:{config.platform}",
+                session_id="private:c1", status="completed", text=f"output {index}",
+            )
+            transport._write_log((message,), result)
+        store = LogStore(self.root)
+        self.assertEqual(len(store.list_messages(config.machine_id)), 4)
+        exchanges = store.runtime_log_records("alice")
+        self.assertEqual(len(exchanges), 2)
+        self.assertEqual({row["outputs"][0]["content"] for row in exchanges}, {"output 0", "output 1"})
+
     def test_parse_repeated_front_matter_and_preserve_markdown_rule(self) -> None:
         messages = parse_message_buffer(
             """---
@@ -330,7 +367,7 @@ timestamp: 2026-07-18T14:31:25+08:00
         self.addCleanup(transport.stop)
         time.sleep(0.05)
         (self.directory / "message.md").write_text(
-            f"""---
+            (f"""---
 machine_id: msg_filedemo
 message_id: p1
 chat_type: private
@@ -371,7 +408,7 @@ timestamp: 2026-07-18T14:32:25+08:00
 ---
 
 第二条群消息
-""",
+""").replace("2026-07-18", datetime.now(timezone.utc).date().isoformat()),
             "utf-8",
         )
 
@@ -419,9 +456,9 @@ timestamp: 2026-07-18T14:32:25+08:00
                 )
             )
 
-        self.assertEqual(len(transport._output.SENT), 2)
+        self.assertEqual(len(getattr(transport, "_output").SENT), 2)
         group_output = next(
-            item for item in transport._output.SENT if item["chat_type"] == "group"
+            item for item in getattr(transport, "_output").SENT if item["chat_type"] == "group"
         )
         self.assertEqual(group_output["reply_to"], "g2")
         self.assertFalse(image.exists())
@@ -563,7 +600,7 @@ class StateTests(unittest.TestCase):
         self.assertTrue(store.claim("mock:m1"))
         self.assertFalse(store.claim("mock:m1"))
         store.complete("mock:m1", status="completed")
-        self.assertEqual(store.get("mock:m1")["status"], "completed")
+        self.assertEqual(require_present(store.get("mock:m1"))["status"], "completed")
 
     def test_claim_many_is_atomic(self) -> None:
         store = ProcessedMessageStore(self.root, "alice")
@@ -577,7 +614,7 @@ class StateTests(unittest.TestCase):
         store.claim("mock:m1")
         self.assertEqual(store.recover_interrupted(), ["mock:m1"])
         record = store.get("mock:m1")
-        self.assertEqual(record["status"], "failed")
+        self.assertEqual(require_present(record)["status"], "failed")
         self.assertFalse(store.claim("mock:m1"))
 
     def test_trim(self) -> None:
@@ -788,7 +825,7 @@ class RouterTests(unittest.TestCase):
         router = self._router(failed)
         result = router.route(_envelope())
         self.assertEqual(result.status, "failed")
-        self.assertIn("boom", result.error["message"])
+        self.assertIn("boom", require_present(result.error)["message"])
         self.assertEqual(len(self.transport.sent), 0)
 
     def test_missing_terminal_is_failure(self) -> None:
@@ -1099,7 +1136,7 @@ class HostTests(unittest.TestCase):
             transport = registry.get("filedemo").transport
             self.assertTrue(transport.running)
             (self.root / "message" / "out" / "filedemo" / "message.md").write_text(
-                """---
+                ("""---
 machine_id: msg_filedemo
 message_id: integrated
 chat_type: private
@@ -1109,32 +1146,32 @@ timestamp: 2026-07-18T14:30:25+08:00
 ---
 
 hello plugin
-""",
+""").replace("2026-07-18", datetime.now(timezone.utc).date().isoformat()),
                 "utf-8",
             )
             _wait_until(
-                lambda: bool(transport._output.SENT),
+                lambda: bool(getattr(transport, "_output").SENT),
                 description="the first file transport response",
                 interval=0.05,
                 diagnostics=lambda: {
-                    "sent": len(transport._output.SENT),
+                    "sent": len(getattr(transport, "_output").SENT),
                     "host": host.status(),
                 },
             )
-            self.assertEqual(transport._output.SENT[0]["text"], "reply:hello plugin")
+            self.assertEqual(getattr(transport, "_output").SENT[0]["text"], "reply:hello plugin")
             _wait_until(
                 lambda: bool(LogStore(self.root).list_messages("msg_filedemo")),
                 description="the first file transport log entry",
                 interval=0.05,
                 diagnostics=lambda: {
-                    "sent": len(transport._output.SENT),
+                    "sent": len(getattr(transport, "_output").SENT),
                     "host": host.status(),
                 },
             )
             logs = LogStore(self.root).list_messages("msg_filedemo")
             self.assertIn("hello plugin", {item["content"] for item in logs})
             (self.root / "message" / "out" / "filedemo" / "message.md").write_text(
-                """---
+                ("""---
 machine_id: msg_filedemo
 message_id: integrated
 chat_type: group
@@ -1155,20 +1192,20 @@ timestamp: 2026-07-18T14:32:25+08:00
 ---
 
 fresh body
-""",
+""").replace("2026-07-18", datetime.now(timezone.utc).date().isoformat()),
                 "utf-8",
             )
             _wait_until(
-                lambda: len(transport._output.SENT) >= 2,
+                lambda: len(getattr(transport, "_output").SENT) >= 2,
                 description="the second file transport response",
                 interval=0.05,
                 diagnostics=lambda: {
-                    "sent": len(transport._output.SENT),
+                    "sent": len(getattr(transport, "_output").SENT),
                     "host": host.status(),
                 },
             )
-            self.assertEqual(len(transport._output.SENT), 2)
-            self.assertEqual(transport._output.SENT[1]["text"], "reply:fresh body")
+            self.assertEqual(len(getattr(transport, "_output").SENT), 2)
+            self.assertEqual(getattr(transport, "_output").SENT[1]["text"], "reply:fresh body")
         finally:
             host.stop()
         self.assertFalse(registry.get("filedemo").transport.running)

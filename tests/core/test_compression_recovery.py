@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.type_assertions import require_present
+
 import json
 import os
 from contextlib import nullcontext
@@ -139,8 +141,8 @@ def test_completed_output_triggers_compaction_and_accounts_for_summary_usage(run
         )
     assert result["text"] == "乙" * 50_000
     archive_path = find_window(root, "alice", "web", "end-token")
-    archive = load_window(archive_path)
-    _, runtime = load_runtime_window(archive_path, archive)
+    archive = load_window(require_present(archive_path))
+    _, runtime = load_runtime_window(require_present(archive_path), archive)
     assert archive["data"]["rounds"] == 2
     if summary_fails:
         from run.context.service import context_status
@@ -205,7 +207,7 @@ def test_compaction_converges_with_expanding_summary_or_rolls_back(tmp_path, fai
         assert runner.inputs[-1]["previous_summary"]["narrative"] == "摘要" * 300
         assert len(result.selection.kept_rounds) == 1
         assert result.selection.estimated_tokens_after <= result.selection.input_budget
-        assert result.summary_cache["covered_rounds"] == [1, 2, 3, 4]
+        assert require_present(result.summary_cache)["covered_rounds"] == [1, 2, 3, 4]
 
 
 def summary_response(narrative="summarized history"):
@@ -255,8 +257,8 @@ def test_repeated_provider_limits_shrink_history_on_each_retry(runtime_root):
         for messages in attempted
     ] == [6, 3, 1]
     archive_path = find_window(root, "alice", "web", "two-retries")
-    archive = load_window(archive_path)
-    _, runtime = load_runtime_window(archive_path, archive)
+    archive = load_window(require_present(archive_path))
+    _, runtime = load_runtime_window(require_present(archive_path), archive)
     assert archive["data"]["rounds"] == 6
     assert runtime["data"]["rounds"] == 1
     assert runtime["data"]["context"]["round_offset"] == 5
@@ -297,8 +299,8 @@ def test_manual_low_round_count_uses_token_target_and_keeps_archive(runtime_root
     assert result["context"]["target_reached"]
     assert result["memory"]["status"] == "queued"
     archive_path = find_window(root, "alice", "web", "manual-token")
-    archive = load_window(archive_path)
-    _, runtime = load_runtime_window(archive_path, archive)
+    archive = load_window(require_present(archive_path))
+    _, runtime = load_runtime_window(require_present(archive_path), archive)
     assert archive["data"]["rounds"] == 3
     assert runtime["data"]["rounds"] == 1
 
@@ -331,4 +333,4 @@ def test_manual_last_turn_above_hard_limit_reports_floor_without_provider_call(r
     assert not result["context"]["target_reached"]
     assert len(provider.requests) == 1
     archive_path = find_window(root, "alice", "web", "single-turn")
-    assert load_window(archive_path)["data"]["rounds"] == 1
+    assert load_window(require_present(archive_path))["data"]["rounds"] == 1

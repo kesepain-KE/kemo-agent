@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from message.identity import IdentityResolver
+
 import tempfile
 import threading
 import unittest
@@ -231,7 +233,7 @@ class ExternalMessageIntegrationTests(unittest.TestCase):
 
         router = MessageRouter(
             self.root,
-            None,
+            IdentityResolver(self.root, []),
             registry,
             event_source=source,
             tool_registry_factory=lambda root, user: ToolRegistry({}),

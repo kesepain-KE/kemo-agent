@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+from provider.protocol.models import KemoRequest
+
+from tests.type_assertions import require_present
+
 import base64
 import json
 import hashlib
@@ -476,8 +481,8 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertEqual(result["analysis"], "图片里有一只猫")
         self.assertEqual(result["model"], "vision-model")
         self.assertEqual(result["attempts"], 1)
-        self.assertEqual(fake.request.model, "vision-model")
-        self.assertEqual(fake.request.generation.max_output_tokens, 10_000)
+        self.assertEqual(require_present(fake.request).model, "vision-model")
+        self.assertEqual(require_present(fake.request).generation.max_output_tokens, 10_000)
 
     def test_dedicated_analysis_retries_one_transient_provider_error(self) -> None:
         root, descriptor = self.make_root(vision="vision-model")
@@ -612,7 +617,7 @@ class MultimodalRoutingTests(unittest.TestCase):
 
         self.assertEqual(fake.get_calls, [descriptor.id])
         self.assertEqual(fake.upload_calls, 0)
-        media = fake.request.input[0].content[1]
+        media = require_present(fake.request).input[0].content[1]
         self.assertIsInstance(media, ImageContent)
         self.assertEqual(media.asset_id, descriptor.id)
         self.assertEqual(media.checksum_sha256, descriptor.checksum_sha256)
@@ -672,7 +677,7 @@ class MultimodalRoutingTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as raised:
             tool._create_with_retry(
                 provider,
-                object(),
+                Mock(spec=KemoRequest),
                 config={},
                 action="generate_image",
                 cancel_event=None,
@@ -697,7 +702,7 @@ class MultimodalRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "已取消"):
             tool._create_with_retry(
                 provider,
-                object(),
+                Mock(spec=KemoRequest),
                 config={},
                 action="analyze_image",
                 cancel_event=cancel,
@@ -763,7 +768,7 @@ class MultimodalRoutingTests(unittest.TestCase):
                     "uploaded_files": [],
                 },
             )
-        media = fake.request.input[0].content[1]
+        media = require_present(fake.request).input[0].content[1]
         self.assertIsInstance(media, ImageContent)
         self.assertEqual(media.source.kind, "inline_base64")
         self.assertEqual(result["paths"], [str(absolute_image.resolve())])

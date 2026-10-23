@@ -1,4 +1,6 @@
 """Regression contracts for evidence, resumable work, archive and generated skills."""
+from tests.type_assertions import require_present
+
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 import json
@@ -520,7 +522,8 @@ def test_merging_valid_source_cannot_overwrite_stale_destination_binding(store):
     assert reconcile(store.root, store.user)["deploy-skill"]["status"] == "stale"
 
 
-def test_split_and_merge_transfer_generated_skill_lineage(store):
+def test_split_and_merge_transfer_generated_skill_lineage(store, monkeypatch):
+    monkeypatch.setattr("run.memory.utc_now", lambda: NOW)
     seed(store)
     generated_skill(store)
     store._split_promote_location(store.locate("deploy"), "one_month", NOW, [
@@ -599,8 +602,9 @@ def test_due_permanent_promotion_settles_skill_after_source_transfer(store, spli
     assert not WorkLedger(store.root, store.user).pending("skill")
 
 
-def test_prompt_excludes_stale_but_catalog_keeps_it_visible(store):
+def test_prompt_excludes_stale_but_catalog_keeps_it_visible(store, monkeypatch):
     from run.config.prompt_sources import PromptSourceRegistry
+    monkeypatch.setattr("run.memory.utc_now", lambda: NOW)
     seed(store)
     generated_skill(store)
     registry = PromptSourceRegistry(store.root, store.user)
@@ -611,8 +615,9 @@ def test_prompt_excludes_stale_but_catalog_keeps_it_visible(store):
     assert len(registry.select_skills(include_stale=True)) == 1
 
 
-def test_web_catalog_retains_stale_status_and_manual_cleanup(store):
+def test_web_catalog_retains_stale_status_and_manual_cleanup(store, monkeypatch):
     from web.service import WebRunService
+    monkeypatch.setattr("run.memory.utc_now", lambda: NOW)
     (store.root / "config").mkdir()
     (store.root / "config/global_config.json").write_text("{}", "utf-8")
     (store.root / "users/alice/user_config.json").write_text("{}", "utf-8")
@@ -641,7 +646,7 @@ def test_extraction_lease_prevents_duplicate_processing_and_recovers_expiration(
                    "WHERE work_key='lease'")
     with ledger.lease("lease") as token:
         ledger.save("lease", {"resumed": True}, lease_token=token)
-    assert ledger.get("lease")["payload"]["resumed"]
+    assert require_present(ledger.get("lease"))["payload"]["resumed"]
 
 
 def test_builtin_and_template_subagents_use_80_without_relaxing_guards():
