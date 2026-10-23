@@ -30,7 +30,6 @@ from run.history.store import (
 )
 from run.config import user_dir
 
-
 INDEX_SCHEMA_VERSION = 3
 INDEX_FILENAME = "history.sqlite3"
 INDEX_LOCK_FILENAME = ".history.index.lock"
@@ -43,10 +42,8 @@ _KEY_SEPARATOR = "\x1f"
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
@@ -59,12 +56,10 @@ def _timestamp(value: Any) -> datetime | None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
-
 def new_conversation_id() -> str:
     """Return an opaque, non-user-derived logical conversation identifier."""
 
     return f"conv_{uuid.uuid4().hex}"
-
 
 def chain_for_source(source: str) -> str:
     value = str(source or "")
@@ -74,28 +69,22 @@ def chain_for_source(source: str) -> str:
         return "message"
     return "background"
 
-
 def session_key(source: str, session_id: str) -> str:
     return f"{source}{_KEY_SEPARATOR}{session_id}"
-
 
 def history_directory(root: Path, user: str) -> Path:
     return user_dir(user, root) / "history"
 
-
 def index_path(root: Path, user: str) -> Path:
     return history_database_path(root, user)
 
-
 def _lock_path(root: Path, user: str) -> Path:
     return history_directory(root, user) / INDEX_LOCK_FILENAME
-
 
 def _thread_lock(root: Path, user: str) -> threading.RLock:
     key = str(index_path(root, user).resolve()).casefold()
     with _PROCESS_LOCKS_GUARD:
         return _PROCESS_LOCKS.setdefault(key, threading.RLock())
-
 
 @contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
@@ -137,20 +126,18 @@ def _file_lock(path: Path) -> Iterator[None]:
 
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            elif locked:
+            elif locked and os.name != "nt":
                 import fcntl
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
 
-
 @contextmanager
 def index_lock(root: Path, user: str) -> Iterator[None]:
     with _thread_lock(root, user):
         with _file_lock(_lock_path(root, user)):
             yield
-
 
 def empty_index() -> dict[str, Any]:
     return {
@@ -161,10 +148,8 @@ def empty_index() -> dict[str, Any]:
         "updated_at": _now(),
     }
 
-
 def _record_key(source: str, session_id: str) -> str:
     return session_key(source, session_id)
-
 
 def _derived_conversation_id(source: str, session_id: str, directory: Path) -> str:
     digest = hashlib.sha256(
@@ -172,14 +157,12 @@ def _derived_conversation_id(source: str, session_id: str, directory: Path) -> s
     ).hexdigest()[:24]
     return f"conv_{digest}"
 
-
 def _platform_binding(source: str) -> str | None:
     if source.startswith("message:"):
         return source.split(":", 1)[1]
     if source in {"telegram", "onebot"}:
         return source
     return None
-
 
 def _record_from_data(
     *,
@@ -291,7 +274,6 @@ def _record_from_data(
         record["lifecycle"] = "open"
     return record
 
-
 def build_window_record(
     *,
     source: str,
@@ -313,7 +295,6 @@ def build_window_record(
     if run_state is not None:
         record["run_state"] = run_state
     return record
-
 
 def _scan_archive_windows(root: Path, user: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
@@ -349,10 +330,8 @@ def _scan_archive_windows(root: Path, user: str) -> dict[str, dict[str, Any]]:
         result[key] = record
     return result
 
-
 def _active_reference(source: str, session_id: str) -> dict[str, str]:
     return {"source": source, "session_id": session_id}
-
 
 def _active_record(sessions: dict[str, Any], value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
@@ -364,14 +343,12 @@ def _active_record(sessions: dict[str, Any], value: Any) -> dict[str, Any] | Non
         return None
     return record
 
-
 def _active_matches(value: Any, source: str, session_id: str) -> bool:
     return bool(
         isinstance(value, dict)
         and value.get("source") == source
         and value.get("session_id") == session_id
     )
-
 
 def _reconcile_metadata_unlocked(index: dict[str, Any]) -> bool:
     """Repair registry-only state without opening archive data files."""
@@ -424,7 +401,6 @@ def _reconcile_metadata_unlocked(index: dict[str, Any]) -> bool:
             changed = True
     return changed
 
-
 def _reconcile_unlocked(
     root: Path,
     user: str,
@@ -458,7 +434,6 @@ def _reconcile_unlocked(
     changed = _reconcile_metadata_unlocked(index) or changed
     return changed
 
-
 def load_index(root: Path, user: str, *, reconcile: bool = True) -> dict[str, Any]:
     """Load the per-user SQLite registry atomically."""
 
@@ -475,7 +450,6 @@ def load_index(root: Path, user: str, *, reconcile: bool = True) -> dict[str, An
             _write_index_unlocked(root, user, index)
         return copy.deepcopy(index)
 
-
 def _load_index_unlocked(root: Path, user: str) -> dict[str, Any]:
     sessions, active = read_registry(root, user)
     metadata = read_registry_metadata(root, user)
@@ -488,7 +462,6 @@ def _load_index_unlocked(root: Path, user: str) -> dict[str, Any]:
         index["revision"] = 0
     index["updated_at"] = str(metadata.get("registry_updated_at") or _now())
     return index
-
 
 def _write_index_unlocked(
     root: Path, user: str, index: dict[str, Any]
@@ -505,7 +478,6 @@ def _write_index_unlocked(
         updated_at=str(index["updated_at"]),
     )
     return copy.deepcopy(index)
-
 
 def upsert_window(
     root: Path,
@@ -533,6 +505,7 @@ def upsert_window(
             # A terminal writer from an older reservation must not move the
             # registry back to a session generation that has already been
             # replaced.
+            assert previous is not None  # current_generation came from this record
             return copy.deepcopy(previous)
         record = build_window_record(
             source=source,
@@ -543,7 +516,6 @@ def upsert_window(
             run_state=run_state,
         )
         return upsert_registry_record(root, user, record, updated_at=_now())
-
 
 def _reserved_record(
     previous: dict[str, Any] | None,
@@ -585,7 +557,6 @@ def _reserved_record(
         "memory_status": str(old.get("memory_status") or "pending"),
     }
 
-
 def reserve_session(
     root: Path,
     user: str,
@@ -605,7 +576,7 @@ def reserve_session(
             session_id=session_id,
             title=title,
         )
-        active_updates = (
+        active_updates: dict[str, dict[str, str] | None] | None = (
             {active_key: _active_reference(source, session_id)} if active_key else None
         )
         return upsert_registry_record(
@@ -616,7 +587,6 @@ def reserve_session(
             updated_at=_now(),
             allow_deleted_reuse=True,
         )
-
 
 def get_or_reserve_active(
     root: Path,
@@ -699,7 +669,6 @@ def get_or_reserve_active(
         )
         return written, True
 
-
 def find_record(
     root: Path,
     user: str,
@@ -708,7 +677,6 @@ def find_record(
 ) -> dict[str, Any] | None:
     record = read_registry_record(root, user, source, session_id)
     return copy.deepcopy(record) if isinstance(record, dict) else None
-
 
 def update_run_state(
     root: Path,
@@ -768,7 +736,6 @@ def update_run_state(
             root, user, record, updated_at=timestamp,
             allow_deleted_reuse=cron_run and run_state == "running",
         )
-
 
 def update_memory_state(
     root: Path,

@@ -31,7 +31,7 @@ def recover_provider_context(v, *, retry_count, live_tail, preserve_live_tail, t
         # Spend the final recovery attempt on the smallest valid request
         # instead of exhausting the budget with removable history remaining.
         keep_limit = 0
-    options = dict(
+    options: dict[str, Any] = dict(
         window=v["window"], policy=policy,
         system_message=v["system_message"],
         current_user_message=v["current_user_message"],

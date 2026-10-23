@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from events import RunEvent as _AnnotationRunEvent
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -93,6 +95,8 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
     round_state = rt.round_state
     config = rt.config or {}
     context_policy = rt.context_policy
+    if context_policy is None:
+        raise RuntimeError("Context policy must be initialized before compression")
     provider = rt.provider
     runtime_provider = rt.runtime_provider
     window_path = rt.window_path
@@ -274,7 +278,7 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
             agent_runner=agent_runner,
             cancel_event=cancel_event,
         )
-        raw_memory_usage = compression_memory.get("usage")
+        raw_memory_usage = compression_memory.get("usage") if compression_memory is not None else None
         if isinstance(raw_memory_usage, dict) and raw_memory_usage.get(
             "provider_request_count", 0
         ):
@@ -282,7 +286,7 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
                 compression_usage,
                 _usage_from_dict(raw_memory_usage),
             )
-    subagent_events: list[RunEvent] = []
+    subagent_events: list[_AnnotationRunEvent] = []
     summary_cache = persisted_summary_cache
     result = compact_context(
         window=window, policy=context_policy, runtime_path=runtime_path,

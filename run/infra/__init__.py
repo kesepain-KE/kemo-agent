@@ -1,5 +1,17 @@
 """Shared, dependency-light runtime infrastructure."""
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from run.infra.process_identity import process_snapshot as process_snapshot
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from run.infra.cli import (
+        handle_cli_request as handle_cli_request, handle_cli_compress as handle_cli_compress,
+        handle_cli_status as handle_cli_status, resolve_interactive_context as resolve_interactive_context,
+        stream_cli_request as stream_cli_request,
+    )
+
 from importlib import import_module as _import_module
 from run.infra.read_cache import BoundedReadCache, cached_read_text, invalidate_source_cache
 

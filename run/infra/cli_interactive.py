@@ -1,5 +1,11 @@
 """Interactive command dispatcher for the CLI facade."""
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from cli import _close_cli_session, run_interactive
+
+from pathlib import Path
 from typing import Any
 
 def _interactive_command(
@@ -444,8 +450,8 @@ def _interactive_command(
         from cron.scheduler import CronScheduler
                 # 使用模块级单例
         if not hasattr(run_interactive, '_cron_scheduler'):
-            run_interactive._cron_scheduler = CronScheduler(root)
-        sched = run_interactive._cron_scheduler
+            setattr(run_interactive, "_cron_scheduler", CronScheduler(root))
+        sched = getattr(run_interactive, "_cron_scheduler")
         if sched.running:
             print("调度器已在运行。", file=stdout)
         else:
@@ -454,7 +460,7 @@ def _interactive_command(
         return True, session_id
     if command == "/cron-stop":
         if hasattr(run_interactive, '_cron_scheduler'):
-            sched = run_interactive._cron_scheduler
+            sched = getattr(run_interactive, "_cron_scheduler")
             sched.stop()
             print("调度器已停止。", file=stdout)
         else:

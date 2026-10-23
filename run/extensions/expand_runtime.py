@@ -378,7 +378,7 @@ def record_expand_runtime(
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     with _state_lock(module_root):
         state = read_expand_runtime(module_root)
-        previous = state.get(channel) if isinstance(state.get(channel), dict) else {}
+        previous = (checked_381 if isinstance(checked_381 := state.get(channel), dict) else {})
         section: dict[str, Any] = {
             "status": "completed" if ok else "failed",
             "last_attempt": now,

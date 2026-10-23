@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import json
 import re
 from dataclasses import dataclass, field
@@ -12,7 +14,11 @@ from run.agents import AgentDefinition
 from run.config import provider_runtime_config, resolve_agent_model
 
 class AgentRunError(RuntimeError):
-    pass
+    if TYPE_CHECKING:
+        retry_budget_exhausted: bool
+        retry_exhausted: bool
+        retry_attempts: int
+        retry_max_attempts: int
 
 
 class AgentExecutionCapacityError(AgentRunError):

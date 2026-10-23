@@ -6,6 +6,8 @@ from __future__ import annotations
 # existing monkeypatch and dependency-injection targets remain compatible.
 # ruff: noqa: F401
 
+from typing import Generator
+
 import asyncio
 import copy
 import json
@@ -507,7 +509,7 @@ def iter_request_events(
     provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
     cancel_event: threading.Event | None = None,
-) -> Iterator[RunEvent]:
+) -> Generator[RunEvent, None, None]:
     """Serialize one logical request, including all automatic retry attempts."""
 
     with _request_session_lock(request, root):
@@ -544,7 +546,9 @@ async def stream_request(
             yield event
     except asyncio.CancelledError:
         stopped.set()
-        await asyncio.to_thread(iterator.close)
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            await asyncio.to_thread(close)
         raise
 
 

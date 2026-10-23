@@ -190,7 +190,7 @@ def mark_cron_runtime_checkpoint(
         if not isinstance(state, dict) or not state.get("dirty"):
             return False
         try:
-            same_updated = float(state.get("updated_monotonic")) == float(
+            same_updated = float(numeric_value if (numeric_value := state.get("updated_monotonic")) is not None else "") == float(
                 expected_updated_monotonic
             )
         except (TypeError, ValueError):

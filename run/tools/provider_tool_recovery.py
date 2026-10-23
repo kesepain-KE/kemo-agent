@@ -212,7 +212,7 @@ def response_invalid_tool_arguments_error(
     if invalid_call is not None:
         return invalid_tool_call_error(invalid_call)
     details = response.incomplete_details
-    if hasattr(details, "model_dump"):
+    if details is not None and hasattr(details, "model_dump"):
         try:
             details = details.model_dump(mode="python")
         except Exception:

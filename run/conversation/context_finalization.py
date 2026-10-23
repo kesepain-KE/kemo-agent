@@ -37,7 +37,7 @@ def finalize_completed_context(v):
     declared = stats.get("provider_declared_input_limit")
     if isinstance(declared, int) and declared > 0:
         policy = replace(policy, token_limit=min(policy.token_limit, declared))
-    options = dict(
+    options: dict[str, Any] = dict(
         window=window, policy=policy, system_message=v["system_message"],
         current_user_message=None, tools=v["tool_schemas"],
     )

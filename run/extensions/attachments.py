@@ -560,13 +560,13 @@ class RunAssetResolver:
 
     def image_content(self, asset_id: str, *, provider: str, detail: str = "auto") -> ImageContent:
         resolved = self.resolve(asset_id, provider=provider)
-        return ImageContent(
-            asset_id=resolved.asset_id,
-            source=resolved.source,
-            mime_type=resolved.mime_type,
-            checksum_sha256=self._descriptors[asset_id].get("checksum_sha256"),
-            detail=detail,
-        )
+        return ImageContent.model_validate({
+                   'asset_id': resolved.asset_id,
+                   'source': resolved.source,
+                   'mime_type': resolved.mime_type,
+                   'checksum_sha256': self._descriptors[asset_id].get("checksum_sha256"),
+                   'detail': detail,
+               })
 
     def remote_content(
         self,

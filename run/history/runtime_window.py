@@ -450,7 +450,7 @@ def _workspace_covers(
     try:
         data = window.get("data") or {}
         local_rounds = max(0, int(data.get("rounds") or 0))
-        context = data.get("context") if isinstance(data.get("context"), dict) else {}
+        context = (checked_453 if isinstance(checked_453 := data.get("context"), dict) else {})
         round_offset = max(0, int(context.get("round_offset") or 0))
     except (TypeError, ValueError):
         return False

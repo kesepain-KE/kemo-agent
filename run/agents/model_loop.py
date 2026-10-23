@@ -6,6 +6,9 @@ are resolved lazily so factories and tests can continue to patch runner globals.
 
 from __future__ import annotations
 
+
+from run.agents.contracts import AgentToolRetryError as _AnnotationAgentToolRetryError
+
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -46,7 +49,7 @@ def run_model(
     ToolDefinition = _runner.ToolDefinition
     ToolResultItem = _runner.ToolResultItem
     ToolResultTooLargeError = _runner.ToolResultTooLargeError
-    _AgentRetryState = _runner._AgentRetryState
+    from run.agents.retry_policy import _AgentRetryState
     _STRUCTURED_OUTPUT_TOOL_NAME = _runner._STRUCTURED_OUTPUT_TOOL_NAME
     _agent_recovery_items = _runner._agent_recovery_items
     _agent_recovery_records = _runner._agent_recovery_records
@@ -283,9 +286,7 @@ def run_model(
                 declared_tool_schemas: dict[str, dict[str, Any]] = {}
                 for raw_schema in context.tool_registry.schemas():
                     function = (
-                        raw_schema.get("function")
-                        if isinstance(raw_schema.get("function"), dict)
-                        else raw_schema
+                        (checked_286 if isinstance(checked_286 := raw_schema.get("function"), dict) else raw_schema)
                     )
                     name = str(function.get("name") or "").strip()
                     parameters = function.get("parameters") or function.get(
@@ -436,7 +437,7 @@ def run_model(
             )
             break
         retry_state.progress = True
-        retryable_tool_failure: AgentToolRetryError | None = None
+        retryable_tool_failure: _AnnotationAgentToolRetryError | None = None
         for call in calls:
             if processed_tool_calls >= max_tool_calls:
                 raise AgentToolLimitError(

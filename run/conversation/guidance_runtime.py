@@ -162,7 +162,7 @@ def prepare_guidance(
                             cancel_event=cancel_event,
                         )
                         remote = wait_asset_ready(remote, cancel_event=cancel_event)
-                    remote_id = str(remote.id)
+                    remote_id = str(getattr(remote, "id"))
                     remote_assets[asset_id] = remote_id
                 provider_media.append(
                     resolver.remote_content(

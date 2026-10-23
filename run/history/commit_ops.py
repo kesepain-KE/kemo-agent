@@ -395,7 +395,7 @@ def commit_terminal_windows(
                 previous=previous,
                 run_state=run_state,
             )
-            active_updates = (
+            active_updates: dict[str, dict[str, str] | None] | None = (
                 {active_key: {"source": source, "session_id": session_id}}
                 if isinstance(active_key, str) and active_key.strip()
                 else None

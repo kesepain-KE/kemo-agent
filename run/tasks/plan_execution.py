@@ -374,6 +374,8 @@ def execute_plan(
             result_payload = {"ok": True, "result": None}
         else:
             try:
+                if tool_registry is None:
+                    raise RuntimeError("Tool registry is unavailable for this plan step")
                 definition = tool_registry.get(tool_name)
                 result = execute_tool(
                     definition,

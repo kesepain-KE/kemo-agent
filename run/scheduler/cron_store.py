@@ -91,7 +91,7 @@ def _atomic_write(path: Path, data: dict[str, Any]) -> None:
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
         os.replace(tmp, path)
-        _LIST_CACHE.invalidate(lambda key: key[0] == os.path.normcase(str(path.parent.resolve())))
+        _LIST_CACHE.invalidate(lambda key: isinstance(key, tuple) and bool(key) and key[0] == os.path.normcase(str(path.parent.resolve())))
     except OSError:
         if tmp.exists():
             try:
@@ -358,7 +358,7 @@ def normalize_task(
 
 def _migrate_task(data: dict[str, Any], *, fallback_user: str) -> dict[str, Any]:
     """将旧嵌套 schema 或不规范时间转换为当前精简 schema。"""
-    schedule = data.get("schedule") if isinstance(data.get("schedule"), dict) else {}
+    schedule = (checked_361 if isinstance(checked_361 := data.get("schedule"), dict) else {})
     task_type = str(data.get("type") or schedule.get("type") or "recurring")
     status = str(data.get("status") or "enabled")
     next_run_at = data.get("next_run_at") or schedule.get("start_at") or now_beijing()
@@ -383,7 +383,7 @@ def _migrate_task(data: dict[str, Any], *, fallback_user: str) -> dict[str, Any]
         month_days=month_days if isinstance(month_days, list) else None,
         start_date=str(data.get("start_date") or ""),
         end_date=str(data.get("end_date") or ""),
-        max_runs=data.get("max_runs") if isinstance(data.get("max_runs"), int) else None,
+        max_runs=(checked_386 if isinstance(checked_386 := data.get("max_runs"), int) else None),
         successful_runs=int(data.get("successful_runs", data.get("run_count")) or 0),
         next_run_at=str(next_run_at),
         latest_run_at=str(latest_run_at),
@@ -522,7 +522,7 @@ class CronStore:
                         or current.get("exec_mode") == "system" or current != completed_snapshot):
                     return False
             path.unlink()
-            _LIST_CACHE.invalidate(lambda key: key[0] == os.path.normcase(str(self._dir.resolve())))
+            _LIST_CACHE.invalidate(lambda key: isinstance(key, tuple) and bool(key) and key[0] == os.path.normcase(str(self._dir.resolve())))
             clear_cron_runtime(self.root, self.user, self._system, task_id)
             return True
 

@@ -4,6 +4,10 @@ Keeping imports lazy prevents package initialization from pulling the complete
 engine into plugin and agent discovery paths.
 """
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from run.engine import EngineError as EngineError, handle_request as handle_request
+
 from typing import Any
 
 

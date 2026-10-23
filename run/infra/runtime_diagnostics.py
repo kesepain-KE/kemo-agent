@@ -218,7 +218,7 @@ def runtime_event_snapshot(root: Path, user: str) -> list[dict[str, Any]]:
 
 def invalidate_runtime_log_cache(root: Path) -> None:
     key = _root_key(root)
-    _cache.invalidate(lambda candidate: candidate[0] == key)
+    _cache.invalidate(lambda candidate: isinstance(candidate, tuple) and bool(candidate) and candidate[0] == key)
 
 
 def cached_runtime_log_records(

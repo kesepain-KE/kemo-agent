@@ -215,12 +215,12 @@ def synthesize_items(window: dict[str, Any]) -> dict[str, Any]:
 
     messages = (window.get("text") or {}).get("messages", [])
     think_rounds = {
-        int(value.get("round")): value
+        int(numeric_value if (numeric_value := value.get("round")) is not None else ""): value
         for value in (window.get("think") or {}).get("rounds", [])
         if isinstance(value, dict) and str(value.get("round", "")).isdigit()
     }
     tool_rounds = {
-        int(value.get("round")): value
+        int(numeric_value if (numeric_value := value.get("round")) is not None else ""): value
         for value in (window.get("tool") or {}).get("rounds", [])
         if isinstance(value, dict) and str(value.get("round", "")).isdigit()
     }

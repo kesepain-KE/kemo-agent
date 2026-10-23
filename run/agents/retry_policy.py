@@ -205,7 +205,7 @@ def _agent_tool_failure_is_retryable(
         return True
     for key in ("status_code", "provider_status"):
         try:
-            if int(error.get(key)) in {408, 425, 429, 500, 502, 503, 504}:
+            if int(numeric_value if (numeric_value := error.get(key)) is not None else "") in {408, 425, 429, 500, 502, 503, 504}:
                 return True
         except (TypeError, ValueError):
             continue

@@ -284,8 +284,8 @@ class TerminalRoundCommitter:
                 else {}
             ),
             **(
-                copy.deepcopy(request.get("_user_metadata"))
-                if isinstance(request.get("_user_metadata"), dict)
+                copy.deepcopy(user_metadata_value)
+                if isinstance(user_metadata_value := request.get("_user_metadata"), dict)
                 else {}
             ),
         }

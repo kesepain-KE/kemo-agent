@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from run.context.service import context_status as context_status
+
 import copy
 import json
 import math
@@ -197,13 +201,13 @@ def _media_estimation_projection(value: Any) -> tuple[Any, int]:
     """Remove binary payload text while retaining a conservative media budget."""
 
     if isinstance(value, list):
-        projected: list[Any] = []
+        projected_items: list[Any] = []
         media_tokens = 0
         for item in value:
             clean, tokens = _media_estimation_projection(item)
-            projected.append(clean)
+            projected_items.append(clean)
             media_tokens += tokens
-        return projected, media_tokens
+        return projected_items, media_tokens
     if not isinstance(value, dict):
         return value, 0
     if value.get("kind") == "inline_base64" and isinstance(value.get("data"), str):
@@ -246,7 +250,7 @@ def _round_lookup(rounds: Any) -> dict[int, dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         try:
-            number = int(item.get("round"))
+            number = int(numeric_value if (numeric_value := item.get("round")) is not None else "")
         except (TypeError, ValueError):
             continue
         result[number] = copy.deepcopy(item)
@@ -324,9 +328,9 @@ def _item_round_messages(window: dict[str, Any]) -> list[list[dict[str, Any]]] |
     for raw in raw_items:
         if not isinstance(raw, dict):
             continue
-        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        metadata = (checked_327 if isinstance(checked_327 := raw.get("metadata"), dict) else {})
         try:
-            round_number = int(metadata.get("round"))
+            round_number = int(numeric_value if (numeric_value := metadata.get("round")) is not None else "")
         except (TypeError, ValueError):
             if raw.get("type") == "message" and raw.get("role") == "user":
                 inferred_round += 1
@@ -539,7 +543,7 @@ def _context_tool_result(
         or preserve_small_directory_result
     ):
         return rendered
-    if file_directory_result:
+    if file_directory_result and isinstance(value, dict):
         return _stable_json(
             {
                 "ok": bool(value.get("ok", True)),

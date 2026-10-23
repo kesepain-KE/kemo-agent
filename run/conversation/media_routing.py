@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from provider.protocol.models import AudioContent as _AnnotationAudioContent
+from provider.protocol.models import FileContent as _AnnotationFileContent
+from provider.protocol.models import ImageContent as _AnnotationImageContent
+from provider.protocol.models import VideoContent as _AnnotationVideoContent
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,7 +87,7 @@ def prepare_provider_request(
         item for item in content_blocks if isinstance(item, ImageContent)
     ]
     vision_route: str | None = None
-    provider_media: list[ImageContent | AudioContent | VideoContent | FileContent] = []
+    provider_media: list[_AnnotationImageContent | _AnnotationAudioContent | _AnnotationVideoContent | _AnnotationFileContent] = []
     direct_asset_ids: set[str] = set()
     resolver = RunAssetResolver(base, user, uploaded_descriptors)
     if image_descriptors or inline_images:
@@ -179,7 +184,7 @@ def prepare_provider_request(
                 provider_media.append(
                     resolver.remote_content(
                         asset_id,
-                        remote_asset_id=str(remote.id),
+                        remote_asset_id=str(getattr(remote, "id")),
                     )
                 )
                 direct_asset_ids.add(asset_id)

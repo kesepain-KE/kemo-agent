@@ -13,7 +13,8 @@ import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
+from multiprocessing.connection import _ConnectionBase
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
 
@@ -103,7 +104,7 @@ def _isolated_worker(
     arguments: dict[str, Any],
     context: dict[str, Any],
     cancel_event: Any,
-    connection: Connection,
+    connection: _ConnectionBase,
 ) -> None:
     _ensure_worker_stdio()
     if os.name != "nt":
@@ -137,8 +138,8 @@ def _isolated_worker(
 
 @dataclass(slots=True)
 class IsolatedProcessCall:
-    process: multiprocessing.Process
-    connection: Connection
+    process: BaseProcess
+    connection: _ConnectionBase
     cancel_event: Any
 
     def receive(self, timeout: float) -> dict[str, Any] | None:
@@ -189,7 +190,7 @@ class IsolatedProcessCall:
                 pass
         elif pid:
             try:
-                os.killpg(pid, signal.SIGTERM)
+                getattr(os, "killpg")(pid, signal.SIGTERM)
             except (OSError, ProcessLookupError):
                 pass
         if self.process.is_alive():

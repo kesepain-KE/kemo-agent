@@ -429,7 +429,7 @@ class AgentRunner:
         definitions: list[ToolDefinition] = []
         for raw in schemas:
             function = (
-                raw.get("function") if isinstance(raw.get("function"), dict) else raw
+                (checked_432 if isinstance(checked_432 := raw.get("function"), dict) else raw)
             )
             definitions.append(
                 ToolDefinition(
@@ -691,7 +691,7 @@ class AgentRunner:
                 status = "timed_out" if exc.process_terminated else "timed_out_running"
             else:
                 status = "failed"
-            detail = {
+            detail: dict[str, Any] = {
                 "error": safe_provider_message(str(exc), "子代理运行失败"),
                 "exception_type": type(exc).__name__,
             }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable, Iterable
+
 import copy
 import json
 import threading
@@ -511,7 +513,7 @@ def events_for_protocol_response(
             item_id=invalid_call.id,
         )
         return
-    common = {
+    common: dict[str, Any] = {
         "request_id": response.request_id,
         "response_id": response.id,
     }
@@ -603,7 +605,7 @@ def run_events_for_protocol_event(
     user: str = "",
     cancel_event: threading.Event | None = None,
 ) -> Iterator[RunEvent]:
-    common = {
+    common: dict[str, Any] = {
         "event_id": event.event_id,
         "sequence": event.sequence,
         "run_sequence": event.run_sequence,
@@ -728,7 +730,7 @@ def provider_events(
     user: str = "",
     cancel_event: threading.Event | None = None,
 ) -> Iterator[RunEvent]:
-    stream = getattr(provider, "stream", None)
+    stream: Callable[..., Iterable[ProviderStreamEvent]] | None = getattr(provider, "stream", None)
     create = getattr(provider, "create", None)
     if protocol_request.stream:
         if not callable(stream):

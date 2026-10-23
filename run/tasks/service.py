@@ -498,5 +498,7 @@ def persist_agent_result(
     store = PlanStore(root, user)
     if action == "create":
         return store.create(normalized)
+    if existing is None:
+        raise PlanGenerationError("task_plan 编辑结果缺少 existing_plan")
     plan_id = str(existing.get("plan_id") or normalized.get("plan_id") or "")
     return store.update(plan_id, lambda current: {**normalized, "plan_id": current["plan_id"]})

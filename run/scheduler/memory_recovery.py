@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from run.agents import AgentRunner as _AnnotationAgentRunner
+
 from typing import Any
 
 
@@ -55,7 +57,7 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         limit = MEMORY_RECOVERY_ROUNDS_PER_SCAN
     batch_size = memory_extraction_batch_rounds(config)
-    runner: AgentRunner | None = None
+    runner: _AnnotationAgentRunner | None = None
     processed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
@@ -211,6 +213,8 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                         agent_source=source,
                         session_id=session_id,
                     )
+                if analysis is None:
+                    raise MaintenanceError("记忆分析未返回结果")
                 if analysis.get("status") != "completed":
                     raw_error = analysis.get("error")
                     extraction_error = (
@@ -295,6 +299,8 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                             batch_rounds,
                         ),
                     )
+                    if extraction is None:
+                        raise MaintenanceError("记忆持久化未返回结果")
                     extraction["skipped_rounds"] = skipped_rounds
                     if extraction.get("status") != "completed":
                         raw_error = extraction.get("error")
@@ -457,9 +463,9 @@ def recover_pending_memory(scheduler, user: str) -> dict[str, Any]:
                     window = load_window(archive_path)
                     data = window.setdefault("data", {})
                     diagnostic = (
-                        finished.get("memory_last_error")
+                        finished_error
                         if isinstance(finished, dict)
-                        and isinstance(finished.get("memory_last_error"), dict)
+                        and isinstance(finished_error := finished.get("memory_last_error"), dict)
                         else error
                     )
                     data["memory_status"] = "failed"

@@ -1,6 +1,8 @@
 """Conversation orchestration implementation behind the stable main-loop facade."""
 from __future__ import annotations
 
+from events import RunEvent as _AnnotationRunEvent
+
 from typing import Any
 
 def run_conversation(request, *, runtime_bindings, root=None, provider_factory=None, tool_registry_factory=None, cancel_event=None):
@@ -134,7 +136,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                 error: Any,
                 *,
                 reason: str = "provider_error",
-            ) -> RunEvent:
+            ) -> _AnnotationRunEvent:
                 return terminal_committer.commit_failed_round(
                     error,
                     reason=reason,
@@ -624,9 +626,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                     }
             extraction_status = str(memory_extraction.get("status") or "pending")
             memory_error = (
-                memory_extraction.get("error")
-                if isinstance(memory_extraction.get("error"), dict)
-                else {"message": "记忆提取失败"}
+                (checked_627 if isinstance(checked_627 := memory_extraction.get("error"), dict) else {"message": "记忆提取失败"})
             )
             if extraction_status == "completed":
                 archive_data["memory_processed_round"] = archive_round_number

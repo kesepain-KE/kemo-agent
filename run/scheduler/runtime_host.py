@@ -224,12 +224,11 @@ class RuntimeHost:
         )
         summary_processor = getattr(self.maintenance, "process_next_summary", None)
         if not callable(summary_processor):
-            def summary_processor(_user: str) -> dict[str, Any]:
-                return {
-                    "claimed": 0,
-                    "processed": [],
-                    "failed": [],
-                }
+            summary_processor = lambda _user: {
+                "claimed": 0,
+                "processed": [],
+                "failed": [],
+            }
         self.history_summaries = (
             history_summary_scheduler
             or HistorySummaryScheduler(

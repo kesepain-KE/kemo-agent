@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from run.tools.background_jobs import (
+        cancel_background_job as cancel_background_job,
+        prepare_background_job as prepare_background_job,
+        public_background_job as public_background_job,
+        read_background_job as read_background_job,
+        reconcile_background_job as reconcile_background_job,
+        update_background_job as update_background_job,
+        write_job_request as write_job_request,
+    )
+
+from typing import TYPE_CHECKING
+
 import asyncio
 import importlib.util
 import inspect
@@ -51,6 +66,13 @@ class ToolExecutionCapacityError(ToolError):
 
 
 class ToolProcessError(ToolError):
+    if TYPE_CHECKING:
+        category: str
+        status_code: int
+        retryable: bool
+        retry_after_ms: int
+        attempt_count: int
+
     def __init__(self, detail: dict[str, Any]) -> None:
         super().__init__(str(detail.get("message") or "隔离工具执行失败"))
         self.remote_exception_type = str(
@@ -408,7 +430,7 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> Non
             "object": isinstance(value, dict),
             "array": isinstance(value, list),
             "null": value is None,
-        }.get(expected, True)
+        }.get(str(expected), True)
         if not matches:
             raise ToolValidationError(f"参数 {name} 类型应为 {expected}")
         if isinstance(value, (int, float)) and not isinstance(value, bool):

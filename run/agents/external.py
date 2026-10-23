@@ -236,7 +236,7 @@ def resolve_external_agent(root: Path, user: str, handle: str) -> ExternalAgentB
     raise ExternalAgentError(f"外部子代理未公开或不可用：{normalized}")
 
 
-def _safe_failure(exc: BaseException) -> str:
+def _safe_failure(exc: object) -> str:
     text = redact_diagnostic_text(str(exc or "")).strip()
     return (text[:400] if text else "外部子代理调用失败")
 
@@ -321,6 +321,7 @@ def call_external_agent(
         raise ExternalAgentError(_safe_failure(exc)) from exc
     raw_result = response.get("result") if isinstance(response, dict) else None
     data = _external_result_data(raw_result, binding)
+    assert isinstance(raw_result, dict)  # validated by _external_result_data
     usage = raw_result.get("usage")
     model = raw_result.get("model")
     return {

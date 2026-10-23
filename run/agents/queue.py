@@ -675,6 +675,8 @@ class AgentScheduler:
                         return
                 continue
             try:
+                if not isinstance(item, AgentTask):
+                    raise TypeError("Agent queue contained an invalid task")
                 task = item
                 with self._lock:
                     if task.status == "cancelled":

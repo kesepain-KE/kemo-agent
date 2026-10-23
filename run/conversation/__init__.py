@@ -1,5 +1,13 @@
 """Conversation orchestration domain."""
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from run.infra import EngineError as EngineError
+    from run.conversation.runtime import (
+        handle_request as handle_request, compress_context as compress_context,
+        iter_request_events as iter_request_events, stream_request as stream_request,
+    )
+
 from importlib import import_module
 from typing import Any
 

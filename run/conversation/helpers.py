@@ -8,6 +8,8 @@ file remains focused on sequencing.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import copy
 import json
 import queue
@@ -93,7 +95,7 @@ def _tool_result_reuse_allowed(name: str, arguments: dict[str, Any]) -> bool:
     return reuse_allowed(name, arguments)
 
 def _drain_guidance(channel: Any) -> list[Any]:
-    drain = getattr(channel, "drain", None)
+    drain: Callable[[], list[Any]] | None = getattr(channel, "drain", None)
     if callable(drain):
         return list(drain())
     if channel is None or not callable(getattr(channel, "get_nowait", None)):
@@ -109,7 +111,7 @@ def _drain_guidance(channel: Any) -> list[Any]:
     return values
 
 def _drain_or_close_guidance(channel: Any) -> list[Any]:
-    drain_or_close = getattr(channel, "drain_or_close", None)
+    drain_or_close: Callable[[], list[Any]] | None = getattr(channel, "drain_or_close", None)
     if callable(drain_or_close):
         return list(drain_or_close())
     return _drain_guidance(channel)
@@ -194,9 +196,7 @@ def _guidance_detail_key(value: Any) -> str:
     return _json_result(
         {
             "text": str(value.get("text") or ""),
-            "uploaded_files": value.get("uploaded_files")
-            if isinstance(value.get("uploaded_files"), list)
-            else [],
+            "uploaded_files": (checked_197 if isinstance(checked_197 := value.get("uploaded_files"), list) else []),
         }
     )
 
@@ -507,7 +507,7 @@ def _tool_failure_is_retryable(
         return True
     for key in ("status_code", "provider_status"):
         try:
-            if int(error.get(key)) in {408, 425, 429, 500, 502, 503, 504}:
+            if int(numeric_value if (numeric_value := error.get(key)) is not None else "") in {408, 425, 429, 500, 502, 503, 504}:
                 return True
         except (TypeError, ValueError):
             continue

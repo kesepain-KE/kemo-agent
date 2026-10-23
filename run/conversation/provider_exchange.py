@@ -1,5 +1,12 @@
 """Provider streaming, recovery, and tool exchange implementation."""
 from __future__ import annotations
+
+from events import RunEvent as _AnnotationRunEvent
+from provider.schema import ToolCall as _AnnotationToolCall
+
+from provider.schema import Usage
+
+from run.tasks import TaskPlanCreationBoundary
 from typing import Any
 from run.conversation.provider_state import finalize_provider_loop, initialize_provider_exchange
 from run.conversation.tool_batch import ToolBatchContext, execute_tool_batch
@@ -130,7 +137,7 @@ def run_provider_exchange(state):
 
     def prepare_context_retry(
         *, iteration: int, preserve_live_tail: bool, trigger: str,
-    ) -> tuple[bool, list[RunEvent]]:
+    ) -> tuple[bool, list[_AnnotationRunEvent]]:
         nonlocal context_retry_count, context_selection, context_stats
         nonlocal compression_memory, summary_cache, summary_diagnostics
         if context_retry_count >= 2:
@@ -276,8 +283,8 @@ def run_provider_exchange(state):
         iteration_text: list[str] = []
         iteration_reasoning: list[str] = []
         iteration_observed_committed = False
-        calls: list[ToolCall] = []
-        iteration_done: RunEvent | None = None
+        calls: list[_AnnotationToolCall] = []
+        iteration_done: _AnnotationRunEvent | None = None
         iteration_usage: Usage | None = None
         tool_schema_map = _tool_schema_map(registry.schemas())
 
@@ -341,9 +348,9 @@ def run_provider_exchange(state):
             iteration_observed_committed = False
             retry_invalid_tool_arguments = False
             attempt_published_media = False
-            attempt_calls: list[ToolCall] = []
-            attempt_tool_events: list[RunEvent] = []
-            attempt_usage_events: list[RunEvent] = []
+            attempt_calls: list[_AnnotationToolCall] = []
+            attempt_tool_events: list[_AnnotationRunEvent] = []
+            attempt_usage_events: list[_AnnotationRunEvent] = []
             attempt_request_recorded = False
 
             def record_attempt_usage() -> None:
@@ -405,11 +412,7 @@ def run_provider_exchange(state):
                                 name=event.tool_name,
                                 arguments=event.arguments or {},
                                 arguments_raw=(
-                                    event.metadata.get("raw_arguments")
-                                    if isinstance(
-                                        event.metadata.get("raw_arguments"), str
-                                    )
-                                    else None
+                                    (checked_412 if isinstance(checked_412 := event.metadata.get("raw_arguments"), str) else None)
                                 ),
                                 parse_error=(
                                     copy.deepcopy(event.metadata.get("parse_error"))
@@ -659,7 +662,8 @@ def run_provider_exchange(state):
                 return
             yield usage_event
         if (
-            not iteration_usage.estimated
+            iteration_usage is not None
+            and not iteration_usage.estimated
             and iteration_usage.prompt_tokens > 0
         ):
             last_provider_input_tokens = iteration_usage.prompt_tokens
@@ -762,7 +766,6 @@ def run_provider_exchange(state):
         )
         return
     if cancel_event is not None and cancel_event.is_set():
-        flush_iteration_observed()
         yield commit_cancelled_round()
         return
 

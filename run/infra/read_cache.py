@@ -86,6 +86,7 @@ class BoundedReadCache:
             cached = None
             hit = False
             bypass = False
+            wait: threading.Event | None = None
             with self._lock:
                 now = time.monotonic()
                 for candidate, item in list(self._entries.items()):
@@ -115,7 +116,8 @@ class BoundedReadCache:
                 return copy.deepcopy(cached), True
             if bypass:
                 return loader(), False
-            wait.wait()
+            if wait is not None:
+                wait.wait()
         try:
             result = loader()
             snapshot = copy.deepcopy(result)
@@ -179,10 +181,10 @@ def cached_read_text(path: Path, encoding: str = "utf-8") -> str:
         try:
             stamp = _stamp(path)
         except OSError:
-            _source_cache.invalidate(lambda k: k[0] == key[0])
+            _source_cache.invalidate(lambda k: isinstance(k, tuple) and bool(k) and k[0] == key[0])
             raise
         if stamp[2] > _MAX_SOURCE_BYTES or not path.is_file():
-            _source_cache.invalidate(lambda k: k[0] == key[0])
+            _source_cache.invalidate(lambda k: isinstance(k, tuple) and bool(k) and k[0] == key[0])
             return path.read_text(encoding)
 
         def load() -> str:
@@ -202,4 +204,4 @@ def cached_read_text(path: Path, encoding: str = "utf-8") -> str:
 
 def invalidate_source_cache(path: Path) -> None:
     key = os.path.normcase(os.path.abspath(path))
-    _source_cache.invalidate(lambda k: k[0] == key)
+    _source_cache.invalidate(lambda k: isinstance(k, tuple) and bool(k) and k[0] == key)

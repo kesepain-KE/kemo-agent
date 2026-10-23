@@ -13,7 +13,8 @@ import threading
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
-from run.infra.runtime_diagnostics import diagnostic_identifier, diagnostic_text, invalidate_runtime_log_cache
+from run.infra.runtime_diagnostics import diagnostic_identifier, invalidate_runtime_log_cache
+from run.infra.message_log_projection import message_log_exchanges
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -175,7 +176,14 @@ class LogStore:
                             ON message_route_state(user, platform);
                         """
                     )
-                    connection.execute("PRAGMA user_version = 2")
+                    message_columns = {
+                        row["name"] for row in connection.execute("PRAGMA table_info(message_route_logs)")
+                    }
+                    if "exchange_id" not in message_columns:
+                        connection.execute(
+                            "ALTER TABLE message_route_logs ADD COLUMN exchange_id TEXT NOT NULL DEFAULT ''"
+                        )
+                    connection.execute("PRAGMA user_version = 3")
                     try:
                         self.path.parent.chmod(0o700)
                         self.path.chmod(0o600)
@@ -359,7 +367,8 @@ class LogStore:
                 ).fetchall())
             cron = sorted(cron, key=lambda row: (row["occurred_at_ms"], row["id"]), reverse=True)[:200]
             messages = connection.execute(
-                """SELECT event_key, occurred_at, platform, direction, kind, success, content
+                """SELECT id, event_key, occurred_at, occurred_at_ms, user, machine_id,
+                          platform, chat_type, chat_id, exchange_id, direction, kind, success, content
                    FROM message_route_logs WHERE user=?
                    ORDER BY occurred_at_ms DESC, id DESC LIMIT 200""", (user,),
             ).fetchall()
@@ -369,17 +378,7 @@ class LogStore:
              "status": diagnostic_identifier(row["status"]), "duration_ms": row["duration_ms"],
              "detail": "系统/定时任务执行记录（高频成功记录可能已聚合）", "source": "sqlite"}
             for row in cron
-        ] + [
-            {"id": "message:" + row["event_key"], "category": "message",
-             "title": diagnostic_identifier(row["platform"]) + " 消息",
-             "occurred_at": row["occurred_at"], "status": "success" if row["success"] else "failed",
-             "duration_ms": None, "detail": diagnostic_identifier(row["direction"]) + " · " + diagnostic_identifier(row["kind"]),
-             "content": diagnostic_text(row["content"]),
-             "direction": diagnostic_identifier(row["direction"]),
-             "kind": diagnostic_identifier(row["kind"]),
-             "source": "sqlite"}
-            for row in messages
-        ]
+        ] + message_log_exchanges(messages)
 
     def append_message_entries(self, entries: list[dict[str, Any]]) -> None:
         if not entries:
@@ -393,13 +392,14 @@ class LogStore:
                     entry.get("chat_id"), entry.get("direction"), entry.get("kind"),
                     _compact_text(entry.get("content")), entry.get("file_path"), entry.get("mime"),
                     entry.get("size"), entry.get("success"),
+                    *([entry["exchange_id"]] if entry.get("exchange_id") else []),
                 )
                 connection.execute(
                     """INSERT OR IGNORE INTO message_route_logs
                     (event_key, occurred_at, occurred_at_ms, user, machine_id, platform,
                      chat_type, chat_id, direction, kind, content, file_path, mime,
-                     size, success, source, created_at_ms)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     size, success, source, created_at_ms, exchange_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         event_key, str(entry.get("occurred_at") or ""),
                         _epoch_ms(entry.get("occurred_at")), str(entry.get("user") or ""),
@@ -411,6 +411,7 @@ class LogStore:
                         1 if entry.get("success", True) else 0,
                         str(entry.get("source") or "runtime/logs.sqlite3"),
                         int(datetime.now(timezone.utc).timestamp() * 1000),
+                        str(entry.get("exchange_id") or ""),
                     ),
                 )
             pruned = self._prune(connection)

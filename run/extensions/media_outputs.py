@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Callable
+from provider.protocol.assets import AssetDescriptor
+
 import mimetypes
 import re
 import threading
@@ -81,7 +84,7 @@ def persist_response_media(
     """Download assistant media Assets, verify checksums, and return stable refs."""
 
     get_asset = getattr(provider, "get_asset", None)
-    wait_asset_ready = getattr(provider, "wait_asset_ready", None)
+    wait_asset_ready: Callable[..., AssetDescriptor] | None = getattr(provider, "wait_asset_ready", None)
     download_asset = getattr(provider, "download_asset", None)
     blocks = [
         block
@@ -136,6 +139,8 @@ def persist_response_media(
         )
         media_type = str(getattr(block, "type", "file"))
         max_bytes = _OUTPUT_LIMITS.get(media_type, _OUTPUT_LIMITS["file"])
+        if descriptor.size is None:
+            raise ProviderError("Asset 元数据缺少文件大小", category="asset_integrity_error")
         if descriptor.size > max_bytes:
             raise ProviderError(
                 f"Kemo 媒体输出超过本地 {media_type} 大小限制：{asset_id}",

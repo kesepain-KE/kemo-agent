@@ -19,7 +19,7 @@ def usage_from_dict(value: dict[str, Any] | None) -> Usage:
     prompt_tokens = max(0, int(prompt_value or 0))
     completion_tokens = max(0, int(completion_value or 0))
     total_value = raw.get("total_tokens")
-    measurement = raw.get("measurement") if isinstance(raw.get("measurement"), dict) else {}
+    measurement = (checked_22 if isinstance(checked_22 := raw.get("measurement"), dict) else {})
     mode = str(measurement.get("mode") or "")
     estimated = bool(
         raw.get("estimated", False)

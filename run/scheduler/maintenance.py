@@ -512,7 +512,7 @@ class MaintenanceScheduler:
                 "failed": [],
             }
         except ProviderCongestionError as exc:
-            error = {"message": str(exc), "exception_type": type(exc).__name__}
+            error: dict[str, Any] = {"message": str(exc), "exception_type": type(exc).__name__}
             try:
                 defer_summary_claim(
                     self.root,
@@ -535,7 +535,7 @@ class MaintenanceScheduler:
                 "failed": [{**identity, "deferred": True, "error": error}],
             }
         except Exception as exc:
-            error = {"message": str(exc), "exception_type": type(exc).__name__}
+            error: dict[str, Any] = {"message": str(exc), "exception_type": type(exc).__name__}
             raw_output_preview = _safe_agent_output_preview(exc)
             if raw_output_preview:
                 error["raw_output_preview"] = raw_output_preview
