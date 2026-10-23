@@ -105,40 +105,34 @@ def classification_lock(root: Path) -> Iterator[None]:
         yield
 
 
-def _authorize(
-    action: int,
-    arg1: str | None,
-    arg2: str | None,
-    _db_name: str | None,
-    _trigger: str | None,
-) -> int:
-    """Allow only the small metadata schema used by classify.sql."""
+_LEGACY_STATEMENT_PREFIXES = (
+    "CREATE TABLE CLASSIFY",
+    "CREATE TABLE IF NOT EXISTS CLASSIFY",
+    "CREATE INDEX",
+    "CREATE UNIQUE INDEX",
+    "INSERT INTO CLASSIFY",
+    "INSERT OR REPLACE INTO CLASSIFY",
+)
 
-    allowed = {
-        sqlite3.SQLITE_CREATE_TABLE,
-        sqlite3.SQLITE_CREATE_INDEX,
-        sqlite3.SQLITE_INSERT,
-        sqlite3.SQLITE_READ,
-        sqlite3.SQLITE_UPDATE,
-        sqlite3.SQLITE_SELECT,
-        sqlite3.SQLITE_TRANSACTION,
-    }
-    if action not in allowed:
-        return sqlite3.SQLITE_DENY
-    if action == sqlite3.SQLITE_CREATE_TABLE and arg1 != "classify":
-        return sqlite3.SQLITE_DENY
-    if action == sqlite3.SQLITE_CREATE_INDEX and arg2 != "classify":
-        return sqlite3.SQLITE_DENY
-    if action in {
-        sqlite3.SQLITE_INSERT,
-        sqlite3.SQLITE_READ,
-    } and arg1 not in {"classify", "sqlite_master"}:
-        return sqlite3.SQLITE_DENY
-    if action == sqlite3.SQLITE_UPDATE and arg1 != "sqlite_master":
-        return sqlite3.SQLITE_DENY
-    # SELECT/transaction actions do not carry a table name.
-    del arg2
-    return sqlite3.SQLITE_OK
+
+def _legacy_statements(script: str) -> list[str]:
+    """按 SQLite 语法完整性切分脚本，供语句白名单逐条校验。"""
+
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer.strip())
+            buffer = ""
+    if buffer.strip():
+        statements.append(buffer.strip())
+    return [item for item in statements if item.strip(" ;\t\r\n")]
+
+
+def _allowed_legacy_statement(statement: str) -> bool:
+    head = " ".join(statement.split()).upper()
+    return any(head.startswith(prefix) for prefix in _LEGACY_STATEMENT_PREFIXES)
 
 
 def _read_legacy_file(path: Path) -> dict[str, str]:
@@ -159,31 +153,27 @@ def _read_legacy_file(path: Path) -> dict[str, str]:
 
     connection = sqlite3.connect(":memory:")
     try:
-        connection.set_authorizer(_authorize)
-        try:
-            connection.executescript(script)
-        except sqlite3.DatabaseError as exc:
-            raise KnowledgeClassificationError(
-                f"{LEGACY_CLASSIFICATION_FILENAME} 格式无效：{exc}"
-            ) from None
-        finally:
-            connection.set_authorizer(None)
-        # 用 sqlite_master 与白名单内的 SELECT 探测表结构：Python 3.10 的
-        # PRAGMA 仍会经过授权回调，改用跨版本一致的只读查询判定。
-        present = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='classify'"
-        ).fetchall()
-        if not present:
-            raise KnowledgeClassificationError(
-                "classify.sql 缺少 classify(relative_path, category) 表"
-            )
+        # 只接受最小元数据 schema：逐条按语句白名单校验后再执行，不依赖
+        # sqlite3 授权回调，避免 Python 3.10 与新版在回调清空语义上的差异。
+        for statement in _legacy_statements(script):
+            if not _allowed_legacy_statement(statement):
+                raise KnowledgeClassificationError(
+                    f"{LEGACY_CLASSIFICATION_FILENAME} 含不支持的语句，"
+                    "只接受 classify 表的建表与插入"
+                )
+            try:
+                connection.execute(statement)
+            except sqlite3.DatabaseError as exc:
+                raise KnowledgeClassificationError(
+                    f"{LEGACY_CLASSIFICATION_FILENAME} 格式无效：{exc}"
+                ) from None
         try:
             rows = connection.execute(
                 "SELECT relative_path, category FROM classify"
             ).fetchall()
         except sqlite3.DatabaseError as exc:
             raise KnowledgeClassificationError(
-                "classify.sql 缺少 classify(relative_path, category) 列："
+                "classify.sql 缺少 classify(relative_path, category) 表或列："
                 f"{exc}"
             ) from None
     finally:
