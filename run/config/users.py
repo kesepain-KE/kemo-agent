@@ -7,6 +7,8 @@ import re
 import shutil
 from pathlib import Path
 
+from .user_skeleton import ensure_user_skeleton
+
 
 class UserDataError(RuntimeError):
     """User data cannot be located or prepared."""
@@ -66,11 +68,25 @@ def ensure_user(user: str, root: Path) -> Path:
     if destination.exists():
         if not destination.is_dir():
             raise UserDataError(f"用户路径不是目录：{destination}")
+        issues: list[str] = []
+        ensure_user_skeleton(destination, issues=issues)
+        if issues:
+            raise UserDataError(
+                f"用户目录骨架存在无法安全补齐的路径：{destination}/"
+                + ", ".join(issues)
+            )
         return destination
     template = user_template_dir(root)
     if not template.is_dir():
         raise UserDataError(f"用户模板不存在：{template}")
     shutil.copytree(template, destination)
+    issues = []
+    ensure_user_skeleton(destination, issues=issues)
+    if issues:
+        raise UserDataError(
+            f"用户目录骨架存在无法安全补齐的路径：{destination}/"
+            + ", ".join(issues)
+        )
     return destination
 
 

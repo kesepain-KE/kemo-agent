@@ -26,6 +26,8 @@ desktop.ini
 *.log
 cron/task_cron_system/log/
 runtime/
+!template/user/runtime/
+!template/user/runtime/.gitkeep
 
 # Backups & temp
 *.bak
