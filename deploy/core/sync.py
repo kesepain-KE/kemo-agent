@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .common import DeployError, atomic, digest, json_bytes, read_json, target, version_key
 from .config import merge_defaults
-from .policy import local_module, merge_file, protected
+from .policy import local_module, merge_file, preserved_seed, protected
 from .source import Bundle
 from .yamllite import loads
 
@@ -73,6 +73,16 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
         if protected(required, extras):
             raise DeployError(f'preserve cannot disable release-critical file: {required}')
     for name, data in bundle.files.items():
+        if preserved_seed(name):
+            # 默认数据文件只补缺：已存在就完全交给本机，不纳入托管清单，
+            # 避免后续升级把本机维护的内容判定成被篡改的托管文件。
+            path = target(root, name)
+            if path.exists():
+                if not path.is_file():
+                    raise DeployError(f'File/directory collision at {name}')
+                continue
+            changes.append(Change(name, data, bundle.modes.get(name, 0o644)))
+            continue
         if protected(name, extras):
             continue
         path = target(root, name)

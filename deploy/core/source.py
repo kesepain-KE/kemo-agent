@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .common import DeployError, digest, relative, version
-from .policy import protected
+from .policy import preserved_seed, protected
 
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 768 * 1024 * 1024
@@ -110,7 +110,7 @@ def parse_archive(data: bytes, expected_version: str | None = None) -> Bundle:
                     manifest_data = content
                 else:
                     rel = relative(name[5:])
-                    if protected(rel):
+                    if protected(rel) and not preserved_seed(rel):
                         raise DeployError(f'Release contains private/runtime path: {rel}')
                     files[rel] = content
                     modes[rel] = 0o755 if info.external_attr >> 16 & 0o111 else 0o644

@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 from core.common import DeployError, digest, json_bytes, no_links, read_json, relative, version
-from core.policy import protected
+from core.policy import preserved_seed, protected
 from core.source import parse_archive
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +22,12 @@ ROOT_FILES = {'version.json', 'cli.py', 'events.py', 'setup.py', 'update.py', 'r
 
 
 def publishable(name: str) -> bool:
+    if preserved_seed(name):
+        # 默认知识分类表是框架自带数据，必须进包；安装时只补缺不覆盖。
+        return True
+    if name.endswith('/classify.sql'):
+        # 旧格式文本分类脚本已由分类数据表取代，不再随发布包分发。
+        return False
     parts = Path(name).parts
     if parts[0] not in DIRECTORIES and name not in ROOT_FILES:
         return False

@@ -15,6 +15,18 @@ LOCAL_NAMES = {
     'config.json', 'users.json', 'credential_registry.json',
     'gateway_config.json', 'graph_config.json',
 }
+# 发布包携带的默认数据文件：缺失时补入，已存在时一律保留本机内容。
+# 逐条精确列出，避免把运行期数据库整体放进发布包。
+RELEASE_DATA_FILES = frozenset({
+    'global_knowledge/classify.sqlite3',
+    'shared_knowledge/classify.sqlite3',
+})
+
+
+def preserved_seed(name: str) -> bool:
+    """True for default data files shipped in the release but never overwritten."""
+
+    return name in RELEASE_DATA_FILES
 
 
 def protected(name: str, extra=()) -> bool:
