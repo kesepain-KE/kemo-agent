@@ -2,6 +2,48 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app import (
+        APP_SOURCE as APP_SOURCE,
+        AsyncIterator as AsyncIterator,
+        CONFIG as CONFIG,
+        ChatRequest as ChatRequest,
+        Depends as Depends,
+        EVENTS as EVENTS,
+        FastAPIPath as FastAPIPath,
+        GuidanceRequest as GuidanceRequest,
+        HTTPException as HTTPException,
+        Header as Header,
+        INSTANCE_ID as INSTANCE_ID,
+        Query as Query,
+        RUNS as RUNS,
+        Request as Request,
+        SERVICE_ID as SERVICE_ID,
+        SERVICE_NAME as SERVICE_NAME,
+        SESSIONS as SESSIONS,
+        SESSION_ID_MAX_LENGTH as SESSION_ID_MAX_LENGTH,
+        Session as Session,
+        StreamingResponse as StreamingResponse,
+        UPSTREAM as UPSTREAM,
+        USERS as USERS,
+        UndoLastRoundRequest as UndoLastRoundRequest,
+        UserLogin as UserLogin,
+        VERSION as VERSION,
+        _client_ip as _client_ip,
+        _rate_limit as _rate_limit,
+        _run_sse as _run_sse,
+        asyncio as asyncio,
+        os as os,
+        quote as quote,
+        require_device as require_device,
+        require_session as require_session,
+        time as time,
+        token_ok as token_ok,
+        uuid as uuid,
+    )
+
 from typing import Any
 
 def register_conversation_routes(app: Any, context: dict[str, Any]) -> None:

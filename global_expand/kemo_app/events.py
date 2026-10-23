@@ -93,7 +93,7 @@ class EventHub:
                     "device_id": device_id,
                     "connections": 1,
                     "connected_at": connected_at,
-                    "capabilities": item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {},
+                    "capabilities": (checked_96 if isinstance(checked_96 := item.get("capabilities"), dict) else {}),
                 }
             else:
                 current["connections"] += 1
@@ -111,7 +111,7 @@ class EventHub:
     def update_capabilities(self, queue: asyncio.Queue[dict[str, Any]], value: Any) -> None:
         if queue not in self._connections or not isinstance(value, dict):
             return
-        actions = value.get("actions") if isinstance(value.get("actions"), dict) else {}
+        actions = (checked_114 if isinstance(checked_114 := value.get("actions"), dict) else {})
         safe_actions = {
             str(name): {
                 "available": bool(config.get("available")),

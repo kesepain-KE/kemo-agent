@@ -136,7 +136,7 @@ class UserStore:
         data = self._load()
         salt = secrets.token_bytes(16)
         digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, self.iterations)
-        previous = data.get(username) if isinstance(data.get(username), dict) else {}
+        previous = (checked_139 if isinstance(checked_139 := data.get(username), dict) else {})
         data[username] = {
             "salt": salt.hex(),
             "hash": digest.hex(),

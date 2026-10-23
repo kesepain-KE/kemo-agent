@@ -196,7 +196,7 @@ def ingest_library(
     endpoint = "/ingest"
     if library.kind == "portable":
         endpoint = "/stores/ingest"
-        payload["store_root"] = library.store_root
+        payload["store_root"] = library.store_root or ""
     data = api_request(config, endpoint, payload, timeout=config.ingest_timeout_seconds)
     result = _result(data)
     failed = result.get("failed")
@@ -207,7 +207,7 @@ def ingest_library(
         "library_id": library.id,
         "failed": failed,
         "data": data,
-        "details": result.get("details") if isinstance(result.get("details"), list) else [],
+        "details": (checked_210 if isinstance(checked_210 := result.get("details"), list) else []),
         "error": f"知识整理存在 {failed} 个失败项" if failed else None,
     }
 
@@ -237,7 +237,7 @@ def upload_markdown(
     endpoint = "/upload"
     if library.kind == "portable":
         endpoint = "/stores/upload"
-        payload["store_root"] = library.store_root
+        payload["store_root"] = library.store_root or ""
     data = api_request(config, endpoint, payload)
     return {"ok": True, "library_id": library.id, "ingest_started": False, "data": data}
 

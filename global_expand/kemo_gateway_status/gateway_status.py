@@ -462,7 +462,7 @@ def sanitize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         version["remote"] = _safe_dict(
             version_raw.get("remote"), ("version", "protocol_version", "build", "notes")
         )
-    registry_raw = payload.get("registry") if isinstance(payload.get("registry"), dict) else {}
+    registry_raw = (checked_465 if isinstance(checked_465 := payload.get("registry"), dict) else {})
     providers: list[dict[str, Any]] = []
     for item in registry_raw.get("providers", []) if isinstance(registry_raw, dict) else []:
         if isinstance(item, dict):
@@ -476,10 +476,10 @@ def sanitize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     for item in registry_raw.get("enabled_models", []) if isinstance(registry_raw, dict) else []:
         if isinstance(item, dict):
             enabled_models.append(_safe_dict(item, ("model", "provider_id")))
-    control_raw = payload.get("control") if isinstance(payload.get("control"), dict) else {}
-    statistics_raw = payload.get("statistics") if isinstance(payload.get("statistics"), dict) else {}
-    rankings_raw = statistics_raw.get("rankings") if isinstance(statistics_raw.get("rankings"), dict) else {}
-    logs_raw = payload.get("logs") if isinstance(payload.get("logs"), dict) else {}
+    control_raw = (checked_479 if isinstance(checked_479 := payload.get("control"), dict) else {})
+    statistics_raw = (checked_480 if isinstance(checked_480 := payload.get("statistics"), dict) else {})
+    rankings_raw = (checked_481 if isinstance(checked_481 := statistics_raw.get("rankings"), dict) else {})
+    logs_raw = (checked_482 if isinstance(checked_482 := payload.get("logs"), dict) else {})
     last_invocation = logs_raw.get("last_invocation")
     return {
         "object": "kemo.gateway_status.safe_snapshot",
@@ -679,7 +679,7 @@ def _render_chart(snapshot: dict[str, Any], target: Path) -> None:
     if not rows:
         draw.text((94, 440), "No provider calls for this date", fill="#7783a4", font=body_font)
 
-    tokens = stats.get("tokens") if isinstance(stats.get("tokens"), dict) else {}
+    tokens = (checked_682 if isinstance(checked_682 := stats.get("tokens"), dict) else {})
     details = [
         ("Input tokens", _integer_text(tokens.get("input_tokens"))),
         ("Cached input", _integer_text(tokens.get("cached_input_tokens"))),

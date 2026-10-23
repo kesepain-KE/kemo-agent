@@ -133,7 +133,7 @@ def _configure_panel_endpoint(arguments: dict[str, Any], caller_user: str | None
     if isinstance(raw_port, bool):
         raise GraphExpandError("graph_port 必须是整数")
     try:
-        port = int(raw_port)
+        port = int(raw_port if raw_port is not None else "")
     except (TypeError, ValueError) as exc:
         raise GraphExpandError("graph_port 必须是整数") from exc
     if not 1 <= port <= 65535:

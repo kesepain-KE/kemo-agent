@@ -19,7 +19,7 @@ from library_operations import (
 def _sync_dependencies() -> None:
     # Preserve the historical facade as the dependency-injection boundary.
     for module in (_library, _graph):
-        module.api_request = api_request
+        setattr(module, "api_request", api_request)
     _library.api_upload_file = api_upload_file
     _library.verify_service = verify_service
     _library._default_document_health = _default_document_health

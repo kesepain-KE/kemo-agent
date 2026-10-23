@@ -188,10 +188,10 @@ def _previous_files(
     state: dict[str, Any],
     library: GraphLibrary,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
-    libraries = state.get("libraries") if isinstance(state.get("libraries"), dict) else {}
-    stored = libraries.get(library.id) if isinstance(libraries.get(library.id), dict) else {}
+    libraries = (checked_191 if isinstance(checked_191 := state.get("libraries"), dict) else {})
+    stored = (checked_192 if isinstance(checked_192 := libraries.get(library.id), dict) else {})
     signature_matches = stored.get("registry_signature") == library_signature(library)
-    files = stored.get("files") if signature_matches and isinstance(stored.get("files"), dict) else {}
+    files = previous_files if signature_matches and isinstance(previous_files := stored.get("files"), dict) else {}
     return ({
         str(path): dict(item)
         for path, item in files.items()
@@ -261,7 +261,7 @@ def scan_libraries(
             previous, signature_matches = _previous_files(state, library)
             current = _library_files(library).files
             changes = _diff(current, previous)
-            state_libraries = state.get("libraries") if isinstance(state.get("libraries"), dict) else {}
+            state_libraries = (checked_264 if isinstance(checked_264 := state.get("libraries"), dict) else {})
             registry_changed = (
                 isinstance(state_libraries.get(library.id), dict)
                 and not signature_matches
@@ -329,9 +329,7 @@ def _persist_library_cursor(
 ) -> None:
     initialized_result = _extract_result(initialized)
     manifest = (
-        initialized_result.get("manifest")
-        if isinstance(initialized_result.get("manifest"), dict)
-        else {}
+        (checked_332 if isinstance(checked_332 := initialized_result.get("manifest"), dict) else {})
     )
     state_libraries[library.id] = {
         "registry_signature": library_signature(library),
@@ -391,7 +389,8 @@ def _confirmed_delete_result(
     counts = (requested, deleted_count, failed_count)
     if any(not isinstance(value, int) or isinstance(value, bool) for value in counts):
         raise GraphExpandError("批量删除响应缺少有效 requested/deleted/failed 计数")
-    if any(value < 0 for value in counts):
+    assert isinstance(requested, int) and isinstance(deleted_count, int) and isinstance(failed_count, int)
+    if any(value < 0 for value in (requested, deleted_count, failed_count)):
         raise GraphExpandError("批量删除响应包含负数计数")
     if requested != len(expected_source_ids) or deleted_count + failed_count != requested:
         raise GraphExpandError("批量删除响应计数与请求不一致")

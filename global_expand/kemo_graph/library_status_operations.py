@@ -50,7 +50,7 @@ def _portable_document_health(
                 processing += 1
             elif any(state != "ready" for state in states):
                 pending += 1
-        pagination = result.get("pagination") if isinstance(result.get("pagination"), dict) else {}
+        pagination = (checked_53 if isinstance(checked_53 := result.get("pagination"), dict) else {})
         total_pages = pagination.get("total_pages", 1)
         if not isinstance(total_pages, int) or isinstance(total_pages, bool) or total_pages < 0:
             raise GraphExpandError(f"{library.id} 文档分页响应不符合协议")
@@ -82,7 +82,7 @@ def _default_document_health(config: GraphConfig) -> tuple[int, int, int]:
                 processing += 1
             elif any(state != "ready" for state in states):
                 pending += 1
-        pagination = result.get("pagination") if isinstance(result.get("pagination"), dict) else {}
+        pagination = (checked_85 if isinstance(checked_85 := result.get("pagination"), dict) else {})
         total_pages = pagination.get("total_pages", 1)
         if not isinstance(total_pages, int) or isinstance(total_pages, bool) or total_pages < 0:
             raise GraphExpandError("内置文档库分页响应不符合协议")
@@ -97,8 +97,8 @@ def _library_status(
     processing: int,
     document_pending: int,
 ) -> tuple[str, int, int]:
-    sources = result.get("sources") if isinstance(result.get("sources"), dict) else {}
-    rag = result.get("rag") if isinstance(result.get("rag"), dict) else {}
+    sources = (checked_100 if isinstance(checked_100 := result.get("sources"), dict) else {})
+    rag = (checked_101 if isinstance(checked_101 := result.get("rag"), dict) else {})
     pending_graph = _count(sources, "pending_graph")
     pending_rag = _count(sources, "pending_rag")
     total_sources = _count(sources, "total")

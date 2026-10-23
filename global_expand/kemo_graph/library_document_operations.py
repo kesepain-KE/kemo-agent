@@ -63,6 +63,10 @@ def document_operation(
     library = libraries[0]
     action = str(arguments.get("action") or "list").strip().casefold()
     source_id = str(arguments.get("source_id") or "").strip()
+    source_ids: list[str] = []
+    project: str | None = None
+    filename: str | None = None
+    expected_relative_path: str | None = None
     if action == "move":
         _require_write_admin(config, caller_user, "documents.move")
         raw_source_ids = arguments.get("source_ids")

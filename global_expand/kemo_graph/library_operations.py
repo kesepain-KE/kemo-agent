@@ -10,7 +10,7 @@ _portable_document_health = _status._portable_document_health
 
 def _sync_dependencies():
     for module in (_status, _content, _documents):
-        module.api_request = api_request
+        setattr(module, "api_request", api_request)
     _content.api_upload_file = api_upload_file
     _status.verify_service = verify_service
     _status.STATUS_PATH = STATUS_PATH

@@ -694,7 +694,7 @@ def _continuation_run_id(data: str) -> str:
         return ""
     if not isinstance(value, dict):
         return ""
-    nested = value.get("data") if isinstance(value.get("data"), dict) else value
+    nested = (checked_697 if isinstance(checked_697 := value.get("data"), dict) else value)
     event_type = str(
         value.get("type")
         or value.get("event")
@@ -704,7 +704,7 @@ def _continuation_run_id(data: str) -> str:
     )
     if event_type != "long_task_update":
         return ""
-    metadata = nested.get("metadata") if isinstance(nested.get("metadata"), dict) else {}
+    metadata = (checked_707 if isinstance(checked_707 := nested.get("metadata"), dict) else {})
     candidate = metadata.get("next_run_id") or nested.get("next_run_id") or value.get("next_run_id")
     rendered = str(candidate or "").strip()
     return rendered if _RUN_ID_RE.fullmatch(rendered) else ""
@@ -719,10 +719,10 @@ def _terminal_status(data: str) -> tuple[str | None, str]:
         return None, ""
     if not isinstance(value, dict):
         return None, ""
-    nested = value.get("data") if isinstance(value.get("data"), dict) else value
+    nested = (checked_722 if isinstance(checked_722 := value.get("data"), dict) else value)
     event_type = str(value.get("type") or value.get("event") or nested.get("type") or nested.get("event") or "")
     if event_type in {"done", "completed"}:
-        metadata = nested.get("metadata") if isinstance(nested.get("metadata"), dict) else {}
+        metadata = (checked_725 if isinstance(checked_725 := nested.get("metadata"), dict) else {})
         raw_status = metadata.get("status")
         if raw_status is None:
             raw_status = nested.get("status")

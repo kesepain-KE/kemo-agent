@@ -648,10 +648,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if message.get("type") == "ping":
                     await websocket.send_json({"type": "pong", "ts": int(time.time()), "data": {}})
                 elif message.get("type") in {"device.command.ack", "device.command.result"}:
-                    data = message.get("data") if isinstance(message.get("data"), dict) else {}
+                    data = (checked_651 if isinstance(checked_651 := message.get("data"), dict) else {})
                     command_id = str(data.get("command_id") or "").strip()
                     status = str(data.get("status") or "").strip()
-                    detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+                    detail = (checked_654 if isinstance(checked_654 := data.get("detail"), dict) else {})
                     if command_id and status:
                         try:
                             DEVICE_COMMANDS.update(
