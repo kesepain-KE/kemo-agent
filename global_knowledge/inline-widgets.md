@@ -259,6 +259,19 @@
 
 推荐引用现有 `/api/users/.../files/.../download` 站内文件端点。组件不会自动抓取外网资源。
 
+### `interactive-visual`
+
+用于学习型解释中需要“看见变化并操作”的安全可视化。当前 `kind` 固定为 `orbit`，适合讲解轨道、
+周期、相对运动和对象关系；正文中仍要用自然语言说明模型假设和结论，不能把动画当作精确物理仿真。
+
+- `title?`、`description?`、`time_label?`
+- `center?: {label, tone?}`
+- `bodies`：1～16 个对象，每项为
+  `{label, orbit: 1..8, radius?: 3..16, period?: >0, angle?: -360..360, color?: blue|cyan|amber|violet|rose|green|slate, detail?}`
+- 页面提供暂停/播放、重置、时间滑块、速度选择、图例点选和对象详情；这些状态只存在当前消息的本地
+  React 状态，不写入会话，也不会触发工具或网络请求。
+- 组件仍必须提供准确的 `fallback.text`；非 Web 客户端或组件失败时，fallback 应能独立表达关键结论。
+
 ### `ui-card`：组合式市场组件
 
 `ui-card` 用一棵受限 `nodes` 树组合常见对话式应用 UI。它覆盖 ChatGPT / ChatKit 类产品中常见的

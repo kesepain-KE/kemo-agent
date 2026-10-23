@@ -2,6 +2,14 @@
 
 本文是框架目录导航，也是全局知识库的主索引。这里只保留稳定结构和文档入口；具体创建步骤、字段约束与示例请进入对应专题文档。
 
+全局了解手册分类检索：基础与总览、配置与知识、运行与调度、模块与集成、网页与交互、
+部署与更新。下方专题文档表按上述分类导航；网页分类标签使用
+`global_knowledge/classify.sqlite3`，维护规则见 `knowledge-and-user-data.md` 的“全局了解手册分类”。
+
+输入坞溢出检索：跟进／引导消息栏、长日志、计划标题和描述、步骤正文、
+内部滚动、composer-auxiliary 辅助区限高、多卡片叠加、窄屏发送框可见，见 `frontend-conventions.md`；
+正式 Vitest 回归、test_kemo 发布入口可达 CSS 与包内文档验收，见 `deployment-and-release.md`。
+
 新建延迟检索：创建新对话空间、保存并新建、创建回执租约复用、并发 Promise 合并、
 旧/无绑定 overview 避免重复刷新、ASGI 事件循环、关闭与摘要单行事务、
 load_window_data、metadata_only 记忆入队，见 `frontend-conventions.md` 与 `storage-and-persistence.md`。
@@ -10,9 +18,25 @@ load_window_data、metadata_only 记忆入队，见 `frontend-conventions.md` �
 复核、并发跳过、task_hub_cleaned_records、执行记录持久列表清理与原始日志保留，见
 `task-automation.md`、`storage-and-persistence.md`、`frontend-conventions.md`。
 
-运行诊断检索：同屏系统提示词与组件拼接状态、小时 Token 刻度与极值、用户 API 脱敏模型路由配置、组件路由卡片、终端 OUT/ERR 与跟随滚动，见 `frontend-conventions.md`；消息输入/输出正文、保留换行与绑定用户隔离，见 `storage-and-persistence.md`。
+运行诊断检索：同屏系统提示词与组件拼接状态、小时 Token 刻度与极值、用户 API 脱敏模型路由配置、组件路由卡片、终端 OUT/ERR 与跟随滚动、消息日志输入输出同卡，见 `frontend-conventions.md`；消息轮次关联、合并后分页、旧库 schema v3、保留换行与绑定用户隔离，见 `storage-and-persistence.md`。
 
 缓存命中率检索：跨轮工具结果内容块、JSON 参数字段顺序、`provider_request_diagnostics`、SHA-256 累计前缀、Agent 映射前证据与网关/云端边界，见 `provider-reliability.md`。
+
+DeepSeek 中转站检索：Chat adapter、官方主机与第三方 API 前缀、保留 /v1、
+HTML 网页误命中、invalid_response、data 包装、reasoning_content、真实思考回传、
+兼容占位、reasoning_synthetic、正文与工具消息合并、require_tool_reasoning 与工具续轮，
+见 `provider-reliability.md`。
+
+发布前检查检索：1.5.1、最新更新说明、release_check.py、test_kemo、
+release_readiness、构建先于分发验收、安装树冒烟、Pyright 固定版本、release_ready、
+quick/skip-frontend 局部检查边界和前提失败报告，见 `deployment-and-release.md`；
+最新版更新说明见 `project-introduction.md`。
+
+通用 Chat 兼容检索：最小请求字段、request_format none/fields/effort/openrouter、
+enable_thinking、metadata_supported、effort_map、reasoning/reasoning_content/reasoning_details、
+history_field、签名密文分片、chat-adapter opaque 状态、8192 字符持久化、
+地址与模型绑定、占位不回传、单次 HTTP 请求、SSE data 包装与 JSON 降级，
+见 `provider-reliability.md`。
 
 网页会话恢复检索：任务切页、首轮 URL 绑定、sessionStorage 标签页身份、localStorage 最近空间、
 显式链接优先、lease 验证、重启健康检查和聊天页回跳，见 `frontend-conventions.md`。
@@ -23,10 +47,18 @@ load_window_data、metadata_only 记忆入队，见 `frontend-conventions.md` �
 不同日期出现次数、同轮用户背书与防自我强化、extraction/candidate/archive/skill 共用待办账本、
 满页分页与历史游标、先归档后移除、expired_memory 普通 Markdown（不自动召回/注入）、
 技能去重/质量门禁/source_memories/稳定来源传递/stale/失败续处理，见 `storage-and-persistence.md`；
-用户骨架见 `knowledge-and-user-data.md`，子代理各自 80 次、600 秒期限和技能合同见 `module-development.md`。
+用户骨架、三层知识库逻辑分类、`classify.sqlite3` 数据表、`未分类`默认规则与知识目录搬运边界见
+`knowledge-and-user-data.md`；子代理各自 80 次、600 秒期限和技能合同见 `module-development.md`。
 
 网页配置 UI 检索：SettingsModelSelect、模型搜索气泡、Chat/KEMO 目录隔离、草稿选择、
 字号 14.5/15.5/17px、当前/可切换用户卡片、云端版本检查结果容器，见 `frontend-conventions.md`。
+知识库 UI 检索：40px 等高工具栏、分类下拉筛选、已有分类计数、简化新建分类、详情三项归类操作、
+全部层级分类来源标注、用户/共享/全局同名分类隔离、分层未分类、删除重复分类筛选、
+文件列表等高截断与横向滚动，见 `frontend-conventions.md`。
+输入框模型选择检索：ComposerModelSelect、选项卡片 4px 间距、选中与悬停高亮，见 `frontend-conventions.md`。
+全站控件检索：原生单选下拉主题、base-select、picker、明暗主题、长选项换行、
+自定义选择弹层 4px 间距、思考档位、Provider/图片路由/模型、排序与菜单选项、
+列表内部滚动、浏览器回退、搜索放大镜垂直居中、search-box、清除按钮，见 `frontend-conventions.md`。
 
 ```text
 kemo-agent/
@@ -41,8 +73,8 @@ kemo-agent/
 ├── global_expand/          # 全局拓展模块
 ├── shared_expand/          # 跨用户共享拓展模块
 ├── shared_skills/          # 跨用户共享技能
-├── global_knowledge/       # 全局知识库（本目录）
-├── shared_knowledge/       # 共享知识库
+├── global_knowledge/       # 全局知识库（含 classify.sqlite3 分类表）
+├── shared_knowledge/       # 共享知识库（含 classify.sqlite3 分类表）
 ├── users/<name>/           # 用户配置、人格、历史、记忆和私有资源
 ├── template/               # 用户、子智能体、技能、拓展等创建模板
 ├── update/                 # 源码更新调度、版本校验、备份、锁、恢复与四板块实现
@@ -79,7 +111,7 @@ kemo-agent/
 
 | 资源 | 全局/共享层 | 用户层 | 核心区别 |
 |------|-------------|--------|----------|
-| 知识库 | `global_knowledge/`、`shared_knowledge/` | `users/<name>/knowledge/` | 只自动注入索引，正文按需读取 |
+| 知识库 | `global_knowledge/`、`shared_knowledge/` | `users/<name>/knowledge/` | 只自动注入索引，正文按需读取；每层可用 `classify.sqlite3` 的 `classify` 表做逻辑分类 |
 | 技能 | `shared_skills/` | `users/<name>/user_skills/` | 只提供指令，不注册可执行工具 |
 | 拓展 | `global_expand/`、`shared_expand/` | `users/<name>/expand/` | 可提供状态注入和外部操控入口 |
 | 感知 | `global_sense/` | 无 | 单向采集并注入，不提供操控 |
@@ -100,27 +132,28 @@ Token 回退、最后一轮、摘要覆盖收敛和失败保留历史见 `archit
 见 `provider-reliability.md`；摘要与裁剪事务、缓存恢复排除已摘要前缀见
 `storage-and-persistence.md`。
 
-| 文件 | 内容 |
-|------|------|
-| `prompt-authoring-standard.md` | 提示词分层、全局/用户默认人格、操作手册、知识索引、插件提示词规范、技能/拓展/感知定义、按需读取来源、健康快照与数据/指令边界 |
-| `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同；`module/panel.json` 用户配置组件面板、status/config/action、preset、masked 密钥与快速配置 |
-| `builtin-expansions.md` | 内置 kemo app 桥接激活意愿、端口/Token/用户绑定面板与异常诊断；Kemo 网关 IP/端口面板和状态拓展；Kemo Graph IP/端口、在线检测及图谱/实体/缓存/日志/维护/项目与文档组织边界 |
-| `provider-reliability.md` | Provider 工具调用完整性、网络恢复、错误序列内最多重试 5 次、接受完整响应即重置序列、单 Run 累计尝试不设上限、`retrying` 的序列序号与 Run 累计序号、SSE 续传和取消边界；含 Kemo 2.0 双仓固定制品与共享 Fixture 门禁，以及 Chat 兼容传输的宽容聚合、请求净化与独立 2 次传输预算 |
-| `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架 |
-| `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；archive 权威存储与 runtime 有界进程缓存（单项/全局/单用户三重容量）、跨进程版本校验和尾部重建；Web 历史默认时间倒序、复合游标分页与按上海自然日日期筛选；`history_search` 基于结构化正文、删除栅栏、来源/会话过滤和条数+字符预算分页；结构化运行日志、终端长行 pending 缓冲上限；记忆按独立更新/失效/加权/检索边界拆分，碎片数量以独立事实为准，A 类仅同一稳定子主题可成簇、B 类保持最小事实，手动 add/edit 同样执行 memory_type 与长度硬边界；晋升时超限必拆（显式 `memory_type`、A 类 1000 字异常硬上限、B 类通常 100/绝不超过 150 字、宿主落盘复验、不设总纲、继承时效、权重归零、防震荡，挂 `memory_promotion`）；临时重要记忆生命周期；加权证据轮次 committed_at、Shanghai 原日期、memory_ref 检索绑定、create/reinforce/revise、creation 零分日锁、operation_id 幂等、weighted/daily_locked 可观测性；Cron 历史默认 7 天保留；Web/App 数据会话按可配置空闲阈值归档（默认 90 分钟），空 Web 会话保留独立 90 秒删除宽限，closed Web 会话支持显式重开但禁止迟到心跳、无参数入口和旧链接隐式复活；Web 启动及周期旧空间巡检、有数据入记忆队列、空空间离线清理、在线租约、CLI 独立绑定、closed 入队补偿、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
-| `long-task-runtime.md` | 会话级长任务的隔离状态机、前台任务计划工具次数上限续跑、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
-| `version-and-update-modules.md` | 当前代码版本与发布状态、配套网关兼容基线、安装渠道更新入口，以及源码 core/agents/plugins/web 更新边界 |
-| `deployment-and-release.md` | 一键部署；Windows/Linux/npm/Docker；Release ZIP/校验；安装渠道与安装根；启动/检查/停止后更新/恢复；预构建前端；打包/发布前提；用户数据保护与禁止混用更新器 |
-| `configuration-reference.md` | `.env`、全局配置和用户配置字段与优先级；中途上下文压缩开关、逐轮摘要与旧工具结果缩略的统一控制；`cron.history_retention_days`、`cron.session_idle_close_seconds` 及全局配置 API |
-| `task-automation.md` | 多步骤任务计划；Cron 的 once/daily/weekly/monthly/recurring、多时刻、生效区间、次数上限、失败终态、按任务索引的真实执行历史、历史只读访问；Web 创建/编辑字段校验、HH:MM 分钟精度、显式时区、enabled/paused 用户状态边界与数组归一化；任务计划/定时任务/执行记录三栏独立容器与各自 6 条分页，定时任务近期执行排序、用户执行记录倒序、`cron/task_cron_system/` 系统维护记录隔离、按需脱敏详情、网页管理与隔离边界；聊天开始页不展示全局或已清理会话的孤立活动计划 |
-| `external-message-route-creation.md` | 外部消息平台模块合同 |
-| `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
-| `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南；受管理 Shell 后台作业、活动配额、启动宽限与失联 worker 对账 |
-| `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进队列与本轮引导/下一轮发送、Enter 跟进与 Ctrl+Enter 直接引导快捷键、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复、Web/App 存活租约、CLI 独立续接、closed Web 会话显式重开与禁止隐式复活、离线转记忆与入队失败补偿、会话生命周期兜底扫描 |
-| `frontend-conventions.md` | Web 样例完整替换：reference 七份样式与生产别名桥接、14 路由与领域拆分、真实 API/Markdown/ModulePanel 宿主、React Root 与窗口/轮询清理、移动端导航覆盖层、任务六条分页与显式重开；高级白/高级黑两项主题偏好、输入框自动高度/useComposerAutosize/field-sizing fixed/空草稿回缩/宽度字号监听、CSS Module、变量链、投影裁切、右侧快捷轮次滚轮/弧线预览/百分比布局/轨道定位/触屏/历史增量加载、输入坞对话菜单溢出与视口内滚动、模型切换气泡/Chat 兼容 models API/KEMO 内置目录/服务端凭据/失败保留草稿、思考档位气泡/真实能力/PATCH 保存、图片文件名边框/简洁附件缩略图、当前会话文件历史隔离、清空对话自绘确认/取消/409/删除后新建重试、构建缓存、浏览器验证、知识库编辑/安全放大预览、DocumentMarkdown 全业务文档统一排版/只读渲染/任务 Markdown 与 JSON 代码块、文件空间右侧详情/FilePreview/媒体/PDF/Office/LibreOffice/原文件下载、外部消息双栏/无搜索框/六条分页/刷新保留选择 |
-| `inline-widgets.md` | Web 智能体正文中的 `kemo-widget` 声明式卡片、图表、交互表格、标签页/折叠、差异、日程、看板、组合 UI、表单、建议追问、位置、影音、文件、商品、订单、投票、评分、有限点击动作与站内媒体；兼容历史 `follow-up.options`、旧表单字段/options/反馈动作归一化，未知名称通用渲染、流式闭合、Zod 校验、历史保存、复制降级、响应式与执行安全边界 |
-| `project-introduction.md` | 项目定位、当前代码版本与发布状态、网关协议匹配、核心能力、部署和使用入口 |
-| `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
+| 分类 | 文件 | 内容 |
+|------|------|------|
+| 基础与总览 | `data_structure.md` | 全局了解手册主索引、六类文档导航、框架目录与按需查阅入口 |
+| 基础与总览 | `project-introduction.md` | 项目定位、当前代码版本与发布状态、网关协议匹配、核心能力、部署和使用入口 |
+| 基础与总览 | `architecture-overview.md` | 事件驱动架构、模块职责、请求生命周期、并发模型、子代理进度气泡、模块注入预览片段来源、消息跟进队列与本轮引导/下一轮发送、Enter 跟进与 Ctrl+Enter 直接引导快捷键、暂停/停止后的 Run ID 状态收口与发送按钮恢复、文件空间排序及分页、新建此用户标签页、独立会话、离线清理后恢复、Web/App 存活租约、CLI 独立续接、closed Web 会话显式重开与禁止隐式复活、离线转记忆与入队失败补偿、会话生命周期兜底扫描 |
+| 基础与总览 | `open-source-license.md` | Apache-2.0 使用、分发与声明要求 |
+| 配置与知识 | `configuration-reference.md` | `.env`、全局配置和用户配置字段与优先级；中途上下文压缩开关、逐轮摘要与旧工具结果缩略的统一控制；`cron.history_retention_days`、`cron.session_idle_close_seconds` 及全局配置 API |
+| 配置与知识 | `prompt-authoring-standard.md` | 提示词分层、全局/用户默认人格、操作手册、知识索引、插件提示词规范、技能/拓展/感知定义、按需读取来源、健康快照与数据/指令边界 |
+| 配置与知识 | `knowledge-and-user-data.md` | 三层知识库、索引和用户目录骨架；逻辑分类与 `classify.sqlite3` 的 `classify` 表、`未分类`默认规则、路径稳定性和 Web 分类操作；`REQUIRED_USER_DIRS` 单一清单、`runtime/`、`tools/`、`expired_memory/`、运行期生成目录与数据库分类 |
+| 运行与调度 | `storage-and-persistence.md` | 历史、记忆、运行状态、日志、高频写盘规则；archive 权威存储与 runtime 有界进程缓存（单项/全局/单用户三重容量）、跨进程版本校验和尾部重建；Web 历史默认时间倒序、复合游标分页与按上海自然日日期筛选；`history_search` 基于结构化正文、删除栅栏、来源/会话过滤和条数+字符预算分页；结构化运行日志、终端长行 pending 缓冲上限；记忆按独立更新/失效/加权/检索边界拆分，碎片数量以独立事实为准，A 类仅同一稳定子主题可成簇、B 类保持最小事实，手动 add/edit 同样执行 memory_type 与长度硬边界；晋升时超限必拆（显式 `memory_type`、A 类 1000 字异常硬上限、B 类通常 100/绝不超过 150 字、宿主落盘复验、不设总纲、继承时效、权重归零、防震荡，挂 `memory_promotion`）；临时重要记忆生命周期；加权证据轮次 committed_at、Shanghai 原日期、memory_ref 检索绑定、create/reinforce/revise、creation 零分日锁、operation_id 幂等、weighted/daily_locked 可观测性；Cron 历史默认 7 天保留；Web/App 数据会话按可配置空闲阈值归档（默认 90 分钟），空 Web 会话保留独立 90 秒删除宽限，closed Web 会话支持显式重开但禁止迟到心跳、无参数入口和旧链接隐式复活；Web 启动及周期旧空间巡检、有数据入记忆队列、空空间离线清理、在线租约、CLI 独立绑定、closed 入队补偿、schema v6、显式新空间链接、事务删除栅栏；执行记录分类、多用户有界读缓存与持久化边界 |
+| 运行与调度 | `provider-reliability.md` | Provider 工具调用完整性、网络恢复、错误序列内最多重试 5 次、接受完整响应即重置序列、单 Run 累计尝试不设上限、`retrying` 的序列序号与 Run 累计序号、SSE 续传和取消边界；含 Kemo 2.0 固定制品门禁，Chat 最小请求、显式厂商思考字段、真实签名状态续接、兼容占位、DeepSeek 专用分支与单次 HTTP 请求 |
+| 运行与调度 | `task-automation.md` | 多步骤任务计划；Cron 的 once/daily/weekly/monthly/recurring、多时刻、生效区间、次数上限、失败终态、按任务索引的真实执行历史、历史只读访问；Web 创建/编辑字段校验、HH:MM 分钟精度、显式时区、enabled/paused 用户状态边界与数组归一化；任务计划/定时任务/执行记录三栏独立容器与各自 6 条分页，定时任务近期执行排序、用户执行记录倒序、`cron/task_cron_system/` 系统维护记录隔离、按需脱敏详情、网页管理与隔离边界；聊天开始页不展示全局或已清理会话的孤立活动计划 |
+| 运行与调度 | `long-task-runtime.md` | 会话级长任务的隔离状态机、前台任务计划工具次数上限续跑、跨 Run 边界、HTTP/SSE 与客户端恢复合同 |
+| 模块与集成 | `module-development.md` | 拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同；`module/panel.json` 用户配置组件面板、status/config/action、preset、masked 密钥与快速配置 |
+| 模块与集成 | `plugin-development.md` | 插件发现、工具循环、执行规则与 SKILL.md 开发指南；受管理 Shell 后台作业、活动配额、启动宽限与失联 worker 对账 |
+| 模块与集成 | `builtin-expansions.md` | 内置 kemo app 桥接激活意愿、端口/Token/用户绑定面板与异常诊断；Kemo 网关 IP/端口面板和状态拓展；Kemo Graph IP/端口、在线检测及图谱/实体/缓存/日志/维护/项目与文档组织边界 |
+| 模块与集成 | `external-message-route-creation.md` | 外部消息平台模块合同 |
+| 模块与集成 | `module-template-validation.md` | 六类模块创建后的独立合同验收、报告语义与维护边界 |
+| 网页与交互 | `frontend-conventions.md` | Web 样例完整替换：reference 七份样式与生产别名桥接、14 路由与领域拆分、真实 API/Markdown/ModulePanel 宿主、React Root 与窗口/轮询清理、移动端导航覆盖层、任务六条分页与显式重开；高级白/高级黑两项主题偏好、输入框自动高度/useComposerAutosize/field-sizing fixed/空草稿回缩/宽度字号监听、CSS Module、变量链、投影裁切、右侧快捷轮次滚轮/弧线预览/百分比布局/轨道定位/触屏/历史增量加载、输入坞对话菜单溢出与视口内滚动、模型切换气泡/Chat 兼容 models API/KEMO 内置目录/服务端凭据/失败保留草稿、思考档位气泡/真实能力/PATCH 保存、图片文件名边框/简洁附件缩略图、当前会话文件历史隔离、清空对话自绘确认/取消/409/删除后新建重试、构建缓存、浏览器验证、知识库编辑/安全放大预览、DocumentMarkdown 全业务文档统一排版/只读渲染/任务 Markdown 与 JSON 代码块、文件空间右侧详情/FilePreview/媒体/PDF/Office/LibreOffice/原文件下载、外部消息双栏/无搜索框/六条分页/刷新保留选择 |
+| 网页与交互 | `inline-widgets.md` | Web 智能体正文中的 `kemo-widget` 声明式卡片、图表、交互表格、标签页/折叠、差异、日程、看板、组合 UI、教育型轨道可视化、表单、建议追问、位置、影音、文件、商品、订单、投票、评分、有限点击动作与站内媒体；兼容历史 `follow-up.options`、旧表单字段/options/反馈动作归一化，未知名称通用渲染、流式闭合、Zod 校验、历史保存、复制降级、响应式与执行安全边界 |
+| 部署与更新 | `deployment-and-release.md` | 一键部署；Windows/Linux/npm/Docker；Release ZIP/校验；安装渠道与安装根；启动/检查/停止后更新/恢复；预构建前端；打包/发布前提；用户数据保护与禁止混用更新器 |
+| 部署与更新 | `version-and-update-modules.md` | 当前代码版本与发布状态、配套网关兼容基线、安装渠道更新入口，以及源码 core/agents/plugins/web 更新边界 |
 
 ## 维护原则
 
@@ -129,7 +162,8 @@ Token 回退、最后一轮、摘要覆盖收敛和失败保留历史见 `archit
 3. 凭据、个人隐私、Cookie、Token 和本机秘密不得进入全局知识库。
 4. `.bak`、缓存、日志和运行产物不列入知识索引。
 5. 目录中只有 `data_structure.md`、`index.md`、`索引.md`、`目录.md` 会作为知识索引自动注入；其他正文按需读取。
-6. 全局知识库不保存版本发布说明、更新日志、单次审计记录或工作区提交清单；长期有效的功能规则应合并到对应专题文档。
+6. `project-introduction.md` 只保留最新版更新说明，不累积历史更新日志；
+   其他知识文档不保存单次审计记录或工作区提交清单，长期有效的功能规则合并到对应专题文档。
 
 ## 模块目录的共同原则
 

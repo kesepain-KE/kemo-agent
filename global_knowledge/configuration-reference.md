@@ -674,7 +674,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `avoid_congestion` | bool | true | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | 0.2 | 拥塞阈值比例 |
 
-`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.5.0 更新器仍只处理已定义的迁移边界；1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
+`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.5.1 更新器仍只处理已定义的迁移边界；1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
 
 ---
 

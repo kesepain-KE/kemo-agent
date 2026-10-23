@@ -36,7 +36,6 @@
 
 - 用户取消：尊重用户意志，不重试，立即落盘；
 - `completed` 和工具轮数上限产生的 `limited`：属于正常或受控结束，不重试；
-- Chat 传输层严格的 2 次预算已经耗尽并显式设置 `retry_budget_exhausted=true`：不再叠加外层 6 次尝试；
 - `KeyboardInterrupt` / `GeneratorExit` 等宿主进程控制边界继续向外传播。
 
 工具参数修复和上下文压缩属于尝试内部的修复型重发（L3），各自预算不计入上述 5 次；只有其自身预算耗尽后，最终失败才进入 L2/L4 的错误序列。成功工具结果的跨尝试重放仍受 32 次、120,000 字符的上限和副作用安全规则约束。用户取消（包括重试退避等待期间取消）始终立即停止，不因已经取得进展而继续重试。
@@ -127,7 +126,7 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 ### Kemo 2.0 固定协议制品与契约门禁
 
-`kemo-agent 1.5.0` 与 `kemo-adapter-api 1.0.0` 使用精确 Kemo 2.0 线路协议，并与 `kemo-graph 1.6.0` 的请求/响应合同对齐。权威源码在
+`kemo-agent 1.5.1` 与 `kemo-adapter-api 1.0.0` 使用精确 Kemo 2.0 线路协议，并与 `kemo-graph 1.6.0` 的请求/响应合同对齐。权威源码在
 `provider/protocol/`，其 `spec/` 生成 `schema.json`、`model-index.json`、`invariants.json`、
 `freeze.json` 与脱敏 Fixture；Gateway 只消费由该目录构建并以 lock 文件固定 SHA-256 的
 `vendor/kemo_protocol-2.0.zip`。这保证两仓不各自维护模型副本，也不提供 Kemo 1.x shim。
@@ -203,28 +202,120 @@ Chat Bridge 支持现代 `message.tool_calls[]` 和旧式单个 `message.functio
 
 #### Chat 请求净化
 
-Chat 是最小兼容传输，不向上游强制注入非标准字段：
+Chat 请求在 HTTP 序列化前按 adapter 内的策略净化；DeepSeek 保留独立分支：
 
-- 不注入 `reasoning_effort` / `reasoning_enabled`（多家兼容服务会因未知字段拒绝请求）；chat 模式的推理能力声明为 `supported=False`（`chat_bridge.py`），运行时按 `chat_reasoning_disabled` 跳过推理档位选择；
+- 普通 Chat 默认不把内部逻辑控制 `reasoning_enabled` / `reasoning_effort` 发给上游，
+  也不发送框架 metadata。模型支持思考不代表它接受这两个 HTTP 字段；厂商参数必须由
+  `provider.capabilities.transport` 显式声明，不能根据“OpenAI 兼容”猜测；
+- DeepSeek 分支使用 `thinking.type` 和 `reasoning_effort`，显式关闭思考时尊重关闭设置；缺失历史思考字段按下一节的兼容占位策略处理；
 - 不注入 `stream_options.include_usage`：usage 依赖上游自愿返回，缺失时按输出文本估算 completion tokens；
 - 工具终态携带的 `finish_reason` 附着在工具事件上，截断调用在发布前即可被拦截。
 
-#### Chat 有界输出前网络恢复
+`provider.capabilities.transport.reasoning.request_format` 支持以下值。下列配置是已有
+capabilities 的 **transport 片段**，不代替完整模型能力声明；既有外层 capabilities 包装也支持。
 
-Chat 传输层执行严格的 2 次尝试预算（`_MAX_CHAT_ATTEMPTS=2`），重试只发生在**零输出**边界：
+| 值 | Chat HTTP 请求行为 |
+|---|---|
+| `none`（默认） | 不自动发送思考控制字段 |
+| `fields` | 按 `enabled_field` / `effort_field` 发送；只配置一个时只发送该字段 |
+| `effort` | 仅发送 `effort_field`，默认名为 `reasoning_effort` |
+| `openrouter` | 使用嵌套 `reasoning.enabled` / `reasoning.effort`；已有 `max_tokens` 预算时不再添加 effort |
 
-- 可重试：建连失败、读取超时、429、5xx；等待采用小随机退避，`Retry-After` 存在时采用（上限 10 秒）；
-- 不可重试：401、403、409、400（400 仅在错误信息明确表示"tools 不受支持"时进入工具降级路径，见下）；
-- 已产出任何文本、思考或工具分片后中断（`stream_interrupted`），一律不重放——用户已见内容不得重复，已缓冲但未发布的工具分片也不构成重试障碍；
-- 重试预算耗尽后错误被标记 `retryable=False`、`retryable_declared=True` 和 `retry_budget_exhausted=True`，这是 Chat 传输层阻止外层运行级重试的唯一终局声明。
+未写 `request_format` 但配置了字段名时，按 `fields` 处理；显式选择 `fields` 且两个字段名
+都未配置时，沿用 `reasoning_enabled` / `reasoning_effort`。可选 `effort_map` 把内部档位映射为
+上游取值。字段名必须是合法标识符，不能覆盖 `model`、`messages`、`tools`、`stream`；
+开关和档位不能映射到同一字段。
 
-#### 工具不支持自动降级
+例如，只接受思考开关的服务使用：
 
-上游 400 且错误信息匹配"tools/function calling 不受支持"类短语（`_TOOLS_UNSUPPORTED_PHRASES`）时，Chat 传输层剥离 `tools`、`tool_choice`、`parallel_tool_calls`、`functions`、`function_call` 全部工具字段重试一次：
+```json
+{
+  "transport": {
+    "reasoning": {
+      "enabled_field": "enable_thinking"
+    }
+  }
+}
+```
 
-- 降级只发生一次；第二次请求再失败即按最终错误结束，不会反复降级或循环重试；
-- 普通 400（模型名错误、参数 schema 错误等）不触发降级，立即失败；
-- 降级请求与原请求的 `messages` 和 `model` 完全一致，只有工具字段被移除。
+只接受 effort 的服务使用 `{"reasoning":{"request_format":"effort"}}`；
+使用嵌套格式的服务使用 `{"reasoning":{"request_format":"openrouter"}}`，均放在 transport 内。
+仅在上游明确支持时才设置 `transport.metadata_supported=true`。
+这些声明只控制 Chat adapter 的请求映射，不修改 Kemo 请求字段或原生网关路径。
+
+#### 普通 Chat 的响应兼容与思考续接
+
+- 解析真实思考时依次支持 `reasoning_content`、字符串 `reasoning` 和 `reasoning_details`
+  内的可读 `text` / `summary`；加密块和签名不作为可见思考展示。
+- 正文支持字符串以及 `text` / `output_text` 文本块；usage 兼容 `input_tokens` /
+  `output_tokens`，已有标准 Chat 计数字段优先。
+- 非流式、SSE 和流式请求返回 JSON 的降级路径支持一层 `data` 包装；顶层 choices 优先，
+  不递归解包，`error` / `success=false` 仍按失败处理。空响应或仅有 `[DONE]` 不能靠
+  伪思考变成成功响应。
+- 缺失上游思考而正文、拒绝说明或工具响应有效时，生成
+  `[Chat compatibility placeholder: upstream reasoning was not provided.]`，
+  标记 `reasoning_synthetic`。它只满足本地兼容，不回传为普通厂商的真实思考，
+  不表示模型实际开启了思考，也不替代上游签名。
+- `reasoning_details` 按原值保留；SSE 按 index 聚合文本、密文和签名分片，
+  不改写签名、跨模型或跨地址复用。状态使用现有 `ReasoningItem.provider_state`
+  中 `provider=chat-adapter` 的 opaque 数据，不新增协议字段；同次响应正文和工具调用
+  合并为一个 assistant 消息，使状态留在工具调用消息上。
+- 只有配置 `transport.reasoning.history_field` 为 `reasoning_content` 或 `reasoning`
+  时才保存和回放对应的真实普通思考；`reasoning_details` 自动保留原始续接块，也可以显式指定。
+  损坏、版本不符或地址/模型不匹配的状态不回放，内部标记在发 HTTP 前移除。
+- 状态先按现有凭据脱敏规则检查，再压缩；编码后最多 8192 字符、解码后最多 262144 字节，
+  超限明确失败，不能截断签名再执行工具。状态通过既有内部持久化通道保存，
+  不写入公开流事件；公开帧也移除含签名或密文的 `reasoning_details`。
+- 普通 Chat 地址保留配置的 API 前缀和查询参数，已包含 `/chat/completions` 时不重复拼接，
+  不擅自增加或移除 `/v1`。
+
+这些分支已用本地模拟中转站覆盖字段拒绝、真实思考别名、签名续接、持久化回放、
+空响应和流式降级；不代表已对所有厂商或真实中转站完成联调。DeepSeek 的专用占位与请求策略
+继续按下一节执行，本轮没有修改其 helper、Kemo 协议模型、Schema、Fixture 或原生网关实现。
+
+#### DeepSeek 官方接口与第三方中转站
+
+DeepSeek 的特殊适配只在 Chat adapter 内按官方主机或 `deepseek-` 模型名前缀识别。
+思考开关与档位继续映射为 `thinking` 和 `reasoning_effort`，不修改 Kemo 线路协议。
+
+- 官方 `api.deepseek.com` 兼容根地址与 `/v1` 两种地址写法；第三方中转站必须原样保留配置的
+  API 前缀，例如 `/v1` 或 `/proxy/v1`，再拼接 `/chat/completions`。不能因为模型属于
+  DeepSeek 就移除中转站的版本路径，否则可能命中返回 HTTP 200 的网站 HTML 页面。
+- 上游提供真实 `reasoning_content` 时完整保留并回传；同一响应中的正文说明和工具调用
+  组合到同一个 assistant 消息，避免思考内容只附在说明消息上、工具消息反而丢失思考。
+  合并只发生在紧邻的正文与工具调用之间，不跨越新的思考片段或其他消息。
+- 开启思考并携带工具时，历史 assistant 消息缺少思考字段或字段为空，Chat adapter 为其补入
+  固定占位 `[DeepSeek compatibility placeholder: upstream reasoning was not provided.]`。
+  官方接口和中转站默认均启用此兼容方式。占位只说明上游缺失数据，不冒充真实模型思考；
+  已有非空思考内容保持原样，序列化不回写调用方传入的历史字典。
+- 非流式、SSE 和流式 JSON 降级共用此策略。新响应缺失思考时，兼容占位保留
+  `reasoning_synthetic=true` 和 `missing_upstream_reasoning` 诊断，方便识别其来源。
+  完整工具调用仍可继续执行，截断、无效参数和其他错误继续按原合同拦截。
+- 需要禁止缺失工具思考的部署可在
+  `provider.capabilities.transport.reasoning.require_tool_reasoning` 设置布尔值 `true`，
+  显式启用严格校验；此字段也支持既有 capabilities 包装结构。严格模式下新工具响应缺失真实
+  思考仍返回 incomplete，不发布可执行工具调用。
+- DeepSeek 分支接受一层 `{"data": <标准 Chat 响应>}` 包装，前提是内部有非空 `choices`
+  及消息对象。已有顶层 `choices` 优先，不展开错误响应或任意递归 `data`。
+  非流式与流式请求返回 JSON 的既有降级路径共用此解析；普通 Chat 的包装兼容见上一节。
+- Chat 返回明确的 HTML/XHTML Content-Type 时，以 `invalid_response` 提示核对
+  `base_url` 和 `/v1` 路径，不再把网页正文当 SSE 解析后误报流式中断；缺省 Content-Type
+  和其他既有兼容响应仍按原路径处理。
+
+#### Chat 网络恢复归属
+
+Chat HTTP 传输层对一次调用只发起一次请求，连接失败、429、5xx 和流式中断向统一运行级重试所有者报告，不在传输层另开重试循环：
+
+- 错误保留 HTTP 状态、错误分类和可用的 `Retry-After`（上限 10 秒），运行级预算按本文前面的错误序列规则执行；
+- 已产出文本、思考或工具分片后，HTTP 传输层也不自行重发，避免重复拼接输出或调用工具；
+- 401、403、409 和普通 400 同样向上报告，不在本层改写请求规避错误。
+
+#### 工具不支持错误
+
+上游 400 且错误信息匹配"tools/function calling 不受支持"类短语（`_TOOLS_UNSUPPORTED_PHRASES`）时，Chat 传输层将其标记为 `tools_unsupported` 并向统一运行级重试所有者报告：
+
+- 不剥离 `tools` 或 `tool_choice` 再次发送，不把需要工具的请求静默降级为普通文本请求；
+- 普通 400（模型名错误、参数 schema 错误等）保持原有错误分类。
 
 #### 流式 JSON 响应降级
 
@@ -292,7 +383,8 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
 相关测试位于：
 
 - `tests/config/test_config_provider.py`：真实 Chat HTTP/SSE 拼接、截断参数、干净 EOF；
-- `tests/provider/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播，以及 Chat 传输层重试矩阵（零输出重试、已输出不重放、429 Retry-After、401/403/409/400 零重试、工具降级一次性、JSON 响应降级、id/name 幂等聚合、完整 JSON 对象参数、截断工具不可执行）；
+- `tests/provider/test_provider_protocol.py`：Chat 终态映射、Kemo `parse_error` 拦截、运行错误传播、传输单次请求、429 Retry-After、工具不支持时不剥离工具重发、JSON 响应降级、id/name 幂等聚合、完整 JSON 对象参数和截断工具拦截；
+- `tests/provider/test_chat_compatibility.py`：请求字段净化与显式映射、思考别名、一层中转包装、地址保留、真实签名和密文经过流式/非流式及持久化的工具续接、公开事件状态隔离、状态容量与凭据检查；
 - `tests/cron/test_task_plan.py`：非成功主运行终态与暂停原因；
 - `tests/core/test_runtime_features.py`：正常流式实时转发、工具续轮、错误和取消回归。
 
