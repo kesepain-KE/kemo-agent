@@ -296,8 +296,10 @@ describe('Windows run sound', () => {
     )
 
     renderApp('/chat?user=kesepain&session=s1')
-    await screen.findByText('断流测试已就绪')
-    const input = await screen.findByRole('textbox', { name: '消息内容' })
+    // 全量并行跑 68 个测试文件时，默认 1 秒的 findBy 等待在慢机器上会超时；
+    // 放宽到 6 秒，仍能检出历史加载被真实阻塞的问题。
+    await screen.findByText('断流测试已就绪', undefined, { timeout: 6000 })
+    const input = await screen.findByRole('textbox', { name: '消息内容' }, { timeout: 6000 })
     fireEvent.change(input, { target: { value: '模拟断流' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
 

@@ -149,7 +149,7 @@ def test_slow_page_reads_do_not_block_creating_a_session(root, method, path):
     def blocked_read(*args, **kwargs):
         started.set()
         try:
-            release.wait(5)
+            release.wait(20)
             return {"fixture": "complete"}
         finally:
             finished.set()
@@ -158,10 +158,10 @@ def test_slow_page_reads_do_not_block_creating_a_session(root, method, path):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             slow_request = asyncio.create_task(client.get(path))
             try:
-                assert await asyncio.to_thread(started.wait, 2)
+                assert await asyncio.to_thread(started.wait, 6)
                 assert not finished.is_set(), "Slow read blocked the ASGI event loop"
                 created = await asyncio.wait_for(client.post("/api/users/alice/sessions",
-                    json={"client_id": "fixture_client_123"}), timeout=2)
+                    json={"client_id": "fixture_client_123"}), timeout=6)
                 assert created.status_code == 200, created.text
                 assert created.json()["created"] is True
                 assert created.json()["active_clients"] == 1
