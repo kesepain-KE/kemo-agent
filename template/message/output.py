@@ -14,13 +14,15 @@ Protocol: send(payload) -> bool
 
 from __future__ import annotations
 
+from importlib import import_module
+
 from pathlib import Path
 from typing import Any
 
-import telegram
-from telegram.constants import ParseMode
+telegram = import_module("telegram")
+ParseMode = import_module("telegram.constants").ParseMode
 
-from message.out.telegram.util import guess_mime, load_token, sync_run
+from util import guess_mime, load_token, sync_run
 
 
 def send(payload: dict) -> bool:

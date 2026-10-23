@@ -11,12 +11,14 @@ Protocol: check(config, state) -> dict
 
 from __future__ import annotations
 
+from importlib import import_module
+
 from datetime import datetime, timezone
 from typing import Any
 
-import telegram
+telegram = import_module("telegram")
 
-from message.out.telegram.util import load_token, sync_run
+from util import load_token, sync_run
 
 
 def check(config: dict, state: dict) -> dict:

@@ -18,6 +18,8 @@ This example:
 
 from __future__ import annotations
 
+from importlib import import_module
+
 import asyncio
 import threading
 from datetime import datetime, timezone
@@ -26,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from message.out.telegram.util import load_token
+from util import load_token
 
 # --- Module-level state ---
 _BOT_APP: Any = None
@@ -36,7 +38,7 @@ _STOP_EVENT = threading.Event()
 _LOCK = threading.Lock()
 _LIFECYCLE_LOCK = threading.RLock()
 _LAST_ERROR: str | None = None
-_START_ARGS: tuple[dict, str, str, str] | None = None
+_START_ARGS: tuple[dict, str, str] | None = None
 
 _MACHINE_ID: str = ""
 _BUFFER_PATH: Path | None = None
@@ -174,7 +176,7 @@ async def _build_message(update: Any) -> tuple[dict, str] | None:
         else:
             text = text or "[贴纸]"
 
-    message_data = {
+    message_data: dict[str, Any] = {
         "machine_id": _MACHINE_ID,
         "message_id": message_id,
         "chat_type": mapped,
@@ -190,12 +192,12 @@ async def _build_message(update: Any) -> tuple[dict, str] | None:
 
 async def _run_bot(token: str) -> None:
     """运行 Telegram Bot Application (async 主循环)。"""
-    from telegram import Update
-    from telegram.ext import Application, MessageHandler, filters
+    extension = import_module("telegram.ext")
+    Application, MessageHandler, filters = extension.Application, extension.MessageHandler, extension.filters
 
     app = Application.builder().token(token).build()
 
-    async def handler(update: Update, _context: Any) -> None:
+    async def handler(update: Any, _context: Any) -> None:
         try:
             result = await _build_message(update)
             if result is None:

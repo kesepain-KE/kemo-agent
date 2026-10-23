@@ -21,9 +21,9 @@ from typing import Any
 
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    getattr(sys.stdout, "reconfigure")(encoding="utf-8", errors="replace")
 if hasattr(sys.stdin, "reconfigure"):
-    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    getattr(sys.stdin, "reconfigure")(encoding="utf-8", errors="strict")
 
 
 def execute(command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
