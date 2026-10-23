@@ -32,16 +32,42 @@ def migrate_user_skeletons(*, root: Path = ROOT, dry_run: bool) -> None:
     candidates = _user_directories(root)
     if not candidates:
         return
-    if dry_run:
-        print(f"[dry-run] 将补齐 {len(candidates)} 个用户的目录骨架")
-        return
     try:
         _ensure_root_importable(root)
-        from run.config import ensure_user
+        from run.config import (
+            ensure_user_skeleton,
+            inspect_user_skeleton,
+        )
 
+        if dry_run:
+            missing_count = 0
+            blocked: list[str] = []
+            for user_dir in candidates:
+                missing, issues = inspect_user_skeleton(user_dir)
+                missing_count += len(missing)
+                blocked.extend(f"{user_dir.name}/{item}" for item in issues)
+            print(
+                f"[dry-run] 将检查 {len(candidates)} 个用户，"
+                f"补齐 {missing_count} 项目录骨架"
+            )
+            if blocked:
+                print("[dry-run] 跳过不安全或无效路径：" + ", ".join(blocked))
+            return
+
+        created_count = 0
+        blocked: list[str] = []
         for user_dir in candidates:
-            ensure_user(user_dir.name, root)
-        print(green(f"用户目录骨架已补齐: {len(candidates)} 个用户"))
+            issues: list[str] = []
+            created_count += len(ensure_user_skeleton(user_dir, issues=issues))
+            blocked.extend(f"{user_dir.name}/{item}" for item in issues)
+        print(
+            green(
+                f"用户目录骨架已补齐: {len(candidates)} 个用户，"
+                f"新增 {created_count} 项目录"
+            )
+        )
+        if blocked:
+            print("警告: 跳过不安全或无效路径：" + ", ".join(blocked))
     except Exception as exc:
         raise UpdateError(f"用户目录骨架补齐失败：{exc}") from exc
 

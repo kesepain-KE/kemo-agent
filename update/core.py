@@ -41,7 +41,11 @@ CRON_RUNTIME_FIELDS = {
 }
 
 RUNTIME_PRESERVING_DIRECTORIES = {
-    "global_knowledge": ("kemo-graph-storage/",),
+    "global_knowledge": (
+        "kemo-graph-storage/",
+        "classify.sqlite3",
+        "classify.sql",
+    ),
 }
 
 FILES = (
@@ -337,6 +341,8 @@ def _update_global_config(
         return False, "保留本地 config/global_config.json"
     if choice == "m":
         merged = _merge_remote_defaults(source_json, target_json)
+        if not isinstance(merged, dict):
+            raise UpdateError("Merged global configuration must be an object")
         merged = _migrate_global_config_defaults(
             merged,
             source_json=source_json,

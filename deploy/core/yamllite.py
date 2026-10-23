@@ -81,11 +81,13 @@ def loads(text: str) -> dict:
             if depth != indent:
                 raise DeployError(f"YAML line {number}: unexpected indentation")
             if is_list:
+                assert isinstance(result, list)
                 if not value.startswith('- '):
                     raise DeployError(f"YAML line {number}: mixed mapping/list")
                 result.append(scalar(value[2:].strip(), number))
                 index += 1
                 continue
+            assert isinstance(result, dict)
             match = re.fullmatch(r'("(?:\\.|[^"\\])*"|\x27[^\x27]*\x27|[^:]+):(?:\s+(.*))?', value)
             if not match:
                 raise DeployError(f"YAML line {number}: expected key: value")

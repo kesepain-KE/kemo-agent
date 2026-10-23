@@ -94,6 +94,8 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
                     if defaults.get('schema_version') != local.get('schema_version'):
                         raise DeployError(f'Config schema changed: {name}; manual migration required')
                     merged = merge_defaults(defaults, local)
+                    if not isinstance(merged, dict):
+                        raise DeployError("Merged configuration must be a mapping")
                     if name == 'config/global_config.json':
                         merged = _migrate_global_config_defaults(
                             merged,

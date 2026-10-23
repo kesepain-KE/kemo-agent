@@ -44,6 +44,8 @@ def load(path: Path) -> dict:
     # Missing discovery keys must not prevent fetching the release which repairs
     # the persisted configuration. Existing values are NEVER replaced here.
     doc = merge_defaults(BOOTSTRAP_DEFAULTS, doc)
+    if not isinstance(doc, dict):
+        raise DeployError("Deploy configuration must be a mapping")
     if not isinstance(doc.get('deploy'), dict) or not isinstance(doc.get('platforms'), dict):
         raise DeployError('deploy and platforms mappings are required')
     mapping = doc.get('mapping', {})

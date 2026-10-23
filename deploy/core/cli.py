@@ -115,6 +115,8 @@ def _run_one(args, doc, channel, bundle=None, web_args=None, available=None):
             if args.command == 'start':
                 return runtime.supervise(root, python, web_args or [])
             return 0
+    if bundle is None:
+        raise DeployError("Install/update requires a release bundle")
     if args.dry_run:
         if _pending(root):
             raise DeployError('Incomplete transaction; run recover before planning another update')

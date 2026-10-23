@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from . import core as core, agents as agents, plugins as plugins, web as web
+
 from typing import Sequence
 
 

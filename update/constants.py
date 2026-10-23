@@ -35,6 +35,8 @@ RUNTIME_EXCLUDES = (
     "message/out/",
     "cron/task_cron_system/",
     "global_knowledge/kemo-graph-storage/",
+    "global_knowledge/classify.sqlite3",
+    "global_knowledge/classify.sql",
     "web/node_modules/",
     "web/frontend/node_modules/",
     ".env",
