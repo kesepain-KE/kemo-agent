@@ -168,17 +168,24 @@ def _read_legacy_file(path: Path) -> dict[str, str]:
             ) from None
         finally:
             connection.set_authorizer(None)
-        columns = {
-            str(row[1])
-            for row in connection.execute("PRAGMA table_info(classify)").fetchall()
-        }
-        if not {"relative_path", "category"}.issubset(columns):
+        # 用 sqlite_master 与白名单内的 SELECT 探测表结构：Python 3.10 的
+        # PRAGMA 仍会经过授权回调，改用跨版本一致的只读查询判定。
+        present = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='classify'"
+        ).fetchall()
+        if not present:
             raise KnowledgeClassificationError(
                 "classify.sql 缺少 classify(relative_path, category) 表"
             )
-        rows = connection.execute(
-            "SELECT relative_path, category FROM classify"
-        ).fetchall()
+        try:
+            rows = connection.execute(
+                "SELECT relative_path, category FROM classify"
+            ).fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise KnowledgeClassificationError(
+                "classify.sql 缺少 classify(relative_path, category) 列："
+                f"{exc}"
+            ) from None
     finally:
         connection.close()
 
