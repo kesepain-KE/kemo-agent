@@ -4,7 +4,7 @@
 「什么场景该读哪份文档」的判断入口。领域细节的权威正文都在 `global_knowledge/`，
 需要时按第 3 节索引显式读取，**不要凭记忆猜测未注入的行为细节**。
 
-> 当前稳定版本：`kemo-agent 1.5.0`（2026-10-15 正式定档），配套 Kemo 网关为 `kemo-adapter-api 1.0.0`，Kemo 2.0 线路协议匹配已确认。本版在四渠道独立部署与一键部署基础上收敛历史生命周期：有内容的 closed Web 归档支持显式重开，日期筛选入口同样走重开合同；Web/App 数据会话默认空闲 90 分钟归档，空 Web 会话仍按独立 90 秒宽限直接清理；源码更新器与部署器只把旧默认值 86400 迁移为 5400，不覆盖用户自定义阈值；开始页不再展示已完成的用户定时任务。远程 Release、npm 与 GHCR 产物仍需另行发布；既有长期智能、记忆证据链、模块面板 2.0、正文内联组件、任务中心和运行可靠性能力继续保留。遇到旧文档与本段冲突时，以当前代码和本段的安全规则为准。
+> 当前稳定版本：`kemo-agent 1.5.1`（2026-10-18 正式定档），配套 `kemo-adapter-api 1.0.0`，使用 Kemo 2.0。版本与最新更新说明见 `global_knowledge/project-introduction.md`；Provider、知识分类、用户骨架和网页交互规则按下表进入专题文档。Release、npm 与 GHCR 产物须另行构建和发布。
 
 ---
 
@@ -13,13 +13,15 @@
 涉及安装、升级或恢复时，先读 `global_knowledge/deployment-and-release.md`，识别源码或
 Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混用于同一安装根。
 更新前停止应用，`check` 仅检查；推送代码不等于发布 Release/npm/GHCR，未确认远程产物前
-必须注明一键命令的发布前提。1.5.0 已在源码中正式定档，但未完成对应远程 Release、npm 与 GHCR 发布前，不得宣称线上产物已经可用。
+必须注明一键命令的发布前提。1.5.1 已在源码中正式定档，但未完成对应远程 Release、npm 与 GHCR 发布前，不得宣称线上产物已经可用。
 
 ## 1. 手册与知识库的关系
 
 - **引导 → 权威**：本手册只给判断入口和红线；`global_knowledge/` 的专题文档是唯一权威正文。
 - **读取顺序**：先按本手册规则行动；命中场景时读第 3 节指向的文档；场景未覆盖时先读主索引
   `global_knowledge/data_structure.md` 按关键词检索，再读对应专题文档。
+- **分类导航**：全局了解手册按查阅用途分为六类；文件归属见主索引的专题文档表，分类维护见
+  `global_knowledge/knowledge-and-user-data.md`，正文仍按需读取。
 - **不复制细节**：手册不重复知识库内容；两者冲突时以知识库专题文档为准（安全底线除外）。
 - **改动纪律**：新增或实质修改框架行为时，必须同步三处 —— ①知识库专题文档 ②本手册引导条目
   ③主索引检索关键词。三者缺一即文档债。
@@ -124,13 +126,14 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 | 创建消息平台适配（`message/out/`） | `external-message-route-creation.md` |
 | 任务计划与定时任务；weekly/monthly、多时刻、生效区间、次数上限、失败终态、真实执行历史、Cron 历史只读访问；Web 创建/编辑字段校验、分钟精度与显式时区、用户可控状态边界；网页任务计划/定时任务/执行记录各有独立容器与 6 条分页，定时任务按下次执行时间排序、执行记录按最近时间排序且隐藏 `cron/task_cron_system/` 系统维护记录，选中后按需加载脱敏详情；开始页不展示其他会话或已清理会话的孤立计划卡 | `task-automation.md` |
 | 长任务模式状态机、任务计划达到工具次数上限后的跨 Run 续跑 | `long-task-runtime.md` |
-| Provider 网络重试、单次错误序列最多重试 5 次、接受完整响应即重置且单 Run 累计尝试不设上限、`retrying` 事件、SSE 续传、Chat 兼容链路行为、工具调用完整性、Kemo 2.0 协议迁移与兼容边界 | `provider-reliability.md` |
+| Provider 网络重试、单次错误序列最多重试 5 次、接受完整响应即重置且单 Run 累计尝试不设上限、`retrying` 事件、SSE 续传、Chat 最小请求与显式厂商字段映射、DeepSeek 专用适配、中转包装与思考别名、真实签名状态持久化续接与缺失思考占位、工具完整性、Kemo 2.0 协议边界 | `provider-reliability.md` |
 | 当前代码版本与发布状态、配套网关兼容基线，以及内核 core / agents / plugins / web 的更新边界 | `version-and-update-modules.md` |
 | 模块创建后的独立验收 | `module-template-validation.md` |
-| 三层知识库与用户目录骨架 | `knowledge-and-user-data.md` |
+| 三层知识库、用户目录骨架、知识分类与 `classify.sqlite3` 数据表 | `knowledge-and-user-data.md` |
+| 全站下拉选择主题、选择弹层与菜单选项间距、搜索图标居中；输入框模型卡片间距；跟进／引导消息及任务计划长文内部滚动、输入坞辅助区限高；知识库等高工具栏、全部层级分类来源标注与同名隔离筛选、新建分类入口、详情三项归类操作与文件列表等高截断 | `frontend-conventions.md` |
 | 内置拓展（kemo app 端口/Token/用户绑定、Kemo 网关 IP/端口、Kemo Graph IP/端口与在线检测） | `builtin-expansions.md` |
 | 项目定位、当前代码版本与发布状态、网关协议匹配、核心能力、部署与使用入口 | `project-introduction.md` |
-| 一键部署、Windows/Linux/npm/Docker 渠道选择、日常启动/更新/恢复、Release 打包与发布前提 | `deployment-and-release.md` |
+| 一键部署、Windows/Linux/npm/Docker 渠道选择、日常启动/更新/恢复、Release 打包、test_kemo 发布前检查与完整报告边界 | `deployment-and-release.md` |
 | Web 样例完整替换、reference 主题与领域页面入口、高级白/高级黑两项偏好、真实接口桥接、React Root/窗口/轮询清理、移动导航、样式变量链、布局与投影裁切、右侧快捷轮次滚轮/弧线预览/轨道定位/触屏与历史增量加载、输入框自动高度/发送清空回缩/宽度字号监听、输入坞对话菜单裁切与滚动、模型切换气泡/Chat 兼容模型 API/KEMO 内置目录/凭据服务端隔离、思考档位气泡与真实能力保存、简洁附件缩略预览、当前会话文件历史隔离、清空对话自绘确认与失败安全重试、新建对话路由交接与旧活跃会话恢复竞态、构建缓存头与浏览器验证；知识库编辑/预览与安全放大渲染、全业务文档统一 DocumentMarkdown 排版与只读预览、文件空间右侧详情/放大/本机 LibreOffice 转 PDF/原文下载、外部消息双栏/无搜索框/六条分页/日志筛选保留 | `frontend-conventions.md` |
 | Web 回复正文内联卡片/图表/表格、布局/表单/建议追问/站内媒体、`kemo-widget` 协议、有限点击动作、流式完整性、复制降级与安全边界 | `inline-widgets.md` |
 | 开源协议 | `open-source-license.md` |
@@ -170,7 +173,7 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 
 网页记忆栏的四层读写接口、UTC 时间显示、临时重要记忆单栏只读预览及简要生命周期状态，见 `global_knowledge/frontend-conventions.md` 的“记忆详情”；存储和来源有效性规则仍以 `storage-and-persistence.md` 为准。
 
-网页运行诊断同屏提示词/拼接状态、小时 Token 极值、脱敏 API 模型配置、组件路由卡片、终端真实输出与消息输入/输出正文，见 `global_knowledge/frontend-conventions.md`；消息日志按当前用户隔离，正文不再仅返回元信息，见 `storage-and-persistence.md` 的结构化运行日志。
+网页运行诊断同屏提示词/拼接状态、小时 Token 极值、脱敏 API 模型配置、组件路由卡片、终端真实输出与消息输入/输出同卡展示，见 `global_knowledge/frontend-conventions.md`；消息日志轮次关联、合并后分页与当前用户隔离，见 `storage-and-persistence.md` 的结构化运行日志。
 
 缓存命中率排查、跨轮工具结果与参数格式保持、逐请求脱敏前缀指纹及 Agent/网关证据边界，见 `global_knowledge/provider-reliability.md`。
 
@@ -284,35 +287,15 @@ Windows/Linux/npm/Docker 安装渠道；不要把旧 `update.py` 与 deploy 混�
 
 ### 4.6 Web 正文内联组件
 
-- 这是智能体在 Web 对话中的**原生输出能力**，不是只有用户点名才可使用的特殊功能。遇到数据对比、
-  指标摘要、计算推导、分布图表或结构化明细时，主动判断组件是否比纯文字更清楚；有明显收益就直接
-  在正文中使用，不要先声称“无法生成交互组件”，也不要要求用户改用工具或附件。
-- 在 `source=web` 且对比、指标、计算、图表、表格或折叠详情能明显提高理解时，可以把组件**直接写在
-  回复正文段落之间**；不调用渲染工具，不把组件放进工具结果，也不以 HTML/JS/iframe 代替。
-- 载体固定为完整闭合的 `kemo-widget` fenced JSON。公共字段为
-  `protocol:"kemo-ui"`、`schema_version:"1.0"`、`surface:"inline"`、稳定 `id`、声明式
-  `component`、严格 `props` 和 `fallback:{"text":"..."}`。组件前后仍写自然语言说明。
-- 原生专用组件除基础卡片、柱/折/饼图、指标、进度、时间线、键值、提示、列表、计算、表格和详情外，
-  还包括 `tabs`、`accordion`、`diff-view`、`badge-group`、`gauge`、`series-chart`、`scatter-chart`、`heatmap`、
-  `calendar`、`kanban`、`button-group`、`follow-up`、`confirm`、`approval`、`form`、`image`、
-  `gallery`、`carousel`，以及市场常见的组合 UI、位置、影音、文件、商品、订单、投票和评分组件：
-  `ui-card`、`map`、`media-player`、`file-list`、`product-grid`、`order-summary`、`poll`、`rating`。
-  `ui-card.nodes` 可组合 `card|list-view|list-item|box|row|col|divider|spacer|transition|title|text|caption|markdown|badge|icon|image|button|date-picker|select|text-input|textarea|number-input|checkbox-group|radio|slider|switch`。
-  其他声明式 `component` 名称同样允许，由 `generic-card` 自动呈现其标量、对象、列表和表格数据，不再因
-  “不在白名单”整块拒绝。色调允许 `neutral|brand|success|warning|danger`。
-- 严格交互组件的最小字段不得凭印象改名：`follow-up.prompts[]` 固定为 `{label,text,send?}`；
-  `button-group.buttons[]` 固定为 `{label,action:{type,text},tone?,disabled?}`；`poll.options[]` 固定为
-  `{label,value,description?,votes?}`；`rating` 使用 `label|max?|default_value?|submit?`。组合卡片输入控件必须有
-  稳定 `name`，按钮动作文本可用 `{{name}}` 读取本卡片本地值。需要其他字段时先读
-  `global_knowledge/inline-widgets.md`，无法确认合同就回退 Markdown，不自行发明 `options/message` 等替代字段。
-- 每块必须提供准确文本降级；单条回复最多 24 块、单块不超过 256 KB。不得输出函数、事件处理器、
-  任意 HTML、JavaScript、CSS 或外部脚本，也不得为生成图表补造数据。媒体只允许既有站内根相对 URL。
-- 动作组件只允许用户明确点击后产生 `fill-input`、`send-message`、`copy` 三种纯文本动作；不得自动发送、
-  自动批准、直接调用工具或请求任意地址。当前回复仍在生成时，发送动作只回填输入框，不并发启动新 Run。
-- 组件是正文的一部分：先用文字说明问题和口径，再放组件，随后继续解释结论。不要向用户展示协议
-  JSON，不要把整条回复变成组件集合；文本本身必须在组件失效时仍能表达核心结论。
-- 无明显收益、非 Web 客户端或无法可靠组成合法数据时使用普通 Markdown。完整字段与示例见
-  `global_knowledge/inline-widgets.md`。
+- Web 对话原生支持正文内联组件。遇到结构化展示、交互解释或学习型可视化能明显降低理解成本时，
+  可以主动使用；普通回答仍使用 Markdown，不要为了视觉效果把整条回复组件化。
+- 处理这类组件前**必须先读取** `global_knowledge/inline-widgets.md`。该文档是协议字段、组件目录、
+  兼容归一化、流式完整性、fallback、交互动作、媒体安全、历史保存和复制降级的权威来源；
+  不要凭记忆复制或发明字段、动作或组件名称。
+- 组件必须是正文中的完整声明，并保留前后自然语言解释和可读的文本降级；不能用 HTML、JavaScript、
+  CSS、iframe、外部脚本或组件声明替代正文解释。组件表达能力不等于新增事实来源、工具权限或执行权限。
+- 组件仅在 Web 正文场景按知识文档中的合同使用；非 Web 客户端、数据不足、协议不确定或无法可靠闭合时，
+  回退为普通 Markdown。
 
 ---
 
