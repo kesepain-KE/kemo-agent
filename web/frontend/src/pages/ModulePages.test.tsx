@@ -588,6 +588,11 @@ describe('V16 module pages', () => {
     expect(screen.queryByText(/当前显示\s+\d+\s*\/\s*\d+/)).not.toBeInTheDocument()
     expect(screen.queryByText('外接项目 · kemo-graph')).not.toBeInTheDocument()
     expect(screen.queryByText('知识集合')).not.toBeInTheDocument()
+    const categoryFilter = screen.getByRole('combobox', { name: '筛选知识分类' })
+    expect(screen.getByRole('button', { name: '新建分类名' })).toBeInTheDocument()
+    expect(categoryFilter.closest('.knowledge-toolbar')).toContainElement(screen.getByPlaceholderText('全部层级：搜索文件名或标题…'))
+    expect(categoryFilter.closest('.knowledge-toolbar')).toContainElement(screen.getByRole('textbox', { name: '新的分类名称' }))
+    expect(document.querySelector('.knowledge-grid-editor .knowledge-category-panel')).not.toBeInTheDocument()
 
     const userMetric = screen.getByRole('button', { name: /用户层.*users\/kesepain\/knowledge/ })
     expect(userMetric).toHaveAttribute('aria-pressed', 'false')
@@ -610,6 +615,10 @@ describe('V16 module pages', () => {
     expect(await screen.findByText('没有匹配的知识文件')).toBeInTheDocument()
     fireEvent.change(search, { target: { value: '' } })
     fireEvent.click(await screen.findByText('个人笔记'))
+    expect(screen.queryByRole('textbox', { name: '新建分类名' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '新的分类名称' })).toBeInTheDocument()
+    const categoryControls = document.querySelector('.knowledge-category-controls') as HTMLElement
+    expect(within(categoryControls).getAllByRole('button')).toHaveLength(2)
     const editToggle = await screen.findByRole('button', { name: '切换到编辑模式' })
     const editorToolbar = editToggle.closest('.knowledge-editor-toolbar') as HTMLElement
     expect(within(editorToolbar).getAllByRole('button').map((button) => button.textContent?.trim())).toEqual(['预览', '放大', '保存', '删除'])

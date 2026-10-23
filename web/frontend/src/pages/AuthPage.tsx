@@ -58,10 +58,15 @@ export function AuthPage({
   return (
     <main className="auth-screen">
       <section className="auth-panel" aria-label="Web 访问认证">
-        <div className="auth-brand">
-          <span className="auth-logo"><img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent logo" /></span>
-          <span><strong>kemo-agent</strong><small>Personal Agent Runtime</small></span>
-        </div>
+        <header className="auth-brand">
+          <span className="auth-logo">
+            <img src="/kemo-agent.jpg" width={571} height={568} alt="kemo-agent logo" />
+          </span>
+          <span className="auth-brand-copy">
+            <strong>kemo-agent</strong>
+            <small>Personal Agent Runtime</small>
+          </span>
+        </header>
         <div className="auth-heading">
           <span className="auth-kicker">Secure Session</span>
           <h1>访问认证</h1>
@@ -70,28 +75,49 @@ export function AuthPage({
 
         {error && <div className="auth-error" role="alert">{error}</div>}
 
-        <div className="auth-methods">
+        <div className="auth-methods" aria-live="polite">
           {stage === 'token' && status.methods.token && (
-            <form className="auth-form" onSubmit={submitToken}>
-              <div className="auth-method-title"><KeyRound size={18} /><span><strong>访问令牌</strong><small>{status.requires_both ? '第 1 步 · 验证当前实例配置的 Token' : '使用当前实例配置的 Token 建立会话'}</small></span></div>
+            <form className="auth-form auth-bubble" onSubmit={submitToken} aria-label="Token 认证">
+              <div className="auth-method-title">
+                <span className="auth-method-icon" aria-hidden="true"><KeyRound size={18} /></span>
+                <span>
+                  <strong>访问令牌</strong>
+                  <small>{status.requires_both ? '第 1 步 · 验证当前实例配置的 Token' : '使用当前实例配置的 Token 建立会话'}</small>
+                </span>
+              </div>
               <label>
                 <span>Token</span>
-                <div className="auth-input"><LockKeyhole size={16} /><input type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" placeholder="输入访问令牌" /></div>
+                <div className="auth-input">
+                  <LockKeyhole size={16} aria-hidden="true" />
+                  <input id="auth-token" name="token" type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" placeholder="输入访问令牌" aria-label="访问令牌" />
+                </div>
               </label>
               <button className="auth-submit" type="submit" disabled={!token || Boolean(pending)}>{pending === 'token' ? <><LoaderCircle size={16} className="spin" />正在验证</> : status.requires_both ? '继续账号验证' : '使用令牌进入'}</button>
             </form>
           )}
 
           {stage === 'password' && status.methods.password && (
-            <form className="auth-form" onSubmit={submitPassword}>
-              <div className="auth-method-title"><UserRound size={18} /><span><strong>账号登录</strong><small>{status.requires_both ? 'Token 已通过 · 第 2 步验证用户名和密码' : '使用当前实例配置的用户名和密码'}</small></span></div>
+            <form className="auth-form auth-bubble" onSubmit={submitPassword} aria-label="用户名密码认证">
+              <div className="auth-method-title">
+                <span className="auth-method-icon" aria-hidden="true"><UserRound size={18} /></span>
+                <span>
+                  <strong>账号登录</strong>
+                  <small>{status.requires_both ? 'Token 已通过 · 第 2 步验证用户名和密码' : '使用当前实例配置的用户名和密码'}</small>
+                </span>
+              </div>
               <label>
                 <span>用户名</span>
-                <div className="auth-input"><UserRound size={16} /><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="输入用户名" /></div>
+                <div className="auth-input">
+                  <UserRound size={16} aria-hidden="true" />
+                  <input id="auth-username" name="username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="输入用户名" aria-label="用户名" />
+                </div>
               </label>
               <label>
                 <span>密码</span>
-                <div className="auth-input"><LockKeyhole size={16} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="输入密码" /></div>
+                <div className="auth-input">
+                  <LockKeyhole size={16} aria-hidden="true" />
+                  <input id="auth-password" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="输入密码" aria-label="密码" />
+                </div>
               </label>
               <button className="auth-submit" type="submit" disabled={!username || !password || Boolean(pending)}>{pending === 'password' ? <><LoaderCircle size={16} className="spin" />正在登录</> : '登录工作区'}</button>
             </form>

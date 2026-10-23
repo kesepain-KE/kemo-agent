@@ -368,7 +368,13 @@ export interface KnowledgeDocumentSummary {
   title: string
   size: number
   updated_at: number
+  category?: string
   active_for_main_agent: boolean
+}
+
+export interface KnowledgeCategorySummary {
+  name: string
+  count: number
 }
 
 export interface NamePolicySummary {
@@ -397,6 +403,9 @@ export interface KnowledgeResponse {
   }
   summary: { documents: number; user_documents: number; shared_documents: number; global_documents: number }
   documents: KnowledgeDocumentSummary[]
+  categories: Record<string, KnowledgeCategorySummary[]>
+  classification_file: string
+  classification_errors: string[]
   source_policy: MainAgentSourcePolicySummary
 }
 
@@ -407,6 +416,7 @@ export interface KnowledgeDocumentResponse {
   content: string
   size: number
   updated_at?: number
+  category?: string
 }
 
 export interface SkillSummary {

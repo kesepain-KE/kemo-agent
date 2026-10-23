@@ -285,6 +285,7 @@ return (
       />
     </div>
     <div className="composer-dock composer-zone">
+      <div className="composer-auxiliary">
       {runRetryNotice ? (
         <div className="run-retry-bubble" role="status" aria-live="polite">
           <span>运行出现问题，正在自动重试（本次错误第 {runRetryNotice.nextAttempt}/{runRetryNotice.maxAttempts} 次）</span>
@@ -321,6 +322,7 @@ return (
         guidanceLabel={guidancePreviewItem ? guidanceTitleLabel(guidancePreviewItem) : undefined}
         guidanceDetail={guidancePreviewItem?.status === 'accepted' ? guidanceDetailLabel(guidancePreviewItem) : undefined}
       />
+      </div>
       <AgentComposer
         modelBar={<div className="composer-modelbar">
           <ComposerModelSelect key={`${user}:${overview?.provider?.type}:${overview?.provider?.base_url}`}

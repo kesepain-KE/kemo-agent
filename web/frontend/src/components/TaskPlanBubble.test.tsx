@@ -45,7 +45,7 @@ describe('TaskPlanBubble', () => {
     confirm.mockRestore()
   })
 
-  it('长计划只让步骤区域滚动并保持运行提示位于卡片内', () => {
+  it('长计划保留全部步骤并保持运行提示位于卡片内', () => {
     render(<TaskPlanBubble
       title="长计划"
       status="running"
@@ -61,6 +61,27 @@ describe('TaskPlanBubble', () => {
     expect(plan.contains(stepList)).toBe(true)
     expect(screen.getAllByRole('listitem')).toHaveLength(12)
     expect(plan.contains(screen.getByText('正在执行：步骤 11'))).toBe(true)
+  })
+
+  it('长标题和描述保留原文，折叠再展开后仍能批准计划', () => {
+    const title = `计划标题\n${'连续长路径/workspace/project/'.repeat(80)}\n标题末尾`
+    const description = `计划描述\n${'需逐项执行并保留完整说明。\n'.repeat(100)}描述末尾`
+    const onApprove = vi.fn()
+    const props = { title, description, status: 'pending' as const, steps: [], onApprove }
+    const { container, rerender } = render(<TaskPlanBubble {...props} />)
+
+    expect(screen.getByRole('heading', { level: 3 }).textContent).toBe(title)
+    expect(container.querySelector('p')?.textContent).toBe(description)
+
+    rerender(<TaskPlanBubble {...props} collapsed />)
+    expect(screen.getByRole('heading', { level: 3 }).textContent).toBe(title)
+    expect(container.querySelector('p')).toBeNull()
+    expect(screen.queryByRole('button', { name: '批准执行' })).not.toBeInTheDocument()
+
+    rerender(<TaskPlanBubble {...props} />)
+    expect(container.querySelector('p')?.textContent).toBe(description)
+    fireEvent.click(screen.getByRole('button', { name: '批准执行' }))
+    expect(onApprove).toHaveBeenCalledOnce()
   })
 
   it('暂停后允许修改并继续执行剩余步骤', () => {

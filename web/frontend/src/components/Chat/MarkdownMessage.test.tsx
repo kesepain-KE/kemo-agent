@@ -291,6 +291,34 @@ describe('MarkdownMessage', () => {
     expect(screen.queryByText(/schema_version/)).not.toBeInTheDocument()
   })
 
+  it('renders a native interactive educational visual with local controls', () => {
+    const widget = JSON.stringify({
+      schema_version: 1,
+      id: 'orbit-visual',
+      component: 'interactive-visual',
+      props: {
+        kind: 'orbit',
+        title: '行星相对运动',
+        center: { label: '太阳' },
+        bodies: [
+          { label: '地球', orbit: 3, period: 1, color: 'blue' },
+          { label: '火星', orbit: 4, period: 1.88, color: 'rose', detail: '周期更长。' },
+        ],
+      },
+      fallback: { text: '地球和火星围绕太阳运行，火星周期更长。' },
+    })
+    render(<MarkdownMessage content={`\`\`\`kemo-widget\n${widget}\n\`\`\``} />)
+
+    expect(screen.getByRole('region', { name: '行星相对运动' })).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: '行星相对运动，2 个对象' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '暂停动画' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '暂停动画' }))
+    expect(screen.getByRole('button', { name: '播放动画' })).toBeInTheDocument()
+    expect(screen.getByLabelText('动画速度')).toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: '火星' })[0])
+    expect(screen.getByText('周期更长。')).toBeInTheDocument()
+  })
+
   it('shows a private streaming placeholder until the widget fence closes', () => {
     render(<MarkdownMessage content={'说明\n\n```kemo-widget\n{"schema_version":1,"id":"partial"'} streaming />)
 

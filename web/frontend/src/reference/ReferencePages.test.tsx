@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { server } from '../test/server'
 import { ReferencePage, loadReferenceData } from './ReferencePage'
 import { FilesPage } from './FilesPage'
@@ -54,6 +54,13 @@ describe('样例替换后的生产路由', () => {
 
   it('终端显示实际输出，消息日志保留完整输入输出正文', async () => {
     let terminalReads = 0
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const restoreClipboard = () => {
+      if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
     server.use(http.get('/api/users/kesepain/runtime/logs', ({ request }) => {
       const category = new URL(request.url).searchParams.get('category') || 'all'
       if (category === 'terminal') terminalReads += 1
@@ -64,8 +71,10 @@ describe('样例替换后的生产路由', () => {
           { id: 'console:2', category, title: '实际错误输出', detail: '启动终端 · 标准错误', stream: 'stderr', occurred_at: '', source: 'memory' },
           ...(terminalReads > 1 ? [{ id: 'console:3', category, title: '新增终端输出', stream: 'stdout', occurred_at: '', source: 'memory' }] : []),
         ] : category === 'message' ? [
-          { id: 'message:1', category, title: '测试消息', detail: 'receive · text', direction: 'receive', content: '正文第一行\n正文第二行', occurred_at: '', source: 'sqlite' },
-          { id: 'message:2', category, title: '测试回复', detail: 'send · text', direction: 'send', content: '完整回复正文', occurred_at: '', source: 'sqlite' },
+          { id: 'message-exchange:1', category, title: '测试消息', detail: '输入 / 输出', direction: 'exchange',
+            inputs: [{ id: 'message:1', content: '正文第一行\n正文第二行', kind: 'text', status: 'success' }],
+            outputs: [{ id: 'message:2', content: '完整回复正文', kind: 'text', status: 'success' }],
+            occurred_at: '', source: 'sqlite' },
         ] : [],
         terminal: { loaded_items: 2, window_size: 300, stdout_items: 1, stderr_items: 1, retention_seconds: 3600 },
         pagination: { page: 1, total_pages: 1 }, source_errors: [],
@@ -90,6 +99,40 @@ describe('样例替换后的生产路由', () => {
     expect(screen.getByText('正文输入')).toBeInTheDocument()
     expect(screen.getByText('正文输出')).toBeInTheDocument()
     expect(document.querySelector('.runtime-message-body pre')?.textContent).toBe('正文第一行\n正文第二行')
+    const cards = document.querySelectorAll('.runtime-log-card')
+    expect(cards).toHaveLength(1)
+    expect(within(cards[0] as HTMLElement).getByRole('region', { name: '正文输入' })).toHaveTextContent('正文第二行')
+    expect(within(cards[0] as HTMLElement).getByRole('region', { name: '正文输出' })).toHaveTextContent('完整回复正文')
+    fireEvent.click(within(cards[0] as HTMLElement).getByRole('button', { name: '复制日志' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+      '测试消息\n输入 / 输出\n正文输入\n正文第一行\n正文第二行\n正文输出\n完整回复正文',
+    ))
+    restoreClipboard()
+  })
+
+  it('同卡显示缺失输入或输出、附件与发送失败，不把单边日志冒充完整回复', async () => {
+    server.use(http.get('/api/users/kesepain/runtime/logs', ({ request }) => {
+      const category = new URL(request.url).searchParams.get('category') || 'all'
+      return HttpResponse.json({
+        user: 'kesepain', category, entries: [
+          { id: 'message-exchange:input', category: 'message', title: '只有输入', direction: 'exchange', source: 'sqlite',
+            inputs: [{ content: '附件名.txt', kind: 'file', status: 'success' }], outputs: [] },
+          { id: 'message-exchange:output', category: 'message', title: '只有输出', direction: 'exchange', source: 'sqlite', status: 'failed',
+            inputs: [], outputs: [{ content: '发送失败的正文', kind: 'system', status: 'failed' }] },
+        ],
+        pagination: { page: 1, total_pages: 1 }, source_errors: [],
+      })
+    }))
+    renderPage('/status')
+    fireEvent.click(await screen.findByRole('button', { name: '运行日志' }))
+    fireEvent.click(screen.getByRole('button', { name: '消息日志' }))
+    await screen.findByText('发送失败的正文')
+    const cards = document.querySelectorAll('.runtime-log-card')
+    expect(cards).toHaveLength(2)
+    expect(within(cards[0] as HTMLElement).getByText('附件')).toBeInTheDocument()
+    expect(within(cards[0] as HTMLElement).getByText('未记录输出')).toBeInTheDocument()
+    expect(within(cards[1] as HTMLElement).getByText('未记录输入')).toBeInTheDocument()
+    expect(within(cards[1] as HTMLElement).getByText('失败')).toBeInTheDocument()
   })
 
   it('外部消息使用子智能体双栏和六条分页，无搜索框，选中模块及日志筛选在刷新后保留', async () => {
@@ -656,6 +699,104 @@ describe('样例替换后的生产路由', () => {
     fireEvent.input(editor, { target: { value: '# 已更新' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(saved).toEqual({ content: '# 已更新' }))
+  })
+
+  it('知识库分类下拉支持筛选、新建、保存分类和移出分类', async () => {
+    const categoryRequests: Array<{ path: string; category: string }> = []
+    const knowledge = {
+      user: 'kesepain',
+      enabled: true,
+      retrieval: { mode: 'index_only', full_index: true },
+      summary: { documents: 3, user_documents: 2, shared_documents: 1, global_documents: 0 },
+      documents: [
+        { scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, category: '未分类', active_for_main_agent: true },
+        { scope: 'user', relative_path: 'roadmap.md', title: '项目路线图', size: 80, updated_at: 1, category: '项目资料', active_for_main_agent: true },
+        { scope: 'shared', relative_path: 'team.md', title: '共享笔记', size: 90, updated_at: 1, category: '团队资料', active_for_main_agent: true },
+      ],
+      categories: {
+        user: [{ name: '未分类', count: 1 }, { name: '项目资料', count: 1 }],
+        shared: [{ name: '未分类', count: 0 }, { name: '团队资料', count: 1 }],
+        global: [{ name: '未分类', count: 0 }],
+        all: [{ name: '未分类', count: 1 }, { name: '项目资料', count: 1 }, { name: '团队资料', count: 1 }],
+      },
+      classification_file: 'classify.sqlite3',
+      classification_errors: [],
+      source_policy: {
+        knowledge: { effective_scopes: ['user', 'shared'], configured_scopes: ['user', 'shared'], enabled: true },
+      },
+    }
+    server.use(
+      http.get('/api/users/kesepain/knowledge', () => HttpResponse.json(knowledge)),
+      http.get('/api/users/kesepain/knowledge/:scope/document', ({ params }) => HttpResponse.json({
+        user: 'kesepain', scope: params.scope, relative_path: 'notes.md',
+        content: '# 知识正文\n\n测试内容', size: 24, updated_at: 1, category: knowledge.documents[0].category,
+      })),
+      http.patch('/api/users/kesepain/knowledge/:scope/classification', async ({ request }) => {
+        const url = new URL(request.url)
+        const body = await request.json() as { category?: string }
+        categoryRequests.push({ path: url.searchParams.get('path') || '', category: body.category || '' })
+        knowledge.documents[0].category = body.category || '未分类'
+        for (const scope of ['user', 'shared', 'global', 'all'] as const) {
+          const counts = new Map([['未分类', 0]])
+          knowledge.documents.filter((document) => scope === 'all' || document.scope === scope).forEach((document) => {
+            counts.set(document.category, (counts.get(document.category) || 0) + 1)
+          })
+          knowledge.categories[scope] = Array.from(counts, ([name, count]) => ({ name, count }))
+        }
+        return HttpResponse.json({
+          user: 'kesepain', scope: 'user', relative_path: 'notes.md',
+          category: body.category || '未分类', updated: true, classification_file: 'classify.sqlite3',
+        })
+      }),
+    )
+
+    renderPage('/knowledge')
+    const categoryFilter = await screen.findByRole('combobox', { name: '筛选知识分类' })
+    expect(screen.getByRole('button', { name: '新建分类名' })).toBeDisabled()
+    const toolbar = categoryFilter.closest('.knowledge-toolbar') as HTMLElement
+    expect(toolbar).toContainElement(screen.getByRole('searchbox'))
+    expect(toolbar).toContainElement(screen.getByRole('textbox', { name: '新的分类名称' }))
+    expect(within(toolbar).queryByText('逻辑标签，不改变文件路径')).not.toBeInTheDocument()
+    expect(within(toolbar).queryByText('新建分类', { selector: 'strong' })).not.toBeInTheDocument()
+    expect(within(categoryFilter).getAllByRole('option')).toHaveLength(6)
+    expect(within(categoryFilter).getByRole('option', { name: '共享层 · 团队资料（1）' })).toBeInTheDocument()
+    const projectCategory = within(categoryFilter).getByRole('option', { name: '用户层 · 项目资料（1）' })
+    fireEvent.change(categoryFilter, { target: { value: projectCategory.getAttribute('value') } })
+    expect(await screen.findByText('项目路线图')).toBeInTheDocument()
+    expect(screen.queryByText('个人笔记')).not.toBeInTheDocument()
+
+    fireEvent.change(categoryFilter, { target: { value: 'all' } })
+    fireEvent.click(await screen.findByText('个人笔记'))
+    await screen.findByText('知识正文')
+    const categoryInput = await screen.findByRole('textbox', { name: '新的分类名称' })
+    fireEvent.input(categoryInput, { target: { value: '学习资料' } })
+    const createButton = screen.getByRole('button', { name: '新建分类名' })
+    expect(createButton).toBeEnabled()
+    createButton.click()
+    await waitFor(() => expect(categoryRequests).toEqual([{ path: 'notes.md', category: '学习资料' }]))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '筛选知识分类' })).toContainElement(screen.getByRole('option', { name: '用户层 · 学习资料（1）' })))
+
+    fireEvent.click((await screen.findAllByText('个人笔记'))[0])
+    await screen.findByText('知识正文')
+    const categoryControls = document.querySelector('.knowledge-category-controls') as HTMLElement
+    expect(within(categoryControls).getAllByRole('button')).toHaveLength(2)
+    const categorySelect = within(categoryControls).getByRole('combobox', { name: '选择知识分类' })
+    expect(within(categoryControls).queryByRole('textbox')).not.toBeInTheDocument()
+    fireEvent.change(categorySelect, { target: { value: '项目资料' } })
+    fireEvent.click(within(categoryControls).getByRole('button', { name: '保存分类' }))
+    await waitFor(() => expect(categoryRequests).toEqual([
+      { path: 'notes.md', category: '学习资料' },
+      { path: 'notes.md', category: '项目资料' },
+    ]))
+    await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).not.toBeInTheDocument())
+    fireEvent.click((await screen.findAllByText('个人笔记'))[0])
+    await screen.findByText('知识正文')
+    fireEvent.click(screen.getByRole('button', { name: '移出分类' }))
+    await waitFor(() => expect(categoryRequests).toEqual([
+      { path: 'notes.md', category: '学习资料' },
+      { path: 'notes.md', category: '项目资料' },
+      { path: 'notes.md', category: '' },
+    ]))
   })
 
   it('诊断消费真实百分比、数字趋势、组件 state/health 字段', async () => {

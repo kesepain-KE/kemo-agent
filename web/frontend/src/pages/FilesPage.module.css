@@ -79,6 +79,8 @@
   transition: background .14s ease, color .14s ease;
 }
 
+.sortPopover > button + button { margin-block-start: var(--s-1); }
+
 .sortPopover button:hover,
 .sortPopover button:focus-visible { background: var(--surface-hover); color: var(--text); }
 .sortPopover button.sortOptionActive { background: var(--brand-soft); color: var(--brand); }

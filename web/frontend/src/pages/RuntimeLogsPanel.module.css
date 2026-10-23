@@ -280,6 +280,68 @@
   transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
 }
 .logCard:hover { border-color: color-mix(in srgb, var(--brand) 26%, var(--log-border)); box-shadow: 0 10px 26px rgba(39, 39, 39, .065); transform: translateY(-1px); }
+.messageCard { align-items: start; }
+.messageCard .entryIcon { margin-top: 1px; }
+.messageCard .identity { padding-top: 2px; }
+.messageCard .metadata > span { align-self: start; }
+.messageCard .detail { align-self: center; }
+.messageCard .status { align-self: start; margin-top: 1px; }
+.messageExchange {
+  grid-column: 2 / -1;
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+  margin-top: 2px;
+}
+.messageBody {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--log-border) 88%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-2) 48%, var(--surface));
+}
+.messageBodyLabel {
+  display: inline-flex;
+  align-items: center;
+  min-height: 21px;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 9px;
+  font-weight: 750;
+}
+.messageParts { min-width: 0; margin-top: 7px; }
+.messagePart + .messagePart {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--log-border) 78%, transparent);
+}
+.messagePartBadges { min-height: 0; display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; }
+.messageBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 0 6px;
+  border-radius: 5px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 8px;
+  font-weight: 750;
+}
+.messageBadgeDanger { color: var(--red); background: color-mix(in srgb, var(--red) 9%, var(--surface)); }
+.messagePart pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.messageEmpty { margin: 7px 0 0; color: var(--muted); font-size: 10px; }
 .entryIcon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px; color: #797979; background: var(--surface-2); }
 .category_backend .entryIcon { color: #7c7c7c; background: color-mix(in srgb, #7c7c7c 9%, var(--surface)); }
 .category_threads .entryIcon { color: #767676; background: color-mix(in srgb, #767676 9%, var(--surface)); }
@@ -347,6 +409,7 @@
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail { display: none; }
   .logCard { grid-template-columns: 40px minmax(145px, .85fr) minmax(120px, .72fr) minmax(150px, 1fr) minmax(125px, .72fr) auto; }
+  .messageCard { grid-template-columns: 40px minmax(145px, 1fr) minmax(125px, .72fr) minmax(145px, .9fr) minmax(125px, .72fr) auto; }
   .terminalSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -356,9 +419,11 @@
   .logCard { grid-template-columns: 34px minmax(0, 1fr); gap: 9px; padding-right: 11px; }
   .entryIcon { width: 34px; height: 34px; }
   .identity { padding-right: 68px; }
+  .messageCard { grid-template-columns: 34px minmax(0, 1fr); }
   .metadata { grid-column: 2; display: grid; grid-template-columns: 1fr; gap: 7px; }
   .detail { grid-column: 2; }
   .status { position: absolute; top: 10px; right: 10px; }
+  .messageExchange { grid-column: 2; }
   .body { max-height: 720px; }
   .terminalWorkspace { height: 760px; }
   .terminalLine { grid-template-columns: 72px 31px minmax(0, 1fr); gap: 7px; padding: 5px 11px; font-size: 10px; }

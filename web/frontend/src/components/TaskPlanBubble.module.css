@@ -5,6 +5,37 @@
   flex: 1;
 }
 
+.headerIdentity { flex: 1; }
+.headerText { flex: 1; }
+.headerIdentity,
+.headerText { max-width: 100%; }
+.title,
+.description,
+.stepTitle,
+.stepDescription,
+.noticeCopy,
+.collapsedSummary > span {
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+.title { max-height: min(3.5rem, 8dvh); }
+.description { max-height: min(4.5rem, 10dvh); }
+.stepTitle { max-height: 3.5em; }
+.stepDescription { max-height: 4.5em; }
+.noticeCopy,
+.collapsedSummary > span { max-height: min(3rem, 8dvh); }
+.notice > svg,
+.collapsedSummary > svg,
+.collapsedSummary > strong { flex-shrink: 0; }
+.stepRow { flex-shrink: 0; align-items: start; }
+.stepMeta { min-width: 0; max-width: 12rem; flex-wrap: wrap; }
+.dependency { min-width: 0; max-width: 100%; max-height: 3.5em; overflow: auto; }
+
 /* Keep long plans inside the card. The composer dock must not become a
    second scroll container: only this step viewport scrolls, while the
    header, progress, running notice and controls remain in normal flow. */
@@ -47,6 +78,12 @@
 }
 
 @media (max-width: 560px) {
+  .stepRow { grid-template-columns: 27px minmax(0, 1fr); gap: 6px 8px; }
+  .stepNumber { grid-column: 1; grid-row: 1 / span 3; }
+  .stepId { grid-column: 2; grid-row: 1; }
+  .stepContent { grid-column: 2; grid-row: 2; }
+  .stepMeta { grid-column: 2; grid-row: 3; max-width: 100%; }
+
   .notice_running {
     flex-wrap: wrap;
   }

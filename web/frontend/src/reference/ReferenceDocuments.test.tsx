@@ -40,7 +40,7 @@ describe('业务文档复用知识库放大预览', () => {
     expect(dialog.querySelector('.document-markdown')?.innerHTML).toBe(html)
     fireEvent.click(within(dialog).getAllByRole('button', { name: '关闭' })[0])
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    expect(screen.getByRole('textbox')).toHaveValue(document)
+    expect(window.document.querySelector('textarea.knowledge-document-editor')).toHaveValue(document)
   })
 
   it('定时任务执行内容渲染 Markdown，编辑保留完整原文', async () => {

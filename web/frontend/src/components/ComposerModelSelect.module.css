@@ -28,6 +28,7 @@
 .search input:focus { box-shadow: none; }
 .options { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .options button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 9px 10px; border-radius: var(--r-sm); text-align: left; color: var(--text-primary); }
+.options button + button { margin-top: var(--s-1); }
 .options button > span { min-width: 0; overflow-wrap: anywhere; }
 .options button strong { display: block; font-size: var(--t-xs); font-weight: 600; }
 .options button small { display: block; margin-top: 3px; font-size: var(--t-2xs); color: var(--text-tertiary); }

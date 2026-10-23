@@ -117,6 +117,7 @@
 
 .contextMenu { position: fixed; z-index: 310; width: 180px; padding: 6px; border: 1px solid color-mix(in srgb, var(--line-strong) 84%, transparent); border-radius: 13px; background: color-mix(in srgb, var(--surface-elevated) 97%, transparent); box-shadow: var(--shadow-float); backdrop-filter: blur(18px); animation: menuIn .12s ease-out; }
 .contextMenu button { width: 100%; min-height: 40px; padding: 0 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 9px; background: transparent; color: var(--text-2); font: inherit; font-size: .75rem; text-align: left; cursor: pointer; }
+.contextMenu > button + button { margin-block-start: var(--s-1); }
 .contextMenu button:hover { background: var(--surface-hover); color: var(--text); }
 .contextMenu .dangerMenuItem { color: var(--red); }
 .contextMenu .dangerMenuItem:hover { background: var(--red-soft); color: var(--red); }

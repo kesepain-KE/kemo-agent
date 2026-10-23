@@ -116,6 +116,37 @@
   scrollbar-width: thin;
 }
 .chartScroll:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 10px; }
+.orbitStage {
+  min-width: 0;
+  padding: .55rem .55rem .35rem;
+  border: 1px solid color-mix(in srgb, var(--brand) 26%, var(--line));
+  border-radius: 13px;
+  background:
+    radial-gradient(circle at 50% 43%, color-mix(in srgb, var(--brand) 28%, transparent), transparent 38%),
+    linear-gradient(145deg, color-mix(in srgb, var(--brand) 24%, var(--surface-2)), var(--surface-2));
+  overflow: hidden;
+}
+.orbitSvg { display: block; width: 100%; height: auto; min-height: 220px; }
+.orbitRing { fill: none; stroke: color-mix(in srgb, var(--brand) 40%, var(--line)); stroke-width: 1; stroke-dasharray: 3 5; }
+.orbitCenter { fill: #ffd36a; stroke: #fff4c2; stroke-width: 2; filter: drop-shadow(0 0 7px rgba(255, 211, 106, .75)); }
+.orbitCenterLabel { fill: var(--text-2); font-size: 10px; font-weight: 700; }
+.orbitBody { cursor: pointer; stroke: rgba(255, 255, 255, .65); stroke-width: 1.3; outline: none; }
+.orbitBody:focus { stroke: var(--brand); stroke-width: 2.5; }
+.orbitBodyHalo { fill: none; stroke: color-mix(in srgb, var(--brand) 65%, transparent); stroke-width: 1.5; opacity: .8; }
+.orbitLegend { display: flex; gap: .35rem .75rem; flex-wrap: wrap; padding: .2rem .2rem 0; }
+.orbitLegendItem { min-width: 0; display: inline-flex; align-items: center; gap: .35rem; padding: .25rem .4rem; border: 1px solid transparent; border-radius: 999px; color: var(--muted); font-size: .67rem; }
+.orbitLegendItem:hover, .orbitLegendActive { border-color: var(--line); background: var(--surface); color: var(--text); }
+.orbitLegendItem i { width: .48rem; height: .48rem; flex: 0 0 .48rem; border-radius: 50%; }
+.orbitControls { margin-top: .7rem; display: flex; align-items: center; flex-wrap: wrap; gap: .45rem .6rem; }
+.orbitControlButton { min-height: 30px; padding: 0 .65rem; display: inline-flex; align-items: center; gap: .3rem; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--text-2); font-size: .68rem; }
+.orbitControlButton:hover { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
+.orbitRange { min-width: 10rem; flex: 1 1 12rem; display: grid; gap: .25rem; color: var(--muted); font-size: .65rem; }
+.orbitRange input { width: 100%; accent-color: var(--brand); }
+.orbitSpeed { display: inline-flex; align-items: center; gap: .35rem; color: var(--muted); font-size: .65rem; }
+.orbitSpeed select { min-height: 28px; padding: 0 .35rem; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--text-2); font-size: .65rem; }
+.orbitDetail { margin-top: .65rem; padding: .65rem .75rem; display: grid; gap: .15rem; border-top: 1px solid var(--line); }
+.orbitDetail strong { color: var(--text); font-size: .78rem; }
+.orbitDetail span, .orbitDetail p { margin: 0; color: var(--muted); font-size: .68rem; line-height: 1.55; }
 .chart { position: relative; height: 286px; padding: 8px 8px 0 42px; }
 .chartTicks {
   position: absolute;

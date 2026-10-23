@@ -43,6 +43,7 @@
   text-align: left;
 }
 
+.addPopover > button + button { margin-block-start: var(--s-1); }
 .addPopover > button:hover { background: var(--brand-soft); }
 .addPopover > button > span:first-child { width: 2.35rem; height: 2.35rem; display: grid; place-items: center; border-radius: .7rem; background: var(--brand-soft); color: var(--brand); }
 .addPopover strong, .addPopover small { display: block; }

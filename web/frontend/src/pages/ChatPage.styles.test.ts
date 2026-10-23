@@ -6,6 +6,8 @@ const stylesheet = readFileSync(resolve(process.cwd(), 'src/styles/app.css'), 'u
 const production = readFileSync(resolve(process.cwd(), 'src/reference/styles/production.css'), 'utf8')
 const chatView = readFileSync(resolve(process.cwd(), 'src/pages/ChatPageView.tsx'), 'utf8')
 const welcomeStyles = readFileSync(resolve(process.cwd(), 'src/reference/styles/chat.css'), 'utf8')
+const main = readFileSync(resolve(process.cwd(), 'src/main.tsx'), 'utf8')
+const styleEntry = readFileSync(resolve(process.cwd(), 'src/reference/styles/index.css'), 'utf8')
 
 describe('欢迎页左右卡片', () => {
   it('左右等宽、等高，标题等高且不额外偏移统计卡片', () => {
@@ -116,9 +118,14 @@ describe('输入框轮数气泡', () => {
 })
 
 describe('ChatPage guidance styles', () => {
+  it('loads the production height limits from the actual application style entry', () => {
+    expect(main).toContain("import './reference/styles/index.css'")
+    expect(styleEntry).toContain("@import './production.css'")
+    expect(main).not.toMatch(/import ['"].*styles\/(?:app|prototype)\.css['"]/)
+  })
+
   it('contains long guidance text inside the conversation width', () => {
-    const rules = [...stylesheet.matchAll(/\.guidance-message\s*\{([^}]*)\}/g)]
-    const rule = rules.map((match) => match[1]).find((value) => value.includes('min-width: 0')) ?? ''
+    const rule = production.match(/\.guidance-message\s*\{([^}]*)\}/)?.[1] ?? ''
 
     expect(rule).toContain('min-width: 0')
     expect(rule).toContain('max-width: 100%')
@@ -126,35 +133,35 @@ describe('ChatPage guidance styles', () => {
     expect(rule).toContain('overflow-y: auto')
   })
 
-  it('scrolls unbroken guidance content horizontally inside its own bubble', () => {
-    const rule = stylesheet.match(/\.guidance-message > strong\s*\{([^}]*)\}/)?.[1] ?? ''
+  it('wraps long paths inside the scrollable bubble without hiding the remaining text', () => {
+    const rule = production.match(/\.guidance-content > strong\s*\{([^}]*)\}/)?.[1] ?? ''
+    const content = production.match(/\.guidance-content\s*\{([^}]*)\}/)?.[1] ?? ''
 
     expect(rule).toContain('min-width: 0')
     expect(rule).toContain('max-width: 100%')
-    expect(rule).toContain('overflow-x: auto')
-    expect(rule).toContain('white-space: pre')
-    expect(rule).toContain('scrollbar-width: thin')
+    expect(rule).toContain('white-space: pre-wrap')
+    expect(rule).toContain('overflow-wrap: anywhere')
+    expect(content).not.toContain('overflow: hidden')
   })
 
   it('limits every guidance bubble to one third of the viewport', () => {
-    const rule = stylesheet.match(/\.guidance-message\s*\{([^}]*)\}/g)?.map((value) => value.replace(/^\.guidance-message\s*\{/, '').replace(/\}$/, '')).find((value) => value.includes('max-height: 33.333vh')) ?? ''
+    const rule = production.match(/\.guidance-message\s*\{([^}]*)\}/)?.[1] ?? ''
 
     expect(rule).toContain('max-width: 100%')
     expect(rule).toContain('box-sizing: border-box')
-    expect(rule).toContain('max-height: 33.333vh')
-    expect(rule).toContain('max-height: 33.333dvh')
+    expect(rule).toContain('max-height: min(20rem, 33.333dvh)')
     expect(rule).toContain('overflow-y: auto')
   })
 
   it('limits only the composer guidance preview to one auxiliary card unit', () => {
-    const previewRule = stylesheet.match(/\.composer-guidance-preview\s*\{([^}]*)\}/)?.[1] ?? ''
-    const cardRule = stylesheet.match(/\.composer-guidance-preview > \.guidance-message\.guidance-current\s*\{([^}]*)\}/)?.[1] ?? ''
+    const previewRule = production.match(/\.composer-guidance-preview\s*\{([^}]*)\}/)?.[1] ?? ''
+    const cardRule = production.match(/\.composer-guidance-preview > \.guidance-message\.guidance-current\s*\{([^}]*)\}/)?.[1] ?? ''
 
     expect(previewRule).toContain('min-height: 0')
     expect(previewRule).not.toContain('overflow-y')
-    expect(cardRule).toContain('max-height: var(--composer-guidance-max, 10.5rem)')
-    expect(cardRule).toContain('overflow-y: auto')
-    expect(cardRule).toContain('overscroll-behavior: contain')
+    expect(cardRule).toContain('max-height: var(--composer-guidance-max)')
+    expect(cardRule).toContain('margin: 0')
+    expect(production).toContain('--composer-guidance-max: min(10.5rem, 20dvh)')
   })
 })
 
@@ -175,11 +182,28 @@ describe('ChatPage tool-call theme styles', () => {
 })
 
 describe('ChatPage active plan dock styles', () => {
-  it('leaves scrolling to the task step list instead of clipping the whole plan card', () => {
-    const dockRule = stylesheet.match(/\.composer-plan-dock\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+  it('bounds the shared auxiliary area while keeping the composer outside that scroll area', () => {
+    const productionDockRule = production.match(/\.composer-plan-dock\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+    const auxiliary = production.match(/\.composer-zone > \.composer-auxiliary\s*\{([^}]*)\}/)?.[1] ?? ''
 
-    expect(dockRule).toContain('max-height: none')
-    expect(dockRule).toContain('align-items: flex-start')
-    expect(dockRule).toContain('overflow: visible')
+    expect(productionDockRule).toContain('margin-bottom: var(--composer-aux-card-gap, .5rem)')
+    expect(auxiliary).toContain('overflow-y: auto')
+    expect(auxiliary).toContain('flex-shrink: 1')
+    expect(auxiliary).toContain('max-height: 52dvh')
+    expect(chatView).toContain('<div className="composer-auxiliary">')
+  })
+
+  it('renders the created task plan as a responsive conversation card', () => {
+    const recordRule = production.match(/\.task-plan-record\s*\{([^}]*)\}/)?.[1] ?? ''
+    const mobileRule = production.match(/\.task-plan-record\s*\{\s*grid-template-columns: 34px minmax\(0, 1fr\) auto;([\s\S]*?)\n  \}/)?.[1] ?? ''
+
+    expect(recordRule).toContain('display: grid')
+    expect(recordRule).toContain('border: 1px solid var(--border-subtle)')
+    expect(recordRule).toContain('border-radius: var(--r-lg)')
+    expect(recordRule).toContain('background: var(--bg-surface)')
+    expect(recordRule).toContain('box-shadow: var(--shadow-xs)')
+    expect(recordRule).toContain('padding: 10px 12px')
+    expect(mobileRule).toContain('padding: 9px 10px')
+    expect(production).toContain('.task-plan-record-progress { display: none; }')
   })
 })

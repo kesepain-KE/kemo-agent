@@ -111,6 +111,12 @@ const legacyComponentNames: Record<string, InlineWidgetComponentName> = {
   image: 'image',
   gallery: 'gallery',
   carousel: 'carousel',
+  interactive: 'interactive-visual',
+  visualization: 'interactive-visual',
+  visual: 'interactive-visual',
+  orbit: 'interactive-visual',
+  orbital: 'interactive-visual',
+  'interactive-visual': 'interactive-visual',
   card: 'generic-card',
   panel: 'generic-card',
   'generic-card': 'generic-card',
@@ -474,6 +480,12 @@ function deriveFallbackText(
   if (component === 'gallery' || component === 'carousel') {
     const value = props as ComponentPropsMap['gallery'] | ComponentPropsMap['carousel']
     return [value.title, value.images.map((item) => item.caption || item.alt).join('；')].filter(Boolean).join('。')
+  }
+  if (component === 'interactive-visual') {
+    const value = props as ComponentPropsMap['interactive-visual']
+    const center = value.center?.label || '中心'
+    const bodies = value.bodies.map((body) => `${body.label}：第 ${body.orbit} 轨道`).join('；')
+    return [value.title, value.description, `${center}，${bodies}`].filter(Boolean).join('。')
   }
   const value = props as ComponentPropsMap['generic-card']
   const entries = Object.entries(value)

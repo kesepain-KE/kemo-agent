@@ -5,10 +5,11 @@ import { BookOpen, ChevronLeft, ChevronRight, Database, Eye, FileText, Layers3, 
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from '../markdownLinks'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { deleteKnowledgeDocument, getKnowledge, getKnowledgeDocument, putKnowledgeDocument } from '../api/client'
+import { deleteKnowledgeDocument, getKnowledge, getKnowledgeDocument, putKnowledgeDocument, setKnowledgeCategory } from '../api/client'
 import type { ShellOutletContext } from '../components/AppShell'
 import { EmptyPanel, formatBytes, formatDateTime, MetricCard, ModuleError, ModuleFrame, StatusChip } from '../components/ModuleUi'
 import type { KnowledgeDocumentSummary, SessionsResponse } from '../types/api'
+import { getKnowledgeCategories, getKnowledgeCategoryFilters, knowledgeCategoryKey, type KnowledgeScope } from '../knowledgeCategories'
 
 type Scope = 'all' | 'user' | 'shared' | 'global'
 type EditableScope = 'user' | 'shared'
@@ -30,9 +31,12 @@ export function KnowledgePage() {
   const navigate = useNavigate()
   const client = useQueryClient()
   const [scope, setScope] = useState<Scope>('all')
+  const [categoryFilter, setCategoryFilter] = useState('all')
   const [queryText, setQueryText] = useState('')
   const [selected, setSelected] = useState<{ scope: string; path: string } | null>(null)
   const [draft, setDraft] = useState('')
+  const [categoryDraft, setCategoryDraft] = useState('')
+  const [newCategoryDraft, setNewCategoryDraft] = useState('')
   const [editorMode, setEditorMode] = useState<EditorMode>('preview')
   const [previewOpen, setPreviewOpen] = useState(false)
   const [hasIndexChanges, setHasIndexChanges] = useState(false)
@@ -51,6 +55,7 @@ export function KnowledgePage() {
   useEffect(() => {
     if (documentQuery.data) {
       setDraft(documentQuery.data.content)
+      setCategoryDraft(documentQuery.data.category && documentQuery.data.category !== '未分类' ? documentQuery.data.category : '')
     }
   }, [documentQuery.data])
   useEffect(() => {
@@ -72,13 +77,19 @@ export function KnowledgePage() {
   }, [previewOpen])
 
   const data = query.data
+  const categoryFilters = useMemo(() => getKnowledgeCategoryFilters(data, scope), [data, scope])
+  const categoryOptions = useMemo(
+    () => selected ? getKnowledgeCategories(data, selected.scope as KnowledgeScope) : [],
+    [data, selected?.scope],
+  )
   const documents = useMemo(() => {
     const term = queryText.trim().toLocaleLowerCase()
     return (data?.documents || []).filter((document) => (
       (scope === 'all' || document.scope === scope)
+      && (categoryFilter === 'all' || knowledgeCategoryKey(document.scope, document.category) === categoryFilter)
       && (!term || `${document.title} ${document.relative_path}`.toLocaleLowerCase().includes(term))
     ))
-  }, [data?.documents, queryText, scope])
+  }, [data?.documents, queryText, scope, categoryFilter])
   const totalPages = Math.max(1, Math.ceil(documents.length / KNOWLEDGE_PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
   const pagedDocuments = useMemo(() => {
@@ -91,6 +102,10 @@ export function KnowledgePage() {
   }, [totalPages])
   const selectedSummary = data?.documents.find((document) => document.scope === selected?.scope && document.relative_path === selected?.path)
   const readOnly = selected?.scope === 'global'
+  const changeScope = (next: Scope) => {
+    setScope(next)
+    setCategoryFilter('all')
+  }
 
   const saveMutation = useMutation({
     mutationFn: () => putKnowledgeDocument(user, selected!.scope, selected!.path, draft),
@@ -108,6 +123,15 @@ export function KnowledgePage() {
       setDraft('')
       setHasIndexChanges(true)
       await client.invalidateQueries({ queryKey: ['knowledge', user] })
+    },
+  })
+  const categoryMutation = useMutation({
+    mutationFn: (category: string) => setKnowledgeCategory(user, selected!.scope, selected!.path, category),
+    onSuccess: async (_result, category) => {
+      setCategoryDraft(category)
+      setNewCategoryDraft('')
+      await client.invalidateQueries({ queryKey: ['knowledge', user] })
+      await documentQuery.refetch()
     },
   })
   const importMutation = useMutation({
@@ -169,35 +193,56 @@ export function KnowledgePage() {
     >
       {query.isError && <ModuleError message="知识库读取失败，请检查服务状态或重新登录。" />}
       {importMutation.isError && <ModuleError message={importMutation.error instanceof Error ? importMutation.error.message : '知识文件导入失败'} />}
-      <div className="knowledge-searchbar">
-        <span className="search-field"><Search size={16} /><input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder={`${scope === 'all' ? '全部层级' : scopeLabels[scope]}：搜索文件名或标题…`} /></span>
-        <button type="button" className="module-btn" onClick={() => setQueryText('')}>清除</button>
-      </div>
-
       <section className="metric-strip knowledge-metrics">
-        <MetricCard label="文件总数" value={data?.summary.documents ?? '—'} detail="有效文档" symbol={<Database size={16} />} active={scope === 'all'} activeLabel="当前区域" onClick={() => setScope('all')} />
-        <MetricCard label="用户层" value={data?.summary.user_documents ?? '—'} detail={`users/${user}/knowledge`} symbol={<FileText size={16} />} active={scope === 'user'} activeLabel="当前区域" onClick={() => setScope('user')} />
-        <MetricCard label="共享层" value={data?.summary.shared_documents ?? '—'} detail="shared_knowledge" symbol={<Share2 size={16} />} active={scope === 'shared'} activeLabel="当前区域" onClick={() => setScope('shared')} />
-        <MetricCard label="全局层" value={data?.summary.global_documents ?? '—'} detail="global_knowledge" symbol={<Layers3 size={16} />} active={scope === 'global'} activeLabel="当前区域" onClick={() => setScope('global')} />
+        <MetricCard label="文件总数" value={data?.summary.documents ?? '—'} detail="有效文档" symbol={<Database size={16} />} active={scope === 'all'} activeLabel="当前区域" onClick={() => changeScope('all')} />
+        <MetricCard label="用户层" value={data?.summary.user_documents ?? '—'} detail={`users/${user}/knowledge`} symbol={<FileText size={16} />} active={scope === 'user'} activeLabel="当前区域" onClick={() => changeScope('user')} />
+        <MetricCard label="共享层" value={data?.summary.shared_documents ?? '—'} detail="shared_knowledge" symbol={<Share2 size={16} />} active={scope === 'shared'} activeLabel="当前区域" onClick={() => changeScope('shared')} />
+        <MetricCard label="全局层" value={data?.summary.global_documents ?? '—'} detail="global_knowledge" symbol={<Layers3 size={16} />} active={scope === 'global'} activeLabel="当前区域" onClick={() => changeScope('global')} />
       </section>
 
       <div className="module-toolbar knowledge-layer-toolbar">
-        <div className="module-tabs">{(['all', 'user', 'shared', 'global'] as const).map((value) => <button type="button" key={value} className={`module-tab-btn ${scope === value ? 'active' : ''}`} onClick={() => setScope(value)}>{value === 'all' ? '全部' : scopeLabels[value]}</button>)}</div>
+        <div className="module-tabs">{(['all', 'user', 'shared', 'global'] as const).map((value) => <button type="button" key={value} className={`module-tab-btn ${scope === value ? 'active' : ''}`} onClick={() => changeScope(value)}>{value === 'all' ? '全部' : scopeLabels[value]}</button>)}</div>
       </div>
 
+      <div className="knowledge-toolbar">
+        <div className="knowledge-searchbar">
+          <span className="search-field"><Search size={16} /><input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder={`${scope === 'all' ? '全部层级' : scopeLabels[scope]}：搜索文件名或标题…`} /></span>
+          <button type="button" className="module-btn" onClick={() => setQueryText('')}>清除</button>
+        </div>
+        <select className="knowledge-category-filter" aria-label="筛选知识分类" value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1) }}>
+          <option value="all">全部分类（{(data?.documents || []).filter((document) => scope === 'all' || document.scope === scope).length}）</option>
+          {categoryFilters.map((item) => <option key={item.value} value={item.value}>{item.label}（{item.count}）</option>)}
+        </select>
+        <div className="knowledge-category-create-controls">
+          <input className="knowledge-category-new-input" aria-label="新的分类名称" value={newCategoryDraft} placeholder="分类名…" onChange={(event) => setNewCategoryDraft(event.target.value)} />
+          <button type="button" className="module-btn" aria-label="新建分类名" disabled={!selected || categoryMutation.isPending || !newCategoryDraft.trim()} onClick={() => categoryMutation.mutate(newCategoryDraft.trim())}>新建分类</button>
+        </div>
+      </div>
       <div className="module-grid knowledge-grid knowledge-grid-editor">
         <article className="panel table-panel">
           <div className="panel-head"><div className="panel-title"><span className="panel-title-icon knowledge-collection-icon"><BookOpen size={17} /></span><span><strong>知识文件</strong><span>只展示元数据，点击文件进入编辑查看</span></span></div><span className="panel-count">{documents.length}</span></div>
-          {documents.length ? <div className="knowledge-list-body"><div className="panel-body table-wrap"><table className="module-table"><thead><tr><th>名称</th><th>层级</th><th>主智能体</th><th>路径</th><th>大小</th><th>更新时间</th></tr></thead><tbody>{pagedDocuments.map((document) => <tr key={documentKey(document)} className={selected && selected.scope === document.scope && selected.path === document.relative_path ? 'knowledge-row-selected' : ''} onClick={() => selectDocument(document)}><td><span className="table-main"><span className="table-icon knowledge-document-icon"><FileText size={16} /></span><span><strong>{document.title}</strong><span>{basename(document.relative_path)}</span></span></span></td><td><span className={`scope-tag ${document.scope}`}>{scopeLabels[document.scope as Exclude<Scope, 'all'>] || document.scope}</span></td><td><StatusChip status={document.active_for_main_agent ? 'enabled' : 'paused'}>{document.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></td><td className="path-cell">{document.relative_path}</td><td>{formatBytes(document.size)}</td><td>{formatDateTime(document.updated_at)}</td></tr>)}</tbody></table></div><footer className="knowledge-pagination"><span>每页 {KNOWLEDGE_PAGE_SIZE} 个 · 共 {documents.length} 个</span><nav aria-label="知识文件分页"><button type="button" aria-label="上一页知识文件" disabled={currentPage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={14} />上一页</button><strong>{currentPage} / {totalPages}</strong><button type="button" aria-label="下一页知识文件" disabled={currentPage >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>下一页<ChevronRight size={14} /></button></nav></footer></div> : <EmptyPanel title="没有匹配的知识文件" description={queryText ? '调整搜索词或切换层级后重试。' : '当前知识目录中还没有可索引文件。'} icon={<BookOpen size={21} />} />}
+          {documents.length ? <div className="knowledge-list-body"><div className="panel-body table-wrap"><table className="module-table knowledge-document-table"><colgroup>{[28, 9, 12, 12, 17, 9, 13].map((width, index) => <col key={index} style={{ width: `${width}%` }} />)}</colgroup><thead><tr><th>名称</th><th>层级</th><th>分类</th><th>主智能体</th><th>路径</th><th>大小</th><th>更新时间</th></tr></thead><tbody>{pagedDocuments.map((document) => <tr key={documentKey(document)} className={selected && selected.scope === document.scope && selected.path === document.relative_path ? 'knowledge-row-selected' : ''} onClick={() => selectDocument(document)}><td><span className="table-main"><span className="table-icon knowledge-document-icon"><FileText size={16} /></span><span><strong title={document.title}>{document.title}</strong><span title={document.relative_path}>{basename(document.relative_path)}</span></span></span></td><td><span className={`scope-tag ${document.scope}`}>{scopeLabels[document.scope as Exclude<Scope, 'all'>] || document.scope}</span></td><td><span className="knowledge-category-tag" title={document.category || '未分类'}>{document.category || '未分类'}</span></td><td><StatusChip status={document.active_for_main_agent ? 'enabled' : 'paused'}>{document.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></td><td className="path-cell" title={document.relative_path}>{document.relative_path}</td><td>{formatBytes(document.size)}</td><td>{formatDateTime(document.updated_at)}</td></tr>)}</tbody></table></div><footer className="knowledge-pagination"><span>每页 {KNOWLEDGE_PAGE_SIZE} 个 · 共 {documents.length} 个</span><nav aria-label="知识文件分页"><button type="button" aria-label="上一页知识文件" disabled={currentPage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={14} />上一页</button><strong>{currentPage} / {totalPages}</strong><button type="button" aria-label="下一页知识文件" disabled={currentPage >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>下一页<ChevronRight size={14} /></button></nav></footer></div> : <EmptyPanel title="没有匹配的知识文件" description={queryText ? '调整搜索词或切换层级后重试。' : '当前知识目录中还没有可索引文件。'} icon={<BookOpen size={21} />} />}
         </article>
 
         <aside className="knowledge-editor panel">
           <div className="panel-head"><div className="panel-title"><span className="panel-title-icon knowledge-collection-icon"><FileText size={17} /></span><span><strong>编辑查看</strong><span>{readOnly ? '全局层只支持查看' : 'Markdown 编辑与预览'}</span></span></div>{selected && <button type="button" className="knowledge-close-button" aria-label="关闭编辑查看" onClick={() => setSelected(null)}><X size={16} /></button>}</div>
           {!selected || !selectedSummary ? <div className="knowledge-editor-empty"><BookOpen size={25} /><strong>选择知识文件</strong><span>点击左侧知识文件后，可在此处编辑或预览。</span></div> : <>
-            <div className="knowledge-editor-file"><span className="knowledge-file-avatar"><FileText size={18} /></span><span><strong>{basename(selected.path)}</strong><small>{selectedSummary.relative_path}</small></span><span className={`scope-tag ${selected.scope}`}>{scopeLabels[selected.scope as Exclude<Scope, 'all'>] || selected.scope}</span><StatusChip status={selectedSummary.active_for_main_agent ? 'enabled' : 'paused'}>{selectedSummary.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></div>
-            <div className={`knowledge-editor-toolbar ${readOnly ? 'read-only' : ''}`}>{!readOnly && <button type="button" className="module-btn knowledge-mode-toggle" aria-label={editorMode === 'preview' ? '切换到编辑模式' : '切换到预览模式'} aria-pressed={editorMode === 'preview'} onClick={() => setEditorMode((current) => current === 'preview' ? 'markdown' : 'preview')}><Eye size={14} />预览</button>}<button type="button" className="module-btn" aria-label="放大预览" disabled={documentQuery.isLoading} onClick={() => setPreviewOpen(true)}><Maximize2 size={14} />放大</button>{!readOnly && <><button type="button" className="module-btn primary" aria-label="保存编辑" disabled={saveMutation.isPending || documentQuery.isFetching || editorMode !== 'markdown'} onClick={() => saveMutation.mutate()}><Save size={14} />保存</button><button type="button" className="module-btn danger" aria-label="删除此知识" disabled={deleteMutation.isPending} onClick={() => { if (window.confirm('删除此知识文件？')) deleteMutation.mutate() }}><Trash2 size={14} />删除</button></>}</div>
-            {saveMutation.isError && <ModuleError message={saveMutation.error instanceof Error ? saveMutation.error.message : '知识文件保存失败'} />}
-            {deleteMutation.isError && <ModuleError message={deleteMutation.error instanceof Error ? deleteMutation.error.message : '知识文件删除失败'} />}
+             <div className="knowledge-editor-file"><span className="knowledge-file-avatar"><FileText size={18} /></span><span><strong>{basename(selected.path)}</strong><small>{selectedSummary.relative_path}</small></span><span className={`scope-tag ${selected.scope}`}>{scopeLabels[selected.scope as Exclude<Scope, 'all'>] || selected.scope}</span><StatusChip status={selectedSummary.active_for_main_agent ? 'enabled' : 'paused'}>{selectedSummary.active_for_main_agent ? '已启用' : '已过滤'}</StatusChip></div>
+             <div className="knowledge-category-editor">
+               <div className="knowledge-category-editor-copy"><strong>归类到分类</strong><span>分类文件夹是逻辑标签，文件仍保留原路径</span></div>
+               <div className="knowledge-category-controls">
+                 <select className="knowledge-category-select" aria-label="选择知识分类" value={categoryDraft} onChange={(event) => setCategoryDraft(event.target.value)}>
+                   <option value="">未分类</option>
+                   {categoryOptions.filter((item) => item.name !== '未分类').map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+                 </select>
+                 <button type="button" className="module-btn" disabled={categoryMutation.isPending} onClick={() => categoryMutation.mutate(categoryDraft.trim())}>保存分类</button>
+                 <button type="button" className="module-btn" disabled={categoryMutation.isPending || !categoryDraft} onClick={() => { setCategoryDraft(''); categoryMutation.mutate('') }}>移出分类</button>
+               </div>
+             </div>
+             <div className={`knowledge-editor-toolbar ${readOnly ? 'read-only' : ''}`}>{!readOnly && <button type="button" className="module-btn knowledge-mode-toggle" aria-label={editorMode === 'preview' ? '切换到编辑模式' : '切换到预览模式'} aria-pressed={editorMode === 'preview'} onClick={() => setEditorMode((current) => current === 'preview' ? 'markdown' : 'preview')}><Eye size={14} />预览</button>}<button type="button" className="module-btn" aria-label="放大预览" disabled={documentQuery.isLoading} onClick={() => setPreviewOpen(true)}><Maximize2 size={14} />放大</button>{!readOnly && <><button type="button" className="module-btn primary" aria-label="保存编辑" disabled={saveMutation.isPending || documentQuery.isFetching || editorMode !== 'markdown'} onClick={() => saveMutation.mutate()}><Save size={14} />保存</button><button type="button" className="module-btn danger" aria-label="删除此知识" disabled={deleteMutation.isPending} onClick={() => { if (window.confirm('删除此知识文件？')) deleteMutation.mutate() }}><Trash2 size={14} />删除</button></>}</div>
+             {saveMutation.isError && <ModuleError message={saveMutation.error instanceof Error ? saveMutation.error.message : '知识文件保存失败'} />}
+             {deleteMutation.isError && <ModuleError message={deleteMutation.error instanceof Error ? deleteMutation.error.message : '知识文件删除失败'} />}
+             {categoryMutation.isError && <ModuleError message={categoryMutation.error instanceof Error ? categoryMutation.error.message : '知识分类保存失败'} />}
             <div className="knowledge-editor-content">{documentQuery.isLoading ? <div className="center-state">正在加载知识正文…</div> : editorMode === 'markdown' ? <textarea className="knowledge-markdown-editor" value={draft} readOnly={readOnly} spellCheck={false} onChange={(event) => setDraft(event.target.value)} /> : <article className="knowledge-markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown></article>}</div>
             <div className="knowledge-editor-footer"><span>共 {draft.split('\n').length} 行</span><span>约 {draft.trim().length} 字符</span><span>最后更新：{formatDateTime(documentQuery.data?.updated_at || selectedSummary.updated_at)}</span></div>
           </>}

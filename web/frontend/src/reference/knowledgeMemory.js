@@ -1,4 +1,5 @@
 import { h, pageHead, chooseFile, mutate, Api, Store, icon, onClickOutside, toast, navigate, LIVE_KNOWLEDGE, $$, makeSearchBox, append, fill, clamp, emptyState, readDetail, truncateMiddle, fmtBytes, fmtRelative, makePager, renderMarkdownWithWidgets, Overlay, LIVE_MEMORY, LIVE_IMPORTANT_MEMORY, statusBadge, statusText, fmtDateTime, refreshPage, closeOverlays } from './shared.js'
+import { getKnowledgeCategories, getKnowledgeCategoryFilters, knowledgeCategoryKey } from '../knowledgeCategories'
 /* ============================================================================
    pages/knowledge · 三级知识库
    ========================================================================= */
@@ -7,9 +8,12 @@ export const SCOPE_LABEL = { user: '用户层', shared: '共享层', global: '�
 
 export function renderKnowledgePage(ctx) {
   let activeScope = 'all';
+  let activeCategory = 'all';
   let query = '';
   let selected = null;
   let draft = '';
+  let categoryDraft = '';
+  let newCategoryDraft = '';
   let previewMode = 'preview';
   let editorSizeObserver = null;
   ctx.registerCleanup?.(() => editorSizeObserver?.disconnect());
@@ -20,7 +24,57 @@ export function renderKnowledgePage(ctx) {
   const inner = pageEl.firstElementChild;
 
   const listHost = h('div');
+  const categoryHost = h('div.knowledge-category-host');
   const editorHost = h('div');
+  const UNCATEGORIZED = '未分类';
+
+  function drawCategories() {
+    fill(categoryHost);
+    const allCount = LIVE_KNOWLEDGE.documents.filter((document) => (
+      activeScope === 'all' || document.scope === activeScope
+    )).length;
+    const items = [
+      { label: '全部分类', value: 'all', count: allCount },
+      ...getKnowledgeCategoryFilters(LIVE_KNOWLEDGE, activeScope),
+    ];
+    const categorySelect = h('select.select.knowledge-category-filter', {
+      'aria-label': '筛选知识分类',
+      onchange: (event) => { activeCategory = event.target.value; page = 1; draw(); },
+    }, items.map((item) => h('option', {
+      value: item.value,
+      selected: activeCategory === item.value,
+    }, `${item.label}（${item.count}）`)));
+    const createInput = h('input.input.knowledge-category-new-input', {
+      value: newCategoryDraft,
+      placeholder: '分类名…',
+      'aria-label': '新的分类名称',
+      oninput: (event) => {
+        newCategoryDraft = event.target.value;
+        createButton.disabled = !selected || !newCategoryDraft.trim();
+      },
+    });
+    const createButton = h('button.btn.btn-outline.btn-sm', {
+      type: 'button',
+      'aria-label': '新建分类名',
+      disabled: !selected || !newCategoryDraft.trim(),
+      onclick: () => {
+        const value = newCategoryDraft.trim();
+        if (!selected || !value) return;
+        void mutate(
+          () => Api.setKnowledgeCategory(Store.user, selected.scope, selected.relative_path, value),
+          `已创建分类“${value}”并归类当前文件`,
+          () => { categoryDraft = value; newCategoryDraft = ''; },
+        );
+      },
+    }, '新建分类');
+    categoryHost.append(
+      categorySelect,
+      h('div.knowledge-category-create-controls',
+        createInput,
+        createButton,
+      ),
+    );
+  }
 
   inner.appendChild(pageHead({
     title: '知识库',
@@ -52,13 +106,14 @@ export function renderKnowledgePage(ctx) {
   }));
 
   /* 工具栏 + 分页 */
-  const toolbar = h('div.toolbar');
+  const toolbar = h('div.toolbar.knowledge-toolbar');
   const tabBar = h('div.tabs', ['all', 'user', 'shared', 'global'].map((s) =>
     h('button.tab' + (s === activeScope ? '.is-active' : ''), {
       onclick: (ev) => {
-        activeScope = s; page = 1;
+        activeScope = s; activeCategory = 'all'; page = 1;
         $$('.tab', tabBar).forEach((x) => x.classList.remove('is-active'));
         ev.currentTarget.classList.add('is-active');
+        drawCategories();
         draw();
       },
     }, s === 'all' ? '全部' : SCOPE_LABEL[s],
@@ -68,16 +123,14 @@ export function renderKnowledgePage(ctx) {
     placeholder: activeScope === 'user' ? `搜索 users/${Store.user}/knowledge …` : '按名称或路径搜索…',
     onInput: (v) => { query = v.toLowerCase(); page = 1; draw(); },
   });
-  toolbar.append(search, h('div.spacer'),
-    h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } },
-      `生效层级：${(LIVE_KNOWLEDGE.source_policy.knowledge.effective_scopes || []).map((s) => SCOPE_LABEL[s]).join('、')}`),
-  );
+  toolbar.append(search, categoryHost);
 
   /* 行渲染 */
   function draw() {
     fill(listHost);
     const rows = LIVE_KNOWLEDGE.documents.filter((d) => {
       if (activeScope !== 'all' && d.scope !== activeScope) return false;
+      if (activeCategory !== 'all' && knowledgeCategoryKey(d.scope, d.category) !== activeCategory) return false;
       if (query && !(d.title + d.relative_path).toLowerCase().includes(query)) return false;
       return true;
     });
@@ -94,11 +147,13 @@ export function renderKnowledgePage(ctx) {
       return;
     }
 
-    const wrap = h('div.table-wrap');
-    const table = h('table.table',
+    const wrap = h('div.table-wrap.knowledge-table-wrap');
+    const table = h('table.table.knowledge-document-table',
+      h('colgroup', [28, 9, 12, 12, 17, 9, 13].map(width => h('col', { style: { width: `${width}%` } }))),
       h('thead', h('tr',
         h('th', '名称'),
         h('th', '层级'),
+        h('th', '分类'),
         h('th', '主智能体'),
         h('th', '路径'),
         h('th.num', '大小'),
@@ -107,25 +162,26 @@ export function renderKnowledgePage(ctx) {
       h('tbody', slice.map((d) => h('tr' + (selected && selected.relative_path === d.relative_path ? '.is-selected' : ''), {
         style: { cursor: 'pointer' },
         onclick: () => {
-          selected = d; draft = ''; previewMode = 'preview'; draw(); drawEditor();
+          selected = d; draft = ''; categoryDraft = d.category && d.category !== UNCATEGORIZED ? d.category : ''; previewMode = 'preview'; drawCategories(); draw(); drawEditor();
           void readDetail(() => Api.getKnowledgeDocument(Store.user, d.scope, d.relative_path),
-            result => { if (selected === d) { draft = result.content; drawEditor(); } });
+            result => { if (selected === d) { draft = result.content; categoryDraft = result.category && result.category !== UNCATEGORIZED ? result.category : ''; drawEditor(); } });
         },
       },
         h('td',
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '9px' } },
             h('div.file-icon', h('span', { html: icon(d.relative_path.endsWith('.json') ? 'fileCode' : 'fileText', 'icon-sm') })),
             h('div', { style: { minWidth: '0' } },
-              h('div', { style: { fontSize: 'var(--t-sm)', fontWeight: '520' } }, d.title),
-              h('div.file-path', d.relative_path.split('/').pop()),
+              h('div.knowledge-document-title', { title: d.title, style: { fontSize: 'var(--t-sm)', fontWeight: '520' } }, d.title),
+              h('div.file-path', { title: d.relative_path }, d.relative_path.split('/').pop()),
             ),
           ),
         ),
         h('td', h('span', { class: 'scope-tag scope-' + d.scope }, SCOPE_LABEL[d.scope])),
+        h('td', h('span', { class: 'knowledge-category-tag', title: d.category || UNCATEGORIZED }, d.category || UNCATEGORIZED)),
         h('td', d.active_for_main_agent
           ? h('span.badge.badge-success', '已启用')
           : h('span.badge', '已过滤')),
-        h('td', h('span.file-path', truncateMiddle(d.relative_path, 34))),
+        h('td', h('span.file-path', { title: d.relative_path }, d.relative_path)),
         h('td.num', { style: { fontVariantNumeric: 'tabular-nums' } }, fmtBytes(d.size)),
         h('td', { style: { fontSize: 'var(--t-xs)', color: 'var(--text-tertiary)' } }, fmtRelative(d.updated_at)),
       ))),
@@ -164,6 +220,48 @@ export function renderKnowledgePage(ctx) {
           '全局层在 UI 上不提供编辑入口，但 HTTP 层仍可写入。这不是权限缺失，而是界面约束。'),
       ));
     }
+    const categorySelect = h('select.select.knowledge-category-select', {
+      'aria-label': '选择知识分类',
+      onchange: (event) => { categoryDraft = event.target.value; },
+    },
+      h('option', { value: '', selected: !categoryDraft }, UNCATEGORIZED),
+      ...getKnowledgeCategories(LIVE_KNOWLEDGE, selected.scope)
+        .filter((item) => item.name !== UNCATEGORIZED)
+        .map((item) => h('option', {
+          value: item.name,
+          selected: categoryDraft === item.name,
+        }, item.name)),
+    );
+    body.appendChild(h('div.knowledge-category-editor',
+      h('div.knowledge-category-editor-copy',
+        h('strong', '归类到分类'),
+        h('span', '分类文件夹是逻辑标签，文件仍保留原路径'),
+      ),
+      h('div.knowledge-category-controls',
+        categorySelect,
+        h('button.btn.btn-outline.btn-sm', {
+          type: 'button',
+          onclick: () => {
+            const value = categorySelect.value.trim();
+            void mutate(
+              () => Api.setKnowledgeCategory(Store.user, selected.scope, selected.relative_path, value),
+              value ? `已移动到“${value}”` : '已移出分类，归入未分类',
+            );
+          },
+        }, '保存分类'),
+        h('button.btn.btn-ghost.btn-sm', {
+          type: 'button',
+          onclick: () => {
+            categorySelect.value = '';
+            categoryDraft = '';
+            void mutate(
+              () => Api.setKnowledgeCategory(Store.user, selected.scope, selected.relative_path, ''),
+              '已移出分类，归入未分类',
+            );
+          },
+        }, '移出分类'),
+      ),
+    ));
     body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-2)', marginBottom: 'var(--s-3)' } },
       h('div.segments',
         h('button.segment' + (previewMode === 'preview' ? '.is-active' : ''), {
@@ -229,7 +327,8 @@ export function renderKnowledgePage(ctx) {
     }
   }
 
-  inner.append(tabBar, toolbar, h('div.split-wide-right', listHost, editorHost));
+  inner.append(tabBar, toolbar, h('div.knowledge-content-layout', listHost, editorHost));
+  drawCategories();
   draw();
   drawEditor();
   return pageEl;
@@ -548,5 +647,3 @@ export function renderMemoryPage(ctx) {
   drawTiers(); drawList(); drawEditor();
   return pageEl;
 }
-
-

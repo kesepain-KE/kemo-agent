@@ -18,6 +18,19 @@ function response(user = 'alice', category: RuntimeLogCategory = 'all', page = 1
     terminal: category === 'terminal' ? { window_size: 300, loaded_items: 1, stdout_items: 0, stderr_items: 1, process_local: true, retention_seconds: 3600 } : null,
   }
 }
+function messageResponse(user = 'alice'): RuntimeLogsResponse {
+  return {
+    ...response(user, 'message', 1),
+    counts: { all: 1, backend: 0, terminal: 0, threads: 0, message: 1 },
+    entries: [{
+      id: 'message-exchange:1', category: 'message', title: '平台 消息',
+      occurred_at: '2026-09-13T00:00:00Z', status: 'success', duration_ms: null,
+      detail: '输入 / 输出', source: 'sqlite', direction: 'exchange',
+      inputs: [{ id: 'input-1', content: '用户输入第一行\n用户输入第二行', kind: 'text', status: 'success', occurred_at: '2026-09-13T00:00:00Z' }],
+      outputs: [{ id: 'output-1', content: '助手输出正文', kind: 'text', status: 'success', occurred_at: '2026-09-13T00:00:01Z' }],
+    }],
+  }
+}
 function mount(user = 'alice') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const view = render(<QueryClientProvider client={client}><RuntimeLogsPanel user={user} /></QueryClientProvider>)
@@ -68,6 +81,34 @@ describe('执行记录分类日志', () => {
     expect(screen.getByText('实时接收')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '上一页' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '下一页' })).not.toBeInTheDocument()
+  })
+
+  it('消息日志把同一轮输入和输出放在同一张卡片内，并保留换行正文', async () => {
+    getLogs.mockResolvedValue(messageResponse())
+    mount()
+    fireEvent.click(await screen.findByRole('tab', { name: '消息日志' }))
+    expect(await screen.findByText(/用户输入第一行/)).toBeInTheDocument()
+    expect(screen.getByText('助手输出正文')).toBeInTheDocument()
+    expect(screen.getByText('正文输入')).toBeInTheDocument()
+    expect(screen.getByText('正文输出')).toBeInTheDocument()
+    const cards = document.querySelectorAll('[class*="logCard"]')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toHaveTextContent('用户输入第二行')
+    expect(cards[0]).toHaveTextContent('助手输出正文')
+  })
+
+  it('消息日志缺失一侧时明确显示占位，并兼容旧单边记录', async () => {
+    const data = messageResponse()
+    data.entries = [
+      { ...data.entries[0], id: 'input-only', outputs: [] },
+      { ...data.entries[0], id: 'legacy-output', inputs: [], outputs: undefined, direction: 'send', content: '旧版输出正文' },
+    ]
+    getLogs.mockResolvedValue(data)
+    mount()
+    fireEvent.click(await screen.findByRole('tab', { name: '消息日志' }))
+    expect(await screen.findByText('旧版输出正文')).toBeInTheDocument()
+    expect(screen.getAllByText('未记录输出')).toHaveLength(1)
+    expect(screen.getAllByText('未记录输入')).toHaveLength(1)
   })
 
   it('切换用户立即清除旧记录并复位分类，不展示上个用户的缓存', async () => {

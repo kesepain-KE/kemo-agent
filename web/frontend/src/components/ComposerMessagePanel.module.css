@@ -1,6 +1,10 @@
 .panel {
   width: min(var(--conversation-width, 1120px), 100%);
   min-width: 0;
+  min-height: 0;
+  max-height: min(26rem, 38dvh);
+  display: flex;
+  flex-direction: column;
   box-sizing: border-box;
   margin: 0 auto var(--composer-aux-card-gap, .5rem);
   padding: 8px;
@@ -9,7 +13,7 @@
   background: color-mix(in srgb, var(--brand-soft) 32%, var(--surface-elevated));
   box-shadow: var(--shadow-soft);
 }
-.header { min-height: 40px; display: flex; align-items: center; gap: 9px; padding: 2px 3px; }
+.header { min-height: 40px; flex: 0 0 auto; display: flex; align-items: center; gap: 9px; padding: 2px 3px; }
 .icon { width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center; border-radius: 10px; color: var(--brand); background: var(--brand-soft); }
 .copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
 .copy strong { color: var(--text); font-size: .8125rem; }
@@ -23,7 +27,7 @@
 .toggle:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .toggle svg { transition: transform .16s ease; }
 .toggle .chevronOpen { transform: rotate(180deg); }
-.content { min-width: 0; padding-top: 8px; display: grid; gap: var(--composer-aux-card-gap, .5rem); border-top: 1px solid color-mix(in srgb, var(--brand) 18%, var(--line)); }
+.content { min-width: 0; min-height: 0; padding-top: 8px; display: grid; gap: var(--composer-aux-card-gap, .5rem); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; border-top: 1px solid color-mix(in srgb, var(--brand) 18%, var(--line)); }
 .followUps, .guidance { min-width: 0; }
 
 @media (max-width: 620px) {

@@ -48,6 +48,7 @@
 .sortSelectOpen .sortTrigger svg { transform: rotate(180deg); }
 .sortPopover { position: absolute; top: calc(100% + 7px); right: 0; min-width: 168px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 13px; background: var(--surface-elevated); box-shadow: var(--shadow-float); animation: sort-popover-in .14s ease-out; }
 .sortPopover button { width: 100%; min-height: 35px; padding: 0 9px 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: 600 .7rem/1.25 inherit; text-align: left; white-space: nowrap; cursor: pointer; }
+.sortPopover > button + button { margin-block-start: var(--s-1); }
 .sortPopover button:hover, .sortPopover button:focus-visible { outline: 0; background: var(--surface-hover); color: var(--text); }
 .sortPopover button.sortOptionActive { background: var(--memory-soft); color: var(--memory-brand); }
 .sortPopover svg { flex: 0 0 auto; }

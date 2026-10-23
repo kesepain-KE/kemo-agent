@@ -60,7 +60,7 @@ const categoryHints: Record<RuntimeLogCategory, string> = {
   backend: '系统及当前用户的定时任务、工具调用与 RuntimeHost 组件生命周期摘要。',
   threads: '当前后端进程线程快照，不是历史执行轨迹；不会展示线程私有数据。',
   terminal: '展示启动 kemo-agent 时可见终端的标准输出与标准错误；内容只保留当前进程内的安全快照，重启后重新开始记录。',
-  message: '仅展示当前用户的消息收发元数据，不复制消息正文、会话标识及附件路径。',
+  message: '展示当前用户消息轮次的脱敏输入与输出正文；不会下发会话标识、用户标识或附件路径。',
 }
 
 function statusTone(status: string) {
@@ -89,6 +89,49 @@ function StatCard({ icon, label, value, detail, tone = 'default' }: {
     <span className={styles.statIcon}>{icon}</span>
     <span className={styles.statCopy}><small>{label}</small><strong>{value}</strong><em>{detail}</em></span>
   </article>
+}
+
+function messageParts(entry: RuntimeLogEntry, direction: 'inputs' | 'outputs') {
+  if (Array.isArray(entry[direction])) return entry[direction]
+  // Keep older single-sided API snapshots visible while the backend projection
+  // rolls out. They still render inside the same exchange card.
+  const legacyDirection = direction === 'inputs' ? 'receive' : 'send'
+  if (entry.direction === legacyDirection && entry.content !== undefined) {
+    return [{
+      id: `${entry.id}:${direction}`,
+      content: entry.content,
+      kind: entry.kind || 'text',
+      status: entry.status,
+      occurred_at: entry.occurred_at,
+    }]
+  }
+  return []
+}
+
+function MessageBody({
+  entry,
+  direction,
+  label,
+  empty,
+}: {
+  entry: RuntimeLogEntry
+  direction: 'inputs' | 'outputs'
+  label: string
+  empty: string
+}) {
+  const parts = messageParts(entry, direction)
+  return <section className={styles.messageBody} aria-label={label}>
+    <span className={styles.messageBodyLabel}>{label}</span>
+    {parts.length ? <div className={styles.messageParts}>
+      {parts.map((part, index) => <div className={styles.messagePart} key={part.id || `${entry.id}:${direction}:${index}`}>
+        <div className={styles.messagePartBadges}>
+          {part.kind === 'file' ? <span className={styles.messageBadge}>附件</span> : null}
+          {part.status === 'failed' || part.status === 'error' ? <span className={`${styles.messageBadge} ${styles.messageBadgeDanger}`}>失败</span> : null}
+        </div>
+        <pre>{part.content || '（无文本正文）'}</pre>
+      </div>)}
+    </div> : <p className={styles.messageEmpty}>{empty}</p>}
+  </section>
 }
 
 function TerminalOutput({ entries, summary }: {
@@ -229,7 +272,8 @@ function LogView({ user, className }: { user: string; className: string }) {
         if (category === 'terminal') return null
         const EntryIcon = categoryIcons[entry.category]
         const SourceIcon = sources[entry.source].icon
-        return <article key={entry.id} className={`${styles.logCard} ${styles[`category_${entry.category}`] || ''}`}>
+        const isMessage = entry.category === 'message'
+        return <article key={entry.id} className={`${styles.logCard} ${styles[`category_${entry.category}`] || ''} ${isMessage ? styles.messageCard : ''}`}>
           <span className={styles.entryIcon}><EntryIcon size={17} /></span>
           <span className={styles.identity}><strong title={entry.title}>{entry.title}</strong><small>{categoryLabels[entry.category]}</small></span>
           <div className={styles.metadata}>
@@ -239,6 +283,10 @@ function LogView({ user, className }: { user: string; className: string }) {
           </div>
           <span className={styles.detail} title={entry.detail || undefined}>{entry.detail}</span>
           <span className={`${styles.status} ${styles[`status_${statusTone(entry.status)}`] || ''}`}><i />{states[entry.status] || entry.status}</span>
+          {isMessage ? <div className={styles.messageExchange}>
+            <MessageBody entry={entry} direction="inputs" label="正文输入" empty="未记录输入" />
+            <MessageBody entry={entry} direction="outputs" label="正文输出" empty="未记录输出" />
+          </div> : null}
         </article>
       })}
       {data && category !== 'terminal' && !data.entries.length ? <p className={styles.empty}>{data.source_errors.length ? '部分日志源不可用，暂时没有可显示的记录。' : '当前分类暂无记录。'}</p> : null}

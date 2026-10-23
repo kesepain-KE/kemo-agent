@@ -26,6 +26,29 @@ const comparisonSource = JSON.stringify({
 })
 
 describe('inline widget protocol', () => {
+  it('parses the native educational interactive visual and derives a readable fallback', () => {
+    const result = parseInlineWidget(JSON.stringify({
+      schema_version: 1,
+      id: 'solar-system-visual',
+      component: 'orbit',
+      props: {
+        kind: 'orbit',
+        title: '行星相对运动',
+        description: '拖动时间轴或调整速度观察周期差异。',
+        center: { label: '太阳' },
+        bodies: [
+          { label: '地球', orbit: 3, period: 1, color: 'blue', detail: '一年完成一周。' },
+          { label: '火星', orbit: 4, period: 1.88, color: 'rose' },
+        ],
+      },
+    }))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.message)
+    expect(result.widget.component).toBe('interactive-visual')
+    expect(result.widget.fallbackText).toContain('地球：第 3 轨道')
+  })
+
   it('parses a versioned comparison widget', () => {
     const result = parseInlineWidget(comparisonSource)
 

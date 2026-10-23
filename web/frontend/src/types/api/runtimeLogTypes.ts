@@ -1,5 +1,13 @@
 export type RuntimeLogCategory = 'all' | 'backend' | 'threads' | 'terminal' | 'message'
 
+export interface RuntimeMessageBody {
+  id: string
+  content: string
+  kind: string
+  status: string
+  occurred_at: string
+}
+
 export interface RuntimeLogEntry {
   id: string
   category: Exclude<RuntimeLogCategory, 'all'>
@@ -14,6 +22,8 @@ export interface RuntimeLogEntry {
   content?: string
   direction?: string
   kind?: string
+  inputs?: RuntimeMessageBody[]
+  outputs?: RuntimeMessageBody[]
 }
 
 export interface RuntimeLogsResponse {

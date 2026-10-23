@@ -439,6 +439,26 @@ const carouselPropsSchema = z.object({
   images: z.array(mediaItemSchema).min(1).max(50),
   start_index: z.number().int().min(0).max(49).optional(),
 }).strict()
+const orbitColorSchema = z.enum(['blue', 'cyan', 'amber', 'violet', 'rose', 'green', 'slate'])
+const interactiveVisualPropsSchema = z.object({
+  title: shortTextSchema.optional(),
+  description: bodyTextSchema.optional(),
+  kind: z.literal('orbit'),
+  center: z.object({
+    label: z.string().trim().min(1).max(120),
+    tone: toneSchema.optional(),
+  }).strict().optional(),
+  bodies: z.array(z.object({
+    label: z.string().trim().min(1).max(120),
+    orbit: z.number().int().min(1).max(8),
+    radius: z.number().finite().min(3).max(16).optional(),
+    period: z.number().finite().positive().max(1_000).optional(),
+    angle: z.number().finite().min(-360).max(360).optional(),
+    color: orbitColorSchema.optional(),
+    detail: z.string().trim().max(500).optional(),
+  }).strict()).min(1).max(16),
+  time_label: z.string().trim().max(80).optional(),
+}).strict()
 
 const genericCardPropsSchema = z.object({
   title: z.string().trim().max(MAX_TITLE_CHARS).optional(),
@@ -478,6 +498,7 @@ export const componentNames = [
   'image',
   'gallery',
   'carousel',
+  'interactive-visual',
   ...extendedComponentNames,
   'generic-card',
 ] as const
@@ -532,6 +553,7 @@ export const propsSchemas = {
   image: imagePropsSchema,
   gallery: galleryPropsSchema,
   carousel: carouselPropsSchema,
+  'interactive-visual': interactiveVisualPropsSchema,
   ...extendedPropsSchemas,
   'generic-card': genericCardPropsSchema,
 } satisfies Record<InlineWidgetComponentName, z.ZodTypeAny>
@@ -568,6 +590,7 @@ export type ComponentPropsMap = {
   image: z.infer<typeof imagePropsSchema>
   gallery: z.infer<typeof galleryPropsSchema>
   carousel: z.infer<typeof carouselPropsSchema>
+  'interactive-visual': z.infer<typeof interactiveVisualPropsSchema>
   'ui-card': ExtendedPropsMap['ui-card']
   map: ExtendedPropsMap['map']
   'media-player': ExtendedPropsMap['media-player']

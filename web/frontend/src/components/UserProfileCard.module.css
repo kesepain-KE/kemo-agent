@@ -18,6 +18,7 @@
 .menuIdentity > svg { color: var(--success); }
 .menuAvatar { width: 30px; height: 30px; }
 .menuItem, .userOption { width: 100%; display: flex; align-items: center; gap: 9px; padding: 9px 10px; text-align: left; border-radius: var(--r-sm); text-decoration: none; color: var(--text-secondary); font-size: var(--t-xs); cursor: pointer; background: transparent; }
+.menuItem + .menuItem, .userOption + .userOption { margin-block-start: var(--s-1); }
 .menuItem:hover, .userOption:hover { background: var(--bg-hover); color: var(--text-primary); }
 .menuItem svg { color: var(--text-tertiary); }
 .dangerItem, .dangerItem svg { color: var(--danger); }

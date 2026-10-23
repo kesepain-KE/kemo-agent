@@ -524,9 +524,9 @@ export function renderStatusPage(ctx) {
             h('div', { style: { flex: '1', minWidth: '0' } },
               h('div.runtime-log-title', e.title),
               e.detail ? h('div.runtime-log-detail', e.detail) : null,
-              e.category === 'message' ? h('div.runtime-message-body',
-                h('span.badge', e.direction === 'receive' ? '正文输入' : e.direction === 'send' ? '正文输出' : '消息正文'),
-                h('pre', e.content || '（无文本正文）'),
+              e.category === 'message' ? h('div.runtime-message-exchange',
+                messageBody(e, 'inputs', '正文输入', '未记录输入'),
+                messageBody(e, 'outputs', '正文输出', '未记录输出'),
               ) : null,
               h('div.runtime-log-meta',
                 h('span.badge', e.category),
@@ -539,7 +539,15 @@ export function renderStatusPage(ctx) {
             h('button.icon-btn', {
               style: { width: '26px', height: '26px' },
               'aria-label': '复制日志', title: '复制日志',
-              onclick: () => { void copyText([e.title, e.detail, e.content].filter(Boolean).join('\n')); },
+              onclick: () => {
+                const bodies = e.category === 'message'
+                  ? ['inputs', 'outputs'].map((direction, index) => {
+                    const parts = messageParts(e, direction);
+                    return [(index === 0 ? '正文输入' : '正文输出'),
+                      parts.length ? parts.map(part => part.content || '（无文本正文）').join('\n\n') : (index === 0 ? '未记录输入' : '未记录输出')].join('\n');
+                  }) : [e.content];
+                void copyText([e.title, e.detail, ...bodies].filter(Boolean).join('\n'));
+              },
             }, h('span', { html: icon('copy', 'icon-sm') })),
           ));
         });
@@ -570,5 +578,24 @@ export function renderStatusPage(ctx) {
 
   draw();
   return pageEl;
+}
+
+function messageParts(entry, direction) {
+  if (Array.isArray(entry[direction])) return entry[direction];
+  // A single-sided older API snapshot still renders in an exchange card.
+  return entry.direction === (direction === 'inputs' ? 'receive' : 'send')
+    ? [{ content: entry.content, kind: entry.kind, status: entry.status }] : [];
+}
+
+function messageBody(entry, direction, label, empty) {
+  const parts = messageParts(entry, direction);
+  return h('section.runtime-message-body', { 'aria-label': label },
+    h('span.badge', label),
+    parts.length ? parts.map(part => h('div.runtime-message-part',
+      part.kind === 'file' ? h('span.badge', '附件') : null,
+      part.status === 'failed' ? h('span.badge', '失败') : null,
+      h('pre', part.content || '（无文本正文）'),
+    )) : h('p.runtime-muted', empty),
+  );
 }
 

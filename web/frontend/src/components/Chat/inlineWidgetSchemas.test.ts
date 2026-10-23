@@ -19,7 +19,7 @@ describe('inline widget schema contract', () => {
       expect(propsSchemas[name]).toBeDefined()
     }
     expect(componentNames).toEqual(expect.arrayContaining([
-      'form', 'confirm', 'approval', 'map', 'poll', 'rating', 'generic-card',
+      'form', 'confirm', 'approval', 'map', 'poll', 'rating', 'interactive-visual', 'generic-card',
     ]))
   })
 

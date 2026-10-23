@@ -1,3 +1,5 @@
+import { OrbitVisualWidget } from './InlineWidgetOrbit'
+import { WidgetHeader, displayValue, toneClass } from './InlineWidgetPrimitives'
 import { useMemo, useState } from 'react'
 import { ChevronDown, LoaderCircle, TriangleAlert } from 'lucide-react'
 import {
@@ -8,33 +10,6 @@ import {
 } from './inlineWidgetProtocol'
 import { ExtendedInlineWidget } from './InlineWidgetExtended'
 import styles from './InlineWidget.module.css'
-
-function toneClass(tone: InlineWidgetTone | undefined): string {
-  return styles[tone || 'neutral'] || styles.neutral
-}
-
-function displayValue(value: string | number | boolean | null | undefined): string {
-  if (value === null || value === undefined || value === '') return '—'
-  if (typeof value === 'boolean') return value ? '是' : '否'
-  return String(value)
-}
-
-function WidgetHeader({ title, description, status }: {
-  title?: string
-  description?: string
-  status?: { label: string; tone?: InlineWidgetTone }
-}) {
-  if (!title && !description && !status) return null
-  return (
-    <header className={styles.header}>
-      <div className={styles.heading}>
-        {title ? <h3>{title}</h3> : null}
-        {description ? <p>{description}</p> : null}
-      </div>
-      {status ? <span className={`${styles.status} ${toneClass(status.tone)}`}>{status.label}</span> : null}
-    </header>
-  )
-}
 
 function ComparisonWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { component: 'comparison-card' }> }) {
   const { title, description, status, items, calculation, highlight } = widget.props
@@ -749,6 +724,7 @@ function RenderedInlineWidget({ widget, onAction }: { widget: InlineWidgetDefini
     case 'image': return <ImageWidget widget={widget} />
     case 'gallery': return <GalleryWidget widget={widget} />
     case 'carousel': return <CarouselWidget widget={widget} />
+    case 'interactive-visual': return <OrbitVisualWidget widget={widget} />
     case 'ui-card': case 'map': case 'media-player': case 'file-list':
     case 'product-grid': case 'order-summary': case 'poll': case 'rating':
       return <ExtendedInlineWidget widget={widget} onAction={onAction} />
