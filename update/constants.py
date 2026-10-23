@@ -37,6 +37,8 @@ RUNTIME_EXCLUDES = (
     "global_knowledge/kemo-graph-storage/",
     "global_knowledge/classify.sqlite3",
     "global_knowledge/classify.sql",
+    "shared_knowledge/classify.sqlite3",
+    "shared_knowledge/classify.sql",
     "web/node_modules/",
     "web/frontend/node_modules/",
     ".env",
