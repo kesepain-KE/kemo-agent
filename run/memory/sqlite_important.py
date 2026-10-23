@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from run.memory.sqlite import SqliteMemoryStore
+
 from datetime import date, datetime, timedelta
 import json
 import math
@@ -19,6 +26,12 @@ from run.memory.sqlite_support import (
 )
 
 class ImportantStoreMixin:
+    if TYPE_CHECKING:
+        _lock: threading.RLock
+        _row_by_filename = SqliteMemoryStore._row_by_filename
+        root: Path
+        user: str
+
     def _important_view_snapshot(
         self, *, now: datetime | None = None,
     ) -> tuple[dict[str, Any], list[sqlite3.Row]]:

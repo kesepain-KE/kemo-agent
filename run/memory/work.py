@@ -30,6 +30,12 @@ class WorkLedger:
         result["source"] = json.loads(result.pop("source_json"))
         return result
 
+    def require(self, key: str) -> dict:
+        item = self.get(key)
+        if item is None:
+            raise KeyError(f"Memory work item is missing: {key}")
+        return item
+
     def enqueue(self, kind: str, key: str, payload: dict, source: dict | None = None):
         from run.memory import iso, utc_now
         stamp = iso(utc_now())
@@ -40,7 +46,7 @@ class WorkLedger:
                 ) VALUES(?,?,?,?,?,?)""",
                 (kind, key, json.dumps(payload, ensure_ascii=False),
                  json.dumps(source or {}, ensure_ascii=False), stamp, stamp))
-        return self.get(key)
+        return self.require(key)
 
     def save(self, key: str, payload: dict, *, completed: bool = False,
              error: str | None = None, lease_token: str | None = None):
@@ -80,4 +86,4 @@ class WorkLedger:
                 """SELECT work_key FROM memory_work_items
                    WHERE work_type=? AND status!='completed' ORDER BY item_id LIMIT ?""",
                 (kind, limit)).fetchall()]
-        return [self.get(key) for key in keys]
+        return [self.require(key) for key in keys]

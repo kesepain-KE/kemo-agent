@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from run.memory.sqlite import SqliteMemoryStore
+
 from datetime import date, datetime, timedelta
 import json
 import math
@@ -19,6 +26,12 @@ from run.memory.sqlite_support import (
 )
 
 class FragmentStoreMixin:
+    if TYPE_CHECKING:
+        _lock: threading.RLock
+        root: Path
+        rules: dict[str, Any]
+        user: str
+
     def database_path(self) -> Path:
         return database_path(self.root, self.user)
 

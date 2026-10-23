@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from run.memory.sqlite import SqliteMemoryStore
+
 from datetime import date, datetime, timedelta
 import json
 import math
@@ -19,6 +26,19 @@ from run.memory.sqlite_support import (
 )
 
 class CandidateStoreMixin:
+    if TYPE_CHECKING:
+        _insert_fragment = SqliteMemoryStore._insert_fragment
+        _lock: threading.RLock
+        _promote_location = SqliteMemoryStore._promote_location
+        _promote_row = SqliteMemoryStore._promote_row
+        _row_by_filename = SqliteMemoryStore._row_by_filename
+        _touch_row = SqliteMemoryStore._touch_row
+        database_path = SqliteMemoryStore.database_path
+        load_all = SqliteMemoryStore.load_all
+        root: Path
+        rules: dict[str, Any]
+        user: str
+
     def _load_operation(
         self, database: sqlite3.Connection, operation_id: str
     ) -> dict[str, Any] | None:

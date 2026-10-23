@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from run.memory.sqlite import SqliteMemoryStore
+
 from datetime import date, datetime, timedelta
 import json
 import math
@@ -20,6 +27,13 @@ from run.memory.sqlite_support import (
 )
 
 class PromotionStoreMixin:
+    if TYPE_CHECKING:
+        _lock: threading.RLock
+        _new_meta = SqliteMemoryStore._new_meta
+        _row_by_filename = SqliteMemoryStore._row_by_filename
+        root: Path
+        user: str
+
     def _promote_row(
         self,
         database: sqlite3.Connection,
@@ -251,6 +265,8 @@ class PromotionStoreMixin:
                         row["expires_at"],
                     ),
                 )
-                targets.append((int(inserted.lastrowid), filename, _hash(content)))
+                if inserted.lastrowid is None:
+                    raise RuntimeError("Memory promotion insert did not return an identifier")
+                targets.append((inserted.lastrowid, filename, _hash(content)))
             transfer_sources(database, source_id, row["content_hash"], targets)
             return [filename for filename, _content in prepared]

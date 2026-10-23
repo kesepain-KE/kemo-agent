@@ -59,7 +59,7 @@ def run_extraction_pages(context, input_data):
                               metadata=deepcopy(state["metadata"]))
     if ledger:
         with ledger.lease(key) as token:
-            state = ledger.get(key)["payload"]
+            state = ledger.require(key)["payload"]
             return _run_pages(context, input_data, ledger, key, state, limit, token)
     return _run_pages(context, input_data, None, key, state, limit, None)
 

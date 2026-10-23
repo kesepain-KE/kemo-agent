@@ -27,7 +27,7 @@ def settle_conversion(store, job, decision=None):
     if not job:
         return True
     ledger = WorkLedger(store.root, store.user)
-    state = ledger.get(job["work_key"])["payload"]
+    state = ledger.require(job["work_key"])["payload"]
     requested = state["promotion"]
     sources = reconcile(store.root, store.user)
     # A checked source binding is authoritative, never the model's skill_created flag.
@@ -54,7 +54,7 @@ def retry_conversions(store, runner, cancel_event=None, *, limit=8):
             break
         if settle_conversion(store, job):
             continue
-        state = ledger.get(job["work_key"])["payload"]
+        state = ledger.require(job["work_key"])["payload"]
         original = state["promotion"]
         with connection(store.root, store.user) as db:
             entries = [db.execute("SELECT * FROM memory_fragments WHERE id=?",

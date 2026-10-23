@@ -109,7 +109,7 @@ def extract_compressed_round_memory(
     round_numbers: list[int] = []
     for raw_round in complete_rounds:
         try:
-            round_numbers.append(int(raw_round.get("round")))
+            round_numbers.append(int(numeric_value if (numeric_value := raw_round.get("round")) is not None else ""))
         except (TypeError, ValueError):
             pass
 

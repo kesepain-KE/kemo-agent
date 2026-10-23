@@ -72,7 +72,7 @@ def analyze_memory_batch(
     round_numbers = [max(0, int(item.get("round") or 0)) for item in rounds]
     if any(number < 1 for number in round_numbers):
         raise EngineError("记忆批量分析包含无效轮次")
-    effective_source = dict(
+    effective_source: dict[str, Any] = dict(
         source
         or {
             "source": "round_commit",
@@ -591,9 +591,7 @@ def extract_memory_backlog(
             record_provider_request(usage, usage_from_dict(extraction_usage))
         if extraction.get("status") not in {"completed", "skipped"}:
             error = (
-                extraction.get("error")
-                if isinstance(extraction.get("error"), dict)
-                else {"message": "记忆提取失败"}
+                (checked_594 if isinstance(checked_594 := extraction.get("error"), dict) else {"message": "记忆提取失败"})
             )
             data["memory_status"] = "failed"
             data["memory_error"] = error
