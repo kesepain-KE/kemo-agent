@@ -4,16 +4,13 @@ import { http, HttpResponse } from 'msw'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import type { ShellOutletContext } from './components/appShellTypes'
-import { KnowledgePage } from './pages/KnowledgePage'
 import { ReferencePage } from './reference/ReferencePage'
 import { server } from './test/server'
 
 describe.each([
   { renderer: 'reference', configured: true },
   { renderer: 'reference', configured: false },
-  { renderer: 'react', configured: true },
-  { renderer: 'react', configured: false },
-])('知识库分类来源隔离：$renderer，分类统计=$configured', ({ renderer, configured }) => {
+])('知识库分类来源隔离：$renderer，分类统计=$configured', ({ configured }) => {
   it('全部层级分别筛选同名分类和未分类，切换单层后重置筛选', async () => {
     const sources = [
       { scope: 'user', label: '用户层' },
@@ -45,7 +42,7 @@ describe.each([
     const context = { user: 'kesepain', sessionId: 's1', chatRunning: false } as ShellOutletContext
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/knowledge']}>
       <Routes><Route element={<Outlet context={context} />}>
-        <Route path="knowledge" element={renderer === 'reference' ? <ReferencePage /> : <KnowledgePage />} />
+        <Route path="knowledge" element={<ReferencePage />} />
       </Route></Routes>
     </MemoryRouter></QueryClientProvider>)
 

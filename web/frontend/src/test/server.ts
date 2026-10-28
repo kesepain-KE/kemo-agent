@@ -49,6 +49,10 @@ function pagedFiles(request: Request, entries: typeof userFileEntries, summary: 
 }
 
 export const handlers = [
+  http.get('/api/users/:user/background/status', ({ params }) => HttpResponse.json({
+    user: params.user, available: false, filename: '', media_kind: '', mime_type: '', size: 0, revision: '', error: '',
+    settings: { enabled: false, overlay_opacity: 0.65, blur: 0 },
+  })),
   http.post('/api/system/restart', async ({ request }) => {
     const body = await request.json() as { port: number }
     return HttpResponse.json({ ok: true, port: body.port, helper_pid: 4321 })
@@ -198,9 +202,11 @@ export const handlers = [
   http.delete('/api/users/kesepain/sessions/:sessionId', ({ params }) => HttpResponse.json({
     user: 'kesepain', source: 'web', session_id: params.sessionId, deleted: true,
   })),
-  http.get('/api/users/kesepain/overview', () => HttpResponse.json({
-    user: 'kesepain', session_id: '',
-    context: { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated: false }, limit: 120000, percent: 0, rounds: 0, round_limit: 30 },
+  http.get('/api/users/kesepain/overview', ({ request }) => {
+    const sessionId = new URL(request.url).searchParams.get('session_id') || ''
+    return HttpResponse.json({
+    user: 'kesepain', session_id: sessionId,
+    context: { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated: false, cache_hit_rate: sessionId ? 0.8 : null }, limit: 120000, percent: 0, rounds: 0, session_total_rounds: 0, archived_rounds: 0, round_limit: 30 },
     provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true },
     counts: { sessions: 1, knowledge_documents: 3, enabled_tools: 2, enabled_agents: 1, active_tasks: 0 },
     context_window: {
@@ -214,12 +220,13 @@ export const handlers = [
       injection_policy: { expand: 'round', perception: 'round' },
     },
     context_snapshot: { available: true, source: 'runtime_recalculated', measurement: 'estimated', captured_at: '2026-07-22T00:00:00Z', system_prompt_tokens: 18200, tool_schema_tokens: 2400, conversation_tokens: 1800, summary_tokens: 0, other_tokens: 0, total_tokens: 22400, capacity_tokens: 120000, percent: 18.67, foreground_rounds: 8 },
-    session_context_stats: { selected: false, foreground_rounds: 8, background_archived_rounds: 36, session_total_rounds: 44, session_tool_calls: 19 },
+    session_context_stats: { selected: Boolean(sessionId), foreground_rounds: 8, background_archived_rounds: 36, session_total_rounds: 44, session_tool_calls: 19 },
     agents: [{ name: 'context_manage', description: '上下文摘要', enabled: true, source: 'builtin', execution: 'sync', model_profile: 'default', exposure: 'internal' }],
     summary_cache: { exists: false, covered_rounds: [], created_at: '', window: '' },
     runtime_host: { state: 'unmanaged', components: {} },
     active_plan: null, activities: [],
-  })),
+    })
+  }),
   http.get('/api/users/:user/runtime/logs', ({ params, request }) => HttpResponse.json({
     user: params.user, category: new URL(request.url).searchParams.get('category') || 'all',
     entries: [], counts: { all: 0, backend: 0, threads: 0, terminal: 0, message: 0 },
@@ -521,4 +528,11 @@ export const handlers = [
   http.delete('/api/users/kesepain/expand/user/:module', () => HttpResponse.json({ deleted: true })),
 ]
 
-export const server = setupServer(...handlers)
+export const server = setupServer(...handlers,
+  http.get('/api/users/:user/workspace/jobs', () => HttpResponse.json({
+    jobs: [], active_count: 0, total: 0, page: 1, total_pages: 1,
+  })),
+  http.get('/api/users/:user/workspace/agents', () => HttpResponse.json({
+    tasks: [], total: 0, page: 1, total_pages: 1,
+  })),
+)

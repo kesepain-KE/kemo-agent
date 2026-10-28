@@ -33,6 +33,19 @@ function recognitionConstructor(): BrowserSpeechRecognitionConstructor | undefin
   return speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition
 }
 
+function detachRecognition(recognition: BrowserSpeechRecognition, abort: boolean) {
+  recognition.onresult = null
+  recognition.onerror = null
+  recognition.onend = null
+  if (abort) {
+    try {
+      recognition.abort()
+    } catch (error) {
+      console.warn('无法中止语音识别:', error)
+    }
+  }
+}
+
 export interface SpeechRecognitionHook {
   listening: boolean
   supported: boolean
@@ -46,6 +59,13 @@ export function useSpeechRecognition(onResult: (text: string) => void): SpeechRe
   const onResultRef = useRef(onResult)
   onResultRef.current = onResult
   const supported = Boolean(recognitionConstructor())
+
+  const finish = useCallback((recognition: BrowserSpeechRecognition, abort = false) => {
+    if (recognitionRef.current !== recognition) return
+    recognitionRef.current = null
+    detachRecognition(recognition, abort)
+    setListening(false)
+  }, [])
 
   const stop = useCallback(() => {
     const recognition = recognitionRef.current
@@ -63,6 +83,7 @@ export function useSpeechRecognition(onResult: (text: string) => void): SpeechRe
     recognition.interimResults = false
     recognition.continuous = false
     recognition.onresult = (event) => {
+      if (recognitionRef.current !== recognition) return
       const fragments: string[] = []
       for (let index = 0; index < event.results.length; index += 1) {
         const transcript = event.results[index]?.[0]?.transcript?.trim()
@@ -72,33 +93,29 @@ export function useSpeechRecognition(onResult: (text: string) => void): SpeechRe
       if (text) onResultRef.current(text)
     }
     recognition.onerror = (event) => {
+      if (recognitionRef.current !== recognition) return
       console.warn('语音识别错误:', event.error)
-      setListening(false)
+      finish(recognition, true)
     }
     recognition.onend = () => {
-      recognitionRef.current = null
-      setListening(false)
+      finish(recognition)
     }
 
     recognitionRef.current = recognition
     try {
       recognition.start()
-      setListening(true)
+      if (recognitionRef.current === recognition) setListening(true)
     } catch (error) {
-      recognitionRef.current = null
-      setListening(false)
+      finish(recognition, true)
       console.warn('无法启动语音识别:', error)
     }
-  }, [])
+  }, [finish])
 
   useEffect(() => () => {
     const recognition = recognitionRef.current
     if (!recognition) return
-    recognition.onresult = null
-    recognition.onerror = null
-    recognition.onend = null
-    recognition.abort()
     recognitionRef.current = null
+    detachRecognition(recognition, true)
   }, [])
 
   return { listening, supported, start, stop }
