@@ -2,6 +2,70 @@
 
 本文集中说明历史、记忆、运行状态、结构化日志和高频写盘的当前持久化规则。各章节保持独立职责，代码和数据库实现是事实来源。
 
+## SQLite 初始化、迁移与恢复安全
+
+history、tasks、logs、memory 四类库共用 `run/infra/sqlite_migrations.py` 的安全边界：
+
+| 数据库 | 版本权威 | 当前 schema |
+|---|---|---|
+| `users/<user>/history/history.sqlite3` | `history_meta.schema_version` | 8 |
+| `users/<user>/task_plan/task_plans.sqlite3` | `task_plan_meta.schema_version` | 1（与计划 JSON 的版本独立） |
+| `runtime/logs.sqlite3` | `PRAGMA user_version` | 3 |
+| `users/<user>/improve/memory.sqlite3` | `memory_meta.schema_version` | 2 |
+
+- 初始化先取得 `BEGIN IMMEDIATE` 写保留锁，再读取版本；版本超前、负数或非法版本明确失败，
+  拒绝前不建表、不补列、不改版本、不切换 journal mode。无版本的既有库按未版本化库处理，
+  但仍先备份；全新空库无需生成空备份。
+- 既有库确需升级，或当前版本库缺少已知新增表/列时，在任何迁移写入前生成
+  `<数据库文件名>.bak.v<原版本>.<UTC时间戳>-<唯一标识>`。备份使用 SQLite backup API，
+  含已提交的 WAL 数据，完成后执行 `quick_check`；失败阻止迁移。
+- 写保留锁期间通过**第二个只读连接**备份，不能在持有写事务的连接上调用其自身的
+  `backup()`，以免等待自身事务。数据库写锁覆盖“版本复查→备份→迁移提交”，不同进程
+  不能同时按旧版本重复迁移。备份有超时；未完成文件保留 `.partial` 后缀，不算可用备份。
+- 建表、已知旧列补齐、历史正文/轮次变换和最终版本戳在一个事务内提交。DDL 不使用会隐式
+  提交前置事务的 `executescript()`。失败回滚结构、数据及版本，并报告已有备份位置；
+  失败不能进入进程内 ready 缓存，下一次可重试。
+- history v2/v3 保留原有正文/轮次变换，v4～v7 的删除栅栏、物理 tombstone、租约及个人标记
+  由幂等建表完成，不虚构未知旧版迁移。tasks 补齐 `reminder/current_step`，logs 补齐
+  `exchange_id` 及四个 `input_*` 状态字段，memory 保留来源列和待办租约列迁移；
+  已有业务记录不因新增列而丢弃。这里不承诺自动修复任意未知或损坏的旧表结构。
+- history 的完整期望列由 `run/history/schema_contract.py` 声明；已知状态等安全新增列在建索引
+  前补齐，缺失身份/正文等不可推导列则备份后拒绝猜测。缺少或回退的版本戳不会授权清空已有
+  规范化消息/轮次：已识别的 compact 引用幂等跳过，支持的无版本旧格式仍可迁移；JSON 损坏、
+  引用表缺失、混合分区或内联/规范化内容冲突则整批回滚并报告备份。
+- 迁移成功后才启用原有 WAL 等运行配置；正常读取继续使用已有 ready 缓存，不逐次备份。
+  **迁移备份和更新前数据库备份均不自动清理**，备份保留策略由用户单独决定。
+
+旧源码更新器 `update.py` 的 core 流程在初始化任何用户库前，先对全部已有用户 history、
+memory、tasks 和实例 logs 生成独立备份集，位置为 `runtime/db_backups/update-<时间>-<唯一标识>/`，
+`manifest.json` 记录源库和备份相对安装根的对应路径。全部复制成功才标记 `complete`，
+任一失败均不开始数据库初始化；dry-run 不生成备份。单独调用初始化函数也有同一前置保护。
+它是各库独立的一致性快照，**不是跨库同一时刻快照**；更新前仍须停止所有框架写入进程。
+独立 deploy 渠道的源文件回滚规则不能据此推断，见 `deployment-and-release.md`。
+
+### 手工恢复单库
+
+源码回滚不会自动回滚用户数据库。恢复前先停止 Web、CLI、Cron 等全部写入进程，
+保留当前库及其 `-wal/-shm` 作为现场；依据 `manifest.json` 或错误提示选定备份，
+核实安装根和用户，再恢复。不要让旧进程继续持有被恢复的数据库连接。
+下面是需由操作者替换路径、审查后执行的单库示例，不是自动恢复入口：
+
+```powershell
+$backup = 'E:\选定的备份目录\users\alice\history\history.sqlite3'
+$target = 'D:\实际安装根\users\alice\history\history.sqlite3'
+python -c "import sqlite3,sys; from pathlib import Path; from contextlib import closing; b=Path(sys.argv[1]).resolve(); t=Path(sys.argv[2]).resolve(); assert b!=t and b.is_file() and t.is_file(); s=sqlite3.connect(b.as_uri()+'?mode=ro',uri=True); d=sqlite3.connect(t); s.backup(d); d.close(); s.close()" "$backup" "$target"
+```
+
+恢复全部库时逐项核对同一备份集，不拼接不同更新批次。恢复后先验证库的完整性与适配代码
+版本；不要只降级代码后直接运行更高版本库。
+
+## 业务智能体任务账本
+
+`users/<user>/runtime/agent_tasks.sqlite3` 独立保存业务父子任务归属、真实执行终态、
+待处理结果／处理确认以及最近 160 条公开事件。它不替代会话历史、系统维护队列或任务计划库。
+入队前登记与完成封口的事务屏障、调度器快照顺序、进程存活核验／interrupted、
+脱敏及有界查询合同见 `agent-task-coordination.md`。
+
 ## 历史对话 SQLite 存储
 
 历史对话以每用户独立的 `users/<user>/history/history.sqlite3` 为唯一权威存储。旧式 `history/data.json`、`history/<window>/*.json` 和 `history/temp/<window>/*.json` 不再参与读取，也不会自动导入。
@@ -12,6 +76,7 @@
 |---|---|
 | `history_windows` | archive 完整权威归档；旧版 runtime 行仅作为兼容快照保留，不再在每轮终态重写 |
 | `history_sessions` | 会话卡片、生命周期、运行态、摘要与记忆任务状态 |
+| `history_session_marks` | schema v7 的个人置顶时间和收藏；按用户库内 source/session_id 隔离，外键随会话删除，普通 Run 索引写入不能覆盖 |
 | `history_active_sessions` | Web、App、CLI 和外部消息入口的逻辑续接绑定；只指向仍为 open 的会话 |
 | `history_web_leases` | schema v6 新增的兼容表名；当前按 session/client 保存 Web 页面与 App 设备/Socket 的在线到期时间，供跨进程判断是否仍有存活链接 |
 | `history_deleted_sessions` | 已删除会话的持久删除栅栏，阻止迟到 Run 重新写入 |
@@ -32,15 +97,30 @@ runtime 工作区是 archive 最近轮次的派生视图，不再作为每轮持
 
 ### 性能边界
 
-- Web 历史列表默认跨 `web`、`cli`、`message:<platform>` 等来源读取当前用户的全部会话，并保留来源标签；结果按 `updated_at DESC, session_id DESC, source DESC` 稳定排序，分页默认每页 50 条、最大 100 条，使用由 `updated_at + session_id + source` 组成的不透明复合游标加载更早记录。`GET /api/users/{user}/sessions` 可传 `date=YYYY-MM-DD`，按 `Asia/Shanghai` 自然日直接过滤权威会话索引，并与来源、正文检索和游标分页组合使用；前端不会只过滤已加载的 50 条。
-- Web 会话仍可切换和管理；CLI 与外部消息会话在网页中只读展示，避免网页接管仍由其他入口持有的活跃会话。写接口继续强制 `source=web`。
+- Web 历史列表默认跨 `web`、`cli`、`message:<platform>` 等来源读取当前用户的全部会话，并保留来源标签；结果按 `pinned_at DESC, updated_at DESC, session_id DESC, source DESC` 稳定排序，未置顶时间为空，普通条目仍按原时间顺序。分页默认每页 50 条、最大 100 条，使用 `marks-v1 + pinned_at + updated_at + session_id + source` 不透明复合游标；继续兼容旧版二/三项或纯时间游标。`GET /api/users/{user}/sessions` 可传 `date=YYYY-MM-DD` 和 `favorites_only=true`，按 `Asia/Shanghai` 自然日、收藏、来源及标题/摘要/正文检索在 SQL 分页前过滤，置顶不能绕过这些筛选。`favorites_count` 始终统计当前用户所有来源、日期的收藏，而非当前页数量。
+- Web 会话仍可切换和管理；APP、CLI、定时任务与外部消息会话在网页中只读展示，不允许网页接管续聊。单条交互写接口仍只接受 `web/app`；跨渠道删除只由用户明确确认的“全部删除”执行，不能借只读来源校验器开放任意写操作。
 - 会话卡片返回记忆状态、已处理轮次、目标轮次、排队原因和最近失败信息。所有入口绑定到同一内部用户后，共用该用户的 `memory.sqlite3`，记忆页不按渠道过滤。
 - 标题、摘要、会话 ID 和消息正文搜索直接查询表，不遍历历史目录。
-- `history_search` 只读取已提交 archive 的 `history_messages.content_text`，因此字符串与多模态消息中的可见文本使用同一权威投影；保留原始 `message_index`，并排除删除栅栏命中的会话。工具支持 `source` / `session_id` 精确过滤，以及 `offset + next_offset + page_char_limit` 双边界分页，避免把大规模历史一次性塞进单个工具结果。上下文只返回 user/assistant 可见文本并逐条限长，不返回 system、tool、思考或工具日志。
+- `history_search` 的 `search`（省略 action 时默认）只读取已提交 archive 的 `history_messages.content_text`，因此字符串与多模态消息中的可见文本使用同一权威投影；保留原始 `message_index`，并排除删除栅栏命中的会话。支持 `source` / `session_id` 精确过滤，以及 `offset + next_offset + page_char_limit` 双边界分页，旧 `since/until` 继续按创建日期匹配。
+- 同一 `history_search` 新增只读 `dates` 日期目录、`list` 物理归档清单、`read` 正文分页；目录使用 SQL 元数据投影，不读取 message/think/tool 大分区、不为无历史用户初始化数据库。dates/list 按 `updated_at`、回退 `created_at` 和旧窗口名确定上海自然日；不同物理窗口即使共享一个逻辑 session_id 也保持独立 `archive_id`。read 仅 SQL 定位该 archive 的 user/assistant 正文，使用消息条数与 JSON 字符预算双界限，超长消息按 UTF-8 字节偏移无损续读；游标绑定用户、物理归档、角色及归档快照，删除栅栏和物理窗口 tombstone 同样生效。当前没有独立可信的逐消息时间列，因而不返回发言时间，也不以消息行存储时间或归档时间冒充；不读取 system、tool、思考、工具日志或未提交 runtime，不触发摘要/记忆、不改变生命周期或更新时间。工具参数、调用顺序和日期返回字段见 `plugins/history_search/SKILL.md`。
 - 活跃会话通过主键绑定恢复，不在启动阶段扫描全部归档。
 - 完整正文只在打开指定会话、上下文构建、摘要或记忆整理时读取。
 - 记忆处理状态使用 archive `data_json` 与 `history_sessions` 的小范围事务更新，不再重写 text/think/tool/items 大分区。
 - `memory_error` 表示当前失败，`memory_last_error` 仅作为最近一次历史诊断保留；后续恢复为 `completed` 后，网页不得继续把 `memory_last_error` 显示成当前红色失败。Agent watchdog 因超时执行尚未退出而拒绝新任务时，维护器释放当前 claim、写入 `queued + memory_retry_at` 并停止该用户本轮继续领取；该容量延期不推进游标、不增加失败重试次数，也不会把同轮扫描中的 Web、App、CLI、Cron 或 `message:<platform>` 会话级联标记为失败。
+
+### 历史置顶与收藏的写入边界
+
+- `PATCH /api/users/{user}/sessions/{session_id}/marks?source=...` 只接受非空的
+  `pinned` / `favorite` 严格布尔字段，拒绝 null、未知字段或字符串布尔值。
+  是显式赋值而非服务端 toggle；重复置顶保留原置顶时间，取消后再次置顶才分配新时间。
+- 标记独立于 `record_json`，在 SQLite 写事务内核验会话存在、未删除及删除栅栏；
+  不改变 `updated_at`、生命周期、运行态、摘要、记忆任务或活跃绑定。
+  收藏不改变排序，取消置顶回到原更新时间位置。
+- Web 中的 APP、CLI、Cron 和消息归档允许个人标记，但打开仍只读，原单条重命名/删除权限不扩大。
+  单条删除、全部删除及底层生命周期清理通过外键同步清除标记；收藏不是防删除或防自动回收开关。
+- 无日期/收藏/搜索时与侧栏共用 recent 缓存；筛选缓存键包含用户、日期、收藏和已提交搜索。
+  迟到的分页响应不得覆盖新筛选或已刷新的首页。标记/重命名后同时失效侧栏与历史列表；
+  同浏览器标签页通过 `session-updated` 广播刷新，其他设备重新读取服务端持久状态。
 
 ### Web 对话空间启动巡检与空空间生命周期
 
@@ -49,9 +129,19 @@ runtime 工作区是 archive 最近轮次的派生视图，不再作为每轮持
 archive/runtime 轮次、思考/工具/Item 数据或上下文摘要时保留；正在运行/排队以及记忆或摘要处理中的
 会话也保留。即使取消/失败尚未形成完整轮，只要已经留下内容，就不会被当作空会话回收。
 
-浏览器每 15 秒心跳，SQLite `history_web_leases`（历史兼容表名）使用独立 client 行、90 秒有效期，健康连续心跳约每
-30 秒续写一次，其余请求只读检查。App 的 active/chat 请求和带会话范围的 WebSocket 使用同一持久租约；Socket 每 30 秒续租，断开时显式释放自己的租约。页面/设备内保留即时在线映射；持久租约用于跨进程及重启保护，不因
-内存读缓存淘汰而丢失。关闭、切换或释放页面关联不会立即删除最后的租约检查点，它自然到期，避免
+浏览器每 15 秒心跳，SQLite `history_web_leases`（历史兼容表名）使用独立 client 行、90 秒有效期。
+schema v8 增加 `sequence` 和 `released` 安全默认列，沿用迁移前 backup、DDL/版本戳同事务及超前版本拒绝。
+新版网页每个文档使用独立 client_id，不复用会被复制标签页继承的 sessionStorage 身份。
+心跳与 pagehide/切换释放携带严格正整数 `lease_sequence`；每次有序心跳持久写序号，
+有序释放写入保留 90 秒的 released 墓碑，立即不再计入存活；同库事务拒绝旧序号，
+包括释放先于首次心跳到达、跨进程乱序和 BFCache 较新激活后的旧释放。
+BFCache 恢复用同文档更大序号，真正刷新使用新文档身份；pagehide 后暂停续租直到 pageshow/online。
+关闭、删除、巡检与过期 processing 回收均忽略 released 行，墓碑按现有有界过期清理，不无限累积。
+旧客户端不带序号时仍约每 30 秒续写一次、其余请求只读检查；旧无序释放不清除现代有效租约，
+旧心跳也不能复活仍在有效期内的释放墓碑。App 的 active/chat 请求和带会话范围的 WebSocket
+使用同一持久租约；Socket 每 30 秒续租，断开时显式释放自己的租约。
+页面/设备内保留即时在线映射；Web/App 关闭和删除以持久状态为权威，不因另一进程的旧内存映射误挡。
+丢失释放消息、异常关闭和旧客户端仍自然到期，避免
 刷新/BFCache、乱序卸载通知和短暂网络抖动误删；多个标签页中任意一个保活即可保护会话。客户端
 长时间冻结或断网到租约失效后视为离线，恢复页会提示已清理并解除绑定；尚未提交到服务端的输入
 草稿不属于对话轮次。
@@ -122,6 +212,26 @@ RuntimeHost 每小时调度系统任务 `session_lifecycle_sweep`，默认处理
 - schema v3/v4/v5 迁移释放的旧 JSON 页会先进入 SQLite freelist 并被后续写入复用；为避免升级时长时间独占数据库，框架不会自动执行 `VACUUM`。确需立即缩小物理文件时，应停止框架、完成备份后再由运维显式执行。
 - 上下文摘要不是历史正文；终态提交时与 archive 和会话索引在同一事务更新，runtime 内存工作区只在事务成功后切换。不要重新创建 `context_summary.json`。
 - schema 不兼容时应明确失败或执行专用迁移，禁止静默混读两套历史格式。
+
+### 网页全部删除历史（含只读对话）
+
+历史抽屉的“全部删除”显式请求 `DELETE /api/users/{user}/sessions?source=all&client_id=<当前页面>`。
+范围是当前内部用户的全部渠道（Web、APP、CLI、`background:cron:*`、`message:*` 等），
+包含未加载分页和只有索引、尚无归档窗口的预留会话；搜索、日期筛选不会缩小范围。
+未传 `source` 的旧 API 调用仍只删除 Web，显式单来源删除保持兼容；`all` 不是单条操作的合法来源。
+
+`run.history.delete_all_sessions(..., source=None)` 转入 `bulk_deletion.delete_user_history`：
+以 `(source, session_id)` 计数，避免不同渠道同名 ID 合并。持有用户索引锁，在同一 SQLite
+写事务中选择全量身份、非阻塞取得各会话执行锁，并重新核验持久运行/排队/停止状态、
+记忆或摘要处理中状态、Web/App 在线租约。当前网页自己的租约可排除；其他网页、
+设备租约（即使使用同名 client_id）仍保护会话。Web 服务也先检查当前进程全部渠道 ActiveRun。
+任一繁忙或被占用会话导致整批 409，不提前删除其他条目；SQL 异常整体回滚，不静默跳过。
+
+复用窗口删除事务清理 archive/runtime、messages、rounds、context summaries，再一并清理
+session、active 和租约、递增索引 revision；保留逻辑会话与物理窗口 tombstone，
+失效 runtime 缓存，迟到提交不能复活。成功返回实际 `deleted_sessions/deleted_windows`，
+不以页面已加载条数冒充总数。只清理该用户历史，不删除已提取记忆、上传/下载附件、
+定时任务定义、执行日志、消息去重与消息队列，也不影响其他用户。
 
 ### 定时任务历史的自动清理
 
@@ -371,6 +481,10 @@ A 类的维度表。命中关键词**只用于维度归类，不用于判定能�
 摘要扩展的所有步骤均为临时结果，必须覆盖每个移除轮次后才能裁剪；后续扩展失败时保留
 原摘要和完整工作历史。本轮输出触发的轮末压缩同样先生成摘要再提交，
 摘要请求用量计入主运行、archive 和 runtime 的用量及最新轮次指标。
+最新轮次指标的 `context_usage` 保存主模型已接受请求的实际输入 Token、本地估算基线、
+模型/路由摘要及摘要哈希，不包含正文或凭据。`null` 表示旧基线失效，不回溯复用更旧检查点。
+压缩失败保留检查点，下一轮可继续触发；成功压缩后清除旧基线。
+`context_compression` 保存摘要阶段、尺寸恢复次数及安全失败分类；内部片段全部成功前不发布整轮覆盖。
 重建 runtime 时按有效摘要的 `covered_through_round` 排除已摘要的归档前缀，
 仍只读取有界归档尾部；有效热缓存若携带摘要失败标记，应保留待整理轮次，
 不能再次用普通轮数上限静默裁剪。
@@ -513,3 +627,23 @@ Web 新建回执的短时租约复用、请求合并和异步读取边界见 `fr
 ### 不进入内存延迟的边界
 
 以下内容仍立即持久化：错误与部分失败日志、对话成功/取消/失败终态、用户主动创建或修改任务、文件和媒体产物、外部消息幂等状态、记忆碎片正文，以及需要跨重启继续的任务声明。
+
+## 历史原子写与并发冲突（2026-10-25）
+
+- `read_registry` 在同一读事务读取 sessions 与 active 指针；`RegistrySnapshot` 带深拷贝 baseline。
+  `write_registry` 仅 upsert 调用者确实改变的行、删除其 baseline 中确实移除的行，不能删掉其他
+  写入者新增的会话。同行内容/代际变化及同 key 并发创建抛 `RegistryConflictError`；revision 在库内递增。
+- 单会话与按 source 删除经 `delete_orchestrator` 同一 `BEGIN IMMEDIATE` 删除窗口、消息、轮次、
+  摘要、active 指针并更新注册表与删除栅栏；任一步失败整批回滚，各来源共用，非仅 web。
+- 旧公开 `delete_session_windows/delete_source_windows` 仅代理到同一编排；底层删除最后一个
+  archive 会同时删除逻辑会话、个人标记、派生 runtime 与绑定并递增 revision，删除 runtime
+  缓存窗口本身不删除逻辑会话。删除非末尾 archive 时保留其余窗口并修正指向已删窗口的索引。
+- `history_web_leases` 保留历史表名与 Web 无前缀 client_id；非 Web 使用 source 分隔前缀。
+  删除和在线判断精确匹配来源，不按 session_id 清空其他来源租约，也不把 `%/_` 当身份通配符。
+- `load_index` 的读修复遇到同行 CAS 冲突时最多尝试三次，每次重读并重算；持续竞争明确报错，
+  不覆盖他人更新。revision 由数据库递增，不接受调用者指定。`lifecycle='deleted'` 过滤仍用于旧记录兼容。
+- 窗口与注册表通过同一连接提交；墓碑命中或代际不符必须抛错，不能静默丢写还返回成功。
+- 编辑消息按 key 比较并增量 upsert；未修改消息保留 rowid，只有真正移除的行被删除。
+- processing 过期巡检按 claim 时间/TTL 筛选，活动 run、有效租约和会话执行锁仍优先保护；
+  回收不是任务重放授权。日志 commit 在写锁内，过期删除每表每批最多 1000 行。
+  FTS/日期物化与任务事件分表/TTL 为另行评估的可选优化，不能未经授权清理历史。

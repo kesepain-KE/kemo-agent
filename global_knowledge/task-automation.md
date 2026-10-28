@@ -2,6 +2,27 @@
 
 本文集中说明一次性多步骤任务计划和按北京时间运行的 Cron 任务。两类任务共用用户隔离、持久化和运行安全边界，但状态机与创建字段仍按各自章节执行。
 
+## 系统自动维护入口与前提
+
+`cron/task_cron_system/` 的定义由系统调度维护，不是用户通过 task_time 创建的普通任务：
+
+| 定义 | 自动职责 | 判读边界 |
+|---|---|---|
+| `expand_update.json` | 按适用配置刷新拓展 | 未授权、未激活或关闭采集的连接不因定时器获得访问权 |
+| `perception_update.json` | 刷新感知出口 | 文件重读不等于重新采集；失败不能伪造更新时间 |
+| `memory_periodic_scan.json` | 周期扫描与待处理补偿 | 是否提取受 memory.extraction_mode 等配置及候选状态约束 |
+| `memory_daily_consolidate.json` | 每日整理与维护 | 不是每个日期无条件改写所有记忆 |
+| `memory_promotion.json` | 审阅到期/达到条件的临时记忆并推进晋升、归档 | 阈值来自有效 memory.tiers；按实际存储与审阅规则，不由主智能体手动搬库 |
+| `session_lifecycle_sweep.json` | 空闲会话、空会话、租约与遗留状态巡检 | 活跃执行与租约受保护，不能只按时间删状态 |
+
+这些动作依赖 RuntimeHost/调度运行、对应任务启用、配置/用户适用、执行成功以及必要的跨进程 lease。
+定义存在、状态 enabled 或已到 next_run_at 都不等于动作已完成，应核对实际日志与结果；任务重启、
+deadline 和失败退避仍按下文状态机约束。频率来自有效配置与系统任务定义，不在手册另造固定周期。
+
+仓库 `cron.session_idle_close_seconds` 为 5400 秒，实际用户配置可覆盖；Web 空会话清理宽限由
+`run/history/web_lifecycle.py::WEB_EMPTY_GRACE_SECONDS` 定义为 90 秒。空闲归档与 Web 空会话
+清理是不同条件，不能推广为所有 source 的统一倒计时；关闭/归档不意味着允许隐式重开只读历史。
+
 ## 定时任务创建规则
 
 定时任务存储在 `users/<user>/task_cron/cron_<8hex>.json`，由 `CronStore` 校验并由 RuntimeHost 调度。所有用户任务都以北京时间（Asia/Shanghai，`+08:00`）保存和计算。
@@ -83,7 +104,9 @@ Schema 拒绝未知或废弃字段。不要重新引入旧式嵌套 `schedule` �
 | `failed` | 最近执行失败；不会被轮询器自动无限重跑，需显式重新启用 | 否 |
 | `cancelled` | 已取消的终态 | 否 |
 
-RuntimeHost 重启时会把被中断的 `running` 用户任务恢复为 `enabled` 并重新安排。`cron.enabled=false` 或 `runtime_host.enable_background_scheduler=false` 时不会后台执行。
+RuntimeHost 重启时把遗留 `running` 用户任务改为 `paused`，清空 `next_run_at` 并标记
+`last_stop_reason=interrupted_pending_confirmation`，由用户核对副作用后显式重新启用；不立即重跑。
+`cron.enabled=false` 或 `runtime_host.enable_background_scheduler=false` 时不会后台执行。
 
 用户任务和系统任务的执行记录都只写入结构化运行日志数据库 `runtime/logs.sqlite3`。用户任务失败会保存受限异常类型与错误摘要，不保存完整提示词。高频 `success` 以及内容完全相同的连续 `partial` 使用时间窗口聚合；新的 partial 指纹、失败和恢复仍即时记录，避免重复异常刷爆数据库。
 
@@ -294,3 +317,15 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 不能通过只读接口返回。这个输出脱敏是持久化前校验的第二道保护，不能用来允许新计划保存凭据。
 
 数据库把计划元数据、步骤和依赖分别保存在 `task_plans`、`task_plan_steps`、`task_plan_dependencies`，并用 `task_plan_revisions` 保存不可改写的修订历史。大型参数、结果和错误通过 `task_plan_revision_blobs` 按计划内 SHA-256 去重，读取时透明还原；旧版明文 JSON 和压缩快照继续兼容。创建、修改、revision 与大型字段引用在同一事务提交，任一步失败都会整体回滚。启动恢复只把 `running` 步骤退回 `pending` 并暂停对应计划。计划运行时没有文件式旁路。
+
+## 取消、独立执行与真实退出（2026-10-25）
+
+- 用户 Cron 有独立有界 worker，按 user/task 去重；额度参考 provider_runtime.max_concurrent_requests，
+  实际模型请求仍走共享 Provider 池。系统扫描使用独立 worker，不阻塞用户扫描。
+- 用户 worker watchdog 超期设置取消与 timeout 诊断；停止设置 stopped。函数未实际退出前保留
+  活动槽位，不把超时伪装成退出。系统 worker 在 stop 超时后仍保留 OS lease，退出才释放。
+- 每次领取生成 attempt_id，旧 attempt 不得覆盖新执行终态；执行中取消落 cancelled、
+  last_stop_reason 与空 next_run_at，不增加 successful_runs。
+- 子任务完成屏障取消超期记录 cancellation_overdue/execution_live 并继续保护会话；
+  Python 活线程不能安全强杀，真正硬截止需要可终止的进程隔离，不能靠改状态实现。
+- 后台 shell 终态不可复活；worker 领取前重读，晚到写入不得把 interrupted 改回 running。
