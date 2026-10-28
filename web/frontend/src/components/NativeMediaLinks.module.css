@@ -1,0 +1,8 @@
+.files { display: flex; flex-direction: column; gap: 6px; padding: 9px 12px; border-top: 1px solid var(--border-subtle); min-width: 0; }
+.file { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.error { flex: 1 1 100%; font-size: var(--t-xs); color: var(--text-secondary); overflow-wrap: anywhere; }
+.file > svg, .file > button { flex: none; }
+.copy { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 3px; }
+.copy strong { font-size: var(--t-xs); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.copy small, .hint { font-size: var(--t-2xs); color: var(--text-tertiary); line-height: 1.5; overflow-wrap: anywhere; }
+.hint { margin: 0; }

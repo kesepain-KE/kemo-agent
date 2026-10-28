@@ -1,0 +1,47 @@
+.timeline { margin: 12px; padding: 0; list-style: none; }
+.timelineRow { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; align-items: start; padding: 0 0 10px; font-size: var(--t-xs); }
+.timelineRow > time { padding-top: 10px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: .92em; }
+.actionCard { min-width: 0; border: 1px solid var(--border-subtle); border-radius: var(--r-md); background: var(--bg-surface); overflow: hidden; }
+.actionCard > summary { display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 9px 10px; cursor: pointer; list-style: none; color: var(--text-secondary); }
+.actionCard > summary::-webkit-details-marker { display: none; }
+.actionCard > summary:hover { background: var(--bg-hover); }
+.actionCard > summary:focus-visible, .rawResult > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.actionCard strong { min-width: 0; max-width: 30%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: var(--font-mono); font-weight: 550; flex-shrink: 0; }
+.actionCard > summary > svg { flex: none; }
+.argumentSummary { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-faint); }
+.actionMeta { display: flex; align-items: center; gap: 9px; margin-inline-start: auto; flex: none; white-space: nowrap; }
+.actionStatus { display: flex; color: var(--text-tertiary); }
+.actionStatus[data-state="success"] { color: var(--success); }
+.actionStatus[data-state="error"] { color: var(--danger); }
+.elapsed { color: var(--text-faint); font-family: var(--font-mono); font-size: var(--t-2xs); white-space: nowrap; }
+.chevron { color: var(--text-tertiary); }
+.actionCard[open] > summary .chevron { transform: rotate(180deg); }
+.actionBody { min-width: 0; padding: 10px; border-top: 1px solid var(--border-subtle); }
+.actionBody h5, .resultSection h5 { margin: 0 0 8px; font-size: var(--t-xs); color: var(--text-secondary); }
+.actionBody p { margin: 0 0 12px; color: var(--text-tertiary); line-height: 1.6; }
+.toolValue, .rawResult pre { margin: 0 0 12px; padding: 10px; max-height: 360px; overflow: auto; border-radius: var(--r-sm); background: var(--code-bg); color: var(--code-text); font-family: var(--font-mono); font-size: var(--t-xs); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.actionBody > :last-child { margin-bottom: 0; }
+.phaseCard { min-width: 0; min-height: 36px; display: flex; align-items: center; padding: 8px 10px; color: var(--text-secondary); border-left: 2px solid var(--border); overflow-wrap: anywhere; }
+.result { margin: 12px; min-width: 0; overflow-wrap: anywhere; }
+.resultBody { min-width: 0; padding: 14px; border: 1px solid var(--border-subtle); border-radius: var(--r-md); background: var(--bg-surface); }
+.resultBody > :first-child { margin-top: 0; }
+.resultBody > :last-child { margin-bottom: 0; }
+.resultSection { min-width: 0; margin: 14px 0; }
+.resultTree { padding-inline-start: 10px; border-inline-start: 1px solid var(--border-subtle); }
+.resultTree > section { min-width: 0; margin-block: 10px; }
+.resultStatus { display: inline-flex; padding: 3px 8px; background: var(--bg-sunken); border-radius: var(--r-full); color: var(--text-secondary); font-size: var(--t-xs); }
+.rawResult { margin: 16px 0; border-top: 1px solid var(--border-subtle); font-size: var(--t-xs); }
+.rawResult > summary { cursor: pointer; padding-block: 10px; color: var(--text-tertiary); }
+.usage { margin: 16px 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.usage > h4 { padding: 0; margin-bottom: 12px; }
+.usage dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.usage dl > div { min-width: 0; padding: 9px 10px; background: var(--bg-sunken); border-radius: var(--r-sm); }
+.usage dt { color: var(--text-tertiary); font-size: var(--t-xs); overflow-wrap: anywhere; }
+.usage dd { margin: 5px 0 0; color: var(--text-primary); font-size: var(--t-sm); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .timelineRow { gap: 8px; }
+  .timelineRow > time { font-size: .85em; }
+  .actionCard > summary { gap: 5px; padding-inline: 8px; }
+  .actionMeta { gap: 5px; }
+  .resultBody { padding: 10px; }
+}
