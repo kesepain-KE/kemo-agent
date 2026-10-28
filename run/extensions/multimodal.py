@@ -84,7 +84,16 @@ def main_model_supports_input(
     provider_config = config.get("provider") or {}
     provider_type = str(runtime_provider.get("type") or "").strip().casefold()
     if provider_type == "chat":
-        return modality == "image" and modality in explicit
+        if modality != "image":
+            return False
+        if "input_modalities" in provider_config:
+            return modality in explicit
+        # Chat capability lookup is local: built-in vision profiles do not
+        # require a user-run probe or another hand-written declaration.
+        declared = lookup_model_capabilities(
+            config, runtime_provider, provider, cancel_event=cancel_event,
+        ).capabilities
+        return declared is not None and modality in declared.input_modalities
     if provider_type != "kemo":
         return False
     if "input_modalities" in provider_config and modality not in explicit:

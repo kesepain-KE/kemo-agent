@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 from PIL import Image, ImageSequence, UnidentifiedImageError
 
+from provider.adapters.image_content import CHAT_IMAGE_MAX_BYTES, image_content_type
 from provider.protocol.assets import ResolvedAsset
 from provider.protocol.models import (
     AudioContent,
@@ -24,7 +25,7 @@ from provider.protocol.models import (
 )
 
 
-IMAGE_MAX_BYTES = 20 * 1024 * 1024
+IMAGE_MAX_BYTES = CHAT_IMAGE_MAX_BYTES
 ACCEPTED_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
 AUDIO_MAX_BYTES = 100 * 1024 * 1024
 VIDEO_MAX_BYTES = 1024 * 1024 * 1024
@@ -560,7 +561,7 @@ class RunAssetResolver:
 
     def image_content(self, asset_id: str, *, provider: str, detail: str = "auto") -> ImageContent:
         resolved = self.resolve(asset_id, provider=provider)
-        return ImageContent.model_validate({
+        return image_content_type(provider).model_validate({
                    'asset_id': resolved.asset_id,
                    'source': resolved.source,
                    'mime_type': resolved.mime_type,
