@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
+    from run.infra.runtime_diagnostics import diagnostic_text as diagnostic_text
     from run.infra.process_identity import process_snapshot as process_snapshot
 
 from typing import TYPE_CHECKING
@@ -16,6 +17,7 @@ from importlib import import_module as _import_module
 from run.infra.read_cache import BoundedReadCache, cached_read_text, invalidate_source_cache
 
 from run.infra.atomic_io import replace_with_retry
+from run.infra.async_utils import run_awaitable
 from run.infra.errors import ContextLengthExceededError, EngineError
 from run.infra.usage import (
     merge_usage,
@@ -52,6 +54,7 @@ __all__ = [
     "hidden_subprocess_kwargs",
     "resolve_interactive_context",
     "replace_with_retry",
+    "run_awaitable",
     "stream_cli_request",
     "terminate_pid_tree",
     "terminate_process_tree",
@@ -59,6 +62,7 @@ __all__ = [
 ]
 
 _LAZY_MODULES = (
+    "sqlite_migrations",
     "runtime_diagnostics",
     "log_store",
     "process_execution",

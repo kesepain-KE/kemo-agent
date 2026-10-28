@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import inspect
 import multiprocessing
@@ -17,6 +16,8 @@ from multiprocessing.connection import _ConnectionBase
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
+
+from run.infra.async_utils import run_awaitable
 
 
 def _windows_pythonw_executable() -> str | None:
@@ -121,7 +122,7 @@ def _isolated_worker(
             kwargs["context"] = invocation_context
         value = function(**kwargs)
         if inspect.isawaitable(value):
-            value = asyncio.run(value)
+            value = run_awaitable(value)
         payload = {"ok": True, "value": value}
     except BaseException as exc:
         payload = {"ok": False, "error": _safe_error(exc)}

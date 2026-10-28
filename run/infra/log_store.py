@@ -15,11 +15,13 @@ from zoneinfo import ZoneInfo
 
 from run.infra.runtime_diagnostics import diagnostic_identifier, invalidate_runtime_log_cache
 from run.infra.message_log_projection import message_log_exchanges
+from run.infra.sqlite_migrations import add_missing_columns, execute_schema, schema_migration
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 LOG_DB_RELATIVE = Path("runtime") / "logs.sqlite3"
 DEFAULT_RETENTION_DAYS = 90
+LOG_DB_SCHEMA_VERSION = 3
 _STORE_LOCKS: dict[str, threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
 _READY_PATHS: set[str] = set()
@@ -96,94 +98,104 @@ class LogStore:
                 if not database_existed:
                     _READY_PATHS.discard(ready_key)
                 if ready_key not in _READY_PATHS:
-                    connection.execute("PRAGMA journal_mode=WAL")
-                    connection.executescript(
-                        """
-                        CREATE TABLE IF NOT EXISTS log_meta (
-                            key TEXT PRIMARY KEY,
-                            value TEXT NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS task_hub_cleaned_records (
-                            user TEXT NOT NULL,
-                            kind TEXT NOT NULL,
-                            record_id TEXT NOT NULL,
-                            updated_at TEXT NOT NULL,
-                            PRIMARY KEY(user, kind, record_id, updated_at)
-                        );
-                        CREATE TABLE IF NOT EXISTS cron_execution_logs (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            event_key TEXT NOT NULL UNIQUE,
-                            occurred_at TEXT NOT NULL,
-                            occurred_at_ms INTEGER NOT NULL,
-                            user TEXT NOT NULL,
-                            task_id TEXT NOT NULL,
-                            status TEXT NOT NULL,
-                            duration_ms INTEGER NOT NULL DEFAULT 0,
-                            result_json TEXT NOT NULL DEFAULT '{}',
-                            error_json TEXT,
-                            created_at_ms INTEGER NOT NULL
-                        );
-                        CREATE INDEX IF NOT EXISTS idx_cron_user_time
-                            ON cron_execution_logs(user, occurred_at_ms DESC, id DESC);
-                        CREATE INDEX IF NOT EXISTS idx_cron_task_time
-                            ON cron_execution_logs(task_id, occurred_at_ms DESC, id DESC);
-                        CREATE INDEX IF NOT EXISTS idx_cron_user_task_time
-                            ON cron_execution_logs(user, task_id, occurred_at_ms DESC, id DESC);
-                        CREATE TABLE IF NOT EXISTS message_route_logs (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            event_key TEXT NOT NULL UNIQUE,
-                            occurred_at TEXT NOT NULL,
-                            occurred_at_ms INTEGER NOT NULL,
-                            user TEXT NOT NULL,
-                            machine_id TEXT NOT NULL,
-                            platform TEXT NOT NULL,
-                            chat_type TEXT NOT NULL,
-                            chat_id TEXT NOT NULL,
-                            direction TEXT NOT NULL,
-                            kind TEXT NOT NULL,
-                            content TEXT NOT NULL DEFAULT '',
-                            file_path TEXT,
-                            mime TEXT,
-                            size INTEGER,
-                            success INTEGER NOT NULL DEFAULT 1,
-                            source TEXT NOT NULL,
-                            created_at_ms INTEGER NOT NULL
-                        );
-                        CREATE INDEX IF NOT EXISTS idx_message_machine_time
-                            ON message_route_logs(machine_id, occurred_at_ms DESC, id DESC);
-                        CREATE INDEX IF NOT EXISTS idx_message_user_time
-                            ON message_route_logs(user, occurred_at_ms DESC, id DESC);
-                        CREATE TABLE IF NOT EXISTS message_route_state (
-                            machine_id TEXT PRIMARY KEY,
-                            user TEXT NOT NULL,
-                            platform TEXT NOT NULL,
-                            schema_version INTEGER NOT NULL,
-                            health TEXT NOT NULL,
-                            last_check TEXT,
-                            last_message_at TEXT,
-                            error TEXT,
-                            latency_ms INTEGER,
-                            messages_received_today INTEGER NOT NULL DEFAULT 0,
-                            messages_sent_today INTEGER NOT NULL DEFAULT 0,
-                            input_status TEXT NOT NULL,
-                            input_restart_count INTEGER NOT NULL DEFAULT 0,
-                            input_last_restart_at TEXT,
-                            input_error TEXT,
-                            extra_json TEXT NOT NULL DEFAULT '{}',
-                            updated_at TEXT NOT NULL
-                        );
-                        CREATE INDEX IF NOT EXISTS idx_message_route_state_user
-                            ON message_route_state(user, platform);
-                        """
-                    )
-                    message_columns = {
-                        row["name"] for row in connection.execute("PRAGMA table_info(message_route_logs)")
-                    }
-                    if "exchange_id" not in message_columns:
-                        connection.execute(
-                            "ALTER TABLE message_route_logs ADD COLUMN exchange_id TEXT NOT NULL DEFAULT ''"
+                    with schema_migration(
+                        connection, target=LOG_DB_SCHEMA_VERSION, meta_table=None,
+                        required={
+                            "log_meta": (), "task_hub_cleaned_records": (),
+                            "cron_execution_logs": (), "message_route_logs": ("exchange_id",),
+                            "message_route_state": ("input_status", "input_restart_count",
+                                                    "input_last_restart_at", "input_error"),
+                        },
+                    ):
+                        execute_schema(connection,
+                            """
+                            CREATE TABLE IF NOT EXISTS log_meta (
+                                key TEXT PRIMARY KEY,
+                                value TEXT NOT NULL
+                            );
+                            CREATE TABLE IF NOT EXISTS task_hub_cleaned_records (
+                                user TEXT NOT NULL,
+                                kind TEXT NOT NULL,
+                                record_id TEXT NOT NULL,
+                                updated_at TEXT NOT NULL,
+                                PRIMARY KEY(user, kind, record_id, updated_at)
+                            );
+                            CREATE TABLE IF NOT EXISTS cron_execution_logs (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                event_key TEXT NOT NULL UNIQUE,
+                                occurred_at TEXT NOT NULL,
+                                occurred_at_ms INTEGER NOT NULL,
+                                user TEXT NOT NULL,
+                                task_id TEXT NOT NULL,
+                                status TEXT NOT NULL,
+                                duration_ms INTEGER NOT NULL DEFAULT 0,
+                                result_json TEXT NOT NULL DEFAULT '{}',
+                                error_json TEXT,
+                                created_at_ms INTEGER NOT NULL
+                            );
+                            CREATE INDEX IF NOT EXISTS idx_cron_user_time
+                                ON cron_execution_logs(user, occurred_at_ms DESC, id DESC);
+                            CREATE INDEX IF NOT EXISTS idx_cron_task_time
+                                ON cron_execution_logs(task_id, occurred_at_ms DESC, id DESC);
+                            CREATE INDEX IF NOT EXISTS idx_cron_user_task_time
+                                ON cron_execution_logs(user, task_id, occurred_at_ms DESC, id DESC);
+                            CREATE TABLE IF NOT EXISTS message_route_logs (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                event_key TEXT NOT NULL UNIQUE,
+                                occurred_at TEXT NOT NULL,
+                                occurred_at_ms INTEGER NOT NULL,
+                                user TEXT NOT NULL,
+                                machine_id TEXT NOT NULL,
+                                platform TEXT NOT NULL,
+                                chat_type TEXT NOT NULL,
+                                chat_id TEXT NOT NULL,
+                                direction TEXT NOT NULL,
+                                kind TEXT NOT NULL,
+                                content TEXT NOT NULL DEFAULT '',
+                                file_path TEXT,
+                                mime TEXT,
+                                size INTEGER,
+                                success INTEGER NOT NULL DEFAULT 1,
+                                source TEXT NOT NULL,
+                                created_at_ms INTEGER NOT NULL
+                            );
+                            CREATE INDEX IF NOT EXISTS idx_message_machine_time
+                                ON message_route_logs(machine_id, occurred_at_ms DESC, id DESC);
+                            CREATE INDEX IF NOT EXISTS idx_message_user_time
+                                ON message_route_logs(user, occurred_at_ms DESC, id DESC);
+                            CREATE TABLE IF NOT EXISTS message_route_state (
+                                machine_id TEXT PRIMARY KEY,
+                                user TEXT NOT NULL,
+                                platform TEXT NOT NULL,
+                                schema_version INTEGER NOT NULL,
+                                health TEXT NOT NULL,
+                                last_check TEXT,
+                                last_message_at TEXT,
+                                error TEXT,
+                                latency_ms INTEGER,
+                                messages_received_today INTEGER NOT NULL DEFAULT 0,
+                                messages_sent_today INTEGER NOT NULL DEFAULT 0,
+                                input_status TEXT NOT NULL,
+                                input_restart_count INTEGER NOT NULL DEFAULT 0,
+                                input_last_restart_at TEXT,
+                                input_error TEXT,
+                                extra_json TEXT NOT NULL DEFAULT '{}',
+                                updated_at TEXT NOT NULL
+                            );
+                            CREATE INDEX IF NOT EXISTS idx_message_route_state_user
+                                ON message_route_state(user, platform);
+                            """
                         )
-                    connection.execute("PRAGMA user_version = 3")
+                        add_missing_columns(connection, "message_route_logs", {
+                            "exchange_id": "TEXT NOT NULL DEFAULT ''",
+                        })
+                        add_missing_columns(connection, "message_route_state", {
+                            "input_status": "TEXT NOT NULL DEFAULT 'unknown'",
+                            "input_restart_count": "INTEGER NOT NULL DEFAULT 0",
+                            "input_last_restart_at": "TEXT",
+                            "input_error": "TEXT",
+                        })
+                    connection.execute("PRAGMA journal_mode=WAL")
                     try:
                         self.path.parent.chmod(0o700)
                         self.path.chmod(0o600)
@@ -191,7 +203,7 @@ class LogStore:
                         pass
                     _READY_PATHS.add(ready_key)
                 yield connection
-            connection.commit()
+                connection.commit()
         except (OSError, sqlite3.Error) as exc:
             raise LogStoreError(f"日志数据库不可用：{exc}") from exc
         finally:
@@ -211,9 +223,16 @@ class LogStore:
             return 0
         cutoff = int((datetime.now(timezone.utc) - timedelta(days=self.retention_days)).timestamp() * 1000)
         before = connection.total_changes
-        connection.execute("DELETE FROM cron_execution_logs WHERE occurred_at_ms < ?", (cutoff,))
-        connection.execute("DELETE FROM message_route_logs WHERE occurred_at_ms < ?", (cutoff,))
+        for table in ("cron_execution_logs", "message_route_logs"):
+            connection.execute(f"DELETE FROM {table} WHERE rowid IN "
+                               f"(SELECT rowid FROM {table} WHERE occurred_at_ms < ? LIMIT 1000)",
+                               (cutoff,))
         deleted = connection.total_changes - before
+        remaining = any(connection.execute(
+            f"SELECT 1 FROM {table} WHERE occurred_at_ms < ? LIMIT 1", (cutoff,)
+        ).fetchone() is not None for table in ("cron_execution_logs", "message_route_logs"))
+        if remaining:
+            return max(0, deleted)  # Next append continues another bounded batch.
         connection.execute(
             "INSERT INTO log_meta(key, value) VALUES('last_pruned_ms', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
