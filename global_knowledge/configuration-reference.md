@@ -2,6 +2,69 @@
 
 本文集中说明 `.env` 环境变量、部署级 `global_config.json` 和用户级 `user_config.json`。配置的默认值、字段校验和实际生效范围以当前加载器和配置 Schema 为准。
 
+## web_ui.language — 用户网页语言
+
+在 `users/<name>/user_config.json` 中配置：
+
+```json
+{
+  "web_ui": {
+    "language": "zh-CN"
+  }
+}
+```
+
+支持 `zh-CN`（简体中文）、`en`（英语）、`es`（西班牙语）、`fr`（法语）、
+`de`（德语）、`pt-BR`（巴西葡萄牙语）、`ru`（俄语）、`ja`（日语）、
+`ko`（韩语），共九种。未配置默认 `zh-CN`。
+配置节必须是对象，语言必须是上述代码字符串；无效值在配置加载或 API 保存时拒绝，
+保存失败不覆盖原文件。`web_ui` 是用户专属段，不继承全局同名节。
+
+阿拉伯语 `ar` 已移除。已有用户文件中的 `ar` 在运行时加载和偏好读取时回退为
+`zh-CN`，浏览器旧缓存也回退中文并恢复从左向右布局；读取不改写磁盘文件。
+旧值不阻碍其他配置字段保存，但 API 显式提交 `web_ui.language: "ar"` 会被拒绝；
+选择任一受支持语言后，新的有效代码正常覆盖旧值。其他无效值仍按原规则拒绝。
+
+网页“配置 → 外观与主题 → 网页语言”立即切换并单独保存该字段，无需重启。
+仅改变网页第一方界面文案，不翻译用户数据、不控制智能体回复语言；
+未收录的 UI 文案保留中文。主题和字号继续存于独立的 `web_preferences.json`；
+语言不能通过 `PATCH preferences` 或全局配置 API 保存。
+
+## web_ui.background — 用户网页背景
+
+配置唯一存于 `users/<name>/user_config.json`，与 `web_ui.language` 并列：
+
+```json
+{
+  "web_ui": {
+    "background": {
+      "enabled": false,
+      "overlay_opacity": 0.65,
+      "blur": 0,
+      "ui_opacity": 0.94,
+      "ui_blur": 0
+    }
+  }
+}
+```
+
+| 字段 | 默认值 | 合同 |
+|------|--------|------|
+| `enabled` | `false` | 布尔值；关闭不删除媒体 |
+| `overlay_opacity` | `0.65` | 0～1 的有限数值，值越大主题遮罩越强 |
+| `blur` | `0` | 0～20 的整数，单位为 CSS px |
+| `ui_opacity` | `0.94` | 0～1 的有限数值，前景 UI 底色不透明度；网页滑块显示 `(1−值)×100%` 透明度，0% 不透明 |
+| `ui_blur` | `0` | 0～30 的整数，UI 面板背后毛玻璃模糊，单位 CSS px，不模糊文字 |
+
+旧配置缺少 UI 两项时使用默认值，不在读取时写回。UI 透明度与毛玻璃在同一背景卡片，启用可用背景时生效。
+背景段必须为对象，不接受额外字段，尤其不能填写任意文件路径或 URL。无效值在运行配置
+加载和 API 保存前拒绝；只保存背景字段，不改写 Provider、语言、主题、字号及其他草稿。
+缺少配置或缺少可用媒体时仍显示原主题。媒体固定读取当前用户根目录的 `background.*`；
+格式、上限、安全读取、手工替换和前端视频降级详见 `frontend-conventions.md` 的“用户网页背景”。
+网页上传仅替换媒体文件，不擅自启用；清除媒体不改写显示参数。
+`web_ui` 不继承全局同名节，背景不能通过全局配置或 `PATCH preferences` 保存；
+`GET preferences` 可返回生效背景参数，但不在 `web_preferences.json` 建立第二份配置真值。
+
 ## `.env` 环境变量参数说明
 
 项目根目录 `.env` 保存本机启动参数和密钥兜底。无密钥模板是 `.env.example`。框架使用内置解析器读取简单 `KEY=VALUE`，支持空行、`#` 注释、可选 `export ` 前缀以及单/双引号包裹的值。
@@ -24,7 +87,7 @@
 | `KEMO_BASE_URL` | kemo | 默认 `http://127.0.0.1:8741`，填写协议根地址，不要求 `/v1` |
 | `KEMO_MODEL` | kemo | 仅当用户配置 `provider.model` 为空时使用 |
 | `OPENAI_API_KEY` | `provider.type=chat` | Chat Completions 兼容密钥兜底 |
-| `OPENAI_BASE_URL` | chat | 默认 `https://api.openai.com/v1`；缺少尾部 `/v1` 时框架自动补全 |
+| `OPENAI_BASE_URL` | chat | 默认 `https://api.openai.com/v1`；裸根地址沿用 `/v1` 默认，自定义 API 前缀、完整路径及查询参数保留 |
 | `OPENAI_MODEL` | chat | 仅当用户配置 `provider.model` 为空时使用 |
 
 `provider.api_key_env` 可以指定任意自定义环境变量名，例如 `MY_TEAM_API_KEY`。该自定义变量无需写入 `.env.example`，但应在部署说明中记录变量名，不能记录真实值。
@@ -61,7 +124,7 @@ Provider 可使用根目录代理配置。隔离运行的 Expand/Sense 模块如
 | `WEB_AUTH_IP_MAX_FAILURES` | `0` | 单个 IP 在同一认证阶段允许的失败次数；留空或 `0` 表示不限次数 |
 | `WEB_AUTH_IP_WINDOW_SECONDS` | `600` | 失败次数统计窗口，单位秒，必须大于 `0` |
 | `WEB_AUTH_IP_LOCK_SECONDS` | `900` | 达到失败上限后的锁定时间，单位秒，必须大于 `0` |
-| `WEB_AUTH_TRUSTED_PROXIES` | 空 | 可信反向代理 IP/CIDR，逗号分隔；仅直连来源命中时才读取 `X-Forwarded-For` |
+| `WEB_AUTH_TRUSTED_PROXIES` | 空 | 可信反向代理 IP/CIDR，逗号分隔；认证限流及免认证本机访问校验共用，只有可信代理可提供来源 IP |
 | `KEMO_LOG_RETENTION_DAYS` | `90` | Cron 与外部消息 SQLite 结构化日志保留天数；`0` 表示不自动清理 |
 
 认证流程按配置确定：只配置 Token 时验证 Token 后进入；只配置用户名密码时登录后进入；两者同时配置时必须先验证 Token，再验证用户名和密码，不能任选其一。双重认证的 Token 中间状态有效 5 分钟，完整签名会话默认有效 2 小时。
@@ -243,11 +306,27 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `queue_maxsize` | int | `50` | 用户级 `AgentScheduler` 的有界队列最大长度；0 表示无界 |
-| `default_timeout` | int | `600` | 子代理整体执行默认超时秒数；达到期限后自动发送协作式取消并等待清理，同步调度不会被普通工具默认超时提前截断 |
-| `timeout_survival_seconds` | number | `120` | 子代理达到整体超时后的收尾存活期；存活期内自然完成会保留结果并标记 `completed_after_timeout`，0 表示禁用 |
+| `queue_maxsize` | int | `50` | 用户级总等待上限；0 为无界。有界时自动启用空间入队保护，见下方说明 |
+| `default_timeout` | int | `600` | 子代理每段默认运行预算秒数；可恢复业务任务到期转入有限收尾并保存超时停止现场，其他执行器遵循既有取消与清理合同；同步调度不被普通工具默认超时提前截断 |
+| `timeout_survival_seconds` | number | `120` | 到期后的有限收尾期；可恢复业务任务保存部分结论并标记 `timed_out`，非恢复执行器自然完成才标记 `completed_after_timeout`；0 表示禁用收尾宽限 |
 
-> 注意：每个用户的 `AgentScheduler` 使用实例级串行锁和独立有界队列，不再由一个进程级锁串行所有用户。
+业务子代理的任务级预算不是新的用户配置项：主智能体在 `subagent_dispatch`
+call/resume 中显式设置 `max_tool_calls`（正整数，0 为不限工具次数）与 `timeout`
+（正数秒）。省略时使用默认，resume 沿用上一段有效预算；内部重试不重置计数。
+可恢复的本地 LLM 业务任务到期后保留结论并 timed_out，不能把收尾部分成果当成
+completed_after_timeout；后者仅适用于已有不支持恢复的执行器合同。
+工具额度停止为 tool_limit，可显式续跑同任务，权限和 API 池保护不变。
+
+> 每个用户的 `AgentScheduler` 使用独立有界队列；普通子任务有界并行，上限沿用共享
+> Provider 请求池的实际 `max_requests`，不新增并发配置。`background_serial` 维护任务保留
+> 用户级串行锁；主/子模型的真实 API 请求仍共同受进程级 Provider 总闸限制。
+> 任务顺序、未退出执行器占额及 `wait` 合同见 `agent-task-coordination.md`。
+
+有界时单空间最多等待 `ceil(queue_maxsize/2)` 项，另为没有待执行项的新空间保护
+`min(5,floor(queue_maxsize/5))` 个总队列位置；默认对应单空间 25、总等待上限 50、
+新空间保护位 5。保护位不是额外容量，不增加配置项或独立 API 并发；仅影响等待任务入队，
+空闲执行槽仍可借用。`0` 的无界配置不提供硬等待区保护。
+公平轮转与容量边界见 `agent-task-coordination.md` 的“对话空间公平与多窗口余量”。
 
 ---
 
@@ -318,6 +397,12 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `max_concurrent_chats` | int | `3` | 单用户最大并发聊天数。空闲闸门会自动采用新保存的 Web 限制 |
 | `max_pending_chats` | int | `5` | 单用户聊天等待队列上限。队列满或等待超时返回 HTTP 503 |
 | `pending_chat_timeout` | float | `30.0` | 排队等待超时秒数 |
+| `sse_heartbeat_seconds` | float | `15.0` | 已建立的 `/api/chat` SSE 流在业务事件静默时发送注释心跳；全局与用户配置均支持。有效值钳制到 1～30 秒，布尔值、非数字、非有限值回退 15 秒 |
+
+响应头 `X-Kemo-Heartbeat-Seconds` 表示本次流实际采用的间隔，修改配置对下一次请求生效。
+反代须关闭 SSE 缓冲，空闲读取超时应大于心跳间隔；请求进入 SSE 前仍可能排队并返回 HTTP 503，
+此阶段不发送心跳，反代首次响应等待需大于 `pending_chat_timeout` 并留出准备余量。心跳不延长
+工具/Provider 的执行期限，也不提供断流重放。消费者生命周期见 `architecture-overview.md`。
 
 ---
 
@@ -330,7 +415,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `max_rounds` | int | `80` | 上下文最大对话轮数。达到后触发压缩。此值限制 SQLite runtime 窗口及 Provider 上下文的轮次上限，不限制用户可见 archive 归档 |
 | `rounds_after_compression` | int | `20` | 压缩后保留的轮数 |
 | `token_limit` | int | `1000000` | 上下文 Token 上限。预估总 token 超过此值时触发压缩 |
-| `token_compression_ratio` | float | `0.3` | Token 压缩目标比例。`input_budget = token_limit × ratio`；自动触发点为硬上限 `token_limit`，手动 Token 整理可提前向此目标压缩 |
+| `token_compression_ratio` | float | `0.3` | Token 后备阶段的目标比例。所有整体压缩先按轮数整理；轮数阶段已解决上限则停止，无法解决才尝试 `input_budget = token_limit × ratio` |
 | `important_memory_review_hours` | int | `3` | 宿主级临时重要记忆巡检间隔（小时）。Cron 据此创建唯一系统 recurring 任务，到期后按用户分别执行；不支持用户级时间表 |
 | `daily_memory_review_time` | str | `"02:00"` | 宿主级每日记忆整理时间（北京时间 HH:MM）。Cron 据此创建唯一系统 daily 任务，到期后按用户分别执行；不支持用户级时间表 |
 
@@ -341,9 +426,12 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 轮数压缩沿用基础保留轮数；Token 压缩可以越过 `recent_full_rounds`、
 `conserved_rounds` 和 `rounds_after_compression`，直到含摘要和固定内容的上下文不超过
 目标比例，或只剩一轮。当前正在运行的一轮计入保留轮次，其工具消息组不拆分。
-网页手动操作优先轮数压缩，轮数没有可移除历史时进入 Token 压缩。
+手动、轮数、本地 Token、API 实际输入用量及 API 上下文错误都优先轮数压缩，
+轮数没有可移除历史或整理后仍超限时进入 Token 压缩；不因压缩前曾超限就无条件追逐比例。
 最后一轮仍高于目标时返回 `target_reached=false`、
 `minimum_rounds_reached=true`，不继续丢弃该轮。正常轮末也检查完整输出后的轮数和 Token。
+
+摘要单次输入默认最多约 64000 估算 Token，包含完整请求固定开销与已有摘要；摘要模型有可靠容量声明时再扣除输出预留收紧。超大单轮内部拆片，不截断或丢弃历史。413 尺寸恢复与模型 Token 超限分别记录，不把单独状态码认定为模型容量声明。
 
 ---
 
@@ -405,13 +493,13 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `type` | string | — | Provider 类型。`"kemo"` = Kemo 网关原生模式，`"chat"` = 标准 Chat Completions 模式。启动前选择，运行中不自动回退 |
-| `base_url` | string | — | API 基础地址。Kemo 默认 `http://127.0.0.1:8741`，chat 模式自动补全 `/v1` |
+| `base_url` | string | — | API 基础地址。Kemo 默认 `http://127.0.0.1:8741`；Chat 默认 `https://api.openai.com/v1`，仅裸根地址补 `/v1`，自定义路径保留 |
 | `api_key` | string | — | API 密钥。优先级高于 `api_key_env` |
 | `api_key_env` | string | — | 从环境变量读取密钥的变量名。当 `api_key` 为空时生效，如 `"KEMO_API_KEY"` |
 | `model` | string | — | 默认对话模型名，如 `"deepseek-chat"` |
 | `stream` | bool | `true` | 是否启用流式输出 |
 | `timeout` | number | `120` | 普通 Provider 请求超时秒数。专用多模态调用未显式配置时会改用当前工具期限并预留 5 秒收尾；显式配置后仍受工具期限上限约束 |
-| `reasoning_effort` | string | `"medium"` | 保存的逻辑思考档位。`chat` 模式下该字段仅为保存值，运行时不向上游提交任何 reasoning 字段（chat 传输声明推理能力为不支持，选择结果为 `chat_reasoning_disabled`）；`kemo` 完全以当前模型能力声明的有序档位为准，不限定名称或数量，并过滤 `none`。已保存档位失效时优先回退 `medium`，否则使用声明首项；不支持推理或能力不可用且无缓存时，请求不提交 `reasoning` |
+| `reasoning_effort` | string | `"medium"` | 保存的逻辑思考档位。Chat 由框架按实际模型自动选择能力及传输档案，已支持时发送对应思考字段，未知或缺少映射时不虚报启用；无需用户手写能力配置或自行检测。Kemo 以网关有序档位为准并过滤 `none`。保存值失效时优先 `medium`，否则使用声明首项；不支持或无可用声明时不提交 reasoning |
 | `input_modalities` | string[] | `["text"]` | 主模型已确认支持的输入模态；必须包含 `text`。Chat 只允许增加 `image`；Kemo 还可声明 `audio`、`video`、`file`，并会与网关能力声明交叉验证 |
 
 #### 密钥优先级
@@ -424,14 +512,15 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 2. `KEMO_BASE_URL` / `OPENAI_BASE_URL` 环境变量
 3. Provider 类型对应的内置默认地址（chat → OpenAI 默认，kemo → `http://127.0.0.1:8741`）
 
-最终地址统一去除尾部 `/`。只有 `chat` 模式自动补全 `/v1`。
+最终地址统一去除尾部 `/`。Chat 未配置地址时使用内置默认值，只填写裸根地址时沿用 `/v1` 默认；显式 API 前缀和查询参数保留，`/chat/completions` 只追加一次。
 
 #### Chat 传输层行为（不可配置，代码内置）
 
 Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配置项：
 
-- 网络重试：仅零输出时 2 次尝试预算，`Retry-After` 上限 10 秒；401/403/409/400 立即失败；
-- 工具降级：仅在 400 错误明确表示 tools 不受支持时剥离工具字段重试一次；
+- 自动能力：用户覆盖、内置精确型号档案、基础兼容策略三层；基础工具调用不要求手写 capabilities，未知高级能力不默认全开。兼容假设与已维护档案有来源标记；
+- 网络重试：HTTP 传输层单次发送，错误和 `Retry-After`（上限 10 秒）交统一运行级重试所有者；
+- 工具不支持：明确报错，不剥离工具字段后静默降级；
 - 请求净化：永不向上游注入 `reasoning_effort`、`reasoning_enabled`、`stream_options`。
 
 行为细节见 `provider-reliability.md` 的 "Chat Completions 兼容链路" 章节。
@@ -632,9 +721,9 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
-| `queue_maxsize` | int | 50 | 用户级 `AgentScheduler` 有界队列最大长度；0 表示无界 |
-| `default_timeout` | int | 600 | 子代理整体默认超时（秒）；到期自动请求协作式取消并等待清理，不受普通工具默认超时提前截断 |
-| `timeout_survival_seconds` | number | 120 | 子代理超时后的收尾存活期（秒）；存活期内完成保留结果并标记 `completed_after_timeout`，设为 0 可恢复旧行为 |
+| `queue_maxsize` | int | 50 | 用户级总等待上限；0 为无界。有界时自动启用空间入队保护，见“对话空间公平与多窗口余量” |
+| `default_timeout` | int | 600 | 子代理每段默认运行预算（秒）；可恢复业务任务到期保存超时停止现场，其他执行器仍按既有取消与清理合同；不受普通工具默认超时提前截断 |
+| `timeout_survival_seconds` | number | 120 | 到期后的有限收尾期（秒）；可恢复业务任务保存结论并标记 `timed_out`，非恢复执行器自然完成才标记 `completed_after_timeout`；0 表示禁用收尾宽限 |
 
 ---
 
@@ -647,6 +736,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `max_concurrent_chats` | int | 3 | 单用户最大并发聊天数 |
 | `max_pending_chats` | int | 5 | 聊天等待队列上限 |
 | `pending_chat_timeout` | float | 30.0 | 排队超时（秒） |
+| `sse_heartbeat_seconds` | float | 15.0 | SSE 业务静默期注释心跳间隔（秒）；覆盖全局值，有效范围 1～30，非法值回退 15 |
 
 ---
 
@@ -674,7 +764,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `avoid_congestion` | bool | true | 是否启用 Provider 拥塞避免 |
 | `congestion_threshold_ratio` | float | 0.2 | 拥塞阈值比例 |
 
-`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.5.1 更新器仍只处理已定义的迁移边界；1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
+`cron.history_retention_days` 与 `cron.session_idle_close_seconds` 都是全局专属字段：即使旧用户配置残留同名值，运行时也始终采用全局配置，用户配置不能覆盖。网页通过 `GET /api/global-config` 读取，通过 `PATCH /api/global-config` 保存；Merge Patch 的 `null` 会删除显式值并恢复默认值。`history_retention_days` 接受 0..3650，`session_idle_close_seconds` 必须是至少 3600 秒的整数；非法值会被拒绝且不会改写配置文件。后台维护每 5 分钟重新读取一次，无需重启 RuntimeHost。1.5.2 更新器仍只处理已定义的迁移边界；1.3.2 更新器只把 1.3.1 及更早安装中仍等于旧默认值 `86400` 的空闲阈值迁移为 `5400`，明确自定义的其他值保持不变。
 
 ---
 
@@ -701,7 +791,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `max_rounds` | int | 80 | 上下文最大对话轮数（触发压缩） |
 | `rounds_after_compression` | int | 20 | 压缩后保留的轮数 |
 | `token_limit` | int | 1000000 | 上下文 Token 上限 |
-| `token_compression_ratio` | float | 0.3 | Token 压缩目标比例；自动触发点仍为 `token_limit`，手动按轮数无可移除历史时按此比例整理 |
+| `token_compression_ratio` | float | 0.3 | Token 后备阶段目标比例。手动/自动/API 恢复均先整理轮数；轮数整理已解决上限则停止，无进展或仍超限才尝试此比例 |
 
 上下文摘要由 `context_manage` 统一处理，输入包含正文、reasoning/think 与工具结论，核心运行时的单次摘要输出预算为 20000 tokens。手动压缩会在 SQLite runtime 窗口和摘要缓存完成落盘校验后才返回成功；该输出预算不是用户配置字段。
 
