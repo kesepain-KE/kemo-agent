@@ -46,6 +46,7 @@ def run_source(
     terminal_run_stats = _service.terminal_run_stats
     threading = _service.threading
     uuid = _service.uuid
+    request["_agent_root_task_id"] = f"main-task-{uuid.uuid4().hex}"
     iterator: Iterator[_AnnotationRunEvent] | None = None
     current_request = request
     current_run_id = normalized_run_id

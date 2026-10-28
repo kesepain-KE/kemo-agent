@@ -7,8 +7,6 @@ remain effective.
 
 from __future__ import annotations
 
-from typing import Generator
-
 import queue as _Annotationqueue
 
 from events import RunEvent
@@ -21,6 +19,7 @@ from typing import Iterator
 from typing import Any
 
 from web.services.run_orchestration import run_source as _run_source_impl
+from web.services.event_stream import QueueEventStream
 
 def stream_chat(
     service,
@@ -36,7 +35,7 @@ def stream_chat(
     task_plan_mode: str = "",
     source: Any = "web",
     client_id: Any = "",
-) -> Generator[RunEvent, None, None]:
+) -> QueueEventStream:
     import importlib
     _service = importlib.import_module("web.service")
     ActiveRun = _service.ActiveRun
@@ -225,31 +224,15 @@ def stream_chat(
         gate.release()
         raise
 
-    def events() -> Generator[RunEvent, None, None]:
+    def release_consumer() -> None:
         try:
-            while True:
-                value = output.get()
-                if value is _WORKER_DONE:
-                    return
-                if isinstance(value, BaseException):
-                    raise value
-                if isinstance(value, RunEvent):
-                    yield value
+            with service._active_runs_lock:
+                active.guidance.close()
         finally:
-            consumer_closed.set()
-            cancel_event.set()
-            worker_stopped = worker.join(timeout=5.0)
-            if not worker_stopped:
-                # The producer is still alive (blocked in put() or inside
-                # the Run generator).  Release the user gate so another
-                # conversation is not blocked by a disconnected client,
-                # but keep the ActiveRun until the worker's own finally
-                # block removes it.  This preserves scoped status/guidance/
-                # cancel control while a long-running provider or tool is
-                # still unwinding; removing it here would make the durable
-                # long-task state look orphaned and make cancellation a
-                # no-op.
-                pass
+            # Keep ActiveRun scoped and cancellable until the dedicated worker
+            # actually exits, but do not let a disconnected consumer hold a slot.
             gate.release()
 
-    return events()
+    return QueueEventStream(
+        output, _WORKER_DONE, consumer_closed, cancel_event, release_consumer,
+    )

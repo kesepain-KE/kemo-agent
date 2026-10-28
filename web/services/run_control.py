@@ -25,6 +25,7 @@ from run.config import load_config
 from run.conversation import GuidanceInput, session_lock
 from run.extensions import history_attachment_descriptors
 from run.history import find_window, load_window
+from run.history import other_presence
 from run.history import (
     close_session as close_index_session,
     find_record as find_index_record,
@@ -67,6 +68,7 @@ class RunControlServiceMixin:
         require_user = WebRunService.require_user
         root: Path
         summary_waker: Callable[[], None] | None
+        memory_waker: Callable[[], None] | None
 
     def submit_guidance(
         self,
@@ -318,7 +320,12 @@ class RunControlServiceMixin:
             durable_clients = self._other_durable_session_clients_locked(
                 name, normalized_source, normalized_session, normalized_client
             )
-            remaining_clients = max(remaining_clients, len(durable_clients))
+            # Web/App presence is cross-process. Another worker may already
+            # have released a client still present in this process's cache.
+            remaining_clients = (
+                len(durable_clients) if normalized_source in {"web", "app"}
+                else max(remaining_clients, len(durable_clients))
+            )
             if remaining_clients:
                 record = find_index_record(
                     self.root, name, normalized_source, normalized_session
@@ -332,6 +339,9 @@ class RunControlServiceMixin:
                     "closed": False,
                     "deferred": True,
                     "active_clients": remaining_clients,
+                    "retry_after_seconds": other_presence(
+                        self.root, name, normalized_source, normalized_session, normalized_client,
+                    )["retry_after_seconds"],
                     "memory": {
                         "status": "skipped",
                         "reason": "session_in_use_by_other_clients",
@@ -374,6 +384,8 @@ class RunControlServiceMixin:
         )
         if summary.get("status") == "queued" and self.summary_waker is not None:
             self.summary_waker()
+        if memory.get("status") == "queued" and self.memory_waker is not None:
+            self.memory_waker()
         record = find_index_record(
             self.root, name, normalized_source, normalized_session
         ) or record
