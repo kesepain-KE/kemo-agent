@@ -52,7 +52,6 @@ class ProviderBackpressureTests(unittest.TestCase):
         with provider_factory_module._provider_semaphore_lock:
             provider_factory_module._provider_semaphore = None
             provider_factory_module._provider_semaphore_limit = 0
-            provider_factory_module._provider_waiting = 0
 
     def test_provider_gate_caps_concurrency_reports_waiters_and_reconfigures_idle(self) -> None:
         config = {

@@ -92,7 +92,7 @@ class PromptPipelineTests(unittest.TestCase):
             "以最新的明确指令为准",
         ):
             self.assertIn(requirement, agents_manual)
-        self.assertIn("### 4.6 Web 正文内联组件", agents_manual)
+        self.assertIn("### Web 正文内联组件", agents_manual)
         self.assertIn("必须先读取", agents_manual)
         self.assertIn("global_knowledge/inline-widgets.md", agents_manual)
         self.assertIn("不要凭记忆复制或发明字段", agents_manual)
@@ -1658,10 +1658,9 @@ class PromptPipelineTests(unittest.TestCase):
                 provider_factory=lambda _: provider,
             )
         self.assertEqual(provider.requests[0].messages[0]["role"], "system")
-        # Chat-compatible requests always carry the normalized compatibility
-        # reasoning fields, even when the fixture has no capability endpoint.
-        self.assertEqual(provider.requests[0].extra["reasoning_effort"], "medium")
-        self.assertTrue(provider.requests[0].extra["reasoning_enabled"])
+        # Missing capability declarations must not fabricate reasoning support.
+        self.assertNotIn("reasoning_effort", provider.requests[0].extra)
+        self.assertNotIn("reasoning_enabled", provider.requests[0].extra)
         self.assertEqual(result["memory"]["injected_files"], ["seven_days/memory.md"])
         self.assertEqual(result["memory"]["weighted_files"], [])
         from run.history import find_record, load_window

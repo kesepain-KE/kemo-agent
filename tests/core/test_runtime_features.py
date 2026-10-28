@@ -1156,17 +1156,19 @@ def run(*, context):
         result_event = next(
             event for event in events if event.type == "tool_call_result"
         )
-        self.assertEqual(result_event.metadata["status"], "result_too_large")
-        self.assertFalse(result_event.result["ok"])
-        error = result_event.result["error"]
-        self.assertEqual(error["exception_type"], "ToolResultTooLargeError")
-        self.assertTrue(error["content_omitted"])
-        self.assertGreater(error["result_chars"], MAX_TOOL_RESULT_CHARS)
+        self.assertEqual(result_event.metadata["status"], "completed")
+        self.assertTrue(result_event.result["ok"])
+        receipt = result_event.result["result"]
+        self.assertTrue(receipt["execution_completed"])
+        self.assertTrue(receipt["content_omitted"])
+        self.assertGreater(receipt["result_chars"], MAX_TOOL_RESULT_CHARS)
+        artifact = root / receipt["artifact"]["path"]
+        self.assertGreater(len(json.loads(artifact.read_text("utf-8"))["content"]), MAX_TOOL_RESULT_CHARS)
         self.assertNotIn("X" * 100, json.dumps(result_event.result, ensure_ascii=False))
         self.assertEqual(len(provider.requests), 2)
         continuation = provider.requests[1].messages[-1]
         self.assertEqual(continuation["role"], "tool")
-        self.assertIn("ToolResultTooLargeError", continuation["content"])
+        self.assertIn("execution_completed", continuation["content"])
         self.assertLess(len(continuation["content"]), 2_000)
         self.assertIsNotNone(provider.requests[1].tools)
         self.assertEqual(events[-1].type, "done")
@@ -1180,8 +1182,8 @@ def run(*, context):
         )
         window = load_window(require_present(window_path))
         stored_call = window["tool"]["rounds"][0]["calls"][0]
-        self.assertEqual(stored_call["status"], "result_too_large")
-        self.assertTrue(stored_call["result"]["error"]["content_omitted"])
+        self.assertEqual(stored_call["status"], "completed")
+        self.assertTrue(stored_call["result"]["result"]["content_omitted"])
         self.assertNotIn("X" * 100, json.dumps(window, ensure_ascii=False))
         self.assertLess(len(json.dumps(window["tool"], ensure_ascii=False)), 10_000)
         self.assertLess(len(json.dumps(window["items"], ensure_ascii=False)), 20_000)
@@ -1664,7 +1666,7 @@ def run(*, context):
 
         def inflated_messages(messages: list[dict[str, Any]]) -> int:
             has_tool_result = any(message.get("role") == "tool" for message in messages)
-            return 200_100 if has_tool_result else 200_000
+            return 20_100 if has_tool_result else 20_000
 
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
@@ -1724,7 +1726,7 @@ def run(*, context):
 
         def growing_messages(messages: list[dict[str, Any]]) -> int:
             has_tool_result = any(message.get("role") == "tool" for message in messages)
-            return 310_000 if has_tool_result else 200_000
+            return 111_000 if has_tool_result else 1_000
 
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
@@ -1821,7 +1823,7 @@ def run(*, context):
 
         def growing_messages(messages: list[dict[str, Any]]) -> int:
             has_tool_result = any(message.get("role") == "tool" for message in messages)
-            return 350_000 if has_tool_result else 200_000
+            return 151_000 if has_tool_result else 1_000
 
         with (
             patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
@@ -3868,6 +3870,31 @@ def run(*, context):
         self.assertEqual(calls[8]["consecutive_identical_calls"], 9)
         self.assertEqual(calls[9]["status"], "completed")
         self.assertEqual(calls[9]["consecutive_identical_calls"], 1)
+
+    def test_explicit_false_result_is_failure_not_cached_or_reported_success(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        (root / "plugins/lookup/tool.py").write_text(
+            "def run(value, *, context):\n    return {'ok': False, 'error': 'injected failure'}\n", "utf-8"
+        )
+        path = root / "config/global_config.json"
+        config = json.loads(path.read_text("utf-8"))
+        config["history"] = {"consecutive_tool_fail_limit": 2}
+        path.write_text(json.dumps(config), "utf-8")
+        provider = ScriptedProvider(responses=[
+            ChatResponse(text="", tool_calls=[ToolCall(f"negative-{i}", "lookup", {"value": "same"})])
+            for i in range(3)
+        ] + [ChatResponse(text="stop retrying")])
+        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+            events = list(iter_request_events(
+                {"user": "alice", "source": "cli", "session_id": "negative-result", "prompt": "go", "_auto_retry_max_attempts": 1},
+                root=root, provider_factory=lambda _: provider,
+            ))
+        results = [event for event in events if event.type == "tool_call_result"]
+        self.assertEqual([event.metadata["status"] for event in results], ["failed", "failed", "temporarily_unavailable"])
+        self.assertTrue(all(event.result["ok"] is False for event in results))
+        self.assertTrue(all(not event.metadata["duplicate"] for event in results))
+        self.assertIsNone(provider.requests[2].tools)
 
     def test_consecutive_failures_temporarily_remove_tool_schema(self) -> None:
         _, root = self.make_root()
