@@ -348,11 +348,13 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 |------|------|
 | `internal_mode` | `true` 为内部代理，不向主智能体公开；`false` 可作为工具调度 |
 | `allowed_callers` | 明确允许的调用方，例如 `main_agent`、`engine` |
-| `tools.plugins.allow` | 可调用插件白名单；缺失授权默认拒绝 |
-| `tools.shared_skills.allow` | 可注入共享技能白名单 |
+| `tools.plugins.allow` | 可调用插件白名单；缺失授权默认拒绝；`["*"]` 动态选择当前用户已授权且启用的插件，仍排除子代理调度 |
+| `tools.shared_skills.allow` | 可注入共享技能白名单；`["*"]` 使用当前用户共享技能白名单，不绕过用户筛选 |
+| `tools.user_skills.allow` | 精简配置可显式授权当前用户技能，默认空；`["*"]` 选择当前用户可用技能，不扫描其他用户 |
 | `tools.max_iterations` | 子智能体单次运行允许的工具调用上限，正整数；同时受全局同名配置的硬上限约束 |
 | `global_knowledge` | 是否注入全局知识索引 |
 | `shared_knowledge` | 是否注入共享知识索引 |
+| `user_knowledge` | 是否注入当前用户知识索引，默认关闭；知识正文仍须按需读取 |
 | `inherit_main_history` | 是否继承主会话历史和当前请求；默认关闭 |
 
 内置配置与新建模板统一为 80；每个子代理各自计数，不是共享池。仍取全局与子代理配置的最小值；
@@ -366,7 +368,34 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 自动注入且可人工删除；正常晋升、融合、拆分传递来源身份，不误失效。当前权威状态保存在记忆库，
 旁车 `memory-provenance.json` 为可携带快照。完整规则见 `storage-and-persistence.md`。
 
-主智能体用户配置的白名单不会自动收缩子智能体显式授权。创建时坚持最小权限，不因为“可能有用”扩大工具、知识或历史范围。子智能体不会得到用户技能、三层拓展或 `subagent_dispatch` 递归调度能力。
+插件能力始终与当前用户插件白名单及启用状态求交，知识索引与当前用户知识开关求交。
+固定共享技能授权保留旧代理行为；通配符共享技能授权则服从当前用户的共享技能白名单。
+旧版 `prompt_sources.skills.user` 仍不注入，只有精简配置的 `tools.user_skills.allow`
+显式授权才开放用户技能。技能发现摘要包含来源路径，不代表已读取正文。
+创建时坚持最小权限，不因为“可能有用”扩大工具、知识或历史范围。
+所有子智能体均不自动注入三层拓展及感知，不下发 `subagent_dispatch`；
+工具入口也按可信 `caller=subagent` 拒绝创建、调度、查询、取消其他代理。
+通过 `expand_call` 按需调用普通已授权拓展仍可用，但已声明在 `agent_bridge.json`
+中的代理命令会被拒绝，桥接清单损坏时保守拒绝。这是框架调用边界，不是操作系统沙箱；
+开放的 file/shell 仍具宿主权限，不能把提示词禁令等同于任意脚本或网络调用的强隔离。
+
+### 内置通用执行助手 general_worker
+
+`agents/general_worker/` 承接文件处理、脚本、检索整理、批量操作和测试验证等明确任务，
+由主智能体调用，不再继续委派。插件、共享技能和当前用户技能使用上述动态授权，
+全局、共享、用户知识只注入允许范围的索引；拓展与感知的说明、状态和数据不自动注入，
+需要时通过已有授权工具按需读取、使用，不自动激活或扩大权限。
+
+输入必须含非空 `task`，可附 `context`、`constraints`、`acceptance_criteria`；
+不自动继承主对话历史。输出含 `status`（completed/partial/blocked/failed）、
+`summary`、`results`、`verification`、`remaining` 和 `artifacts`。
+外层代理执行成功不代表内部业务一定 completed，主智能体须检查遗留事项与验证。
+产物只引用真实文件，按 `scope/relative_path/name` 交付。
+
+沿用 default 模型配置、80 次工具上限（受全局更小上限约束）和现有整体期限，
+不新增模型账号或调用渠道。执行类型为 sync，可经公开调度 `wait=false` 后台提交，
+不占用维护代理的串行执行锁；仍遵守主任务完成屏障、取消和右侧任务详情机制。
+没有测试、部署或发布的独立隐式授权。完整输入输出见该包的 `trigger.md` 与 `schema.json`。
 
 #### AGENT.md
 
@@ -404,6 +433,8 @@ def execute(context, input_data: dict):
 ```
 
 执行器应检查 trigger、取消信号和输出格式。`schema.json` 若存在，必须且只能包含 `input_schema` 与 `output_schema` 两个对象；缺失时使用宽松对象 Schema。
+字符串字段可用 `minLength`、`maxLength` 与 `pattern` 约束；
+`general_worker.task` 用 `pattern: "\\S"` 拒绝只有空白的目标，格式错误在模型调用前返回。
 
 自定义执行器会被主进程直接导入，不具备代码沙箱。内部工程自由不改变这一信任边界：只能放入可信代码，不得在导入阶段启动线程、发起网络请求或产生其他副作用；长期任务仍必须响应 `context.cancel_event` 和整体超时。
 

@@ -166,6 +166,7 @@ knowledge-root/
 users/<name>/
 ├── user_config.json                    # Provider、白名单与用户级配置
 ├── user_soul.md                        # 用户人格与工作偏好
+├── background.webp                     # 新用户复制的默认网页背景；可换图片/视频，默认不启用
 ├── memory_temporary_important.md       # 临时重要记忆，子智能体维护
 ├── avatar/                             # 用户头像
 ├── file_upload/                        # 用户上传文件
@@ -199,6 +200,7 @@ Web 启动自检和更新迁移都通过同一个幂等补齐函数处理：只�
 | A 必需目录 | `agents/`、`avatar/`、`download/`、`expand/`、`file_upload/`、`history/`、`improve/`、`improve/expired_memory/`、`knowledge/`、`task_cron/`、`task_plan/`、`user_skills/`、`user_skills/agent_create/`、`user_skills/user_create/`、`runtime/`、`tools/` | 模板带 `.gitkeep`；创建器、Web 启动自检和更新迁移只增不减地幂等补齐 |
 | B 运行期生成 | `runtime/background_jobs/`、`history/thumbnails/`、`web_preferences.json`、`completion_sound.*`、`failure_sound.*` | 不预置、不从模板复制；由对应运行时或 Web 上传流程按需生成 |
 | C 数据库 | `improve/memory.sqlite3`、`history/history.sqlite3`、`task_plan/task_plans.sqlite3` 及其 WAL/SHM | 由各自数据库模块按当前 schema 初始化；不作为静态模板文件。已有 `memory.backup_*.sqlite3*` 只保留为备份，不导入当前运行库 |
+| D 可选静态媒体 | 根目录 `background.{jpg,jpeg,png,webp,mp4,webm}`；模板为 `background.webp` | 新用户从模板复制轻量默认背景、默认不启用；已有用户修复/升级不补入、不覆盖。用户可通过网页上传替换或手工放入，读取不修改文件 |
 
 运行中还可能生成：
 
@@ -266,4 +268,9 @@ python user_create.py
 
 ### 备份建议
 
-备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.json`、`user_soul.md`、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/`、`expand/`、`runtime/` 和约定式 `tools/`；若用户已设置音效，也一并保留用户根目录的 `completion_sound.*` 和 `failure_sound.*`。
+网页背景 `background.*` 不进入上传/下载文件列表、知识库或模型输入。显示配置归
+`user_config.json → web_ui.background`；格式、安全读取和视频降级见
+`frontend-conventions.md` 的“用户网页背景”。默认背景为项目原创程序绘制的静态 WebP，
+不依赖远程素材或外部图片版权；模板验收检查默认文件可正常解码。
+
+备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.json`、`user_soul.md`、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/`、`expand/`、`runtime/` 和约定式 `tools/`；若用户已设置音效或背景，也一并保留用户根目录的 `completion_sound.*`、`failure_sound.*` 和 `background.*`。
