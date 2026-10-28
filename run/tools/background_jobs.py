@@ -36,6 +36,7 @@ MAX_BACKGROUND_JOB_LOG_BYTES = 16 * 1024 * 1024
 _JOB_ID_RE = re.compile(r"^job_[a-f0-9]{32}$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _JOB_ARTIFACT_SUFFIXES = (".json", ".request.json", ".stdout.log", ".stderr.log")
+_RECORD_READ_RETRY_DELAYS = (0.02, 0.05, 0.1)
 
 
 def _now() -> str:
@@ -250,12 +251,22 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _read_record(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text("utf-8"))
-    except FileNotFoundError:
-        raise KeyError("后台作业不存在") from None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError("后台作业记录损坏或不可读") from exc
+    attempt = 0
+    while True:
+        try:
+            value = json.loads(path.read_text("utf-8"))
+            break
+        except FileNotFoundError:
+            raise KeyError("后台作业不存在") from None
+        except PermissionError as exc:
+            # A Windows atomic replacement can briefly deny new read handles.
+            # Retry only access failures, never malformed JSON or missing jobs.
+            if attempt >= len(_RECORD_READ_RETRY_DELAYS):
+                raise RuntimeError("后台作业记录损坏或不可读") from exc
+            time.sleep(_RECORD_READ_RETRY_DELAYS[attempt])
+            attempt += 1
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("后台作业记录损坏或不可读") from exc
     if not isinstance(value, dict) or value.get("schema_version") != JOB_SCHEMA_VERSION:
         raise RuntimeError("后台作业记录版本无效")
     return value
@@ -271,7 +282,13 @@ def prepare_background_job(
     shell_type: str,
     command_digest: str,
     timeout_seconds: float | None = None,
+    ownership: dict[str, Any] | None = None,
+    completion_mode: str = "required",
+    label: str = "",
 ) -> tuple[dict[str, Any], dict[str, Path]]:
+    if completion_mode not in {"required", "detached"}:
+        raise ValueError("completion_mode 必须是 required/detached")
+    from run.infra import diagnostic_text
     job_id = f"job_{uuid.uuid4().hex}"
     paths = job_paths(root, user, job_id)
     now = _now()
@@ -311,6 +328,12 @@ def prepare_background_job(
         "command_digest": str(command_digest),
         "stdout_path": str(paths["stdout"]),
         "stderr_path": str(paths["stderr"]),
+        "root_task_id": str((ownership or {}).get("root_task_id") or ""),
+        "owner_task_id": str((ownership or {}).get("owner_task_id") or ""),
+        "notification_enabled": bool(ownership and source and session_id),
+        "notification_handled": False,
+        "completion_mode": completion_mode,
+        "label": diagnostic_text(label)[:160],
     }
     directory = paths["record"].parent
     with index_lock(root, user):
@@ -346,8 +369,9 @@ def write_job_request(path: Path, payload: dict[str, Any]) -> None:
 
 def read_background_job(root: Path, user: str, job_id: str) -> dict[str, Any]:
     paths = job_paths(root, user, job_id)
-    with index_lock(root, user):
-        return _read_record(paths["record"])
+    # Writers publish with atomic replace; a reader sees either complete
+    # version and must not contend for the user's cross-process write lock.
+    return _read_record(paths["record"])
 
 
 def assert_background_job_access(
@@ -378,6 +402,8 @@ def update_background_job(
         rendered = mutator(dict(current))
         if not isinstance(rendered, dict):
             raise TypeError("后台作业 mutator 必须返回对象")
+        if current.get("status") not in JOB_ACTIVE_STATUSES and rendered.get("status") != current.get("status"):
+            raise ValueError("后台作业终态不可变，拒绝状态复活")
         rendered["schema_version"] = JOB_SCHEMA_VERSION
         rendered["job_id"] = job_id
         rendered["user"] = user
@@ -636,6 +662,14 @@ def public_background_job(
         "started_at",
         "updated_at",
         "finished_at",
+        "root_task_id",
+        "owner_task_id",
+        "label",
+        "completion_mode",
+        "notification_handled",
+        "notification_enabled",
+        "output_tail",
+        "output_tail_complete",
         "exit_code",
         "cancel_requested",
         "timeout_requested",

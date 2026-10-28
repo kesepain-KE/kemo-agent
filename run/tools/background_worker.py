@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from typing import Any
+from run.tools.background_output import OutputTail
 
 from run.infra import (
     cancellable_subprocess_kwargs,
@@ -30,7 +31,8 @@ MAX_LOG_BYTES = MAX_BACKGROUND_JOB_LOG_BYTES
 _LOG_CHUNK_BYTES = 64 * 1024
 
 
-def _capture_stream(stream: Any, path: Path, *, max_bytes: int = MAX_LOG_BYTES) -> None:
+def _capture_stream(stream: Any, path: Path, *, max_bytes: int = MAX_LOG_BYTES,
+                    tail: OutputTail | None = None, stream_name: str = "stdout") -> None:
     """Drain one child stream while bounding the durable log size."""
 
     truncated = False
@@ -38,6 +40,8 @@ def _capture_stream(stream: Any, path: Path, *, max_bytes: int = MAX_LOG_BYTES) 
     marker = f"\n...[日志输出已截断，单个流上限 {max_bytes} 字节]...\n".encode(
         "utf-8"
     )
+    if len(marker) > max_bytes:
+        marker = b"\n...[truncated]...\n"[:max(0, max_bytes)]
     content_limit = max(0, max_bytes - len(marker))
     output = None
     try:
@@ -51,11 +55,17 @@ def _capture_stream(stream: Any, path: Path, *, max_bytes: int = MAX_LOG_BYTES) 
             output = None
         while True:
             try:
-                chunk = stream.read(_LOG_CHUNK_BYTES)
+                # BufferedReader.read(size) can wait for an entire 64 KiB or EOF.
+                # read1 drains the available pipe data so running jobs stay visible.
+                chunk = getattr(stream, "read1", stream.read)(_LOG_CHUNK_BYTES)
             except (OSError, ValueError):
                 break
             if not chunk:
+                if tail is not None:
+                    tail.feed(stream_name, b"")
                 break
+            if tail is not None:
+                tail.feed(stream_name, chunk)
             if output is None:
                 continue
             try:
@@ -107,6 +117,8 @@ def _finish(
     exit_code: int | None,
     error_code: str = "",
     exception_type: str = "",
+    output_tail: list[str] | None = None,
+    output_tail_complete: bool = False,
 ) -> None:
     def mutate(record: dict[str, Any]) -> dict[str, Any]:
         if record.get("status") in JOB_TERMINAL_STATUSES:
@@ -124,6 +136,8 @@ def _finish(
         )
         record["finished_at"] = datetime.now(timezone.utc).isoformat()
         record["exit_code"] = exit_code
+        record["output_tail"] = output_tail or []
+        record["output_tail_complete"] = output_tail_complete
         record["stop_reason"] = (
             "user_cancel"
             if cancelled
@@ -164,6 +178,8 @@ def run(request_path: Path) -> int:
     user = str(request["user"])
     job_id = str(request["job_id"])
     current = read_background_job(root, user, job_id)
+    if current.get("status") in JOB_TERMINAL_STATUSES:
+        return 0
     if current.get("cancel_requested"):
         _finish(root, user, job_id, exit_code=None)
         return 0
@@ -189,6 +205,7 @@ def run(request_path: Path) -> int:
 
     process: subprocess.Popen[Any] | None = None
     capture_threads: list[threading.Thread] = []
+    tail = OutputTail()
     try:
         process = subprocess.Popen(
             command,
@@ -244,6 +261,7 @@ def run(request_path: Path) -> int:
             stdout_thread = threading.Thread(
                 target=_capture_stream,
                 args=(process.stdout, stdout_path),
+                kwargs={"tail": tail, "stream_name": "stdout"},
                 daemon=True,
             )
             capture_threads.append(stdout_thread)
@@ -252,6 +270,7 @@ def run(request_path: Path) -> int:
             stderr_thread = threading.Thread(
                 target=_capture_stream,
                 args=(process.stderr, stderr_path),
+                kwargs={"tail": tail, "stream_name": "stderr"},
                 daemon=True,
             )
             capture_threads.append(stderr_thread)
@@ -291,6 +310,8 @@ def run(request_path: Path) -> int:
             job_id,
             exit_code=exit_code,
             error_code="background_timeout" if timed_out else "",
+            output_tail=tail.snapshot(),
+            output_tail_complete=tail.complete() and all(not thread.is_alive() for thread in capture_threads),
         )
         return 0
     except BaseException as exc:
@@ -303,6 +324,7 @@ def run(request_path: Path) -> int:
             exit_code=(process.returncode if process is not None else None),
             error_code="background_worker_exception",
             exception_type=type(exc).__name__,
+            output_tail=tail.snapshot(),
         )
         return 1
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from run.tools.background_notifications import ShellInbox as ShellInbox
     from run.tools.background_jobs import (
         cancel_background_job as cancel_background_job,
         prepare_background_job as prepare_background_job,
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from plugins.manifest import PluginManifest, PluginManifestError, discover_plugin_manifests
+from provider.request_scope import provider_request_scope
 from run.tools.execution_watchdog import (
     ExecutionCapacityError,
     abandon_execution,
@@ -39,8 +41,9 @@ from run.tools.execution_watchdog import (
     release_execution,
     reserve_execution,
 )
-from run.infra import start_isolated_tool
+from run.infra import run_awaitable, start_isolated_tool
 from run.config import MainAgentSourcePolicy
+from run.retry import HOST_CONTROL_EXCEPTIONS
 
 
 class ToolError(RuntimeError):
@@ -55,9 +58,10 @@ class ToolTimeoutError(ToolError):
     category = "timeout"
     retryable = False
 
-    def __init__(self, message: str, *, still_running: bool = False) -> None:
+    def __init__(self, message: str, *, still_running: bool = False, completion_future: Any = None) -> None:
         super().__init__(message)
         self.still_running = bool(still_running)
+        self.completion_future = completion_future
 
 
 class ToolExecutionCapacityError(ToolError):
@@ -93,6 +97,10 @@ class ToolProcessError(ToolError):
 class ToolCancelledError(ToolError):
     """The user explicitly cancelled the run while a tool was executing."""
 
+    def __init__(self, message: str, *, completion_future: Any = None) -> None:
+        super().__init__(message)
+        self.completion_future = completion_future
+        self.still_running = completion_future is not None and not completion_future.done()
 
 class ToolResultTooLargeError(ToolError):
     """A tool completed, but its inline result is unsafe to place in context."""
@@ -132,7 +140,8 @@ class ToolResultTooLargeError(ToolError):
             "result_chars": self.result_chars,
             "limit_chars": self.limit_chars,
             "content_omitted": True,
-            "instruction": self.instruction,
+            "execution_completed": True,
+            "instruction": "执行已经完成，先核对副作用，禁止原样重试。 " + self.instruction,
         }
         if self.action:
             payload["action"] = self.action
@@ -179,9 +188,26 @@ def _enforce_tool_result_limit(
     tool_name: str,
     arguments: dict[str, Any],
     value: Any,
+    context: dict[str, Any] | None = None,
 ) -> Any:
     rendered = json.dumps(value, ensure_ascii=False, default=str)
     if len(rendered) > MAX_TOOL_RESULT_CHARS:
+        if context and context.get("root") and context.get("user"):
+            from run.tools.result_artifacts import save_result_artifact
+            try:
+                artifact = save_result_artifact(rendered, context)
+            except (OSError, ValueError, RuntimeError):
+                # Execution has already happened; the fallback exception also
+                # explicitly forbids blindly re-executing side effects.
+                artifact = None
+            if artifact is not None:
+                return {
+                    "ok": not (isinstance(value, dict) and value.get("ok") is False),
+                    "execution_completed": True,
+                    "content_omitted": True, "result_chars": len(rendered),
+                    "artifact": artifact,
+                    "instruction": "工具已执行完成，不要重复执行；请用 file.read_range 分页读取 artifact.path 核对完整结果。",
+                }
         raise ToolResultTooLargeError(
             tool_name,
             arguments,
@@ -515,10 +541,14 @@ def _invoke(function: Callable[..., Any], arguments: dict[str, Any], context: di
     kwargs = dict(arguments)
     if "context" in signature.parameters:
         kwargs["context"] = context
-    result = function(**kwargs)
-    if inspect.isawaitable(result):
-        return asyncio.run(result)
-    return result
+    with provider_request_scope(
+        context.get("root"), str(context.get("user") or ""),
+        str(context.get("source") or ""), str(context.get("session_id") or ""),
+    ):
+        result = function(**kwargs)
+        if inspect.isawaitable(result):
+            return run_awaitable(result)
+        return result
 
 
 def _execute_tool_process(
@@ -572,7 +602,7 @@ def _execute_tool_process(
             call.wait(1)
             if payload.get("ok") is True:
                 return _enforce_tool_result_limit(
-                    tool.name, arguments, payload.get("value")
+                    tool.name, arguments, payload.get("value"), context=context
                 )
             detail = payload.get("error")
             raise ToolProcessError(detail if isinstance(detail, dict) else {})
@@ -636,8 +666,11 @@ def _execute_tool_impl(
                 cleanup_deadline = time.monotonic() + _TOOL_CANCEL_CLEANUP_GRACE
                 while not future.done() and time.monotonic() < cleanup_deadline:
                     time.sleep(0.05)
-                abandon_execution(execution_id)
-                raise ToolCancelledError("工具调用因用户紧急停止而取消")
+                still_running = abandon_execution(execution_id)
+                raise ToolCancelledError(
+                    "工具调用因用户紧急停止而取消",
+                    completion_future=future,
+                )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 tool_cancel_event.set()
@@ -651,6 +684,8 @@ def _execute_tool_impl(
                         future.result(timeout=min(0.05, cleanup_remaining))
                     except FutureTimeout:
                         continue
+                    except HOST_CONTROL_EXCEPTIONS:
+                        raise
                     except BaseException:
                         break
                 still_running = abandon_execution(execution_id)
@@ -658,10 +693,11 @@ def _execute_tool_impl(
                 raise ToolTimeoutError(
                     f"工具 {tool.name} 执行超时（{effective_timeout:g}s）{state}",
                     still_running=still_running,
+                    completion_future=future,
                 )
             try:
                 value = future.result(timeout=min(0.1, remaining))
-                return _enforce_tool_result_limit(tool.name, arguments, value)
+                return _enforce_tool_result_limit(tool.name, arguments, value, context=context)
             except FutureTimeout:
                 continue
     finally:
@@ -719,6 +755,7 @@ _DOMAIN_MODULES = (
     "execution_watchdog",
     "provider_tool_recovery",
     "background_jobs",
+    "background_notifications",
 )
 
 
