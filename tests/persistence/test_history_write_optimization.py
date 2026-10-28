@@ -33,6 +33,7 @@ from run.history import (
     save_window,
 )
 import run.history.runtime_cache as runtime_cache
+from run.history.store_core import HISTORY_SCHEMA_VERSION
 
 
 def test_late_terminal_commit_does_not_overwrite_newer_active_session(tmp_path: Path) -> None:
@@ -85,13 +86,15 @@ def test_late_terminal_commit_after_delete_cannot_recreate_session(tmp_path: Pat
 
     delete_session(tmp_path, "alice", "web", "session-deleted")
 
-    commit_terminal_windows(
-        archive,
-        archive_window,
-        runtime_window_path(archive),
-        copy.deepcopy(archive_window),
-        active_key="interactive:alice",
-    )
+    import pytest
+    with pytest.raises(RuntimeError, match="已删除|冲突"):
+        commit_terminal_windows(
+            archive,
+            archive_window,
+            runtime_window_path(archive),
+            copy.deepcopy(archive_window),
+            active_key="interactive:alice",
+        )
 
     assert read_registry_record(tmp_path, "alice", "web", "session-deleted") is None
     assert get_active(tmp_path, "alice", "interactive:alice") is None
@@ -163,7 +166,7 @@ def test_archive_append_inserts_only_new_message_suffix(tmp_path: Path) -> None:
     assert load_window(archive)["text"]["messages"] == window["text"]["messages"]
 
 
-def test_archive_edit_uses_explicit_rebuild_fallback(tmp_path: Path) -> None:
+def test_archive_edit_updates_only_changed_message_and_preserves_rowids(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
     window = empty_window("alice", "web", "conv_write")
     _append_round(window, 1)
@@ -171,25 +174,31 @@ def test_archive_edit_uses_explicit_rebuild_fallback(tmp_path: Path) -> None:
     save_window(archive, window)
     db_path = database_path(tmp_path, "alice")
     with sqlite3.connect(db_path) as database:
+        before = database.execute(
+            "SELECT rowid, message_index, message_json FROM history_messages ORDER BY message_index"
+        ).fetchall()
         database.executescript(
             """
-            CREATE TABLE write_audit(kind TEXT NOT NULL);
+            CREATE TABLE write_audit(kind TEXT NOT NULL, message_index INTEGER);
             CREATE TRIGGER audit_message_insert AFTER INSERT ON history_messages
-            BEGIN INSERT INTO write_audit(kind) VALUES('insert'); END;
+            BEGIN INSERT INTO write_audit VALUES('insert', NEW.message_index); END;
             CREATE TRIGGER audit_message_delete AFTER DELETE ON history_messages
-            BEGIN INSERT INTO write_audit(kind) VALUES('delete'); END;
+            BEGIN INSERT INTO write_audit VALUES('delete', OLD.message_index); END;
+            CREATE TRIGGER audit_message_update AFTER UPDATE ON history_messages
+            BEGIN INSERT INTO write_audit VALUES('update', NEW.message_index); END;
             """
         )
     window["text"]["messages"][0]["content"] = "edited"
     save_window(archive, window)
     with sqlite3.connect(db_path) as database:
-        audit = dict(
-            database.execute(
-                "SELECT kind, COUNT(*) FROM write_audit GROUP BY kind"
-            ).fetchall()
-        )
-    assert audit == {"delete": 4, "insert": 4}
-    assert load_window(archive)["text"]["messages"][0]["content"] == "edited"
+        audit = database.execute("SELECT kind, message_index FROM write_audit").fetchall()
+        after = database.execute(
+            "SELECT rowid, message_index, message_json FROM history_messages ORDER BY message_index"
+        ).fetchall()
+    assert audit == [("update", 0)]
+    assert [row[:2] for row in after] == [row[:2] for row in before]
+    assert after[1:] == before[1:]
+    assert load_window(archive)["text"]["messages"] == window["text"]["messages"]
 
 
 def test_terminal_commit_does_not_write_runtime_window(tmp_path: Path) -> None:
@@ -636,6 +645,9 @@ def test_schema_v3_migrates_legacy_partition_blobs_without_losing_rounds(
         database.execute(
             "UPDATE history_meta SET value='1' WHERE key='schema_version'"
         )
+        # Persist the legacy fixture before invoking a migration; its backup
+        # must represent a committed database, not implicit executescript commits.
+        database.commit()
         _ensure_schema(database)
         database.commit()
         version = database.execute(
@@ -654,7 +666,7 @@ def test_schema_v3_migrates_legacy_partition_blobs_without_losing_rounds(
             "SELECT COUNT(*) FROM history_rounds "
             "WHERE window_kind='archive' AND window_name='conv_write'"
         ).fetchone()[0]
-    assert version == "6"
+    assert version == str(HISTORY_SCHEMA_VERSION)
     assert compact["storage"] == "history_messages"
     assert count == 2
     assert round_count == 1
