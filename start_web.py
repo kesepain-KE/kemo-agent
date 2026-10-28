@@ -391,6 +391,8 @@ def _run_main(argv: list[str] | None, root: Path) -> int:
         web_host = _resolve_web_host(args.host)
         base_port = _resolve_web_port(args.port)
         auth_config = WebAuthConfig.from_env()
+        from web.auth import validate_web_bind
+        validate_web_bind(web_host, auth_config)
     except (ValueError, WebAuthConfigError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
