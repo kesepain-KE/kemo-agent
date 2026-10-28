@@ -29,7 +29,6 @@ _SCOPES = frozenset({"global", "shared", "user"})
 _MODULE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _COMMAND_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _MAX_REQUEST_CHARS = 256_000
-_MAX_RESULT_CHARS = 256_000
 _MAX_ARTIFACTS = 32
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 _MAX_ARTIFACT_TOTAL_BYTES = 1024 * 1024 * 1024
@@ -622,11 +621,9 @@ def invoke_expand(
                     metadata=payload,
                 )
             result = payload.get("result")
-            serialized = json.dumps(result, ensure_ascii=False, default=str)
-            if len(serialized) > _MAX_RESULT_CHARS:
-                raise ExpandOperationError(
-                    "拓展操作结果过大；请将大型 DOM、日志或二进制内容保存为 artifact"
-                )
+            # Do not report a completed external side effect as failed merely
+            # because its receipt is large. The shared tool boundary persists
+            # oversized results and returns a bounded, non-retry receipt.
             if isinstance(result, dict):
                 status = str(result.get("status") or "").strip().casefold()
                 if result.get("ok") is False or status in {"error", "failed", "failure"}:

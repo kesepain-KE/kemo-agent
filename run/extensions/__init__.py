@@ -2,6 +2,10 @@
 
 _DOMAIN_MODULES = (
     "attachments",
+    "media_input_request",
+    "media_input_queue",
+    "media_input_host",
+    "media_input_metadata",
     "model_capabilities",
     "module_runtime",
     "multimodal",

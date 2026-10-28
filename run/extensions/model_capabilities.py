@@ -1,6 +1,7 @@
 """Shared Kemo model-capability cache and reasoning selection policy."""
 
 from __future__ import annotations
+from run.retry import HOST_CONTROL_EXCEPTIONS
 
 from dataclasses import dataclass
 import hashlib
@@ -155,6 +156,19 @@ def lookup_model_capabilities(
     force_refresh: bool = False,
 ) -> CapabilityLookup:
     selected_model = str(model or runtime_provider.get("model") or "").strip()
+    if str(runtime_provider.get("type") or "").strip().casefold() == "chat":
+        # Chat declarations are local profile data, not a network capability
+        # probe and not a request-derived default. Never cache across profiles.
+        method = getattr(provider, "capabilities", None)
+        if not callable(method):
+            return CapabilityLookup(None)
+        try:
+            declared = ModelCapabilities.model_validate(method(selected_model))
+            if declared.model != selected_model:
+                raise ValueError("Chat 能力声明与所选模型不一致")
+            return CapabilityLookup(declared)
+        except Exception as exc:
+            return CapabilityLookup(None, error=exc)
     if str(runtime_provider.get("type") or "").strip().casefold() != "kemo":
         return CapabilityLookup(None)
     key = _cache_key(runtime_provider, selected_model, capabilities_url)
@@ -190,7 +204,7 @@ def lookup_model_capabilities(
                 f"能力声明模型不匹配：{capabilities.model!r} != {selected_model!r}"
             )
     except BaseException as exc:
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        if isinstance(exc, HOST_CONTROL_EXCEPTIONS):
             raise
         LOGGER.warning("Kemo 模型能力查询失败：model=%s error=%s", selected_model, exc)
         return CapabilityLookup(
@@ -237,16 +251,7 @@ def resolve_reasoning_selection(
 ) -> ReasoningSelection:
     provider_type = str(runtime_provider.get("type") or "").strip().casefold()
     configured = runtime_provider.get("reasoning_effort")
-    if provider_type == "chat":
-        # Chat has no capability-negotiation endpoint in the compatibility
-        # path, so it must use the protocol default instead of silently
-        # disabling the reasoning phase.
-        return ReasoningSelection(
-            True,
-            normalize_reasoning_effort(configured),
-            "chat_reasoning_forced",
-        )
-    if provider_type != "kemo":
+    if provider_type not in {"chat", "kemo"}:
         return ReasoningSelection(False, None, "unsupported_provider")
     lookup = lookup_model_capabilities(
         config,
