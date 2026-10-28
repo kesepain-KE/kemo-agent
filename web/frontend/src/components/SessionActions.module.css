@@ -1,0 +1,29 @@
+.trigger {
+  flex: 0 0 28px; display: inline-grid; place-items: center; width: 28px; height: 28px;
+  padding: 0; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer;
+}
+.trigger:hover, .trigger:focus-visible { color: var(--brand); background: var(--brand-soft); }
+.menu {
+  position: fixed; z-index: 160; min-width: 182px; max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px); overflow-y: auto; padding: 6px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--surface-elevated); color: var(--text);
+  box-shadow: 0 12px 36px #0003; box-sizing: border-box;
+}
+.menu button {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px;
+  border: 0; border-radius: 7px; padding: 8px 10px; background: transparent;
+  color: inherit; text-align: left; font: inherit; font-size: 13px; cursor: pointer;
+}
+.menu button:hover:not(:disabled), .menu button:focus-visible { background: var(--brand-soft); outline: 0; }
+.menu button:disabled, .trigger:disabled { opacity: .4; cursor: not-allowed; }
+.menu [role="separator"] { height: 1px; background: var(--line); margin: 5px 4px; }
+.menu .danger, .error { color: var(--danger, #d44); }
+.error { display: block; max-width: 240px; padding: 8px; overflow-wrap: anywhere; font-size: 12px; }
+.rename { display: grid; gap: 8px; margin-top: 10px; }
+.rename input { width: 100%; box-sizing: border-box; padding: 9px 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
+.rename small { text-align: right; color: var(--muted); }
+.recent { display: flex; align-items: center; min-width: 0; border-radius: 8px; }
+.recent > button:first-child { flex: 1; min-width: 0; }
+.recent:hover { background: var(--brand-soft); }
+.badge { flex-shrink: 0; color: var(--brand); }

@@ -11,6 +11,112 @@ const sessions = [
 ]
 
 describe('HistorySearchDrawer', () => {
+  it('收藏气泡显示服务端全量计数，置顶在普通历史前，收藏不改变排序', () => {
+    const onFavoritesChange = vi.fn()
+    render(<HistorySearchDrawer open sessions={[
+      { ...sessions[0], title: '最新收藏', favorite: true },
+      { ...sessions[1], title: '较早置顶', pinned: true, pinned_at: '2026-10-25T08:00:00Z' },
+    ]} activeSessionId="" favoritesCount={123} onFavoritesChange={onFavoritesChange}
+      onClose={vi.fn()} onSelectSession={vi.fn()} onDeleteSession={vi.fn()}
+      onDeleteAllSessions={vi.fn()} onRetrySummary={vi.fn()} />)
+    const chip = screen.getByRole('button', { name: '收藏 123' })
+    expect(chip).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(chip)
+    expect(onFavoritesChange).toHaveBeenCalledWith(true)
+    expect(screen.getAllByRole('button', { name: /^打开对话/ }).map(item => item.getAttribute('aria-label')))
+      .toEqual(['打开对话 较早置顶', '打开对话 最新收藏'])
+  })
+
+  it('服务端搜索模式只在点击放大镜或回车后执行，不丢草稿且不排除正文匹配记录', () => {
+    const onSearchChange = vi.fn()
+    render(<HistorySearchDrawer open sessions={sessions} activeSessionId=""
+      onSearchChange={onSearchChange} onClose={vi.fn()} onSelectSession={vi.fn()}
+      onDeleteSession={vi.fn()} onDeleteAllSessions={vi.fn()} onRetrySummary={vi.fn()} />)
+    const input = screen.getByRole('textbox', { name: '搜索历史对话名称' })
+    const executeSearch = screen.getByRole('button', { name: '搜索历史对话' })
+    const executeSearchClass = executeSearch.className
+    const clearSearch = input.closest('form')!.querySelector('button[type="button"]')
+    expect(clearSearch).toHaveAttribute('aria-hidden', 'true')
+    expect(clearSearch).toBeDisabled()
+    fireEvent.change(input, { target: { value: '正文关键字 abc' } })
+    expect(onSearchChange).not.toHaveBeenCalled()
+    expect(input).toHaveValue('正文关键字 abc')
+    expect(screen.getByRole('button', { name: '搜索历史对话' }).className).toBe(executeSearchClass)
+    expect(screen.getByRole('button', { name: '清空历史搜索' })).toBeVisible()
+    expect(screen.getByRole('button', { name: '打开对话 项目复盘' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '搜索历史对话' }))
+    expect(onSearchChange).toHaveBeenLastCalledWith('正文关键字 abc')
+    fireEvent.submit(input.closest('form')!)
+    expect(onSearchChange).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByRole('button', { name: '清空历史搜索' }))
+    expect(onSearchChange).toHaveBeenLastCalledWith('')
+  })
+
+  it('收藏筛选结果为空时仍可全部删除，收藏不是删除保护', () => {
+    render(<HistorySearchDrawer open sessions={[]} activeSessionId="" favoritesOnly favoritesCount={0}
+      onClose={vi.fn()} onSelectSession={vi.fn()} onDeleteSession={vi.fn()}
+      onDeleteAllSessions={vi.fn()} onRetrySummary={vi.fn()} />)
+    expect(screen.getByText('暂无收藏的对话')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '全部删除' })).toBeEnabled()
+  })
+
+  it('只有只读记录时仍可全部删除，确认范围覆盖全部渠道和未加载记录', async () => {
+    const onDeleteAllSessions = vi.fn()
+    const onSelectSession = vi.fn()
+    render(<HistorySearchDrawer
+      open hasMore selectedDate="2026-10-23"
+      sessions={[
+        { ...sessions[0], source: 'cli', title: '终端历史' },
+        { ...sessions[1], source: 'message:nya_desk_pet', title: '桌宠历史' },
+      ]}
+      activeSessionId="" onClose={vi.fn()} onSelectSession={onSelectSession}
+      onDeleteSession={vi.fn()} onDeleteAllSessions={onDeleteAllSessions} onRetrySummary={vi.fn()}
+    />)
+    expect(screen.queryByRole('button', { name: /删除对话 / })).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: '不匹配的搜索' } })
+    expect(screen.getByRole('button', { name: '全部删除' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: '全部删除' }))
+    const dialog = screen.getByRole('alertdialog', { name: '确认删除全部历史对话？' })
+    expect(dialog).toHaveTextContent('全部渠道 · 包含只读对话')
+    expect(dialog).toHaveTextContent('含未加载记录')
+    expect(dialog).toHaveTextContent('不受搜索、日期或收藏筛选限制')
+    expect(dialog).toHaveTextContent('包括已置顶和收藏的对话')
+    expect(dialog).toHaveTextContent('不删除已提取的记忆、附件文件或定时任务本身')
+    expect(onDeleteAllSessions).not.toHaveBeenCalled()
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认全部删除' }))
+    await waitFor(() => expect(onDeleteAllSessions).toHaveBeenCalledTimes(1))
+    expect(onSelectSession).not.toHaveBeenCalled()
+  })
+
+  it('所选日期没有记录也能删除全部历史，失败保留确认层并可重试', async () => {
+    const onDeleteAllSessions = vi.fn()
+      .mockRejectedValueOnce(new Error('其他设备仍在使用对话'))
+      .mockResolvedValueOnce(undefined)
+    render(<HistorySearchDrawer
+      open sessions={[]} selectedDate="2026-10-23" activeSessionId=""
+      onClose={vi.fn()} onSelectSession={vi.fn()} onDeleteSession={vi.fn()}
+      onDeleteAllSessions={onDeleteAllSessions} onRetrySummary={vi.fn()}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: '全部删除' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认全部删除' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('其他设备仍在使用对话')
+    expect(screen.getByRole('alertdialog', { name: '确认删除全部历史对话？' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '确认全部删除' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(onDeleteAllSessions).toHaveBeenCalledTimes(2)
+  })
+
+  it('空历史和运行中的只读列表不可全部删除', () => {
+    const props = {
+      open: true, activeSessionId: '', onClose: vi.fn(), onSelectSession: vi.fn(),
+      onDeleteSession: vi.fn(), onDeleteAllSessions: vi.fn(), onRetrySummary: vi.fn(),
+    }
+    const { rerender } = render(<HistorySearchDrawer {...props} sessions={[]} />)
+    expect(screen.getByRole('button', { name: '全部删除' })).toBeDisabled()
+    rerender(<HistorySearchDrawer {...props} sessions={[{ ...sessions[0], source: 'cli' }]} chatRunning />)
+    expect(screen.getByRole('button', { name: '全部删除' })).toBeDisabled()
+  })
+
   it('默认按更新时间倒序展示历史归档', () => {
     render(<HistorySearchDrawer
       open

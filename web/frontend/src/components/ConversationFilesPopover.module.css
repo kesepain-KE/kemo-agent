@@ -2,6 +2,7 @@
   position: relative;
   display: inline-flex;
 }
+.count { min-width: 15px; height: 15px; line-height: 15px; border-radius: var(--r-full); background: var(--bg-inset); font-size: var(--t-2xs); text-align: center; }
 
 .trigger {
   display: inline-flex;
@@ -28,7 +29,8 @@
 .panel {
   position: fixed;
   top: calc(var(--header-h) + 12px);
-  right: var(--s-6);
+  /* Leave the idle message navigator's rail and thumb clear on the right. */
+  right: calc(var(--s-6) + 32px);
   display: flex;
   flex-direction: column;
   /*
@@ -36,8 +38,8 @@
    * The panel is a compact utility popover rather than a secondary content
    * column, so it should not span across the chat viewport on narrow screens.
    */
-  width: min(280px, calc(100vw - 80px));
-  max-width: calc(100vw - 80px);
+  width: min(280px, calc(100vw - 112px));
+  max-width: calc(100vw - 112px);
   height: min(380px, calc(100dvh - var(--header-h) - 24px));
   min-height: 0;
   overflow: hidden;
@@ -54,6 +56,7 @@
 
 .head {
   display: flex;
+  flex-shrink: 0;
   align-items: flex-start;
   padding: 14px 14px 13px;
   border-bottom: 1px solid var(--border-subtle);
@@ -77,8 +80,23 @@
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
   padding: 10px;
 }
+
+.body:focus-visible, .record:focus-visible, .more:focus-visible, .entryAction:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.record { width: 100%; text-align: start; cursor: pointer; }
+.recordArrow { flex: none; color: var(--text-faint); }
+.recordNotice { margin: 8px 3px; color: var(--text-faint); font-size: var(--t-2xs); line-height: 1.6; }
+.more { display: block; width: 100%; margin-top: 7px; padding: 6px; border: 1px solid var(--border-subtle); border-radius: var(--r-sm); background: transparent; color: var(--text-secondary); font-size: var(--t-2xs); cursor: pointer; }
+.more:disabled { cursor: wait; opacity: .6; }
 
 .section + .section {
   margin-top: 12px;

@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { t as tr, useLanguage } from '../i18n'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { normalizeLanguage } from '../i18n/locales'
+import { AppBackground } from './AppBackground'
+import { WorkspaceLauncher, WorkspaceLayout } from './workspace/WorkspaceLayout'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -47,6 +51,8 @@ import {
   logoutAuth,
   patchPreferences,
   patchUserConfig,
+  patchSessionMarks,
+  renameSession,
   releaseSessionLease,
   retrySessionSummary,
   touchSessionLease,
@@ -55,13 +61,15 @@ import {
 } from '../api/client'
 import { ReferenceIcon } from '../reference/ReferenceIcon'
 import { HistorySearchDrawer } from './HistorySearchDrawer'
+import { RecentSessionList } from './RecentSessionList'
+import { useHistoryBrowser } from './useHistoryBrowser'
 import { ConversationFilesPopover } from './ConversationFilesPopover'
 import { ApiError } from '../api/transport'
 import { ReasoningEffortSelect } from './ReasoningEffortSelect'
 import { UserProfileCard } from './UserProfileCard'
 import { KemoLogo } from './KemoLogo'
 import lifecycleStyles from './SessionLifecycle.module.css'
-import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionsResponse } from '../types/api'
+import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionSummary } from '../types/api'
 import { useUiStore } from '../store/ui'
 import { chatDraftKey, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
 import { createSessionChannel, getPageClientId } from '../sessionClient'
@@ -98,6 +106,7 @@ export * from './appShellConfig'
 export type * from './appShellTypes'
 
 export function AppShell() {
+  useLanguage()
   const location = useLocation()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
@@ -122,9 +131,9 @@ export function AppShell() {
   const creatingSessionRef = useRef<{ user: string; session: string; promise: Promise<string | undefined> } | null>(null)
   const createdLeaseRef = useRef<{ user: string; session: string; until: number } | null>(null)
   const authStatus = queryClient.getQueryData<AuthStatusResponse>(['auth-status'])
-  const usersQuery = useQuery({ queryKey: ['users'], queryFn: getUsers })
-  const healthQuery = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 30_000 })
-  const versionQuery = useQuery({ queryKey: ['version'], queryFn: getVersion, staleTime: 60_000 })
+  const usersQuery = useQuery({ queryKey: ['users'], queryFn: ({ signal }) => getUsers(signal) })
+  const healthQuery = useQuery({ queryKey: ['health'], queryFn: ({ signal }) => getHealth(signal), refetchInterval: 30_000 })
+  const versionQuery = useQuery({ queryKey: ['version'], queryFn: ({ signal }) => getVersion(signal), staleTime: 60_000 })
   const [rememberedUser, setRememberedUser] = useState(readLastActiveUser)
   const user = resolveCurrentUser(params.get('user') || '', rememberedUser, usersQuery.data?.users)
   const sessionId = params.get('session') || ''
@@ -199,10 +208,8 @@ export function AppShell() {
   const [commandQuery, setCommandQuery] = useState('')
   const [commandMode, setCommandMode] = useState<'main' | 'slash'>('main')
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false)
-  const [historyArchiveDate, setHistoryArchiveDate] = useState('')
   const [historySwitchingSessionId, setHistorySwitchingSessionId] = useState('')
   const [historySwitchError, setHistorySwitchError] = useState('')
-  const [historyLoadingMore, setHistoryLoadingMore] = useState(false)
   const [logoutPending, setLogoutPending] = useState(false)
   const [avatarRevision, setAvatarRevision] = useState(0)
   const locationRef = useRef(location)
@@ -210,14 +217,10 @@ export function AppShell() {
   const fontSizeRef = useRef<HTMLDivElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const commandInputRef = useRef<HTMLInputElement>(null)
-  const historyDateSessionsQuery = useQuery({
-    queryKey: ['history-sessions', user, historyArchiveDate],
-    queryFn: () => getSessions(user, '', 50, '', 'all', historyArchiveDate),
-    enabled: Boolean(user && historyDrawerOpen && historyArchiveDate),
-  })
-  const historySessionsData = historyArchiveDate
-    ? historyDateSessionsQuery.data
-    : sessionsQuery.data
+  const historyBrowser = useHistoryBrowser(user, historyDrawerOpen, sessionsQuery)
+  const { archiveDate: historyArchiveDate, setArchiveDate: setHistoryArchiveDate,
+    loadingMore: historyLoadingMore, query: historyQuery } = historyBrowser
+  const historySessionsData = historyQuery.data
 
   locationRef.current = location
   const {
@@ -239,13 +242,18 @@ export function AppShell() {
     if (rememberedUser !== user) setRememberedUser(user)
   }, [rememberedUser, user, usersQuery.data?.users])
 
+  useLayoutEffect(() => {
+    useUiStore.getState().activateLanguage(user)
+  }, [user])
+
   useEffect(() => {
-    if (!preferencesQuery.data) return
+    if (!preferencesQuery.data || preferencesQuery.data.user !== user) return
     ui.setTheme(preferencesQuery.data.appearance.theme)
     ui.setFontSize(preferencesQuery.data.appearance.font_size)
+    ui.setLanguage(normalizeLanguage(preferencesQuery.data.appearance.language), user)
     // The store setters persist local cache; the API remains the source for new devices.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preferencesQuery.data])
+  }, [preferencesQuery.data, user])
 
   useEffect(() => {
     const handler = (event: MouseEvent) => {
@@ -290,10 +298,6 @@ export function AppShell() {
   }, [commandOpen])
 
   useEffect(() => {
-    if (!historyDrawerOpen && historyArchiveDate) setHistoryArchiveDate('')
-  }, [historyArchiveDate, historyDrawerOpen])
-
-  useEffect(() => {
     if (!historyDrawerOpen) return
     const sessions = historySessionsData?.sessions ?? []
     const hasPendingSummary = sessions.some(
@@ -312,11 +316,10 @@ export function AppShell() {
       delay = Math.min(30_000, Math.max(2_000, nextRetryAt - Date.now() + 1_500))
     }
     const timer = window.setTimeout(() => {
-      if (historyArchiveDate) void historyDateSessionsQuery.refetch()
-      else void sessionsQuery.refetch()
+      void historyQuery.refetch()
     }, delay)
     return () => window.clearTimeout(timer)
-  }, [historyArchiveDate, historyDateSessionsQuery.refetch, historyDrawerOpen, historySessionsData?.sessions, sessionsQuery.refetch])
+  }, [historyQuery.refetch, historyDrawerOpen, historySessionsData?.sessions])
 
   useEffect(() => {
     const refreshAvatar = (event: Event) => {
@@ -409,8 +412,9 @@ export function AppShell() {
   useEffect(() => {
     if (!user || !sessionId) return
     let disposed = false
+    let suspended = false
     const touch = (updateLatest = false) => {
-      if (!disposed) void touchSessionLease(user, sessionId, clientId).then(() => {
+      if (!disposed && !suspended) void touchSessionLease(user, sessionId, clientId).then(() => {
         if (!disposed) {
           rememberSession(user, sessionId, updateLatest && document.visibilityState !== 'hidden')
           setLeasedConversation(chatRunKey(user, sessionId))
@@ -429,8 +433,12 @@ export function AppShell() {
         setSessionId('')
       })
     }
-    const release = () => { void releaseSessionLease(user, sessionId, clientId, true).catch(() => undefined) }
-    const resume = () => touch(true)
+    const release = () => {
+      suspended = true
+      void releaseSessionLease(user, sessionId, clientId, true).catch(() => undefined)
+    }
+    const resume = () => { suspended = false; touch(true) }
+    const visibility = () => { if (!suspended) touch(true) }
     const proof = createdLeaseRef.current
     if (proof?.user === user && proof.session === sessionId && proof.until > Date.now()) {
       createdLeaseRef.current = null
@@ -441,20 +449,25 @@ export function AppShell() {
     window.addEventListener('pagehide', release)
     window.addEventListener('pageshow', resume)
     window.addEventListener('online', resume)
-    document.addEventListener('visibilitychange', resume)
+    document.addEventListener('visibilitychange', visibility)
     return () => {
       disposed = true
       window.clearInterval(heartbeat)
       window.removeEventListener('pagehide', release)
       window.removeEventListener('pageshow', resume)
       window.removeEventListener('online', resume)
-      document.removeEventListener('visibilitychange', resume)
+      document.removeEventListener('visibilitychange', visibility)
       release()
     }
   }, [clientId, sessionId, user])
 
   useEffect(() => {
     const channel = createSessionChannel((event) => {
+      if (event.type === 'session-updated') {
+        void queryClient.invalidateQueries({ queryKey: ['sessions', event.user] })
+        void queryClient.invalidateQueries({ queryKey: ['history-sessions', event.user] })
+        return
+      }
       if (event.clientId === clientId || event.user !== userRef.current) return
       forgetSession(event.user, event.sessionId)
       queryClient.removeQueries({ queryKey: ['history', event.user, event.sessionId] })
@@ -479,32 +492,6 @@ export function AppShell() {
   }, [clientId, navigate, queryClient])
 
   const refreshSessions = async () => (await sessionsQuery.refetch()).data
-
-  const loadMoreHistorySessions = async () => {
-    const current = historySessionsData
-    if (!user || !current?.has_more || !current.next_cursor || historyLoadingMore) return
-    setHistoryLoadingMore(true)
-    try {
-      const nextPage = await getSessions(user, '', 50, current.next_cursor, 'all', historyArchiveDate)
-      const queryKey = historyArchiveDate
-        ? ['history-sessions', user, historyArchiveDate]
-        : ['sessions', user]
-      queryClient.setQueryData<SessionsResponse>(queryKey, {
-        ...nextPage,
-        sessions: [
-          ...current.sessions,
-          ...nextPage.sessions.filter(
-            (candidate) => !current.sessions.some(
-              (existing) => (existing.source || 'web') === (candidate.source || 'web')
-                && existing.session_id === candidate.session_id,
-            ),
-          ),
-        ],
-      })
-    } finally {
-      setHistoryLoadingMore(false)
-    }
-  }
 
   const createNewSession = (): Promise<string | undefined> => {
     if (!user || chatRunning) return Promise.resolve(undefined)
@@ -589,7 +576,7 @@ export function AppShell() {
       if (sessionId && currentSession?.state !== 'closed') {
         await closeSession(user, sessionId, clientId)
       }
-      const targetSession = historySessionsData?.sessions.find(
+      const targetSession = [...(historySessionsData?.sessions ?? []), ...(sessionsQuery.data?.sessions ?? [])].find(
         (session) => (session.source || 'web') === 'web' && session.session_id === targetSessionId,
       )
       if (targetSession?.state === 'closed') {
@@ -622,6 +609,24 @@ export function AppShell() {
     }
   }
 
+  const refreshHistoryMetadata = async () => {
+    sessionChannelRef.current?.post({ type: 'session-updated', user, sessionId: '', clientId })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
+      queryClient.invalidateQueries({ queryKey: ['history-sessions', user] }),
+    ])
+  }
+  const markHistorySession = async (session: SessionSummary, changes: { pinned?: boolean; favorite?: boolean }) => {
+    if (!user) throw new Error('当前没有可用用户')
+    await patchSessionMarks(user, session, changes)
+    await refreshHistoryMetadata()
+  }
+  const renameHistorySession = async (target: string, title: string) => {
+    if (!user) throw new Error('当前没有可用用户')
+    await renameSession(user, target, title)
+    await refreshHistoryMetadata()
+  }
+
   const retryHistorySummary = async (targetSessionId: string) => {
     if (!user) throw new Error('当前没有可用用户')
     await retrySessionSummary(user, targetSessionId)
@@ -634,10 +639,11 @@ export function AppShell() {
   const deleteAllHistorySessions = async () => {
     if (!user) throw new Error('当前没有可用用户')
     if (chatRunning) throw new Error('当前对话正在运行，暂时不能删除全部历史对话')
-    await deleteAllSessions(user)
+    await deleteAllSessions(user, clientId)
     forgetSession(user)
     queryClient.removeQueries({ queryKey: ['history', user] })
-    queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
+    queryClient.removeQueries({ queryKey: ['readonly-history', user] })
+    queryClient.removeQueries({ queryKey: ['active-session', user] })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['sessions', user] }),
       queryClient.invalidateQueries({ queryKey: ['history-sessions', user] }),
@@ -704,6 +710,13 @@ export function AppShell() {
   const contextTotal = Number(contextTokens?.total_tokens ?? 0)
   const contextLimit = Number(contextTokens?.capacity_tokens ?? 0)
   const contextPercent = Number(contextTokens?.percent ?? 0)
+  const cacheHitRateValue = overview?.context.usage.cache_hit_rate
+  const cacheHitRate = typeof cacheHitRateValue === 'number'
+    && Number.isFinite(cacheHitRateValue)
+    && cacheHitRateValue >= 0
+    && cacheHitRateValue <= 1
+    ? new Intl.NumberFormat(ui.language, { style: 'percent', maximumFractionDigits: 1 }).format(cacheHitRateValue)
+    : '—'
   const perceptionInjection = injectionPolicyPresentation(
     contextWindow?.injection_policy?.perception,
   )
@@ -754,42 +767,39 @@ export function AppShell() {
 
   return (
     <div className={`app-shell ${ui.sidebarCollapsed ? 'sidebar-collapsed' : ''} ${mobileSidebarOpen ? 'mobile-sidebar-open' : ''}`}>
-      {mobileSidebarOpen && <button className="mobile-nav-backdrop mobile-only" aria-label="关闭导航遮罩" onClick={() => setMobileSidebarOpen(false)} />}
-      <aside className="sidebar" aria-label="主导航" inert={(narrowScreen || ui.sidebarCollapsed) && !mobileSidebarOpen} aria-hidden={(narrowScreen || ui.sidebarCollapsed) && !mobileSidebarOpen}>
+      <AppBackground key={user} user={user} />
+      {mobileSidebarOpen && <button className="mobile-nav-backdrop mobile-only" aria-label={tr("关闭导航遮罩")} onClick={() => setMobileSidebarOpen(false)} />}
+      <aside className="sidebar" aria-label={tr("主导航")} inert={(narrowScreen || ui.sidebarCollapsed) && !mobileSidebarOpen} aria-hidden={(narrowScreen || ui.sidebarCollapsed) && !mobileSidebarOpen}>
         <div className="sidebar-brand">
           <div className="brand-mark"><KemoLogo /></div>
           <div className="brand-name">kemo-agent</div>
           {versionQuery.data?.version && <span className="badge badge-outline mono">v{versionQuery.data.version}</span>}
           <button className="icon-btn desktop-only" onClick={ui.toggleSidebar}
-            aria-label={ui.sidebarCollapsed ? '展开侧边栏' : '收缩侧边栏'} title="折叠侧栏"><ReferenceIcon name="panelLeft" /></button>
-          <button className="icon-btn mobile-only" onClick={() => setMobileSidebarOpen(false)} aria-label="关闭侧栏"><X size={18} /></button>
+            aria-label={ui.sidebarCollapsed ? tr('展开侧边栏') : tr('收缩侧边栏')} title={tr("折叠侧栏")}><ReferenceIcon name="panelLeft" /></button>
+          <button className="icon-btn mobile-only" onClick={() => setMobileSidebarOpen(false)} aria-label={tr("关闭侧栏")}><X size={18} /></button>
         </div>
         <div className="sidebar-scroll">
           {navGroups.map(group => <div className="sidebar-group" key={group.label}>
             <div className="section-label nav-section-divider" role="separator" aria-label={group.label} />
-            {group.items.map(({ path, label }) => <NavLink key={path} to={withContext(path)} aria-label={label}
-              title={ui.sidebarCollapsed ? label : undefined} className={({ isActive }) => `nav-item ${isActive ? 'is-active' : ''}`}>
-              <ReferenceIcon name={path.slice(1)} /><span className="nav-label">{label}</span>
+            {group.items.map(({ path, label }) => <NavLink key={path} to={withContext(path)} aria-label={tr(label)}
+              title={ui.sidebarCollapsed ? tr(label) : undefined} className={({ isActive }) => `nav-item ${isActive ? 'is-active' : ''}`}>
+              <ReferenceIcon name={path.slice(1)} /><span className="nav-label">{tr(label)}</span>
               {path === '/tasks' && overview?.counts.active_tasks ? <span className="nav-count">{overview.counts.active_tasks}</span> : null}
             </NavLink>)}
           </div>)}
           {location.pathname === '/chat' && <div className="sidebar-group sidebar-recent-group">
-            <div className="section-label">最近对话
+            <div className="section-label">{tr("最近对话")}
               <button className="icon-btn" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={openHistoryDrawer}
-                aria-label="浏览全部历史"><ReferenceIcon name="history" small /></button>
+                aria-label={tr("浏览全部历史")}><ReferenceIcon name="history" small /></button>
             </div>
             <div className="sidebar-session">
               <div className="sidebar-session-list">
-                {webSessions.map(session => <button key={session.session_id}
-                  className={`session-item ${session.session_id === sessionId ? 'is-active' : ''}`}
-                  onClick={() => void selectHistorySession(session.session_id)} disabled={Boolean(historySwitchingSessionId)}
-                  title={session.title || session.session_id}>
-                  <ReferenceIcon name="chat" small /><span className="si-title">{session.title || '未命名对话'}</span>
-                  {session.summary_status === 'failed' ? <span className="dot dot-warning" /> : null}
-                  <span className="si-time">{session.rounds} 轮</span>
-                </button>)}
+                <RecentSessionList sessions={webSessions} activeSessionId={sessionId}
+                  switching={Boolean(historySwitchingSessionId)} running={chatRunning}
+                  onOpen={(target) => { void selectHistorySession(target) }}
+                  onMark={markHistorySession} onRename={renameHistorySession} onDelete={deleteHistorySession} />
               </div>
-              <button className="btn btn-ghost btn-sm" onClick={openHistoryDrawer}><ReferenceIcon name="history" small />浏览全部历史</button>
+              <button className="btn btn-ghost btn-sm" onClick={openHistoryDrawer}><ReferenceIcon name="history" small />{tr("浏览全部历史")}</button>
             </div>
           </div>}
         </div>
@@ -806,15 +816,15 @@ export function AppShell() {
       </aside>
       <div className="app-main">
         <header className="topbar">
-          <button className="icon-btn mobile-only" onClick={() => setMobileSidebarOpen(value => !value)} aria-label="切换导航" aria-expanded={mobileSidebarOpen}><Menu size={18} /></button>
-          {ui.sidebarCollapsed && <button className="icon-btn desktop-only" onClick={ui.toggleSidebar} aria-label="展开侧边栏"><ReferenceIcon name="panelLeft" /></button>}
-          <div className="topbar-title">{pageTitles[location.pathname] || '对话'}
+          <button className="icon-btn mobile-only" onClick={() => setMobileSidebarOpen(value => !value)} aria-label={tr('切换导航')} aria-expanded={mobileSidebarOpen}><Menu size={18} /></button>
+          {ui.sidebarCollapsed && <button className="icon-btn desktop-only" onClick={ui.toggleSidebar} aria-label={tr("展开侧边栏")}><ReferenceIcon name="panelLeft" /></button>}
+          <div className="topbar-title">{tr(pageTitles[location.pathname] || '对话')}
             {location.pathname === '/chat' && <span className="topbar-sub">{webSessions.find(item => item.session_id === sessionId)?.title || '新对话'}</span>}
           </div>
           <div className="topbar-actions">
             <button className="status-pill" title="查看上下文与运行状态" onClick={openContextDrawer}>
               <ReferenceIcon name="gauge" small /><span className="sp-val">{contextAvailable && contextLimit ? `${contextPercent.toFixed(1)}%` : '—'}</span>
-              <span className="faint">{contextAvailable && contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : '暂不可用'}</span>
+              <span className="faint">{contextAvailable && contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : tr('暂不可用')}</span>
             </button>
             <div className="reference-menu-anchor" ref={modelMenuRef}>
               <button className="status-pill" onClick={() => setModelMenuOpen(value => !value)} aria-expanded={modelMenuOpen} title="模型与思考档位">
@@ -837,34 +847,34 @@ export function AppShell() {
             </div>
             <div className="reference-top-divider" />
             {location.pathname === '/chat' && <ConversationFilesPopover user={user} sessionId={sessionId} liveRun={chatRuns[chatRunKey(user, sessionId)]} />}
-            <button className="icon-btn" onClick={openHistoryDrawer} aria-label="搜索历史对话" title="搜索历史对话"><ReferenceIcon name="search" /></button>
+            <button className="icon-btn" onClick={openHistoryDrawer} aria-label={tr("搜索历史对话")} title={tr("搜索历史对话")}><ReferenceIcon name="search" /></button>
             <div className="reference-menu-anchor" ref={fontSizeRef}>
-              <button className="icon-btn" onClick={() => setFontSizeMenuOpen(value => !value)} aria-label="调整界面字号" title="界面比例" aria-expanded={fontSizeMenuOpen}><ReferenceIcon name="type" /></button>
-              {fontSizeMenuOpen && <div className="menu reference-top-menu" role="menu"><div className="menu-label">界面字号</div>
+              <button className="icon-btn" onClick={() => setFontSizeMenuOpen(value => !value)} aria-label={tr("调整界面字号")} title={tr("界面比例")} aria-expanded={fontSizeMenuOpen}><ReferenceIcon name="type" /></button>
+              {fontSizeMenuOpen && <div className="menu reference-top-menu" role="menu"><div className="menu-label">{tr("界面字号")}</div>
                 {(['small', 'medium', 'large'] as const).map(size => <button className={`menu-item ${ui.fontSize === size ? 'is-active' : ''}`}
-                  role="menuitem" key={size} onClick={() => { ui.setFontSize(size); if (user) void patchPreferences(user, { font_size: size }); setFontSizeMenuOpen(false) }}>{fontSizeLabels[size]}{ui.fontSize === size ? ' ✓' : ''}</button>)}
+                  role="menuitem" key={size} onClick={() => { ui.setFontSize(size); if (user) void patchPreferences(user, { font_size: size }); setFontSizeMenuOpen(false) }}>{tr(fontSizeLabels[size])}{ui.fontSize === size ? ' ✓' : ''}</button>)}
               </div>}
             </div>
             <button className="icon-btn" onClick={() => { const theme = ui.theme === 'dark' ? 'light' : 'dark'; ui.setTheme(theme); if(user) void patchPreferences(user, { theme }) }}
-              aria-label={ui.theme === 'dark' ? '切换为高级白主题' : '切换为高级黑主题'} title="切换主题"><ReferenceIcon name={ui.theme === 'dark' ? 'sun' : 'moon'} /></button>
-            <button className="icon-btn" onClick={() => navigate(withContext('/status'))} aria-label="运行状态" title="运行诊断"><ReferenceIcon name="activity" /></button>
-            <button className="icon-btn" onClick={openCommandPanel} aria-label="命令面板" title="命令面板（Ctrl+K）"><ReferenceIcon name="command" /></button>
+              aria-label={ui.theme === 'dark' ? tr('切换为高级白主题') : tr('切换为高级黑主题')} title={tr("切换主题")}><ReferenceIcon name={ui.theme === 'dark' ? 'sun' : 'moon'} /></button>
+            <button className="icon-btn" onClick={() => navigate(withContext('/status'))} aria-label={tr("运行状态")} title={tr("运行诊断")}><ReferenceIcon name="activity" /></button>
+            <WorkspaceLauncher user={user} />
           </div>
         </header>
-        <main className="reference-outlet">
+        <WorkspaceLayout user={user} sessionId={sessionId}><main className="reference-outlet">
           {healthQuery.isError && <div className="banner banner-warning" role="status">Web 后端连接异常，请检查服务。</div>}
-          {sessionLifecycleNotice && <div className={lifecycleStyles.notice} role="status">{sessionLifecycleNotice}<button onClick={() => setSessionLifecycleNotice('')}>知道了</button></div>}
+          {sessionLifecycleNotice && <div className={lifecycleStyles.notice} role="status">{sessionLifecycleNotice}<button onClick={() => setSessionLifecycleNotice('')}>{tr("知道了")}</button></div>}
           {historySwitchError && <div className="banner banner-danger" role="alert">{historySwitchError}</div>}
           {newUserTab || (location.pathname === '/chat' && !sessionId && !sessionTransitioning
             && (activeSessionQuery.isPending || activeSessionQuery.isFetching || activeSessionQuery.isError
               || Boolean(activeSessionQuery.data?.session?.session_id))) ? <div className={lifecycleStyles.pending} role={activeSessionQuery.isError ? 'alert' : 'status'}>
             {activeSessionQuery.isError ? <>{newUserTab ? '创建独立对话失败，请重试。' : '恢复对话失败，请重试。'}<button onClick={() => { void activeSessionQuery.refetch() }}>{newUserTab ? '重试创建对话' : '重试恢复对话'}</button></> : newUserTab ? '正在为此用户创建独立对话…' : '正在恢复最近的对话…'}
           </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady: Boolean(sessionId && leasedConversation === chatRunKey(user, sessionId)), clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} />}
-        </main>
+        </main></WorkspaceLayout>
       </div>
 
-      <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen} role="dialog" aria-label="上下文窗口" aria-modal="true" aria-hidden={!ui.drawerOpen}>
-        <div className="drawer-head"><div className="context-drawer-heading"><strong>上下文窗口</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话 · 系统提示词已就绪'}</span></div><button className="icon-btn" onClick={() => ui.setDrawerOpen(false)} aria-label="关闭"><X size={17} /></button></div>
+      <aside className={`drawer ${ui.drawerOpen ? 'show' : ''}`} inert={!ui.drawerOpen} role="dialog" aria-label={tr("上下文窗口")} aria-modal="true" aria-hidden={!ui.drawerOpen}>
+        <div className="drawer-head"><div className="context-drawer-heading"><strong>{tr("上下文窗口")}</strong><span>{sessionId ? sessionLabel(sessionId) : '新会话 · 系统提示词已就绪'}</span></div><button className="icon-btn" onClick={() => ui.setDrawerOpen(false)} aria-label={tr("关闭")}><X size={17} /></button></div>
         <div className="drawer-body context-drawer-body">
           <section className="context-injection-panel" aria-label="系统提示词数据注入策略">
             <div className="context-injection-panel-head"><strong>数据注入策略</strong><small>当前用户配置 · 只读</small></div>
@@ -887,6 +897,7 @@ export function AppShell() {
               <div className="context-metric"><span>对话与摘要</span><strong>{contextAvailable ? formatTokens(Number(contextTokens?.conversation_tokens ?? contextWindow?.tokens.context_tokens ?? 0) + Number(contextTokens?.summary_tokens ?? 0)) : '—'}</strong><small>Token</small></div>
               <div className="context-metric emphasized"><span>当前总占用</span><strong>{contextAvailable ? formatTokens(contextTokens?.total_tokens ?? 0) : '—'}</strong><small>Token</small></div>
               <div className="context-metric"><span>容量上限</span><strong>{contextLimit ? formatTokens(contextTokens?.capacity_tokens ?? 0) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric"><span>{tr('Token 总命中率')}</span><strong>{sessionId && overview?.session_id === sessionId ? cacheHitRate : '—'}</strong><small>{tr('当前对话空间累计')}</small></div>
             </div>
             <div className="context-capacity"><div><span>上下文容量</span><strong>{contextAvailable ? `${Number(contextTokens?.percent ?? 0).toFixed(2)}%` : '—'}</strong></div><span className="context-capacity-track"><i style={{ width: `${contextAvailable ? contextTokens?.percent ?? 0 : 0}%` }} /></span></div>
           </section>
@@ -914,7 +925,7 @@ export function AppShell() {
             <div className="context-metric-grid three-columns">
               <div className="context-metric"><span>启用工具</span><strong>{contextWindow?.capabilities.tools_enabled ?? '—'}</strong><small>个</small></div>
               <div className="context-metric"><span>禁用工具</span><strong>{contextWindow?.capabilities.tools_disabled ?? '—'}</strong><small>个</small></div>
-              <div className="context-metric"><span>子智能体</span><strong>{contextWindow?.capabilities.agents_enabled ?? '—'}</strong><small>个</small></div>
+              <div className="context-metric"><span>{tr("子智能体")}</span><strong>{contextWindow?.capabilities.agents_enabled ?? '—'}</strong><small>个</small></div>
             </div>
           </section>
 
@@ -927,7 +938,7 @@ export function AppShell() {
           </section>
 
           <section className="context-drawer-card compact-card">
-            <div className="context-card-head"><span><RadioTower size={17} /><strong>外部消息</strong></span><small>连接状态</small></div>
+            <div className="context-card-head"><span><RadioTower size={17} /><strong>{tr("外部消息")}</strong></span><small>连接状态</small></div>
             <div className="context-single-stat"><span>已连接的外部消息模块</span><strong>{contextWindow?.messages.connected ?? '—'}<small> 个</small></strong></div>
           </section>
 
@@ -947,23 +958,27 @@ export function AppShell() {
         open={historyDrawerOpen}
         sessions={historySessionsData?.sessions ?? []}
         activeSessionId={sessionId}
-        loading={historyArchiveDate
-          ? historyDateSessionsQuery.isLoading || historyDateSessionsQuery.isFetching
-          : sessionsQuery.isLoading || sessionsQuery.isFetching}
+        loading={!historySessionsData && (historyQuery.isLoading || historyQuery.isFetching)}
         loadingMore={historyLoadingMore}
         hasMore={Boolean(historySessionsData?.has_more)}
-        error={historyArchiveDate ? historyDateSessionsQuery.isError : sessionsQuery.isError}
+        error={historyQuery.isError}
         chatRunning={chatRunning}
         switchingSessionId={historySwitchingSessionId}
         actionError={historySwitchError}
         selectedDate={historyArchiveDate}
         onClose={() => setHistoryDrawerOpen(false)}
         onDateChange={setHistoryArchiveDate}
+        favoritesOnly={historyBrowser.favoritesOnly}
+        favoritesCount={historySessionsData?.favorites_count ?? sessionsQuery.data?.favorites_count}
+        onFavoritesChange={historyBrowser.setFavoritesOnly}
+        onSearchChange={historyBrowser.setSearch}
+        onMarkSession={markHistorySession}
+        onRenameSession={renameHistorySession}
         onSelectSession={(targetSessionId) => { void selectHistorySession(targetSessionId) }}
         onDeleteSession={deleteHistorySession}
         onDeleteAllSessions={deleteAllHistorySessions}
         onRetrySummary={retryHistorySummary}
-        onLoadMore={() => { void loadMoreHistorySessions() }}
+        onLoadMore={() => { void historyBrowser.loadMore().catch((error: unknown) => setHistorySwitchError(error instanceof Error ? error.message : '加载历史对话失败')) }}
       />
 
       {commandOpen && <div className="command-layer show" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandOpen(false) }}>
@@ -989,7 +1004,7 @@ export function AppShell() {
             {!filteredSlashCommands.length && <div className="command-empty">没有匹配的斜杠指令</div>}
           </div> : <div className="command-list">
             {filteredConversationCommands.length > 0 && <section className="command-section" aria-labelledby="conversation-command-title">
-              <h3 id="conversation-command-title">对话操作</h3>
+              <h3 id="conversation-command-title">{tr("对话操作")}</h3>
               <div className="command-card-grid">{filteredConversationCommands.map((command) => {
                 const Icon = command.icon
                 return <button className={`command-item ${command.tone || ''}`} type="button" key={command.id} disabled={chatRunning || location.pathname !== '/chat'} onClick={() => runCommand(command.action)}><span className="command-item-icon"><Icon size={18} /></span><span><strong>{command.label}</strong><small>{location.pathname !== '/chat' ? '请先进入对话页面' : command.detail}</small></span></button>

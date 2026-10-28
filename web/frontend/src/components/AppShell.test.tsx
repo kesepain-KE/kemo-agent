@@ -8,11 +8,13 @@ import { ChatPage } from '../pages/ChatPage'
 import { SettingsPage } from '../pages/SettingsPage'
 import { server } from '../test/server'
 import { chatDraftKey, useChatDraftStore } from '../store/chatDrafts'
+import { useScratchSender } from '../store/scratchNotes'
 import type { SessionSummary } from '../types/api'
 import { forgetSession, rememberSession } from '../sessionNavigation'
 import type { ShellOutletContext } from './appShellTypes'
 
 afterEach(() => {
+  useScratchSender.setState({ handlers: {} })
   useChatDraftStore.getState().clearAll()
   localStorage.removeItem('kemo-last-active-user')
   forgetSession('kesepain')
@@ -21,7 +23,83 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+it('scratchpad sends through the existing chat endpoint without clearing the composer', async () => {
+  const interceptedFetch = globalThis.fetch.bind(globalThis)
+  const requests: Array<{ prompt: string; session_id: string }> = []
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+    requests.push(JSON.parse(String(init?.body)))
+    return new Response('event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } })
+  }))
+  renderApp('/chat?user=kesepain&session=s1')
+  const composer = await screen.findByRole('textbox', { name: '消息内容' })
+  fireEvent.change(composer, { target: { value: 'keep composer text' } })
+  let accepted = false
+  await act(async () => {
+    accepted = await useScratchSender.getState().handlers[chatDraftKey('kesepain', 's1')]('scratch submission')
+  })
+  expect(accepted).toBe(true)
+  expect(requests).toHaveLength(1)
+  expect(requests[0]).toMatchObject({ prompt: 'scratch submission', session_id: 's1' })
+  expect(composer).toHaveValue('keep composer text')
+})
+
+it('scratchpad queues while running and the later queued send preserves newly typed composer text', async () => {
+  const interceptedFetch = globalThis.fetch.bind(globalThis)
+  const prompts: string[] = []
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+    prompts.push(JSON.parse(String(init?.body)).prompt)
+    const done = 'event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n'
+    return new Response(prompts.length === 1 ? new ReadableStream({
+      start(value) { controller = value },
+    }) : done, { headers: { 'Content-Type': 'text/event-stream' } })
+  }))
+  renderApp('/chat?user=kesepain&session=s1')
+  const composer = await screen.findByRole('textbox', { name: '消息内容' })
+  fireEvent.change(composer, { target: { value: 'first run' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送' }))
+  await waitFor(() => expect(prompts).toHaveLength(1))
+  try {
+    await act(async () => {
+      expect(await useScratchSender.getState().handlers[chatDraftKey('kesepain', 's1')]('queued scratch')).toBe(true)
+    })
+    fireEvent.change(composer, { target: { value: 'new composer text' } })
+  } finally {
+    controller?.enqueue(new TextEncoder().encode('event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n'))
+    controller?.close()
+  }
+  await waitFor(() => expect(prompts).toEqual(['first run', 'queued scratch']))
+  expect(composer).toHaveValue('new composer text')
+})
+
 describe('AppShell user persistence', () => {
+  it('pagehide releases only this document; hidden visibility cannot revive it and pageshow resumes in order', async () => {
+    const transitions: Array<{ release: boolean; client_id: string; lease_sequence: number }> = []
+    server.use(http.post('/api/users/kesepain/sessions/s1/lease*', async ({ request }) => {
+      const body = await request.json() as { client_id: string; lease_sequence: number }
+      transitions.push({ release: new URL(request.url).pathname.endsWith('/release'), ...body })
+      return HttpResponse.json({ leased: true })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    await waitFor(() => expect(transitions).toHaveLength(1))
+    fireEvent(window, new Event('pagehide'))
+    await waitFor(() => expect(transitions).toHaveLength(2))
+    fireEvent(document, new Event('visibilitychange'))
+    await act(async () => { await delay(50) })
+    expect(transitions).toHaveLength(2)
+    fireEvent(window, new Event('pageshow'))
+    await waitFor(() => expect(transitions).toHaveLength(3))
+    expect(transitions.map(item => item.release)).toEqual([false, true, false])
+    expect(new Set(transitions.map(item => item.client_id)).size).toBe(1)
+    expect(transitions[1].lease_sequence).toBeGreaterThan(transitions[0].lease_sequence)
+    expect(transitions[2].lease_sequence).toBeGreaterThan(transitions[1].lease_sequence)
+  })
+
   it('后端重启后从无参数页面恢复最近访问空间，即使它不在历史列表第一页', async () => {
     rememberSession('kesepain', 'selected-old')
     let restores = 0
@@ -358,6 +436,44 @@ function session(id: string, title: string, index: number): SessionSummary {
   }
 }
 
+describe('历史个人标记与侧栏同步', () => {
+  it('侧栏收藏后历史气泡读取全量计数，收藏过滤清除旧日期，并支持重命名同步', async () => {
+    let record: SessionSummary = { ...session('s1', '标记验收对话', 1), source: 'web', state: 'open' }
+    const requests: URL[] = []
+    server.use(
+      http.get('/api/users/kesepain/sessions', ({ request }) => {
+        const url = new URL(request.url)
+        requests.push(url)
+        return HttpResponse.json({ user: 'kesepain', source: 'all', favorites_count: record.favorite ? 1 : 0,
+          sessions: url.searchParams.get('favorites_only') === 'true' && !record.favorite ? [] : [record] })
+      }),
+      http.patch('/api/users/kesepain/sessions/s1/marks', async ({ request }) => {
+        record = { ...record, ...await request.json() as object }
+        return HttpResponse.json({ user: 'kesepain', source: 'web', session: record })
+      }),
+      http.patch('/api/users/kesepain/sessions/s1', async ({ request }) => {
+        record = { ...record, ...await request.json() as object }
+        return HttpResponse.json({ user: 'kesepain', source: 'web', session: record })
+      }),
+    )
+    renderApp('/chat?user=kesepain&session=s1')
+    fireEvent.click(await screen.findByRole('button', { name: '对话操作 标记验收对话' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '收藏' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '对话操作 标记验收对话' })).toHaveAttribute('aria-expanded', 'false'))
+    fireEvent.click(screen.getByTitle('搜索历史对话'))
+    const drawer = screen.getByRole('dialog', { name: '历史对话' })
+    fireEvent.click(await within(drawer).findByRole('button', { name: '收藏 1' }))
+    await waitFor(() => expect(requests.some(url => url.searchParams.get('favorites_only') === 'true' && !url.searchParams.has('date'))).toBe(true))
+    fireEvent.click(within(drawer).getByRole('button', { name: '对话操作 标记验收对话' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '重命名' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '对话名称' }), { target: { value: '新的验收标题' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存名称' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(await within(drawer).findByRole('button', { name: '打开对话 新的验收标题' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: '对话操作 新的验收标题' })).toHaveLength(2)
+  })
+})
+
 describe('新建对话关键路径', () => {
   const createdResponse = (id: string, clientId: string) => ({
     user: 'kesepain', created: true, client_id: clientId, active_clients: 1,
@@ -486,6 +602,52 @@ describe('新建对话关键路径', () => {
       expect(screen.getByRole('textbox', { name: '消息内容' })).toBeEnabled()
       expect(useChatDraftStore.getState().drafts[chatDraftKey('kesepain', 's1')]).toBeUndefined()
     } finally { releaseClose(); releaseReads() }
+  })
+
+  it.each(['legacy', 'ordered', 'unconfirmed'])('保存关闭未完成时不新建、不丢草稿且可重试（%s）', async (mode) => {
+    const deferred = mode !== 'unconfirmed'
+    let closed = false
+    let creates = 0
+    server.use(
+      http.post('/api/users/kesepain/sessions/s1/close', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 's1', closed,
+        deferred: !closed && deferred, active_clients: closed ? 0 : 1,
+        ...(mode === 'ordered' ? { retry_after_seconds: 37 } : {}),
+        memory: { status: closed ? 'queued' : 'skipped', reason: 'session_in_use_by_other_clients' },
+      })),
+      http.post('/api/users/kesepain/sessions', async ({ request }) => {
+        creates += 1
+        const body = await request.json() as { client_id: string }
+        return HttpResponse.json(createdResponse('saved_after_retry', body.client_id))
+      }),
+      http.get('/api/users/kesepain/sessions/saved_after_retry/history', () => HttpResponse.json({
+        user: 'kesepain', source: 'web', session_id: 'saved_after_retry',
+        messages: [], round_metrics: [], round_traces: [],
+      })),
+    )
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    fireEvent.change(await screen.findByRole('textbox', { name: '消息内容' }), {
+      target: { value: '关闭未完成时保留的草稿' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ }))
+    const feedback = mode === 'ordered'
+      ? '另有 1 个页面或客户端仍在使用此对话，尚未关闭，也未启动后台提取。请关闭其他页面后重试；旧页面停止心跳后，租约预计最多 37 秒过期。'
+      : deferred
+      ? '此对话仍被其他页面或客户端使用，尚未关闭，也未启动后台提取。请关闭其他页面后重试；异常断开的页面可能需要等待在线租约过期。'
+      : '当前对话尚未确认关闭，未创建新对话，请重试。'
+    expect(await screen.findByText(feedback)).toBeInTheDocument()
+    expect(app.getSearch()).toContain('session=s1')
+    expect(creates).toBe(0)
+    expect(useChatDraftStore.getState().drafts[chatDraftKey('kesepain', 's1')]?.text).toBe('关闭未完成时保留的草稿')
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('关闭未完成时保留的草稿'))
+    expect(screen.getByText(feedback)).toBeInTheDocument()
+    closed = true
+    fireEvent.click(screen.getByRole('menuitem', { name: /保存此对话，创建新对话/ }))
+    await waitFor(() => expect(app.getSearch()).toContain('session=saved_after_retry'))
+    expect(creates).toBe(1)
+    fireEvent.click(screen.getByRole('button', { name: '展开对话操作' }))
+    expect(screen.queryByText(feedback)).not.toBeInTheDocument()
   })
 
   it('同一空间并发新建复用一次创建请求及同一个 Promise', async () => {
@@ -961,7 +1123,7 @@ describe('AppShell navigation', () => {
     await screen.findByText(welcomeText)
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '首轮测试' } })
     const sendButton = screen.getByRole('button', { name: '发送' })
-    expect(sendButton).toBeEnabled()
+    await waitFor(() => expect(sendButton).toBeEnabled())
     fireEvent.click(sendButton)
     await waitFor(() => expect(screen.queryByText(welcomeText)).not.toBeInTheDocument())
 
@@ -2248,9 +2410,46 @@ describe('AppShell navigation', () => {
     expect(screen.getByText('知识库状态')).toBeInTheDocument()
     expect(screen.getAllByText('外部消息').length).toBeGreaterThan(0)
     expect(screen.getByText('拓展与感知')).toBeInTheDocument()
+    const cacheHitMetric = screen.getByText('Token 总命中率').closest('.context-metric')
+    expect(cacheHitMetric).toHaveTextContent('80%')
+    expect(cacheHitMetric).toHaveTextContent('当前对话空间累计')
     expect(screen.getAllByText('18.67%').length).toBeGreaterThan(0)
     expect(screen.queryByText('知识图谱')).not.toBeInTheDocument()
     expect(document.querySelector('.context-drawer-body')).toHaveClass('drawer-body')
+  })
+
+  it('不以用户每日统计替代当前会话 Token 命中率，并移除顶栏命令面板重复入口', async () => {
+    server.use(http.get('/api/users/kesepain/overview', ({ request }) => {
+      const selectedSession = new URL(request.url).searchParams.get('session_id') || ''
+      return HttpResponse.json({
+        user: 'kesepain', session_id: selectedSession,
+        context: { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated: false, cache_hit_rate: null },
+          limit: 120000, percent: 0, rounds: 0, session_total_rounds: 0, archived_rounds: 0, round_limit: 30 },
+        provider: { type: 'kemo', model: 'test-model', configured: true },
+        counts: { sessions: 1, knowledge_documents: 0, enabled_tools: 0, enabled_agents: 0, active_tasks: 0 },
+        context_window: {
+          tokens: { total_tokens: 0, capacity_tokens: 120000, percent: 0, source: 'unavailable', measurement: 'unknown' },
+          conversation: { foreground_rounds: 0, archived_rounds: 0, total_tool_calls: 0, session_total_rounds: 0, session_tool_calls: 0 },
+          tasks: { active_plans: 0, waiting_crons: 0 }, capabilities: { tools_enabled: 0, tools_disabled: 0, agents_enabled: 0 },
+          knowledge: { enabled: 0, disabled: 0 }, messages: { connected: 0 }, integrations: { expands: 0, senses: 0 },
+          injection_policy: { expand: 'round', perception: 'round' },
+        },
+        context_snapshot: { available: false, source: 'unavailable', measurement: 'unknown', captured_at: '',
+          system_prompt_tokens: 0, tool_schema_tokens: 0, conversation_tokens: 0, summary_tokens: 0, other_tokens: 0,
+          total_tokens: 0, capacity_tokens: 120000, percent: 0, foreground_rounds: 0 },
+        session_context_stats: { selected: true, foreground_rounds: 0, background_archived_rounds: 0, session_total_rounds: 0, session_tool_calls: 0 },
+        agents: [], summary_cache: { exists: false, covered_rounds: [], created_at: '', window: '' },
+        runtime_host: { state: 'unmanaged', components: {} }, active_plan: null, activities: [],
+      })
+    }))
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByRole('textbox', { name: '消息内容' })
+    expect(screen.queryByRole('button', { name: '命令面板' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '打开快捷指令' })).toBeInTheDocument()
+    fireEvent.click(await screen.findByTitle('查看上下文与运行状态'))
+    const cacheHitMetric = screen.getByText('Token 总命中率').closest('.context-metric')
+    expect(cacheHitMetric).toHaveTextContent('—')
+    expect(cacheHitMetric).not.toHaveTextContent('45.2%')
   })
 
   it('字号切换会同步更新文字与顶部布局比例', async () => {
@@ -2312,6 +2511,54 @@ describe('AppShell navigation', () => {
 
     await waitFor(() => expect(compressionCalled).toBe(true))
     expect(screen.queryByRole('dialog', { name: '全局搜索与命令' })).not.toBeInTheDocument()
+  })
+
+  it('全部删除跨渠道历史携带当前页面标识，失败保留绑定，成功清理只读缓存', async () => {
+    let deleted = false
+    const requests: URL[] = []
+    const mixed = [
+      { ...session('s1', '当前工作', 3), source: 'web' },
+      { ...session('shared', '桌宠只读历史', 2), source: 'message:nya_desk_pet' },
+    ]
+    server.use(
+      http.get('/api/users/kesepain/sessions', ({ request }) => {
+        const source = new URL(request.url).searchParams.get('source')
+        return HttpResponse.json({
+          user: 'kesepain', source: source || 'web',
+          sessions: deleted ? [] : source === 'all' ? mixed : mixed.slice(0, 1),
+        })
+      }),
+      http.delete('/api/users/kesepain/sessions', ({ request }) => {
+        requests.push(new URL(request.url))
+        if (requests.length === 1) return HttpResponse.json({
+          error: { code: 'conflict', message: '其他设备正在使用对话' },
+        }, { status: 409 })
+        deleted = true
+        return HttpResponse.json({
+          user: 'kesepain', source: 'all', deleted: true, deleted_sessions: 29, deleted_windows: 31,
+        })
+      }),
+    )
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    app.client.setQueryData(['readonly-history', 'kesepain', 'message:nya_desk_pet', 'shared'], { stale: true })
+    app.client.setQueryData(['readonly-history', 'reviewer', 'cli', 'other'], { keep: true })
+    fireEvent.click(await screen.findByTitle('搜索历史对话'))
+    const drawer = await screen.findByRole('dialog', { name: '历史对话' })
+    expect(await within(drawer).findByText('桌宠只读历史')).toBeInTheDocument()
+    fireEvent.click(within(drawer).getByRole('button', { name: '全部删除' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认全部删除' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('其他设备正在使用对话')
+    expect(app.getSearch()).toContain('session=s1')
+    expect(app.client.getQueryData(['readonly-history', 'kesepain', 'message:nya_desk_pet', 'shared'])).toEqual({ stale: true })
+    fireEvent.click(screen.getByRole('button', { name: '确认全部删除' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(app.getSearch()).not.toContain('session=s1'))
+    expect(requests).toHaveLength(2)
+    expect(requests[0].searchParams.get('source')).toBe('all')
+    expect(requests[0].searchParams.get('client_id')).toBeTruthy()
+    expect(requests[1].searchParams.get('client_id')).toBe(requests[0].searchParams.get('client_id'))
+    expect(app.client.getQueryData(['readonly-history', 'kesepain', 'message:nya_desk_pet', 'shared'])).toBeUndefined()
+    expect(app.client.getQueryData(['readonly-history', 'reviewer', 'cli', 'other'])).toEqual({ keep: true })
   })
 
   it('顶部历史搜索保存当前对话后跳转到指定历史会话', async () => {
@@ -2421,6 +2668,36 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 个人笔记' }))
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('[知识库引用 user:notes.md] 个人笔记'))
+    expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
+  })
+
+  it('聊天知识引用可叠加分类和搜索，引用仍写入原始路径标记', async () => {
+    const documents = [
+      { scope: 'user', relative_path: 'notes.md', title: '个人笔记', category: '开发规范', size: 120, updated_at: 1, active_for_main_agent: true },
+      { scope: 'shared', relative_path: 'team.md', title: '共享规范', category: '开发规范', size: 90, updated_at: 1, active_for_main_agent: true },
+      { scope: 'shared', relative_path: 'other.md', title: '其他资料', category: '其他分类', size: 90, updated_at: 1, active_for_main_agent: true },
+    ]
+    server.use(http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({
+      user: 'kesepain', documents, summary: { documents: 3, user_documents: 1, shared_documents: 2, global_documents: 0 },
+      categories: {
+        user: [{ name: '开发规范', count: 1 }],
+        shared: [{ name: '开发规范', count: 1 }, { name: '其他分类', count: 1 }],
+      },
+    })))
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: '请参考规范' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开知识库' }))
+    const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
+    const select = within(drawer).getByRole('combobox', { name: '知识库分类' })
+    const option = await within(select).findByRole('option', { name: '共享层 · 开发规范（1）' })
+    fireEvent.change(select, { target: { value: option.getAttribute('value') } })
+    fireEvent.change(within(drawer).getByRole('textbox', { name: '搜索知识库' }), { target: { value: 'team.md' } })
+    expect(within(drawer).getByText('匹配 1 / 共 3 个知识文件')).toBeInTheDocument()
+    expect(within(drawer).queryByText('个人笔记')).not.toBeInTheDocument()
+    expect(within(drawer).queryByText('其他资料')).not.toBeInTheDocument()
+    fireEvent.click(within(drawer).getByRole('button', { name: '引用 共享规范' }))
+    await waitFor(() => expect(composer).toHaveValue('请参考规范\n[知识库引用 shared:team.md] 共享规范'))
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
   })
 

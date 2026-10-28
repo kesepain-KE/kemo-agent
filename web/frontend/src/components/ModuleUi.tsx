@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react'
+import { t, useLanguage } from '../i18n'
+import { useUiStore } from '../store/ui'
 import { AlertCircle, Inbox, RefreshCw } from 'lucide-react'
 
 export function RefreshActionButton({
@@ -91,6 +93,7 @@ export function MetricCard({
 }
 
 export function StatusChip({ status, children }: { status: string; children?: ReactNode }) {
+  useLanguage()
   const tone = ['failed', 'cancelled', 'error', 'missing'].includes(status)
     ? 'danger'
     : ['paused', 'pending', 'warning', 'not_connected'].includes(status)
@@ -144,14 +147,14 @@ export function statusLabel(status: string) {
     not_connected: '未连接',
     registered: '已注册',
   }
-  return labels[status] || status || '未知'
+  return labels[status] ? t(labels[status]) : status || t('未知')
 }
 
 export function formatDateTime(value: string | number) {
   if (!value) return '—'
   const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat(useUiStore.getState().language, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

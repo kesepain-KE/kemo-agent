@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -79,6 +80,7 @@ export function CapabilityReferenceDrawer({
   onClose,
   onReference,
 }: CapabilityReferenceDrawerProps) {
+  useLanguage()
   const [kind, setKind] = useState<CapabilityKind>('expand')
   const [scope, setScope] = useState<ScopeFilter>('all')
   const [query, setQuery] = useState('')
@@ -169,12 +171,12 @@ export function CapabilityReferenceDrawer({
             className={scope === value ? styles.activeScopeTab : ''}
             aria-pressed={scope === value}
             onClick={() => setScope(value)}
-          >{value === 'all' ? '全部' : scopeLabels[value]}</button>)}
+          >{value === 'all' ? tr('全部') : scopeLabels[value]}</button>)}
         </nav>}
 
         <div className={styles.results}>
           {busy && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={22} /><strong>正在加载{kindLabels[kind]}</strong></div>}
-          {failed && !busy && <div className={styles.empty}><KindIcon size={22} /><strong>{kindLabels[kind]}加载失败</strong><span>关闭后重新打开即可再次加载。</span></div>}
+          {failed && !busy && <div className={styles.empty}><KindIcon size={22} /><strong>{kindLabels[kind]}加载失败</strong><span>{tr("关闭后重新打开即可再次加载。")}</span></div>}
           {!busy && !failed && filteredItems.map((item) => {
             const ScopeIcon = scopeIcons[item.scope]
             return <article className={styles.capabilityCard} key={item.id}>
@@ -186,7 +188,7 @@ export function CapabilityReferenceDrawer({
               </span>
               <span className={`${styles.scopeBadge} ${styles[item.scope]}`}>{scopeLabels[item.scope]}</span>
               <button type="button" className={styles.referenceButton} onClick={() => onReference(item)} aria-label={`引用 ${item.title || item.name}`}>
-                <Quote size={14} /><span>引用</span>
+                <Quote size={14} /><span>{tr("引用")}</span>
               </button>
             </article>
           })}

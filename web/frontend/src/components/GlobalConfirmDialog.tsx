@@ -8,6 +8,7 @@ export interface GlobalConfirmDialogProps {
   title: string
   description: ReactNode
   detail?: ReactNode
+  detailMode?: 'text' | 'content'
   error?: ReactNode
   icon: ReactNode
   tone?: 'warning' | 'danger'
@@ -15,6 +16,7 @@ export interface GlobalConfirmDialogProps {
   pendingLabel?: string
   cancelLabel?: string
   pending?: boolean
+  confirmDisabled?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -33,6 +35,7 @@ export function GlobalConfirmDialog({
   title,
   description,
   detail,
+  detailMode = 'text',
   error,
   icon,
   tone = 'warning',
@@ -40,6 +43,7 @@ export function GlobalConfirmDialog({
   pendingLabel,
   cancelLabel = '取消',
   pending = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: GlobalConfirmDialogProps) {
@@ -114,13 +118,13 @@ export function GlobalConfirmDialog({
         <span className={styles.icon}>{icon}</span>
         <div className={styles.copy}>
           <strong id={titleId}>{title}</strong>
-          {detail ? <span className={styles.detail}>{detail}</span> : null}
+          {detail ? <div className={detailMode === 'content' ? styles.detailContent : styles.detail}>{detail}</div> : null}
           <p id={descriptionId}>{description}</p>
         </div>
         {error ? <div className={styles.error} role="alert">{error}</div> : null}
         <footer className={styles.actions}>
           <button type="button" disabled={pending} onClick={onCancel}>{cancelLabel}</button>
-          <button ref={confirmRef} type="button" className={styles.confirm} disabled={pending} onClick={onConfirm}>
+          <button ref={confirmRef} type="button" className={styles.confirm} disabled={pending || confirmDisabled} onClick={onConfirm}>
             {pending ? (pendingLabel || confirmLabel) : confirmLabel}
           </button>
         </footer>

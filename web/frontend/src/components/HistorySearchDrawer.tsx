@@ -11,6 +11,8 @@ import {
   MessageSquareText,
   RotateCcw,
   Search,
+  Star,
+  Pin,
   Trash2,
   X,
 } from 'lucide-react'
@@ -18,10 +20,18 @@ import type { SessionSummary } from '../types/api'
 import { GlobalConfirmDialog } from './GlobalConfirmDialog'
 import { formatDateTime } from './ModuleUi'
 import { ReadOnlySessionHistoryDialog } from './ReadOnlySessionHistoryDialog'
-import { sessionDisplayName } from './SessionHistoryPanel'
+import { sessionDisplayName } from '../utils/sessionDisplayName'
+import { t, useLanguage } from '../i18n'
+import { SessionActions, type SessionActionCallbacks } from './SessionActions'
 import styles from './HistorySearchDrawer.module.css'
 
 export interface HistorySearchDrawerProps {
+  favoritesOnly?: boolean
+  favoritesCount?: number
+  onFavoritesChange?: (value: boolean) => void
+  onSearchChange?: (value: string) => void
+  onMarkSession?: SessionActionCallbacks['onMark']
+  onRenameSession?: SessionActionCallbacks['onRename']
   user?: string
   open: boolean
   sessions: SessionSummary[]
@@ -105,6 +115,7 @@ function monthGrid(year: number, month: number) {
 
 export function HistorySearchDrawer({
   user = '',
+  favoritesOnly = false, favoritesCount, onFavoritesChange, onSearchChange, onMarkSession, onRenameSession,
   open,
   sessions,
   activeSessionId,
@@ -124,6 +135,7 @@ export function HistorySearchDrawer({
   onRetrySummary,
   onLoadMore = () => undefined,
 }: HistorySearchDrawerProps) {
+  useLanguage()
   const [query, setQuery] = useState('')
   const [pendingSessionId, setPendingSessionId] = useState('')
   const [deleteSessionId, setDeleteSessionId] = useState('')
@@ -146,6 +158,8 @@ export function HistorySearchDrawer({
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const orderedSessions = useMemo(
     () => [...sessions].sort((left, right) => {
+      const pinOrder = (right.pinned_at || '').localeCompare(left.pinned_at || '')
+      if (pinOrder) return pinOrder
       const leftTime = Date.parse(left.updated_at) || 0
       const rightTime = Date.parse(right.updated_at) || 0
       if (leftTime !== rightTime) return rightTime - leftTime
@@ -156,7 +170,7 @@ export function HistorySearchDrawer({
     [sessions],
   )
   const filteredSessions = useMemo(
-    () => normalizedQuery
+    () => normalizedQuery && !onSearchChange
       ? orderedSessions.filter((session) => [
           sessionDisplayName(session),
           session.summary || '',
@@ -165,7 +179,7 @@ export function HistorySearchDrawer({
           session.bound_platform || '',
         ].join(' ').toLocaleLowerCase().includes(normalizedQuery))
       : orderedSessions,
-    [normalizedQuery, orderedSessions],
+    [normalizedQuery, orderedSessions, onSearchChange],
   )
   const calendarDays = useMemo(
     () => monthGrid(visibleMonth.year, visibleMonth.month),
@@ -316,11 +330,12 @@ export function HistorySearchDrawer({
     }
   }
   const confirmDeleteAll = async () => {
-    if (sessions.length === 0 || pendingAction) return
+    if (pendingAction) return
     setPendingAction('delete_all')
     setMutationError('')
     try {
       await onDeleteAllSessions()
+      setReadOnlySession(null)
       setDeleteAllOpen(false)
       setQuery('')
     } catch (error) {
@@ -371,8 +386,8 @@ export function HistorySearchDrawer({
         <button className="icon-btn" type="button" onClick={closeDrawer} aria-label="关闭历史对话"><X size={17} /></button>
       </div>
       <div className={`drawer-body ${styles.body}`}>
-        <label className={styles.searchBox}>
-          <Search size={17} />
+        <form className={styles.searchBox} data-has-query={Boolean(query)} onSubmit={(event) => { event.preventDefault(); onSearchChange?.(query.trim()) }}>
+          <Search size={17} aria-hidden="true" />
           <input
             ref={searchRef}
             value={query}
@@ -380,8 +395,12 @@ export function HistorySearchDrawer({
             placeholder="搜索历史对话名称…"
             aria-label="搜索历史对话名称"
           />
-          {query && <button type="button" onClick={() => setQuery('')} aria-label="清空历史搜索"><X size={15} /></button>}
-        </label>
+          <button type="button" className={styles.searchClear}
+            disabled={!query} aria-hidden={!query} tabIndex={query ? 0 : -1}
+            onClick={() => { setQuery(''); onSearchChange?.(''); searchRef.current?.focus() }}
+            aria-label="清空历史搜索"><X size={15} /></button>
+          {onSearchChange && <button type="submit" className={styles.searchSubmit} aria-label={t('搜索历史对话')}><Search size={17} /></button>}
+        </form>
 
         <section className={styles.dateFilter} aria-label="历史归档日期筛选">
           <button
@@ -403,11 +422,19 @@ export function HistorySearchDrawer({
           </button>
         </section>
 
+        <div className={styles.filterChips}>
+          <button type="button" aria-pressed={favoritesOnly} className={favoritesOnly ? styles.favoriteActive : ''}
+            onClick={() => onFavoritesChange?.(!favoritesOnly)}>
+            <Star size={14} fill={favoritesOnly ? 'currentColor' : 'none'} />{t('收藏')}
+            {favoritesCount !== undefined && <span>{favoritesCount}</span>}
+          </button>
+        </div>
+
         <div className={styles.actionBar}>
           <span>{selectedDateText ? `${selectedDateText} · ` : ''}{sessions.length} 条历史对话 · {webSessions.length} 条 Web{appSessions.length ? ` · ${appSessions.length} 条 APP` : ''}</span>
           <button
             type="button"
-            disabled={loading || error || webSessions.length === 0 || chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction)}
+            disabled={loading || error || (sessions.length === 0 && !selectedDate && !favoritesOnly && !normalizedQuery) || chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction)}
             onClick={() => {
               setPendingSessionId('')
               setDeleteSessionId('')
@@ -455,8 +482,12 @@ export function HistorySearchDrawer({
             const memoryStatus = session.memory_status || 'unknown'
             const memoryProcessed = Math.max(0, session.memory_processed_round || 0)
             const memoryTarget = Math.max(0, session.memory_target_round || session.rounds || 0)
-            return <article
-              key={`${source}:${session.session_id}`}
+            return <SessionActions key={`${source}:${session.session_id}`} session={session}
+              onMark={onMarkSession} onRename={onRenameSession} onDelete={onDeleteSession}
+              onOpen={() => { setSummaryPreview(null); if (!mutable) setReadOnlySession(session); else if (!active) setPendingSessionId(session.session_id); else onSelectSession(session.session_id) }}
+              openDisabled={mutable && (chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction))}
+              deleteDisabled={Boolean(switchingSessionId) || Boolean(pendingAction) || (chatRunning && active)}>
+              {(menuTrigger, onContextMenu) => <article onContextMenu={onContextMenu}
               className={`${styles.sessionCard} ${!mutable ? styles.readOnlyCard : ''} ${active ? styles.activeCard : ''}`}
             >
               <button
@@ -476,7 +507,7 @@ export function HistorySearchDrawer({
               >
                 <span className={styles.cardIcon}>{switching ? <LoaderCircle className={styles.spinning} size={18} /> : <MessageSquareText size={18} />}</span>
                 <span className={styles.cardCopy}>
-                  <strong>{displayName}</strong>
+                  <strong><b>{displayName}</b>{session.pinned && <Pin size={13} aria-label={t('已置顶')} />}{session.favorite && <Star size={13} fill="currentColor" aria-label={t('已收藏')} />}</strong>
                   {['queued', 'processing'].includes(summaryStatus)
                     ? <span>正在生成摘要{totalChunks > 1 ? ` · ${Math.min(completedChunks, totalChunks)}/${totalChunks}` : ''}…</span>
                     : summaryStatus === 'exhausted'
@@ -497,7 +528,9 @@ export function HistorySearchDrawer({
                   {active ? '当前对话' : !mutable ? (session.run_state === 'running' ? '渠道使用中' : '只读') : session.state === 'closed' ? '已保存' : '历史对话'}
                 </span>
               </button>
-              {mutable && <span className={styles.cardActions}>
+              <span className={styles.cardActions}>
+                {menuTrigger}
+                {mutable && <>
                 {canRetrySummary && <button
                   type="button"
                   className={styles.retryButton}
@@ -518,10 +551,12 @@ export function HistorySearchDrawer({
                 >
                   <Trash2 size={15} />
                 </button>
-              </span>}
-            </article>
+              </>}
+              </span>
+            </article>}
+            </SessionActions>
           })}
-          {!loading && !error && !normalizedQuery && hasMore && <button
+          {!loading && !error && (!normalizedQuery || Boolean(onSearchChange)) && hasMore && <button
             type="button"
             className={styles.loadMoreButton}
             disabled={loadingMore}
@@ -532,7 +567,7 @@ export function HistorySearchDrawer({
           </button>}
           {!loading && !error && filteredSessions.length === 0 && <div className={styles.empty}>
             <Search size={22} />
-            <strong>{sessions.length === 0 ? (selectedDate ? '该日期没有历史对话' : '暂无历史对话') : '没有匹配的对话'}</strong>
+            <strong>{sessions.length === 0 ? (favoritesOnly ? t('暂无收藏的对话') : selectedDate ? '该日期没有历史对话' : '暂无历史对话') : '没有匹配的对话'}</strong>
             <span>{sessions.length === 0 ? (selectedDate ? '请选择其他日期，或清除日期筛选查看全部归档。' : 'Web、CLI、定时任务或外部消息完成对话后会在这里生成历史记录。') : '请尝试输入其他对话名称或渠道。'}</span>
           </div>}
         </div>
@@ -612,8 +647,8 @@ export function HistorySearchDrawer({
     <GlobalConfirmDialog
       open={deleteAllOpen}
       title="确认删除全部历史对话？"
-      detail={selectedDate ? '将删除当前用户的全部 Web 历史对话，而不只限于所选日期' : `共 ${webSessions.length} 条 Web 历史对话`}
-      description="当前用户的全部 Web 历史对话及其完整内容将被永久删除，此操作无法撤销。"
+      detail="全部渠道 · 包含只读对话"
+      description="Web、APP、CLI、定时任务及外部消息的完整历史（含未加载记录）将永久删除，包括已置顶和收藏的对话，不受搜索、日期或收藏筛选限制，且无法撤销。不删除已提取的记忆、附件文件或定时任务本身。"
       error={mutationError}
       icon={<Trash2 size={21} />}
       tone="danger"

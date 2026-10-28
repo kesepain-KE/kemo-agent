@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { AlertCircle, Check, CheckCircle2, ChevronDown, Copy, LoaderCircle, Wrench } from 'lucide-react'
 import type { ChatItem } from '../types/api'
 import { copyText } from '../utils/clipboard'
+import { ShellJobLink } from './workspace/ShellJobLink'
+import { NativeMediaLinks } from './NativeMediaLinks'
 
 const SENSITIVE_ARGUMENT_KEY = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)/i
 
@@ -172,7 +174,7 @@ export function ReasoningTrace({ item }: { item: Extract<ChatItem, { kind: 'reas
   )
 }
 
-export function ToolCallCard({ item }: { item: Extract<ChatItem, { kind: 'tool' }> }) {
+export function ToolCallCard({ item, user = '', sessionId = '' }: { item: Extract<ChatItem, { kind: 'tool' }>; user?: string; sessionId?: string }) {
   const [open, setOpen] = useState(false)
   const [liveElapsedMs, setLiveElapsedMs] = useState(0)
   const elapsedStartedAt = useRef(Date.now())
@@ -216,6 +218,8 @@ export function ToolCallCard({ item }: { item: Extract<ChatItem, { kind: 'tool' 
           </span>
         </span>
       </button>
+      <ShellJobLink user={user} sessionId={sessionId} name={item.name} result={item.result} resultText={item.resultText} />
+      <NativeMediaLinks user={user} item={item} />
       {body && <div className="tool-call-body">
         <div className="tool-call-grid">
           <div className="tool-call-panel"><label>输入参数</label><pre>{body.arguments}</pre></div>

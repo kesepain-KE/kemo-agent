@@ -7,6 +7,8 @@ import {
   getAuthStatus,
 } from '../api/client'
 import { AuthPage } from '../pages/AuthPage'
+import { AuthLayout } from './AuthLayout'
+import styles from '../pages/AuthPage.module.css'
 
 interface AuthGateProps {
   children: ReactNode
@@ -16,7 +18,7 @@ export function AuthGate({ children }: AuthGateProps) {
   const location = useLocation()
   const query = useQuery({
     queryKey: ['auth-status'],
-    queryFn: getAuthStatus,
+    queryFn: ({ signal }) => getAuthStatus(signal),
     retry: false,
     staleTime: 0,
   })
@@ -40,14 +42,15 @@ export function AuthGate({ children }: AuthGateProps) {
   }, [location.hash, location.pathname, location.search])
 
   if (query.isLoading) {
-    return <main className="auth-screen"><div className="auth-state"><LoaderCircle className="spin" size={22} /><strong>正在检查访问状态</strong></div></main>
+    return <AuthLayout><div className={`${styles.card} ${styles.state}`} role="status"><LoaderCircle className="spin" size={22} aria-hidden="true" /><strong>正在检查访问状态</strong></div></AuthLayout>
   }
   if (query.isError || !query.data) {
-    return <main className="auth-screen"><div className="auth-state"><strong>无法连接 Web 认证服务</strong><span>请确认后端已经启动，然后重试。</span><button onClick={() => void query.refetch()}><RefreshCw size={15} />重新连接</button></div></main>
+    return <AuthLayout><div className={`${styles.card} ${styles.state}`} role="alert"><h1>无法连接 Web 认证服务</h1><p>请确认后端已经启动，然后重试。</p><button className={styles.submit} onClick={() => void query.refetch()}><RefreshCw size={15} aria-hidden="true" />重新连接</button></div></AuthLayout>
   }
   if (query.data.authenticated) return children
   return (
     <AuthPage
+      key={query.data.stage || (query.data.methods.token ? 'token' : 'password')}
       status={query.data}
       onAuthenticated={async () => { await query.refetch() }}
     />

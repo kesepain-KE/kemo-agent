@@ -1,39 +1,80 @@
-import { Bot, LoaderCircle } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { Bot, ChevronRight } from 'lucide-react'
 import type { ChatItem } from '../types/api'
+import { getAgentTask, getAgentTasks } from '../api/workspace'
+import { openWorkspaceAgentTask, openWorkspaceAgents } from '../store/workspace'
+import { t, useLanguage } from '../i18n'
 import { ToolCallCard } from './RunEventCards'
-import styles from './SubagentProgressBubble.module.css'
+import { agentStatus } from './workspace/AgentTasks'
+import styles from './workspace/Workspace.module.css'
 
-function roundLabel(item: Extract<ChatItem, { kind: 'subagent_progress' }>) {
-  return `${Math.max(1, item.iteration)}: ${item.toolName}`
+export function agentTaskId(value: unknown, depth = 0): string | undefined {
+  if (depth > 4) return undefined
+  if (typeof value === 'string') {
+    if (value.length > 200000) return undefined
+    try { return agentTaskId(JSON.parse(value), depth + 1) } catch { return undefined }
+  }
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.task_id === 'string' && /^agent-task-[a-f0-9]{32}$/.test(record.task_id)) return record.task_id
+  return agentTaskId(record.result, depth + 1)
 }
 
-export function SubagentProgressBubble({ items }: { items: ChatItem[] }) {
-  const active = items
-    .filter((item): item is Extract<ChatItem, { kind: 'subagent_progress' }> => item.kind === 'subagent_progress' && Boolean(item.toolName))
-    .slice()
-    .sort((left, right) => left.iteration - right.iteration)
-  if (!active.length) return null
-  return <section className={styles.stack} aria-label="子代理运行进度" aria-live="polite" aria-atomic="true">
-    {active.map((item, index) => {
-      const label = roundLabel(item)
-      const latest = index === active.length - 1
-      return <article key={item.id} className={styles.bubble}>
-      <Bot className={styles.icon} aria-hidden="true" />
-      <span className={styles.round} title={label}>{label}</span>
-      {latest ? <LoaderCircle className={styles.spinner} aria-hidden="true" /> : <span className={styles.spinnerPlaceholder} aria-hidden="true" />}
-    </article>
-    })}
-  </section>
+function dispatchArguments(item: Extract<ChatItem, { kind: 'tool' }>): Record<string, unknown> | undefined {
+  if (item.arguments) return item.arguments
+  if (item.argumentsTruncated || !item.argumentsText || item.argumentsText.length > 200000) return undefined
+  try {
+    const value: unknown = JSON.parse(item.argumentsText)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+  } catch { return undefined }
 }
 
-export function SubagentToolCard({ item, progress, running }: {
-  item: Extract<ChatItem, { kind: 'tool' }>
-  progress: ChatItem[]
-  running: boolean
+/** A simple dispatch link replaces the previous floating progress stack. */
+export function SubagentToolCard({ item, user = '', sessionId = '' }: {
+  item: Extract<ChatItem, { kind: 'tool' }>; user?: string; sessionId?: string
+  progress?: ChatItem[]; running?: boolean
 }) {
-  const matching = running ? progress.filter((value) => value.kind === 'subagent_progress' && value.callId === item.callId) : []
-  return <div className={styles.anchor} data-subagent-call-id={item.callId}>
-    <ToolCallCard item={item} />
-    <SubagentProgressBubble items={matching} />
-  </div>
+  useLanguage()
+  const args = dispatchArguments(item)
+  if (args?.action !== 'call') return <ToolCallCard item={item} user={user} sessionId={sessionId} />
+  return <DispatchCard item={item} args={args} user={user} sessionId={sessionId} />
+}
+
+function DispatchCard({ item, args, user, sessionId }: {
+  item: Extract<ChatItem, { kind: 'tool' }>; args: Record<string, unknown>; user: string; sessionId: string
+}) {
+  const id = agentTaskId(item.result) || agentTaskId(item.resultText)
+  const list = useQuery({
+    queryKey: ['dispatch-agent-list', user, sessionId],
+    queryFn: () => getAgentTasks(user, sessionId, 1),
+    enabled: Boolean(user && sessionId && !id && item.status === 'running'),
+    retry: false, refetchInterval: query => query.state.status !== 'error' && !id && item.status === 'running'
+      && !query.state.data?.tasks.some(root => root.children?.some(child => child.tool_call_id === item.callId)) ? 1500 : false,
+  })
+  const registered = list.data?.tasks.flatMap(root => root.children || []).find(task => task.tool_call_id === item.callId)
+  const taskId = id || registered?.id
+  const detail = useQuery({
+    queryKey: ['workspace-agent', user, taskId, 'web', sessionId],
+    queryFn: () => getAgentTask(user, taskId!, 'web', sessionId),
+    enabled: Boolean(user && sessionId && taskId), retry: false,
+    refetchInterval: query => query.state.status === 'error'
+      || (query.state.data?.task.finished_at && !query.state.data?.task.execution_live) ? false : 1500,
+  })
+  const task = detail.data?.task || registered
+  const agent = String(args?.agent || task?.agent || t('子智能体'))
+  const status = detail.isError ? t('执行状态不可用') : task ? agentStatus(task.status)
+    : item.status === 'error' ? t('分派失败')
+      : list.isError ? t('提交状态不可用')
+        : item.status === 'running' ? t('等待提交') : t('已提交，等待执行状态')
+  const input = args?.input
+  const summary = input && typeof input === 'object' ? String((input as Record<string, unknown>).task || (input as Record<string, unknown>).instruction || '') : ''
+  return <article className="tool-call" data-subagent-call-id={item.callId}>
+    <div className={styles.toolbar}><Bot size={16} /><strong>{agent}</strong>
+      <span className={styles.badge}>{status}</span>
+      <button className={styles.button} disabled={!user || !sessionId} onClick={() => taskId
+        ? openWorkspaceAgentTask(user, { id: taskId, agent, source: 'web', session_id: sessionId })
+        : openWorkspaceAgents(user)}>{t('查看执行')}<ChevronRight size={14} /></button>
+    </div>
+    {summary && <p className={styles.hint}>{summary.slice(0, 300)}</p>}
+  </article>
 }

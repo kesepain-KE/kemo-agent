@@ -40,6 +40,8 @@
 .danger .icon { color: var(--red); background: var(--red-soft); }
 
 .copy { min-width: 0; }
+.detailContent { min-width: 0; margin-top: 10px; color: var(--text); white-space: normal; font-size: .75rem; font-weight: 400; }
+.detailContent input, .detailContent textarea, .detailContent select { width: 100%; min-width: 0; padding: 8px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); font: inherit; }
 .copy strong,
 .detail { display: block; }
 .copy strong { color: var(--text); font-size: 1rem; }

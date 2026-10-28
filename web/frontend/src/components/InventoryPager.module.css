@@ -1,0 +1,6 @@
+.pager { flex: none; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .75rem .25rem .125rem; color: var(--muted); font-size: .6875rem; }
+.pager > span { min-width: 0; overflow-wrap: anywhere; }
+.pager > div { display: flex; flex: none; align-items: center; gap: .5rem; }
+.pager button { display: grid; place-items: center; min-width: 1.75rem; min-height: 1.75rem; padding: .25rem; border: 1px solid var(--line); border-radius: .45rem; background: var(--surface); color: var(--text); cursor: pointer; }
+.pager button:disabled { opacity: .4; cursor: default; }
+@media (max-width: 480px) { .pager { align-items: flex-start; flex-direction: column; } .pager > div { align-self: flex-end; } }

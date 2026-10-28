@@ -4,7 +4,7 @@ import { Archive, LoaderCircle, X } from 'lucide-react'
 import { ApiError, getHistory } from '../api/client'
 import type { HistoryMessage, SessionSummary } from '../types/api'
 import { formatDateTime } from './ModuleUi'
-import { sessionDisplayName } from './SessionHistoryPanel'
+import { sessionDisplayName } from '../utils/sessionDisplayName'
 import styles from './ReadOnlySessionHistoryDialog.module.css'
 
 const PAGE_SIZE = 40

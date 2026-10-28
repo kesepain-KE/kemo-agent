@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import type { ChangeEvent, ClipboardEvent, KeyboardEvent, ReactNode } from 'react'
 import { useRef } from 'react'
 import { BookOpen, Boxes, Mic, Paperclip, Send, Square, Zap } from 'lucide-react'
@@ -66,6 +67,7 @@ export function AgentComposer({
   onNextTurn,
   onStop,
 }: AgentComposerProps) {
+  useLanguage()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const canSubmit = !disabled
@@ -121,7 +123,7 @@ export function AgentComposer({
   }
 
   return (
-    <section className={`composer composer-inner ${running ? 'is-running' : ''}`} aria-label="消息输入区域">
+    <section className={`composer composer-inner ${running ? 'is-running' : ''}`} aria-label={tr("消息输入区域")}>
       {notice}
       {uploadFeedback}
       {modelBar}
@@ -133,7 +135,7 @@ export function AgentComposer({
         placeholder={placeholder}
         disabled={disabled}
         rows={1}
-        aria-label="消息内容"
+        aria-label={tr("消息内容")}
         aria-keyshortcuts={running && onGuide ? 'Control+Enter' : undefined}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
@@ -142,25 +144,25 @@ export function AgentComposer({
 
       <div className="composer-bar">
         <div className="reference-composer-tools">
-          <ComposerIconButton label="上传文件" onClick={() => fileInputRef.current?.click()} disabled={disabled || uploading || !onUploadFiles}>
+          <ComposerIconButton label={tr("上传文件")} onClick={() => fileInputRef.current?.click()} disabled={disabled || uploading || !onUploadFiles}>
             <Paperclip />
           </ComposerIconButton>
           {speech.supported ? <ComposerIconButton
-            label={speech.listening ? '停止语音识别' : '语音识别'}
-            title={speech.listening ? '停止语音识别' : '语音识别'}
+            label={speech.listening ? tr('停止语音识别') : tr('语音识别')}
+            title={speech.listening ? tr('停止语音识别') : tr('语音识别')}
             onClick={speech.listening ? speech.stop : speech.start}
             disabled={disabled}
             active={speech.listening}
           >
             <Mic />
           </ComposerIconButton> : null}
-          <ComposerIconButton label="打开知识库" onClick={onOpenKnowledge} disabled={disabled}>
+          <ComposerIconButton label={tr("打开知识库")} onClick={onOpenKnowledge} disabled={disabled}>
             <BookOpen />
           </ComposerIconButton>
-          <ComposerIconButton label="打开能力引用" title="引用拓展、技能或插件" onClick={onOpenCapabilities} disabled={disabled}>
+          <ComposerIconButton label={tr("打开能力引用")} title="引用拓展、技能或插件" onClick={onOpenCapabilities} disabled={disabled}>
             <Boxes />
           </ComposerIconButton>
-          <ComposerIconButton label="打开快捷指令" onClick={onOpenCommands} disabled={disabled} command>
+          <ComposerIconButton label={tr("打开快捷指令")} onClick={onOpenCommands} disabled={disabled} command>
             <Zap />
           </ComposerIconButton>
         </div>
@@ -200,25 +202,25 @@ export function AgentComposer({
               className={`btn btn-ghost btn-sm ${conversationMenuOpen ? 'is-active' : ''}`}
               disabled={disabled}
               aria-expanded={conversationMenuOpen}
-              aria-label="展开对话操作"
+              aria-label={tr("展开对话操作")}
               onClick={onToggleConversationMenu}
             >
-              <span>对话操作</span>
+              <span>{tr("对话操作")}</span>
             </button>
             {conversationMenu}
           </div>
 
           {running && onNextTurn ? <button type="button" className="btn btn-ghost btn-sm" disabled={!canSubmit} onClick={() => { if (canSubmit) onNextTurn() }}>
-            <span>下一轮发送</span>
+            <span>{tr("下一轮发送")}</span>
           </button> : null}
           <button type="button" className={`send-btn ${running ? 'reference-followup-send' : ''}`} disabled={!canSubmit} onClick={handleSubmit}>
             <ReferenceIcon name="arrowUp" />
-            <span className="sr-only">{running ? '消息跟进' : '发送'}</span>
+            <span className="sr-only">{running ? tr('消息跟进') : tr('发送')}</span>
           </button>
           {running && onStop ? (
-            <button type="button" className="send-btn is-stop" onClick={onStop} aria-label="停止生成" disabled={stopping}>
+            <button type="button" className="send-btn is-stop" onClick={onStop} aria-label={tr("停止生成")} disabled={stopping}>
               <Square aria-hidden="true" />
-              <span className="sr-only">{stopping ? '正在停止…' : '停止'}</span>
+              <span className="sr-only">{stopping ? tr('正在停止…') : tr('停止')}</span>
             </button>
           ) : null}
         </div>
@@ -242,6 +244,7 @@ interface ComposerIconButtonProps {
 }
 
 function ComposerIconButton({ label, title, disabled, command = false, active = false, children, onClick }: ComposerIconButtonProps) {
+  useLanguage()
   return (
     <button
       type="button"

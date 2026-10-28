@@ -1,125 +1,130 @@
-import { render, screen, within } from '@testing-library/react'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatItem } from '../types/api'
-import { reduceRunEvent, finalizeCurrentRoundItems, resetCurrentRoundItemsForRetry } from '../pages/chatState'
-import { SubagentToolCard } from './SubagentProgressBubble'
+import { SubagentToolCard, agentTaskId } from './SubagentProgressBubble'
+import { AgentTasks, AgentTaskView } from './workspace/AgentTasks'
+import { openWorkspaceAgentTask, openWorkspaceAgents, openWorkspacePath, useWorkspaceStore } from '../store/workspace'
+import { getAgentTask, getAgentTasks, type AgentTask } from '../api/workspace'
 
-function start(items: ChatItem[] = [], callId = 'call-a', agent = 'task_plan') {
-  return reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: callId, tool_name: 'subagent_dispatch', arguments: { action: 'call', agent } })
+vi.mock('../api/workspace', () => ({ getAgentTask: vi.fn(), getAgentTasks: vi.fn() }))
+const id = `agent-task-${'a'.repeat(32)}`
+const task: AgentTask = { id, root_task_id: 'main', source: 'web', session_id: 's1', agent: 'worker',
+  status: 'running', description: 'test child', created_at: '2026-10-24T00:00:00Z',
+  events: [{ at: '2026-10-24T00:00:00Z', status: 'tool_finished', tool_name: 'file', elapsed_ms: 80, summary: '执行成功' }] }
+const root: AgentTask = { ...task, id: 'main', root_task_id: '', agent: 'main', status: 'waiting_children', children: [task] }
+const item: Extract<ChatItem, { kind: 'tool' }> = { id: 'tool-call', kind: 'tool', callId: 'call', name: 'subagent_dispatch',
+  arguments: { action: 'call', agent: 'worker', input: { task: 'test child' } }, status: 'success', result: { ok: true, result: { status: 'queued', task_id: id } } }
+function view(node: React.ReactNode) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>)
 }
-
-function tool(items: ChatItem[], callId = 'call-a') {
-  return items.find((item): item is Extract<ChatItem, { kind: 'tool' }> => item.kind === 'tool' && item.callId === callId)!
-}
-
-describe('subagent progress attached to its tool card', () => {
-  it('shows only a numbered tool row on the matching tool card right side', () => {
-    let items = start()
-    const { container, rerender } = render(<SubagentToolCard item={tool(items)} progress={items} running />)
-    const anchor = container.querySelector('[data-subagent-call-id="call-a"]')!
-    expect(anchor).toContainElement(container.querySelector('.tool-call'))
-    expect(screen.queryByLabelText('子代理运行进度')).not.toBeInTheDocument()
-    items = reduceRunEvent(items, { type: 'subagent_progress', tool_call_id: 'call-a', metadata: { agent: 'task_plan', status: 'tool_running', iteration: 2, tool_name: 'file' } })
-    rerender(<SubagentToolCard item={tool(items)} progress={items} running />)
-    const progress = screen.getByLabelText('子代理运行进度')
-    expect(anchor).toContainElement(progress)
-    expect(screen.getByText('2: file')).toBeInTheDocument()
-    expect(within(progress).getByTitle('2: file')).toBeInTheDocument()
-    expect(progress).not.toHaveTextContent('工具调用中')
-    expect(progress).not.toHaveTextContent('action:')
-    expect(items.filter((item) => item.kind === 'reasoning')).toHaveLength(0)
-    expect(items.filter((item) => item.kind === 'subagent_progress')).toHaveLength(1)
-  })
-
-  it('keeps same-name agents attached to separate call IDs', () => {
-    let items = start(start(), 'call-b')
-    items = reduceRunEvent(items, { type: 'subagent_progress', tool_call_id: 'call-a', metadata: { status: 'tool_running', iteration: 1, tool_name: 'file' } })
-    items = reduceRunEvent(items, { type: 'subagent_progress', tool_call_id: 'call-b', metadata: { status: 'tool_running', iteration: 1, tool_name: 'shell' } })
-    const { container } = render(<>
-      <SubagentToolCard item={tool(items)} progress={items} running />
-      <SubagentToolCard item={tool(items, 'call-b')} progress={items} running />
-    </>)
-    for (const id of ['call-a', 'call-b']) {
-      expect(within(container.querySelector(`[data-subagent-call-id="${id}"]`) as HTMLElement).getAllByLabelText('子代理运行进度')).toHaveLength(1)
-    }
-    const completed = reduceRunEvent(items, { type: 'subagent_progress', tool_call_id: 'call-a', metadata: { status: 'completed' } })
-    expect(completed.filter((item) => item.kind === 'subagent_progress').map((item) => item.callId)).toEqual(['call-b'])
-  })
-
-  it('retains each tool round so the side card can scroll after its sixth row', () => {
-    let items = start()
-    for (let iteration = 1; iteration <= 7; iteration += 1) {
-      items = reduceRunEvent(items, {
-        type: 'subagent_progress', tool_call_id: 'call-a',
-        metadata: { status: 'tool_running', iteration, tool_name: `tool-${iteration}` },
-      })
-    }
-    const { container } = render(<SubagentToolCard item={tool(items)} progress={items} running />)
-    const progress = screen.getByLabelText('子代理运行进度')
-
-    expect(within(progress).getAllByTitle(/\d+: tool-/)).toHaveLength(7)
-    expect(within(progress).getByText('1: tool-1')).toBeInTheDocument()
-    expect(within(progress).getByText('7: tool-7')).toBeInTheDocument()
-    expect(container.querySelectorAll('[data-subagent-call-id="call-a"] [aria-label="子代理运行进度"]')).toHaveLength(1)
-  })
-
-  it.each(['completed', 'completed_after_timeout', 'failed', 'cancelled', 'timed_out'])('disappears on %s', (status) => {
-    let items = start()
-    const { rerender } = render(<SubagentToolCard item={tool(items)} progress={items} running />)
-    items = reduceRunEvent(items, { type: 'subagent_progress', tool_call_id: 'call-a', metadata: { status } })
-    rerender(<SubagentToolCard item={tool(items)} progress={items} running />)
-    expect(screen.queryByLabelText('子代理运行进度')).not.toBeInTheDocument()
-  })
-
-  it('clears on dispatch result, parent completion, interruption and retry', () => {
-    const items = start()
-    for (const event of [
-      { type: 'tool_call_result' as const, tool_call_id: 'call-a', result: { ok: true, result: { status: 'completed' } } },
-      { type: 'done' as const }, { type: 'error' as const, error: { message: '失败' } },
-      { type: 'long_task_update' as const },
-    ]) expect(reduceRunEvent(items, event).some((item) => item.kind === 'subagent_progress')).toBe(false)
-    expect(finalizeCurrentRoundItems(items, {}).some((item) => item.kind === 'subagent_progress')).toBe(false)
-    expect(resetCurrentRoundItemsForRetry(items).some((item) => item.kind === 'subagent_progress')).toBe(false)
-    const { container } = render(<SubagentToolCard item={tool(items)} progress={items} running={false} />)
-    expect(within(container).queryByLabelText('子代理运行进度')).not.toBeInTheDocument()
-  })
-
-  it('does not show a bubble for list/status operations and keeps detached tasks live', () => {
-    expect(reduceRunEvent([], { type: 'tool_call_start', tool_call_id: 'list', tool_name: 'subagent_dispatch', arguments: { action: 'list' } }).some((item) => item.kind === 'subagent_progress')).toBe(false)
-    const items = reduceRunEvent(start(), { type: 'tool_call_result', tool_call_id: 'call-a', result: { ok: true, result: { status: 'queued' } } })
-    expect(items.some((item) => item.kind === 'subagent_progress')).toBe(true)
-  })
+beforeEach(() => {
+  vi.clearAllMocks()
+  useWorkspaceStore.setState({ users: {} })
+  vi.mocked(getAgentTask).mockResolvedValue({ task })
+  vi.mocked(getAgentTasks).mockResolvedValue({ tasks: [root], total: 1, total_pages: 1 })
 })
 
-describe('subagent progress side-card layout', () => {
-  const stylesheet = readFileSync(resolve(process.cwd(), 'src/components/SubagentProgressBubble.module.css'), 'utf8')
-
-  it('keeps the ordinary tool card full-sized and places progress outside its right edge', () => {
-    const anchorRule = stylesheet.match(/\.anchor\s*\{([^}]*)\}/)?.[1] ?? ''
-    const stackRule = stylesheet.match(/\.stack\s*\{([^}]*)\}/)?.[1] ?? ''
-
-    expect(anchorRule).toContain('position: relative')
-    expect(anchorRule).toContain('width: min(100%, 880px)')
-    expect(anchorRule).not.toContain('grid-template-columns')
-    expect(stackRule).toContain('position: absolute')
-    expect(stackRule).toContain('left: calc(100% + 14px)')
-    expect(stackRule).toContain('width: calc((100dvw / 6) * .7)')
+describe('dispatch card replaces floating subagent progress', () => {
+  it('distinguishes unsubmitted calls from queued and running tasks', async () => {
+    vi.mocked(getAgentTasks).mockResolvedValue({ tasks: [], total: 0, total_pages: 1 })
+    const node = view(<SubagentToolCard item={{ ...item, status: 'running', result: undefined }} user="alice" sessionId="s1" />)
+    expect(screen.getByText('等待提交')).toBeInTheDocument()
+    expect(screen.queryByText('执行中')).not.toBeInTheDocument()
+    expect(screen.queryByText('排队中')).not.toBeInTheDocument()
+    await waitFor(() => expect(getAgentTasks).toHaveBeenCalled())
+    node.unmount()
+    vi.mocked(getAgentTask).mockResolvedValue({ task: { ...task, status: 'queued' } })
+    view(<SubagentToolCard item={item} user="alice" sessionId="s1" />)
+    expect(await screen.findByText('排队中')).toBeInTheDocument()
   })
-
-  it('starts at one normal card height, caps at six rounds, and fixes every row to one line', () => {
-    const stackRule = stylesheet.match(/\.stack\s*\{([^}]*)\}/)?.[1] ?? ''
-    const bubbleRule = stylesheet.match(/\.bubble\s*\{([^}]*)\}/)?.[1] ?? ''
-    const textRule = stylesheet.match(/\.round\s*\{([^}]*)\}/)?.[1] ?? ''
-
-    expect(stackRule).toContain('min-height: 44px')
-    expect(stackRule).toContain('max-height: 224px')
-    expect(stackRule).toContain('overflow-y: auto')
-    expect(stackRule).toContain('overscroll-behavior: contain')
-    expect(bubbleRule).toContain('height: 30px')
-    expect(bubbleRule).toContain('max-height: 30px')
-    expect(textRule).toContain('text-overflow: ellipsis')
-    expect(textRule).toContain('white-space: nowrap')
+  it('shares one discovery query across the same conversation batch', async () => {
+    vi.mocked(getAgentTasks).mockResolvedValue({ tasks: [], total: 0, total_pages: 1 })
+    view(<>{['a', 'b', 'c', 'd', 'e'].map(callId =>
+      <SubagentToolCard key={callId} item={{ ...item, callId, status: 'running', result: undefined }}
+        user="alice" sessionId="s1" />)}</>)
+    expect(screen.getAllByText('等待提交')).toHaveLength(5)
+    await waitFor(() => expect(getAgentTasks).toHaveBeenCalledTimes(1))
+  })
+  it('reports lookup failure without pretending a task is running', async () => {
+    vi.mocked(getAgentTasks).mockRejectedValue(new Error('offline'))
+    view(<SubagentToolCard item={{ ...item, status: 'running', result: undefined }} user="alice" sessionId="s1" />)
+    expect(await screen.findByText('提交状态不可用')).toBeInTheDocument()
+    expect(screen.queryByText('执行中')).not.toBeInTheDocument()
+  })
+  it('never displays a side bubble or reports queued as completed; opens only on click', async () => {
+    openWorkspacePath('alice', 'download', 'a.md', 'a.md')
+    view(<SubagentToolCard item={item} user="alice" sessionId="s1" />)
+    expect(screen.queryByLabelText('子代理运行进度')).not.toBeInTheDocument()
+    expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+    expect(screen.getByText('已提交，等待执行状态')).toBeInTheDocument()
+    await screen.findByText('执行中')
+    expect(useWorkspaceStore.getState().users.alice.activeId).toBe('file:download:a.md')
+    fireEvent.click(screen.getByRole('button', { name: '查看执行' }))
+    expect(useWorkspaceStore.getState().users.alice.tabs).toHaveLength(2)
+    expect(useWorkspaceStore.getState().users.alice.tabs[1]).toMatchObject({ type: 'agent-task', taskId: id })
+  })
+  it('uses ordinary tool cards for non-dispatch operations', () => {
+    view(<SubagentToolCard item={{ ...item, arguments: { action: 'list' } }} user="alice" sessionId="s1" />)
+    expect(screen.queryByRole('button', { name: '查看执行' })).not.toBeInTheDocument()
+    expect(getAgentTask).not.toHaveBeenCalled()
+  })
+  it('rejects untrusted task identifiers and overlarge encoded payloads', () => {
+    expect(agentTaskId({ result: { task_id: id } })).toBe(id)
+    expect(agentTaskId({ task_id: '../../private' })).toBeUndefined()
+    expect(agentTaskId('x'.repeat(200001))).toBeUndefined()
+  })
+  it('restores the execution link from bounded historical JSON fields after refresh', async () => {
+    view(<SubagentToolCard item={{ ...item, arguments: undefined, result: undefined,
+      argumentsText: JSON.stringify(item.arguments), resultText: JSON.stringify(item.result) }} user="alice" sessionId="s1" />)
+    await screen.findByText('执行中')
+    fireEvent.click(screen.getByRole('button', { name: '查看执行' }))
+    expect(useWorkspaceStore.getState().users.alice.tabs[0]).toMatchObject({ taskId: id, type: 'agent-task' })
+  })
+})
+describe('agent workspace views', () => {
+  it('shows parent stage and child tree and opens a dedicated detail tab', async () => {
+    view(<AgentTasks user="alice" sessionId="s1" active />)
+    await screen.findByText('等待子任务')
+    expect(screen.getByText('必要依赖')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    expect(useWorkspaceStore.getState().users.alice.tabs[0]).toMatchObject({ type: 'agent-task', sessionId: 's1' })
+  })
+  it('shows public timeline, actual tool duration and final output without a terminal', async () => {
+    vi.mocked(getAgentTask).mockResolvedValue({ task: { ...task, status: 'completed', result: { answer: 'public output' }, usage: { total_tokens: 23 } } })
+    view(<AgentTaskView user="alice" taskId={id} source="web" sessionId="s1" active />)
+    await screen.findByText('file')
+    expect(screen.getByText(/80 ms/)).toBeInTheDocument()
+    expect(screen.getByText(/public output/)).toBeInTheDocument()
+    expect(screen.getByText('总 Token')).toBeInTheDocument()
+    expect(screen.getByText('23')).toBeInTheDocument()
+    expect(screen.queryByText('total_tokens: 23')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('实例终端')).not.toBeInTheDocument()
+  })
+  it('does not fetch while hidden and isolates query scope by user and session', async () => {
+    const node = view(<AgentTasks user="alice" sessionId="s1" active={false} />)
+    expect(getAgentTasks).not.toHaveBeenCalled()
+    node.unmount()
+    view(<AgentTaskView user="bob" taskId={id} source="web" sessionId="s2" active />)
+    await waitFor(() => expect(getAgentTask).toHaveBeenCalledWith('bob', id, 'web', 's2'))
+  })
+  it('opens validated output files in the existing file tab without duplication', async () => {
+    vi.mocked(getAgentTask).mockResolvedValue({ task: { ...task, status: 'completed',
+      finished_at: '2026-10-24T00:01:00Z', artifacts: [{ scope: 'download', relative_path: 'report.md', name: 'report.md', size: 23 }] } })
+    openWorkspacePath('alice', 'download', 'report.md', 'report.md', 23)
+    view(<AgentTaskView user="alice" taskId={id} source="web" sessionId="s1" active />)
+    fireEvent.click(await screen.findByRole('button', { name: 'report.md' }))
+    expect(useWorkspaceStore.getState().users.alice.tabs).toHaveLength(1)
+    expect(useWorkspaceStore.getState().users.alice.activeId).toBe('file:download:report.md')
+  })
+  it('deduplicates task tabs and closing them never cancels execution', () => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    act(() => { openWorkspaceAgents('alice'); openWorkspaceAgentTask('alice', task); openWorkspaceAgentTask('alice', task) })
+    expect(useWorkspaceStore.getState().users.alice.tabs).toHaveLength(2)
+    useWorkspaceStore.getState().close('alice', useWorkspaceStore.getState().users.alice.activeId)
+    expect(useWorkspaceStore.getState().users.alice.tabs).toHaveLength(1)
+    expect(fetch).not.toHaveBeenCalled()
+    fetch.mockRestore()
   })
 })

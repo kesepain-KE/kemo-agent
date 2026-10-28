@@ -12,7 +12,7 @@
   min-height: 44px;
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-columns: 20px minmax(0, 1fr) 28px 28px;
   align-items: center;
   gap: 8px;
   padding: 0 11px;
@@ -25,12 +25,15 @@
 
 .searchBox:focus-within { border-color: var(--brand-line); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 9%, transparent); }
 .searchBox svg { color: var(--brand); }
-.searchBox input { min-width: 0; height: 40px; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: .8125rem; }
+.searchBox input { min-width: 0; width: 100%; height: 40px; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: .8125rem; white-space: nowrap; }
 .searchBox input:focus,
 .searchBox input:focus-visible { border: 0 !important; border-color: transparent !important; outline: 0 !important; box-shadow: none !important; }
 .searchBox input::placeholder { color: var(--muted-2); }
 .searchBox button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--radius-control); color: var(--muted); background: transparent; cursor: pointer; }
 .searchBox button:hover { color: var(--text); background: var(--surface-hover); }
+.searchClear { grid-column: 3; grid-row: 1; }
+.searchSubmit { grid-column: 4; grid-row: 1; }
+.searchBox[data-has-query="false"] .searchClear { visibility: hidden; pointer-events: none; }
 
 .dateFilter {
   position: relative;
@@ -235,7 +238,7 @@
 }
 .sessionCard:hover { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 28%, var(--surface-elevated)); transform: translateY(-1px); box-shadow: 0 9px 24px color-mix(in srgb, var(--brand) 8%, transparent); }
 .sessionCard:focus-within { border-color: var(--brand); outline: 0; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--brand) 32%, transparent); }
-.readOnlyCard { grid-template-columns: minmax(0, 1fr); }
+.readOnlyCard { grid-template-columns: minmax(0, 1fr) 34px; }
 .activeCard { border-color: var(--brand-line); background: color-mix(in srgb, var(--brand-soft) 50%, var(--surface-elevated)); }
 
 .sessionSelect {
@@ -284,7 +287,8 @@
 .cardCopy strong,
 .cardCopy span,
 .cardCopy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cardCopy strong { font-size: .8125rem; }
+.cardCopy strong { display: flex; align-items: center; gap: 5px; font-size: .8125rem; }
+.cardCopy strong b { min-width: 0; overflow: hidden; text-overflow: ellipsis; font: inherit; }
 .cardCopy span { margin-top: 4px; color: var(--muted); font-size: .6875rem; }
 .cardCopy .summaryText { cursor: help; }
 .cardCopy .summaryFailed { color: var(--amber); }
@@ -359,3 +363,11 @@
   .dateFilterToggle > svg:last-child { transition: none; }
   .spinning { animation: none; }
 }
+
+.filterChips { display: flex; flex-wrap: wrap; gap: 8px; margin: -2px 0 2px; }
+.filterChips button { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 11px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--text-2);
+  font: inherit; font-size: 12px; cursor: pointer; }
+.filterChips .favoriteActive { background: var(--brand-soft); border-color: var(--brand-line); color: var(--brand); }
+.filterChips span { font-size: 11px; font-variant-numeric: tabular-nums; }
+.cardCopy strong svg { flex-shrink: 0; color: var(--brand); }
