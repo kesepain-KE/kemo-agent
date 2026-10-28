@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import type { ApiErrorPayload, RunEvent } from '../types/api'
+import { validateApiResponse } from './contracts'
+import type { RunEvent } from '../types/api'
 
 export const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
@@ -16,15 +17,23 @@ export class ApiError extends Error {
   }
 }
 
+const apiErrorSchema = z.object({
+  error: z.object({
+    message: z.string().refine(value => value.trim().length > 0).optional().catch(undefined),
+    code: z.string().refine(value => value.trim().length > 0).optional().catch(undefined),
+  }),
+})
+
 export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     credentials: 'same-origin',
     ...init,
   })
   if (!response.ok) {
-    let payload: ApiErrorPayload | undefined
+    let payload: z.infer<typeof apiErrorSchema> | undefined
     try {
-      payload = (await response.json()) as ApiErrorPayload
+      const parsed = apiErrorSchema.safeParse(await response.json())
+      payload = parsed.success ? parsed.data : undefined
     } catch {
       payload = undefined
     }
@@ -42,7 +51,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     }
     throw error
   }
-  return (await response.json()) as T
+  return validateApiResponse(path, await response.json()) as T
 }
 
 export const runEventSchema = z
@@ -53,10 +62,12 @@ export const runEventSchema = z
       'tool_call_start',
       'tool_call_result',
       'media_output',
+      'media_input_update',
       'guidance_applied',
       'context_compression',
       'long_task_update',
       'subagent_progress',
+      'background_job_progress',
       'usage',
       'retrying',
       'error',

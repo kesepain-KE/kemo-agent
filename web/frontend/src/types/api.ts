@@ -31,10 +31,12 @@ export type RunEventType =
   | 'tool_call_start'
   | 'tool_call_result'
   | 'media_output'
+  | 'media_input_update'
   | 'guidance_applied'
   | 'context_compression'
   | 'long_task_update'
   | 'subagent_progress'
+  | 'background_job_progress'
   | 'usage'
   | 'retrying'
   | 'error'
@@ -70,6 +72,9 @@ export interface UserSummary {
 }
 
 export interface SessionSummary {
+  pinned?: boolean
+  pinned_at?: string
+  favorite?: boolean
   source?: string
   bound_platform?: string
   session_id: string
@@ -132,6 +137,7 @@ export interface SessionCloseResponse {
   closed: boolean
   deferred?: boolean
   active_clients?: number
+  retry_after_seconds?: number
   summary?: {
     status: string
     reason: string
@@ -216,6 +222,14 @@ export interface InputAttachment {
   available: boolean
 }
 
+export interface NativeMediaInput extends Omit<InputAttachment, 'scope'> {
+  scope: 'file_upload' | 'download' | 'external'
+  status: 'queued' | 'prepared' | 'included' | 'failed' | 'not_sent' | 'unconfirmed'
+  tool_call_id: string
+  attachment_id?: string
+  error?: string
+}
+
 export interface UsersResponse {
   users: UserSummary[]
 }
@@ -241,6 +255,8 @@ export interface AuthenticationSummary {
 }
 
 export interface SessionsResponse {
+  favorites_only?: boolean
+  favorites_count?: number
   user: string
   source: string
   sessions: SessionSummary[]
@@ -336,6 +352,7 @@ export interface HistoryResponse {
     cancelled?: boolean
     cancel_reason?: string
     artifacts?: MediaArtifact[]
+    media_inputs?: NativeMediaInput[]
   }>
   round_traces: Array<{
     round: number
@@ -350,6 +367,7 @@ export interface HistoryResponse {
       result_text: string
       result_truncated: boolean
       artifacts?: MediaArtifact[]
+      media_inputs?: NativeMediaInput[]
     }>
   }>
   pagination?: {
@@ -850,6 +868,7 @@ export interface OverviewResponse {
       completion_tokens: number
       total_tokens: number
       estimated: boolean
+      cache_hit_rate?: number | null
     }
     limit: number
     percent: number
@@ -983,6 +1002,7 @@ export type ChatItem =
       resultTruncated?: boolean
       status: 'running' | 'success' | 'error'
       elapsedMs?: number
+      mediaInputs?: NativeMediaInput[]
     }
   | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
   | { id: string; kind: 'task_plan'; plan: PlanSummary; presentation?: 'record' | 'reference' }

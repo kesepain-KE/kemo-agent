@@ -82,7 +82,7 @@ export interface FileMutationResponse {
 
 export interface PreferencesResponse {
   user: string
-  appearance: { theme: 'light' | 'dark'; font_size: 'small' | 'medium' | 'large' }
+  appearance: { theme: 'light' | 'dark'; font_size: 'small' | 'medium' | 'large'; language?: string; background?: import('../../api/background').BackgroundSettings }
 }
 
 export interface AvatarUploadResponse {

@@ -1,3 +1,4 @@
+import { nextLeaseSequence } from '../sessionClient'
 import type {
   AgentDeleteResponse,
   AgentsResponse,
@@ -84,27 +85,40 @@ export async function streamChat(...args: Parameters<typeof streamChatImpl>): Re
   return streamChatImpl(...args)
 }
 
-export async function getHealth(): Promise<{ status: string; service: string; version: number }> {
-  return requestJson('/api/health')
+export async function getHealth(signal?: AbortSignal): Promise<{ status: string; service: string; version: number }> {
+  return requestJson('/api/health', { signal })
 }
 
-export async function getUsers(): Promise<UsersResponse> {
-  return requestJson('/api/users')
+export async function getUsers(signal?: AbortSignal): Promise<UsersResponse> {
+  return requestJson('/api/users', { signal })
 }
 
-export async function getSessions(
-  user: string,
+export async function getSessions(user: string,
   query = '',
   limit = 50,
   before = '',
   source = 'all',
   archiveDate = '',
+  favoritesOnly = false, signal?: AbortSignal
 ): Promise<SessionsResponse> {
   const params = new URLSearchParams({ limit: String(limit), source })
   if (query.trim()) params.set('query', query.trim())
   if (before) params.set('before', before)
   if (archiveDate) params.set('date', archiveDate)
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions?${params.toString()}`)
+  if (favoritesOnly) params.set('favorites_only', 'true')
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions?${params.toString()}`, { signal })
+}
+
+export async function patchSessionMarks(user: string, session: SessionSummary, changes: { pinned?: boolean; favorite?: boolean }): Promise<{ session: SessionSummary }> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(session.session_id)}/marks?source=${encodeURIComponent(session.source || 'web')}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
+  })
+}
+
+export async function renameSession(user: string, sessionId: string, title: string): Promise<SessionRenameResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+  })
 }
 
 export async function restartSystem(port: number, force = false): Promise<{ ok: boolean; port: number; helper_pid?: number; already_requested?: boolean }> {
@@ -115,9 +129,9 @@ export async function restartSystem(port: number, force = false): Promise<{ ok: 
   })
 }
 
-export async function getActiveSession(user: string, clientId = ''): Promise<ActiveSessionResponse> {
+export async function getActiveSession(user: string, clientId = '', signal?: AbortSignal): Promise<ActiveSessionResponse> {
   const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : ''
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/active${suffix}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/active${suffix}`, { signal })
 }
 
 export async function createSession(user: string, clientId = ''): Promise<ActiveSessionResponse> {
@@ -156,7 +170,7 @@ export async function touchSessionLease(user: string, sessionId: string, clientI
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ client_id: clientId }),
+      body: JSON.stringify({ client_id: clientId, lease_sequence: nextLeaseSequence(clientId) }),
     },
   )
 }
@@ -172,35 +186,31 @@ export async function releaseSessionLease(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ client_id: clientId }),
+      body: JSON.stringify({ client_id: clientId, lease_sequence: nextLeaseSequence(clientId) }),
       keepalive,
     },
   )
 }
 
-export async function getHistory(
-  user: string,
+export async function getHistory(user: string,
   sessionId: string,
-  options: { limit?: number; before?: number; source?: string } = {},
+  options: { limit?: number; before?: number; source?: string } = {}, signal?: AbortSignal
 ): Promise<HistoryResponse> {
   const query = new URLSearchParams()
   if (options.source) query.set('source', options.source)
   if (options.limit !== undefined) query.set('limit', String(options.limit))
   if (options.before !== undefined) query.set('before', String(options.before))
   const suffix = query.size ? `?${query.toString()}` : ''
-  return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/history${suffix}`,
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/history${suffix}`, { signal }
   )
 }
 
-export async function getSessionLongTask(
-  user: string,
+export async function getSessionLongTask(user: string,
   sessionId: string,
-  source = 'web',
+  source = 'web', signal?: AbortSignal
 ): Promise<LongTaskResponse> {
   const query = new URLSearchParams({ source })
-  return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task?${query.toString()}`,
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task?${query.toString()}`, { signal }
   )
 }
 
@@ -271,15 +281,17 @@ export async function undoLastRound(
   )
 }
 
-export async function deleteAllSessions(user: string): Promise<SessionDeleteAllResponse> {
+export async function deleteAllSessions(user: string, clientId = ''): Promise<SessionDeleteAllResponse> {
+  const params = new URLSearchParams({ source: 'all' })
+  if (clientId) params.set('client_id', clientId)
   return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions`,
+    `/api/users/${encodeURIComponent(user)}/sessions?${params.toString()}`,
     { method: 'DELETE' },
   )
 }
 
-export async function getAuthStatus(): Promise<AuthStatusResponse> {
-  return requestJson('/api/auth/status')
+export async function getAuthStatus(signal?: AbortSignal): Promise<AuthStatusResponse> {
+  return requestJson('/api/auth/status', { signal })
 }
 
 export async function loginWithToken(token: string): Promise<AuthStatusResponse> {
@@ -305,33 +317,31 @@ export async function logoutAuth(): Promise<{ authenticated: boolean }> {
   return requestJson('/api/auth/logout', { method: 'POST' })
 }
 
-export async function getOverview(user: string, sessionId = ''): Promise<OverviewResponse> {
+export async function getOverview(user: string, sessionId = '', signal?: AbortSignal): Promise<OverviewResponse> {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
-  return requestJson(`/api/users/${encodeURIComponent(user)}/overview${query}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/overview${query}`, { signal })
 }
 
-export async function getRuntimeStatus(
-  user: string,
+export async function getRuntimeStatus(user: string,
   sessionId = '',
-  sections: string[] = [],
+  sections: string[] = [], signal?: AbortSignal
 ): Promise<RuntimeStatusResponse> {
   const query = new URLSearchParams()
   if (sessionId) query.set('session_id', sessionId)
   if (sections.length) query.set('sections', sections.join(','))
   const suffix = query.size ? `?${query.toString()}` : ''
-  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/status${suffix}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/status${suffix}`, { signal })
 }
 
-export async function getRuntimeLogs(
-  user: string, category: RuntimeLogCategory = 'all', page = 1, refresh = false,
+export async function getRuntimeLogs(user: string, category: RuntimeLogCategory = 'all', page = 1, refresh = false, signal?: AbortSignal
 ): Promise<RuntimeLogsResponse> {
   const query = new URLSearchParams({ category, page: String(page), page_size: '25', refresh: String(refresh) })
-  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/logs?${query}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/runtime/logs?${query}`, { signal })
 }
 
-export async function getTasks(user: string, sessionId = ''): Promise<TasksResponse> {
+export async function getTasks(user: string, sessionId = '', signal?: AbortSignal): Promise<TasksResponse> {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks${query}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks${query}`, { signal })
 }
 
 export async function previewTaskCleanup(user: string, category: TaskCleanupCategory, sessionId = ''): Promise<TaskCleanupPreview> {
@@ -362,8 +372,8 @@ export async function reopenSession(
   )
 }
 
-export async function getCron(user: string, taskId: string): Promise<CronTaskDetailResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons/${encodeURIComponent(taskId)}`)
+export async function getCron(user: string, taskId: string, signal?: AbortSignal): Promise<CronTaskDetailResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons/${encodeURIComponent(taskId)}`, { signal })
 }
 
 export async function editPlan(
@@ -393,25 +403,23 @@ export async function retryPlanStep(
   })
 }
 
-export async function getPlanRevisions(
-  user: string,
+export async function getPlanRevisions(user: string,
   planId: string,
   sessionId: string,
-  source = "web",
+  source = "web", signal?: AbortSignal
 ): Promise<PlanRevisionsResponse> {
   const query = new URLSearchParams({ session_id: sessionId, source })
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions?${query.toString()}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions?${query.toString()}`, { signal })
 }
 
-export async function getPlanRevision(
-  user: string,
+export async function getPlanRevision(user: string,
   planId: string,
   revision: number,
   sessionId: string,
-  source = "web",
+  source = "web", signal?: AbortSignal
 ): Promise<PlanRevisionResponse> {
   const query = new URLSearchParams({ session_id: sessionId, source })
-  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions/${revision}?${query.toString()}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/plans/${encodeURIComponent(planId)}/revisions/${revision}?${query.toString()}`, { signal })
 }
 
 export async function rollbackPlan(
@@ -467,12 +475,12 @@ export async function deleteCron(user: string, taskId: string): Promise<Record<s
   return requestJson(`/api/users/${encodeURIComponent(user)}/tasks/crons/${encodeURIComponent(taskId)}`, { method: 'DELETE' })
 }
 
-export async function getKnowledge(user: string): Promise<KnowledgeResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge`)
+export async function getKnowledge(user: string, signal?: AbortSignal): Promise<KnowledgeResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge`, { signal })
 }
 
-export async function getKnowledgeDocument(user: string, scope: string, path: string): Promise<KnowledgeDocumentResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/document?path=${encodeURIComponent(path)}`)
+export async function getKnowledgeDocument(user: string, scope: string, path: string, signal?: AbortSignal): Promise<KnowledgeDocumentResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/document?path=${encodeURIComponent(path)}`, { signal })
 }
 
 export async function putKnowledgeDocument(user: string, scope: string, path: string, content: string): Promise<Record<string, unknown>> {
@@ -498,12 +506,12 @@ export async function deleteKnowledgeDocument(user: string, scope: string, path:
   return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/document?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
 }
 
-export async function getSkills(user: string): Promise<SkillsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/skills`)
+export async function getSkills(user: string, signal?: AbortSignal): Promise<SkillsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills`, { signal })
 }
 
-export async function getSkillDocument(user: string, category: SkillCategory, name: string): Promise<SkillDocumentResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/skills/${category}/document?name=${encodeURIComponent(name)}`)
+export async function getSkillDocument(user: string, category: SkillCategory, name: string, signal?: AbortSignal): Promise<SkillDocumentResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/skills/${category}/document?name=${encodeURIComponent(name)}`, { signal })
 }
 
 export async function putSkillDocument(user: string, category: SkillCategory, name: string, content: string): Promise<SkillDocumentResponse> {
@@ -535,8 +543,8 @@ export function getSkillDownloadUrl(user: string, category: SkillCategory, name:
   return `${apiBase}/api/users/${encodeURIComponent(user)}/skills/${category}/download?name=${encodeURIComponent(name)}`
 }
 
-export async function getSense(user: string): Promise<SenseResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sense`)
+export async function getSense(user: string, signal?: AbortSignal): Promise<SenseResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sense`, { signal })
 }
 
 export async function refreshSenseModule(user: string, moduleName: string): Promise<void> {
@@ -546,8 +554,8 @@ export async function refreshSenseModule(user: string, moduleName: string): Prom
   )
 }
 
-export async function getSenseModulePanel(user: string, moduleName: string): Promise<ModulePanelResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}/panel`)
+export async function getSenseModulePanel(user: string, moduleName: string, signal?: AbortSignal): Promise<ModulePanelResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/sense/${encodeURIComponent(moduleName)}/panel`, { signal })
 }
 
 export async function putSenseModulePanel(
@@ -585,21 +593,21 @@ export async function deleteSenseModule(user: string, moduleName: string): Promi
   )
 }
 
-export async function getSettings(user: string): Promise<SettingsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/settings`)
+export async function getSettings(user: string, signal?: AbortSignal): Promise<SettingsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/settings`, { signal })
 }
 
-export async function getVersion(): Promise<VersionResponse> {
-  return requestJson('/api/version')
+export async function getVersion(signal?: AbortSignal): Promise<VersionResponse> {
+  return requestJson('/api/version', { signal })
 }
 
-export async function getVersionCheck(refresh = false): Promise<VersionCheckResponse> {
+export async function getVersionCheck(refresh = false, signal?: AbortSignal): Promise<VersionCheckResponse> {
   const query = refresh ? '?refresh=true' : ''
-  return requestJson(`/api/version/check${query}`)
+  return requestJson(`/api/version/check${query}`, { signal })
 }
 
-export async function getUserConfig(user: string): Promise<ConfigFullResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/config/full`)
+export async function getUserConfig(user: string, signal?: AbortSignal): Promise<ConfigFullResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/config/full`, { signal })
 }
 
 export async function patchUserConfig(user: string, changes: Record<string, unknown>): Promise<ConfigFullResponse> {
@@ -608,25 +616,23 @@ export async function patchUserConfig(user: string, changes: Record<string, unkn
   })
 }
 
-export async function getKemoProviderModels(user: string, refresh = false): Promise<KemoProviderModelsResponse> {
+export async function getKemoProviderModels(user: string, refresh = false, signal?: AbortSignal): Promise<KemoProviderModelsResponse> {
   const query = refresh ? '?refresh=true' : ''
-  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/models${query}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/models${query}`, { signal })
 }
 
-export async function getKemoModelCapabilities(
-  user: string,
+export async function getKemoModelCapabilities(user: string,
   model: string,
-  refresh = false,
+  refresh = false, signal?: AbortSignal
 ): Promise<KemoModelCapabilitiesResponse> {
   const query = new URLSearchParams({ model })
   if (refresh) query.set('refresh', 'true')
-  return requestJson(
-    `/api/users/${encodeURIComponent(user)}/provider/model-capabilities?${query.toString()}`,
+  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/model-capabilities?${query.toString()}`, { signal }
   )
 }
 
-export async function getGlobalConfig(): Promise<{ scope: string; config: Record<string, unknown>; redacted_paths: string[] }> {
-  return requestJson('/api/global-config')
+export async function getGlobalConfig(signal?: AbortSignal): Promise<{ scope: string; config: Record<string, unknown>; redacted_paths: string[] }> {
+  return requestJson('/api/global-config', { signal })
 }
 
 export async function patchGlobalConfig(changes: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -635,22 +641,22 @@ export async function patchGlobalConfig(changes: Record<string, unknown>): Promi
   })
 }
 
-export async function getPreferences(user: string): Promise<PreferencesResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/preferences`)
+export async function getPreferences(user: string, signal?: AbortSignal): Promise<PreferencesResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/preferences`, { signal })
 }
 
-export async function patchPreferences(user: string, changes: Partial<PreferencesResponse['appearance']>): Promise<PreferencesResponse> {
+export async function patchPreferences(user: string, changes: Partial<Omit<PreferencesResponse['appearance'], 'language' | 'background'>>): Promise<PreferencesResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/preferences`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
   })
 }
 
-export async function getMemorySummary(user: string): Promise<MemorySummaryResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/summary`)
+export async function getMemorySummary(user: string, signal?: AbortSignal): Promise<MemorySummaryResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/summary`, { signal })
 }
 
-export async function getMemoryItem(user: string, tier: string, filename: string): Promise<MemoryItemResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?tier=${encodeURIComponent(tier)}&filename=${encodeURIComponent(filename)}`)
+export async function getMemoryItem(user: string, tier: string, filename: string, signal?: AbortSignal): Promise<MemoryItemResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?tier=${encodeURIComponent(tier)}&filename=${encodeURIComponent(filename)}`, { signal })
 }
 
 export async function putMemory(user: string, filename: string, content: string, tier?: string): Promise<MemoryItemResponse> {
@@ -663,8 +669,8 @@ export async function deleteMemory(user: string, tier: string, filename: string)
   return requestJson(`/api/users/${encodeURIComponent(user)}/memory/item?tier=${encodeURIComponent(tier)}&filename=${encodeURIComponent(filename)}`, { method: 'DELETE' })
 }
 
-export async function getImportantMemory(user: string): Promise<ImportantMemoryResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/important`)
+export async function getImportantMemory(user: string, signal?: AbortSignal): Promise<ImportantMemoryResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/memory/important`, { signal })
 }
 
 export async function updateImportantMemory(user: string, content: string): Promise<ImportantMemoryResponse> {
@@ -673,18 +679,17 @@ export async function updateImportantMemory(user: string, content: string): Prom
   })
 }
 
-export async function getUserFiles(
-  user: string,
+export async function getUserFiles(user: string,
   scope: 'file_upload' | 'download',
   path = '',
   search = '',
   page = 1,
   pageSize = 6,
   sortBy: FileSortBy = 'name',
-  sortOrder: FileSortOrder = 'asc',
+  sortOrder: FileSortOrder = 'asc', signal?: AbortSignal
 ): Promise<UserFilesResponse> {
   const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize), sort_by: sortBy, sort_order: sortOrder })
-  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}?${query.toString()}`)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}?${query.toString()}`, { signal })
 }
 
 export function getUserFileDownloadUrl(
@@ -717,8 +722,9 @@ export function getUserAttachmentThumbnailUrl(
   user: string,
   checksum: string,
   path = '',
+  area: 'file_upload' | 'download' = 'file_upload',
 ): string {
-  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  const query = path ? `?path=${encodeURIComponent(path)}${area === 'download' ? '&area=download' : ''}` : ''
   return `${apiBase}/api/users/${encodeURIComponent(user)}/attachment-thumbnails/${encodeURIComponent(checksum)}${query}`
 }
 
@@ -759,9 +765,9 @@ export async function moveUserFile(user: string, scope: 'file_upload' | 'downloa
   return requestJson(`/api/users/${encodeURIComponent(user)}/files/${scope}/move?path=${encodeURIComponent(path)}&new_path=${encodeURIComponent(newPath)}`, { method: 'PATCH' })
 }
 
-export async function getTmpFiles(path = '', search = '', page = 1, pageSize = 6, sortBy: FileSortBy = 'name', sortOrder: FileSortOrder = 'asc'): Promise<TmpFilesResponse> {
+export async function getTmpFiles(path = '', search = '', page = 1, pageSize = 6, sortBy: FileSortBy = 'name', sortOrder: FileSortOrder = 'asc', signal?: AbortSignal): Promise<TmpFilesResponse> {
   const query = new URLSearchParams({ path, search, page: String(page), page_size: String(pageSize), sort_by: sortBy, sort_order: sortOrder })
-  return requestJson(`/api/tmp?${query.toString()}`)
+  return requestJson(`/api/tmp?${query.toString()}`, { signal })
 }
 
 export async function deleteTmpFiles(paths: string[]): Promise<TmpFilesDeleteResponse> {
@@ -799,8 +805,8 @@ export function getCompletionSoundUrl(user: string, revision?: string | number):
   return `${apiBase}/api/users/${encodeURIComponent(user)}/completion-sound${suffix}`
 }
 
-export async function getCompletionSoundStatus(user: string): Promise<CompletionSoundStatus> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/completion-sound/status`)
+export async function getCompletionSoundStatus(user: string, signal?: AbortSignal): Promise<CompletionSoundStatus> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/completion-sound/status`, { signal })
 }
 
 export async function uploadCompletionSound(user: string, file: File): Promise<CompletionSoundUploadResponse> {
@@ -829,8 +835,8 @@ export function getFailureSoundUrl(user: string, revision?: string | number): st
   return `${apiBase}/api/users/${encodeURIComponent(user)}/failure-sound${suffix}`
 }
 
-export async function getFailureSoundStatus(user: string): Promise<FailureSoundStatus> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/failure-sound/status`)
+export async function getFailureSoundStatus(user: string, signal?: AbortSignal): Promise<FailureSoundStatus> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/failure-sound/status`, { signal })
 }
 
 export async function uploadFailureSound(user: string, file: File): Promise<FailureSoundUploadResponse> {
@@ -854,8 +860,8 @@ export async function playFailureSoundFallback(user: string): Promise<FailureSou
   })
 }
 
-export async function getAgents(user: string): Promise<AgentsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/agents`)
+export async function getAgents(user: string, signal?: AbortSignal): Promise<AgentsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/agents`, { signal })
 }
 
 export async function deleteUserAgent(user: string, agent: string): Promise<AgentDeleteResponse> {
@@ -865,8 +871,8 @@ export async function deleteUserAgent(user: string, agent: string): Promise<Agen
   )
 }
 
-export async function getMessageStatus(user: string): Promise<MessageStatusResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/message/status`)
+export async function getMessageStatus(user: string, signal?: AbortSignal): Promise<MessageStatusResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/message/status`, { signal })
 }
 
 export async function checkMessageModule(user: string, moduleName: string): Promise<MessageCheckResponse> {
@@ -883,8 +889,8 @@ export async function deleteMessageModule(user: string, moduleName: string): Pro
   )
 }
 
-export async function getUserSoul(user: string): Promise<SoulResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/soul`)
+export async function getUserSoul(user: string, signal?: AbortSignal): Promise<SoulResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/soul`, { signal })
 }
 
 export async function updateUserSoul(user: string, content: string): Promise<SoulResponse> {
@@ -895,16 +901,16 @@ export async function updateUserSoul(user: string, content: string): Promise<Sou
   })
 }
 
-export async function getGlobalSoul(): Promise<SoulResponse> {
-  return requestJson('/api/global-soul')
+export async function getGlobalSoul(signal?: AbortSignal): Promise<SoulResponse> {
+  return requestJson('/api/global-soul', { signal })
 }
 
 export function getLogoUrl(): string {
   return `${apiBase}/api/logo`
 }
 
-export async function getExpands(user: string): Promise<ExpandsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/expand`)
+export async function getExpands(user: string, signal?: AbortSignal): Promise<ExpandsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/expand`, { signal })
 }
 
 export async function refreshExpandModule(user: string, scope: ExpandScope, moduleName: string): Promise<void> {
@@ -914,12 +920,12 @@ export async function refreshExpandModule(user: string, scope: ExpandScope, modu
   )
 }
 
-export async function getChatProviderModels(user: string): Promise<import('../types/api').ChatProviderModelsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/chat-models`)
+export async function getChatProviderModels(user: string, signal?: AbortSignal): Promise<import('../types/api').ChatProviderModelsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/provider/chat-models`, { signal })
 }
 
-export async function getExpandModulePanel(user: string, scope: ExpandScope, moduleName: string): Promise<ModulePanelResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/panel`)
+export async function getExpandModulePanel(user: string, scope: ExpandScope, moduleName: string, signal?: AbortSignal): Promise<ModulePanelResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/expand/${scope}/${encodeURIComponent(moduleName)}/panel`, { signal })
 }
 
 export async function putExpandModulePanel(
