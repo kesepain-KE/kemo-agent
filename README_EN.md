@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.5.1-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.5.2-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -139,7 +139,7 @@ The project does not claim that every model service is inherently private. What 
 
 ### Choose an installation method
 
-Windows, Linux, npm, and Docker share the framework version. The current formally finalized version is **1.5.1**; the compatible gateway baseline is **1.0.0**.
+Windows, Linux, npm, and Docker share the framework version. The current formally finalized version is **1.5.2**; the compatible gateway baseline is **1.0.0**.
 
 > **Publication prerequisite:** The remote commands below work only after the installer scripts and the corresponding distribution artifacts are published. Native installation needs `kemo-agent-release-<version>.zip` and its `.zip.sha256` in a Release; npm needs a published distribution package; Docker needs a published image tag. Pushing code alone does not publish these artifacts. This guide does not claim they are already available online. The Release ZIP is not GitHub's automatically generated source archive.
 
@@ -266,18 +266,21 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.5.1` (stable source release; remote distribution artifacts are published separately)
+Current version: `1.5.2` (source finalized on October 26, 2026; remote distribution artifacts are published separately)
 
 Confirmed compatible Kemo gateway: `kemo-adapter-api 1.0.0` (Kemo 2.0 wire protocol matched).
 
-### 1.5.1 release notes (October 18, 2026)
+### 1.5.2 release notes (October 26, 2026)
 
-- Refines generic Chat request fields, explicit vendor reasoning controls, response aliases, and signed reasoning continuation. Retains the dedicated DeepSeek adaptation and labeled missing-reasoning fallback while preserving the Kemo 2.0 wire protocol.
-- Adds portable `classify.sqlite3` category tables for personal, shared, and global knowledge, with category creation, assignment, removal, and source-aware filtering in the web interface.
-- Completes user skeleton creation and repair, and refines task-plan bubbles, inline response widgets, separate authentication screens, selector spacing, and paired input/output message logs.
-- Keeps long follow-up/guidance messages and task-plan titles and descriptions within bounded, scrollable containers, preserving full text and keeping the composer visible when multiple cards are expanded or the viewport is narrow.
-- Resolves Python type diagnostics and strengthens pre-release version and documentation checks, system acceptance tests, production frontend builds, and isolated installation of the resulting distribution artifacts.
-- Keeps compatibility baselines at `kemo-adapter-api 1.0.0` and `kemo-graph 1.6.0`. Finalizing source does not publish Release, npm, or GHCR artifacts; these require separate builds and validation.
+- Makes subagent collaboration observable: adds the `general_worker` execution assistant, parent/child task groups, expandable tool arguments/results, and conclusion-only delivery to the main agent. Time- or tool-budget stops preserve checkpoints, partial conclusions and usage. The main agent can explicitly resume with a fresh segment budget, set tool limits (0 means unlimited calls) and runtime, receive budget warnings, guide running work or explicitly split remaining tasks; live work retains its ownership and completion barrier.
+- Adds conversation-space fairness to subagent dispatch and the shared API request pool. Multiple windows of one space share accounting; less-occupied spaces receive priority, ties rotate, and idle execution capacity remains borrowable. The default backlog is 50 overall, at most 25 per space, with five protected first-entry positions for other spaces; in-flight requests are not preempted.
+- Adds `attach_media` to enqueue acquired media for the next native model request, with file, tool-card, and history linkage. Chat accepts original images up to 20 MiB; Kemo keeps its 1 MiB inline limit and uses Asset for larger images. The framework selects basic Chat tools and compatibility profiles without requiring users to probe capabilities; dedicated DeepSeek behavior and advanced-capability boundaries remain intact.
+- Adds a right-side multi-tab workspace for file previews, current-space background Shell jobs, and subagent details. Its default scratchpad saves locally and transfers text to the composer or uses the existing send/queue flow; closing a tab does not cancel work. Individual terminal cards show ownership, finish time and duration. Refines live API-pool status, per-space cache-hit statistics, workspace-relative path copying, and bounded, scrollable related-file records.
+- Adds owner-scoped background Shell completion receipts containing status, time, exit code and the last five captured lines, with detailed logs queried on demand. Finite jobs keep a completion barrier by default; explicitly detached service jobs do not block delivery. Completion alone never starts a new model request.
+- Adds pinned/favorite conversations, context menus, and date-based archive lookup; deleting all history includes read-only sources. Knowledge references gain category filtering, memory search uses an explicit magnifier/Enter action, and permanent memory no longer displays a weight field.
+- Adds nine interface languages, per-user image/video backgrounds, UI opacity, and backdrop blur. Background limits are 100 MB for images and 400 MB for videos; playback does not depend on Windows animation preferences. Refines two-stage authentication and subagent rendering while retaining scrollable guidance/task plans and the current UI build entry.
+- Hardens SSE heartbeats and disconnect cleanup, SQLite pre-migration and update backups, transactions and concurrent writes, session leases, and background-task terminal states. Updates manuals, shared knowledge, formal tests, local system acceptance, and post-build isolated distribution checks together.
+- Keeps compatibility baselines at `kemo-adapter-api 1.0.0`, `kemo-graph 1.6.0`, and Kemo 2.0. Source finalization does not publish Release, npm, or GHCR artifacts, and historical evidence or packages are not relabeled as the new version.
 
 ### Available today
 
