@@ -137,7 +137,7 @@ class FakeService:
             "deleted": True,
         }
 
-    def delete_all_sessions(self, user, *, source="web"):
+    def delete_all_sessions(self, user, *, source="web", client_id=""):
         self.seen = {"user": user, "source": source}
         return {
             "user": user,
@@ -5585,6 +5585,7 @@ class WebBackendTests(unittest.TestCase):
         import start_web
 
         with (
+            patch.dict(os.environ, {"WEB_ACCESS_TOKEN": "offline-startup-test"}),
             patch.object(start_web, "project_root", return_value=root),
             patch.object(start_web, "_check_users", return_value=True),
             patch.object(start_web, "_can_bind", return_value=(True, "")),
@@ -5610,7 +5611,7 @@ class WebBackendTests(unittest.TestCase):
         import start_web
 
         with (
-            patch.dict(os.environ, {"WEB_HOST": "0.0.0.0", "WEB_PORT": "19001"}),
+            patch.dict(os.environ, {"WEB_HOST": "0.0.0.0", "WEB_PORT": "19001", "WEB_ACCESS_TOKEN": "offline-startup-test"}),
             patch.object(start_web, "project_root", return_value=root),
             patch.object(start_web, "_check_users", return_value=True),
             patch.object(start_web, "_can_bind", return_value=(True, "")),
@@ -5891,6 +5892,9 @@ class WebBackendTests(unittest.TestCase):
             "completion_tokens": 300,
             "total_tokens": 1500,
             "estimated": False,
+            "cached_prompt_tokens": 800,
+            "cache_miss_tokens": 200,
+            "cache_hit_rate": 0.8,
         }
         commit_window(root / "users" / "alice" / "history" / "observer-window", window)
         app_window = empty_window("alice", "app", "observer-app-session")
@@ -5989,6 +5993,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(overview.json()["counts"]["knowledge_documents"], 3)
         self.assertEqual(overview.json()["counts"]["enabled_tools"], 1)
         self.assertEqual(overview.json()["context"]["usage"]["total_tokens"], 1500)
+        self.assertEqual(overview.json()["context"]["usage"]["cache_hit_rate"], 0.8)
         self.assertEqual(overview.json()["context"]["rounds"], 1)
         self.assertEqual(overview.json()["context"]["round_limit"], 30)
         self.assertEqual(overview.json()["agents"][0]["name"], "observer_agent")
@@ -6019,6 +6024,10 @@ class WebBackendTests(unittest.TestCase):
             {"expand": "round", "perception": "round"},
         )
 
+        unbound_overview = self.request(app, "GET", "/api/users/alice/overview")
+        self.assertEqual(unbound_overview.status_code, 200)
+        self.assertIsNone(unbound_overview.json()["context"]["usage"]["cache_hit_rate"])
+
         app_overview = self.request(
             app,
             "GET",
@@ -6026,6 +6035,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(app_overview.status_code, 200, app_overview.text)
         self.assertEqual(app_overview.json()["session_id"], "observer-app-session")
+        self.assertIsNone(app_overview.json()["context"]["usage"]["cache_hit_rate"])
         self.assertEqual(app_overview.json()["context_window"]["conversation"]["foreground_rounds"], 1)
         self.assertTrue(app_overview.json()["context_snapshot"]["available"])
 
@@ -6112,6 +6122,17 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(token_payload["tokens"]["request_count"], 1)
         self.assertEqual(token_payload["prompt"]["content"], "")
         self.assertEqual(token_payload["runtime_host"]["state"], "not_requested")
+
+        other_window["data"]["token_usage"] = {
+            "cached_prompt_tokens": 99,
+            "cache_miss_tokens": 1,
+        }
+        commit_window(root / "users" / "alice" / "history" / "other-window", other_window)
+        other_overview = self.request(
+            app, "GET", "/api/users/alice/overview?session_id=other-session"
+        )
+        self.assertEqual(other_overview.status_code, 200)
+        self.assertEqual(other_overview.json()["context"]["usage"]["cache_hit_rate"], 0.99)
 
         tasks = self.request(app, "GET", "/api/users/alice/tasks")
         self.assertEqual(len(tasks.json()["plans"]), 1)

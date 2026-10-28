@@ -7,6 +7,7 @@ import threading
 import unittest
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,80 @@ from web.service import WebRunService
 
 
 class PlanLongTaskTests(unittest.TestCase):
+    def test_plan_close_before_first_next_releases_slot_and_pauses_plan(self):
+        root, store, plan = self.make_plan(enabled=False)
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        thread_ids = []
+
+        def source(*_args, **_kwargs):
+            thread_ids.append(threading.get_ident())
+            entered.set()
+            try:
+                release.wait(3)
+                yield RunEvent(type="done")
+            finally:
+                thread_ids.append(threading.get_ident())
+                finished.set()
+
+        service = WebRunService(root, event_source=source)
+        events = service.stream_plan(
+            "alice", "plan-session", plan["plan_id"], cancel_event=threading.Event(),
+        )
+        try:
+            self.assertTrue(entered.wait(1))
+            events.close()
+            events.close()
+            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+            self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
+            self.assertFalse(finished.is_set())
+            self.assertEqual(list(events), [])
+        finally:
+            release.set()
+            self.assertTrue(finished.wait(2))
+            deadline = time.monotonic() + 2
+            while service._active_runs and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(service._active_runs)
+        self.assertEqual(len(thread_ids), 2)
+        self.assertEqual(thread_ids[0], thread_ids[1])
+        self.assertNotEqual(thread_ids[0], threading.get_ident())
+
+    def test_plan_close_interrupts_concurrent_next_without_waiting_for_tool(self):
+        root, store, plan = self.make_plan(enabled=False)
+        release = threading.Event()
+        entered = threading.Event()
+        result = []
+
+        def source(*_args, **_kwargs):
+            entered.set()
+            release.wait(3)
+            yield RunEvent(type="done")
+
+        service = WebRunService(root, event_source=source)
+        events = service.stream_plan(
+            "alice", "plan-session", plan["plan_id"], cancel_event=threading.Event(),
+        )
+        reader = threading.Thread(target=lambda: result.extend(list(events)))
+        reader.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            events.close()
+            reader.join(1)
+            self.assertFalse(reader.is_alive())
+            self.assertFalse(release.is_set())
+            self.assertEqual(result, [])
+            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+            self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
+        finally:
+            release.set()
+            reader.join(2)
+            deadline = time.monotonic() + 2
+            while service._active_runs and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(service._active_runs)
+
     def make_plan(self, *, source="web", enabled=True, auto_accept=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

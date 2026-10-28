@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import threading
+import time
 from unittest.mock import Mock, patch
 
 import httpx
@@ -79,8 +80,8 @@ def test_save_queues_memory_without_reading_archive_transcripts(root):
         configure(database, **kwargs)
         database.set_trace_callback(statements.append)
 
-    summary_waker = Mock()
-    service = WebRunService(root, summary_waker=summary_waker)
+    summary_waker, memory_waker = Mock(), Mock()
+    service = WebRunService(root, summary_waker=summary_waker, memory_waker=memory_waker)
     with (
         patch.object(store_core, "_configure", trace),
         patch("run.history.session_api.load_window", side_effect=AssertionError("No full archive load")),
@@ -96,6 +97,7 @@ def test_save_queues_memory_without_reading_archive_transcripts(root):
     assert result["session"]["summary_status"] == "queued"
     extract.assert_not_called()
     summary_waker.assert_called_once()
+    memory_waker.assert_called_once()
     selects = [sql.lower() for sql in statements if sql.lstrip().lower().startswith("select")]
     assert not any("from history_messages" in sql or "from history_rounds" in sql for sql in selects)
     assert not any("text_json" in sql or "items_json" in sql for sql in selects)
@@ -105,6 +107,46 @@ def test_save_queues_memory_without_reading_archive_transcripts(root):
     assert saved["data"]["memory_status"] == "queued"
     assert saved["data"]["memory_target_round"] == 12
     assert saved["data"]["memory_processed_round"] == 0
+
+
+def test_save_deferred_by_another_process_does_not_queue_or_wake(root):
+    archive(root)
+    other_page = WebRunService(root)
+    other_page.session_lease("alice", "old", "web_other_page")
+    summary_waker, memory_waker = Mock(), Mock()
+    service = WebRunService(root, summary_waker=summary_waker, memory_waker=memory_waker)
+    result = service.close_session("alice", "old", client_id="web_saving_page")
+    assert result["closed"] is False
+    assert result["deferred"] is True
+    assert result["active_clients"] == 1
+    assert result["memory"]["reason"] == "session_in_use_by_other_clients"
+    record = find_record(root, "alice", "web", "old")
+    assert record["lifecycle"] == "open"
+    assert record["memory_status"] == "deferred"
+    summary_waker.assert_not_called()
+    memory_waker.assert_not_called()
+
+    other_page.release_session_lease("alice", "old", "web_other_page")
+    # Unload is deliberately not authoritative: a late pagehide must not erase
+    # a newer heartbeat. The durable lease expires naturally after 90 seconds.
+    assert service.close_session("alice", "old", client_id="web_saving_page")["deferred"]
+    with patch("run.history.web_lifecycle.time.time", return_value=time.time() + 91):
+        retried = service.close_session("alice", "old", client_id="web_saving_page")
+    assert retried["closed"] is True
+    assert retried["memory"]["status"] == "queued"
+    summary_waker.assert_called_once()
+    memory_waker.assert_called_once()
+
+
+def test_save_without_pending_memory_does_not_wake_memory_worker(root):
+    reserve_session(root, "alice", "web", "empty")
+    summary_waker, memory_waker = Mock(), Mock()
+    service = WebRunService(root, summary_waker=summary_waker, memory_waker=memory_waker)
+    result = service.close_session("alice", "empty")
+    assert result["closed"] is True
+    assert result["memory"]["status"] == "skipped"
+    memory_waker.assert_not_called()
+    summary_waker.assert_not_called()
 
 
 def test_targeted_session_update_rolls_back_on_failure(root):
@@ -150,7 +192,7 @@ def test_slow_page_reads_do_not_block_creating_a_session(root, method, path):
         started.set()
         try:
             release.wait(20)
-            return {"fixture": "complete"}
+            return ({"user": "alice", "summary": {"active_plans": 0, "waiting_plans": 0, "enabled_crons": 0, "completed_plans": 0}, "plans": [], "cron_tasks": [], "executions": []} if method == "tasks" else {"fixture": "complete"})
         finally:
             finished.set()
 

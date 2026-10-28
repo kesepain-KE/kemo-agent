@@ -76,7 +76,9 @@ class SubagentProgressTests(unittest.TestCase):
                         kwargs["event_callback"](RunEvent(type="reasoning_delta", metadata={"phase": "subagent", "agent": agent, "status": "queued"}))
                         return "task-a"
 
-                result = SimpleNamespace(agent="custom", data={}, usage={}, model="mock", metadata={})
+                result = tool.AgentRunResult(
+                    agent="custom", data={}, raw_text="", usage={}, model="mock",
+                )
                 with (
                     patch.object(tool, "_public", return_value=[SimpleNamespace(name="custom", timeout=1)]),
                     patch.object(tool, "load_config", return_value={}),
