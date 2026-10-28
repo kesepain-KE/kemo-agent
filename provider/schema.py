@@ -11,6 +11,16 @@ from events import RunEvent
 
 
 _RETRYABLE_UNSET = object()
+_CHAT_EXTRA_FIELDS = frozenset({
+    "reasoning_enabled", "reasoning_effort", "top_p", "top_k", "seed", "logit_bias",
+    "presence_penalty", "frequency_penalty", "verbosity", "stop", "n", "logprobs",
+    "top_logprobs", "tool_choice", "allowed_tools", "parallel_tool_calls",
+    "response_format", "prediction", "service_tier", "prompt_cache_key",
+    "safety_identifier", "store", "metadata", "max_completion_tokens",
+    "web_search_options", "search_parameters", "enable_search", "thinking",
+    "enable_thinking", "thinking_budget", "reasoning", "chat_template_kwargs",
+    "min_p", "repetition_penalty",
+})
 
 
 class ProviderError(RuntimeError):
@@ -98,6 +108,8 @@ class ChatRequest:
     temperature: float | None = None
     max_tokens: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # Trusted adapter configuration only; not serialized or read from options.
+    adapter_extra_fields: frozenset[str] = field(default_factory=frozenset, repr=False, kw_only=True)
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -111,6 +123,13 @@ class ChatRequest:
             payload["temperature"] = self.temperature
         if self.max_tokens is not None:
             payload["max_tokens"] = self.max_tokens
+        protected = {"model", "messages", "stream", "tools", "temperature", "max_tokens",
+                     "system", "input", "instructions", "api_key", "headers",
+                     "base_url", "authorization"}
+        if protected.intersection(str(key).casefold() for key in self.extra):
+            raise ProviderError("extra 不得覆盖对话、身份或正式请求字段", retryable=False)
+        if set(self.extra) - _CHAT_EXTRA_FIELDS - self.adapter_extra_fields:
+            raise ProviderError("extra 包含未经适配器授权的字段", retryable=False)
         payload.update(self.extra)
         return payload
 

@@ -20,6 +20,7 @@ from provider.protocol.enums import (
     StreamEventType,
 )
 from provider.protocol.errors import CapabilityError
+from provider.adapters.image_content import image_content_type, prepare_image_blocks
 from provider.protocol.diagnostics import (
     invalid_tool_call_diagnostic,
     sanitize_provider_diagnostic,
@@ -525,49 +526,31 @@ def kemo_request_to_chat(
             index += 1
             continue
         index += 1
-    # Vendor options are never forwarded without an explicit profile
-    # allow-list.  Adapter-internal bookkeeping keys from Chat→Kemo are not
-    # vendor options and are retained only for the reverse bridge mapping.
-    vendor_options = {
-        key: value
-        for key, value in request.provider_options.items()
-        if isinstance(key, str) and key.startswith("vendor.")
-    }
-    internal_options = {
-        key: value
-        for key, value in request.provider_options.items()
-        if key not in vendor_options
-        and key not in {"reasoning_enabled", "reasoning_effort"}
-    }
-    extra = dict(internal_options)
-    extra.update(validate_provider_options(vendor_options, provider_profile))
+    # Only profile-authorized vendor keys enter the payload. Formal controls
+    # below have one source: their validated Kemo fields, never options/extra.
+    extra = validate_provider_options(request.provider_options, provider_profile)
     # These are logical controls. The Chat HTTP policy only serializes wire
     # controls explicitly declared by its transport profile. DeepSeek retains
     # its separate thinking-mode mapping.
     configured_effort = (
         request.reasoning.effort
         if request.reasoning is not None and request.reasoning.enabled
-        else request.provider_options.get("reasoning_effort")
+        else None
     )
     if deepseek:
-        configured_enabled = request.provider_options.get("reasoning_enabled")
         if request.reasoning is not None:
             enabled = request.reasoning.enabled
             if not enabled:
                 configured_effort = "none"
-        elif configured_enabled is not None:
-            enabled = bool(configured_enabled)
         else:
-            enabled = str(configured_effort or "").strip().casefold() != "none"
+            enabled = False
         effort = (
             deepseek_reasoning_effort(configured_effort)
             if enabled
             else "none"
         )
     else:
-        enabled = request.reasoning.enabled if request.reasoning is not None else (
-            request.provider_options.get("reasoning_enabled") is not False
-        )
+        enabled = request.reasoning.enabled if request.reasoning is not None else False
         effort = normalize_reasoning_effort(configured_effort)
     reasoning_profile = (
         (checked_557 if isinstance(checked_557 := transport_profile.get("reasoning"), dict) else {})
@@ -582,8 +565,9 @@ def kemo_request_to_chat(
     )
     if enabled_field == effort_field:
         enabled_field, effort_field = "reasoning_enabled", "reasoning_effort"
-    extra[enabled_field] = enabled
-    extra[effort_field] = effort
+    if request.reasoning is not None or deepseek:
+        extra[enabled_field] = enabled
+        extra[effort_field] = effort
     generation = request.generation
     for key in (
         "top_p",
@@ -689,12 +673,14 @@ def kemo_request_to_chat(
             else None
         ),
         extra=extra,
+        adapter_extra_fields=frozenset({enabled_field, effort_field}),
     )
 
 
-def _content_blocks(value: Any) -> list[Any]:
+def _content_blocks(value: Any, *, transport: str = "kemo") -> list[Any]:
     if isinstance(value, str):
         return [TextContent(text=value)]
+    image_type = image_content_type(transport)
     blocks: list[Any] = []
     for raw in value if isinstance(value, list) else []:
         if not isinstance(raw, dict):
@@ -703,7 +689,7 @@ def _content_blocks(value: Any) -> list[Any]:
         if kind in {"text", "input_text", "output_text"}:
             blocks.append(TextContent(text=str(raw.get("text") or "")))
         elif kind == "image":
-            blocks.append(ImageContent.model_validate(raw))
+            blocks.append(image_type.model_validate(raw))
         elif kind == "audio":
             blocks.append(AudioContent.model_validate(raw))
         elif kind == "video":
@@ -720,7 +706,7 @@ def _content_blocks(value: Any) -> list[Any]:
             if isinstance(url, str) and url:
                 source_kind = "data_url" if url.startswith("data:") else "url"
                 blocks.append(
-                    ImageContent.model_validate({
+                    image_type.model_validate({
                         'source': {"kind": source_kind, "uri": url},
                         'detail': image.get("detail", "auto") if isinstance(image, dict) else "auto",
                     })
@@ -728,7 +714,9 @@ def _content_blocks(value: Any) -> list[Any]:
     return blocks or [TextContent(text="")]
 
 
-def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
+def chat_request_to_kemo(
+    request: ChatRequest, *, transport: str = "kemo",
+) -> KemoRequest:
     system_parts: list[str] = []
     items: list[Any] = []
     item_ids: set[str] = set()
@@ -776,6 +764,9 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                 native_message_copy["id"] = _unique_id(
                     native_message_copy.get("id"), "msg", item_ids
                 )
+                native_message_copy["content"] = prepare_image_blocks(
+                    native_message_copy["content"], transport=transport,
+                )
                 items.append(MessageItem.model_validate(native_message_copy))
             else:
                 try:
@@ -786,7 +777,7 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                             'id': _unique_id(None, "msg", item_ids),
                             'role': role,
                             'phase': MessagePhase.COMMENTARY if role == "assistant" else None,
-                            'content': _content_blocks(raw.get("content")) if raw.get("content") not in (None, "") else [],
+                            'content': _content_blocks(raw.get("content"), transport=transport) if raw.get("content") not in (None, "") else [],
                             'refusal': str(raw.get("refusal")) if raw.get("refusal") else None,
                             'annotations': annotations,
                             'logprobs': logprobs,
@@ -850,7 +841,7 @@ def chat_request_to_kemo(request: ChatRequest) -> KemoRequest:
                         'content': blocks,
                     })
                 )
-    reasoning_enabled = request.extra.get("reasoning_enabled") is not False
+    reasoning_enabled = request.extra.get("reasoning_enabled") is True
     effort = normalize_kemo_reasoning_effort(request.extra.get("reasoning_effort"))
     mapped_chat_fields = {
         "reasoning_enabled", "reasoning_effort", "top_p", "seed", "logit_bias",
@@ -991,9 +982,9 @@ def chat_response_to_kemo(response: ChatResponse, request: KemoRequest) -> KemoR
                 "details": {"kind": "structured_output_invalid", "error": structured_error},
             }
     executable_calls = call_items if incomplete_details is None else []
-    if response.reasoning:
+    if (response.reasoning and not response.reasoning_synthetic) or chat_state_from_raw(response.raw):
         output.append(ReasoningItem.model_validate({
-            "id": _id("rs"), "content": response.reasoning,
+            "id": _id("rs"), "content": "" if response.reasoning_synthetic else response.reasoning,
             "provider_state": chat_state_from_raw(response.raw),
         }))
     annotations = _protocol_annotations(response.annotations)
@@ -1138,6 +1129,8 @@ def chat_stream_to_protocol(
             reasoning_synthetic = reasoning_synthetic or bool(
                 event.metadata.get("synthetic")
             )
+            if event.metadata.get("synthetic"):
+                continue
             if not reasoning_added:
                 yield ProviderStreamEvent(
                     type=StreamEventType.OUTPUT_ITEM_ADDED,
@@ -1275,7 +1268,7 @@ def chat_stream_to_protocol(
             if event.metadata.get("service_tier") is not None:
                 stream_service_tier = str(event.metadata["service_tier"])
     output: list[Any] = []
-    if reasoning_parts:
+    if reasoning_parts or chat_reasoning_state:
         output.append(ReasoningItem.model_validate({
             "id": reasoning_id, "content": "".join(reasoning_parts),
             "provider_state": chat_reasoning_state,

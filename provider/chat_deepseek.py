@@ -8,7 +8,7 @@ Chat transport when its local vendor detector identifies DeepSeek.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 
 DEEPSEEK_REASONING_PLACEHOLDER = (
@@ -58,10 +58,13 @@ def deepseek_reasoning_effort(value: Any) -> str:
 def deepseek_chat_url(base_url: str) -> str:
     """Normalize official DeepSeek URLs while preserving relay API prefixes."""
 
-    normalized = str(base_url).rstrip("/")
-    if is_official_deepseek_url(normalized) and normalized.casefold().endswith("/v1"):
-        normalized = normalized[:-3]
-    return f"{normalized}/chat/completions"
+    parts = urlsplit(str(base_url))
+    path = parts.path.rstrip("/")
+    if is_official_deepseek_url(base_url) and path == "/v1":
+        path = ""
+    if not path.endswith("/chat/completions"):
+        path += "/chat/completions"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
 def deepseek_response_payload(payload: dict[str, Any]) -> dict[str, Any]:

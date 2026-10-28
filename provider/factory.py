@@ -5,26 +5,26 @@ from __future__ import annotations
 from contextlib import contextmanager
 import math
 import threading
-import time
 from typing import Any, Iterator
 
 from provider.adapters.base import ProviderAdapter
 from provider.adapters.chat_bridge import ChatBridgeProvider
 from provider.kemo_gateway import KemoGatewayProvider
+from provider.request_pool import FairRequestPool, RequestCancelled
+from provider.request_scope import current_request_scope
 
 
 class ProviderCongestionError(RuntimeError):
     """等待 Provider 全局并发槽位超时。"""
 
 
-_provider_semaphore: threading.BoundedSemaphore | None = None
+_provider_semaphore: FairRequestPool | None = None
 _provider_semaphore_limit = 0
-_provider_waiting = 0
 _provider_semaphore_lock = threading.RLock()
 
 
-def get_provider_semaphore(max_concurrent: int = 10) -> threading.BoundedSemaphore:
-    """获取可在空闲时重配置的进程级 Provider 信号量。"""
+def get_provider_semaphore(max_concurrent: int = 10) -> FairRequestPool:
+    """获取可在完全空闲时重配置的进程级公平 Provider 请求池。"""
 
     if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int):
         raise ValueError("Provider 最大并发数必须是正整数")
@@ -33,13 +33,12 @@ def get_provider_semaphore(max_concurrent: int = 10) -> threading.BoundedSemapho
     global _provider_semaphore, _provider_semaphore_limit
     with _provider_semaphore_lock:
         if _provider_semaphore is None:
-            _provider_semaphore = threading.BoundedSemaphore(max_concurrent)
+            _provider_semaphore = FairRequestPool(max_concurrent)
             _provider_semaphore_limit = max_concurrent
         elif _provider_semaphore_limit != max_concurrent:
-            available = int(getattr(_provider_semaphore, "_value", 0))
-            active = max(0, _provider_semaphore_limit - available)
-            if active == 0 and _provider_waiting == 0:
-                _provider_semaphore = threading.BoundedSemaphore(max_concurrent)
+            status = _provider_semaphore.status()
+            if status["active_requests"] == 0 and status["waiting_estimate"] == 0:
+                _provider_semaphore = FairRequestPool(max_concurrent)
                 _provider_semaphore_limit = max_concurrent
         return _provider_semaphore
 
@@ -59,13 +58,7 @@ def provider_semaphore_status(config: dict[str, Any] | None = None) -> dict[str,
                 "available_requests": 0,
                 "waiting_estimate": 0,
             }
-        available = max(0, int(getattr(_provider_semaphore, "_value", 0)))
-        return {
-            "active_requests": max(0, _provider_semaphore_limit - available),
-            "max_requests": _provider_semaphore_limit,
-            "available_requests": available,
-            "waiting_estimate": max(0, _provider_waiting),
-        }
+        return _provider_semaphore.status()
 
 
 def _provider_runtime_limits(config: dict[str, Any]) -> tuple[int, float]:
@@ -102,31 +95,23 @@ def provider_request_slot(
     """限制一次真实 Provider 请求；工具执行期间不占用槽位。"""
 
     max_concurrent, timeout = _provider_runtime_limits(config)
-    semaphore = get_provider_semaphore(max_concurrent)
-    acquired = semaphore.acquire(blocking=False)
+    scope = current_request_scope()
+    with _provider_semaphore_lock:
+        semaphore = get_provider_semaphore(max_concurrent)
+        ticket = semaphore.register(scope)
+    try:
+        acquired = semaphore.wait(ticket, timeout, cancel_event)
+    except RequestCancelled as exc:
+        raise ProviderCongestionError("等待 Provider 并发槽位时请求已取消") from exc
     if not acquired:
-        global _provider_waiting
-        with _provider_semaphore_lock:
-            _provider_waiting += 1
-        deadline = time.monotonic() + timeout
-        try:
-            while not acquired:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise ProviderCongestionError("等待 Provider 并发槽位时请求已取消")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ProviderCongestionError(
-                        f"Provider 并发已满（{max_concurrent}），等待 {timeout:g}s 超时"
-                    )
-                acquired = semaphore.acquire(timeout=min(0.1, remaining))
-        finally:
-            with _provider_semaphore_lock:
-                _provider_waiting = max(0, _provider_waiting - 1)
+        raise ProviderCongestionError(
+            f"Provider 并发已满（{semaphore.limit}），等待 {timeout:g}s 超时"
+        )
     try:
         yield
     finally:
         if acquired:
-            semaphore.release()
+            semaphore.release(scope)
 
 
 def create_provider(config: dict[str, Any]) -> ProviderAdapter:

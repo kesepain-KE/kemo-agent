@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 import re
 from datetime import datetime, timezone
+from pydantic import ValidationError
 
 from provider.protocol.errors import CapabilityError, ProtocolValidationError, ToolLinkageError
 from provider.protocol.models import (
     Item,
+    ImageContent,
     KemoRequest,
     ModelCapabilities,
     MessageItem,
@@ -51,6 +53,20 @@ def validate_tool_linkage(items: Iterable[Item]) -> None:
 
 def validate_request(request: KemoRequest) -> KemoRequest:
     validate_tool_linkage(request.input)
+    validate_provider_option_keys(request.provider_options)
+    # An adapter-only image subclass can survive Pydantic's instance
+    # revalidation. Do not let its larger local limit cross the Kemo boundary.
+    for item in request.input:
+        if not isinstance(item, (MessageItem, ToolResultItem)):
+            continue
+        for block in item.content:
+            if isinstance(block, ImageContent):
+                try:
+                    ImageContent.model_validate(block.model_dump(mode="json"))
+                except ValidationError:
+                    raise ProtocolValidationError(
+                        "原生 Kemo 内联图片不得超过 1 MiB；大图请使用 Asset 上传"
+                    ) from None
     return request
 
 
@@ -59,13 +75,27 @@ _FORBIDDEN_OPTION_NAMES = {
     "authorization", "authorisation", "api_key", "apikey", "token",
     "url", "base_url", "endpoint", "http", "headers", "header",
 }
-_FORMAL_REQUEST_FIELDS = {
-    "model", "stream", "n", "temperature", "top_p", "top_k", "stop",
-    "seed", "logit_bias", "presence_penalty", "frequency_penalty", "verbosity",
-    "logprobs", "top_logprobs", "tools", "tool_choice", "allowed_tools",
-    "parallel_tool_calls", "response_format", "prediction", "service_tier",
-    "prompt_cache_key", "safety_identifier", "store", "reasoning_effort",
-}
+_VENDOR_OPTION_TARGETS = frozenset({
+    "web_search_options", "search_parameters", "enable_search",
+    "thinking", "enable_thinking", "thinking_budget", "reasoning",
+    "chat_template_kwargs", "min_p", "repetition_penalty",
+})
+
+
+def validate_provider_option_keys(options: Mapping[str, object]) -> None:
+    """All transports reject alternate sources for formal/transport fields."""
+    for key, value in options.items():
+        path = f"provider_options.{key}"
+        if not isinstance(key, str) or not _VENDOR_OPTION_RE.fullmatch(key):
+            raise ProtocolValidationError(
+                "provider_options key 必须使用 vendor.<provider>.<option>",
+                path=path, details={"path": path},
+            )
+        if _option_contains_forbidden_transport_data({key.split(".")[-1]: value}):
+            raise ProtocolValidationError(
+                "provider_options 不得携带凭据、URL 或 HTTP 传输配置",
+                path=path, details={"path": path},
+            )
 
 
 def _option_contains_forbidden_transport_data(value: object) -> bool:
@@ -94,6 +124,7 @@ def validate_provider_options(
 
     if not options:
         return {}
+    validate_provider_option_keys(options)
     if not isinstance(profile, Mapping):
         raise ProtocolValidationError(
             "provider_options 需要 provider profile 显式白名单",
@@ -132,7 +163,7 @@ def validate_provider_options(
             target = declaration.get("target", declaration.get("chat_key"))
         else:
             target = None
-        if not isinstance(target, str) or not target or target in _FORMAL_REQUEST_FIELDS:
+        if not isinstance(target, str) or target not in _VENDOR_OPTION_TARGETS:
             raise ProtocolValidationError(
                 "provider_options 不得覆盖正式协议字段",
                 path=path,

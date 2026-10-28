@@ -48,7 +48,7 @@ from provider.protocol.streaming import (
     StreamSequenceGuard,
     parse_sse_events,
 )
-from provider.protocol.validation import validate_request
+from provider.protocol.validation import validate_provider_options, validate_request
 from provider.schema import (
     ProviderAuthError,
     ProviderError,
@@ -94,6 +94,9 @@ class KemoGatewayAdapter:
         self.api_key = str(config["api_key"])
         self.model = str(config["model"])
         self.timeout = float(config.get("timeout", 120))
+        # Optional vendor options require explicit local profile authorization,
+        # even on native transport. Keep their wire names unchanged.
+        self._option_profile = config.get("capabilities")
         self._retry_policy = KemoNetworkRetryPolicy()
         self.responses_url = f"{self.base_url}/model/responses"
         self.embeddings_url = f"{self.base_url}/model/embeddings"
@@ -197,6 +200,7 @@ class KemoGatewayAdapter:
 
     def validate(self, request: KemoRequest) -> None:
         validate_request(request)
+        validate_provider_options(request.provider_options, self._option_profile)
 
     def _read_all(
         self,
@@ -355,6 +359,7 @@ class KemoGatewayAdapter:
     ) -> EmbeddingResponse:
         """Call the native Kemo vectorization endpoint without translation."""
 
+        validate_provider_options(request.provider_options, self._option_profile)
         body = to_json_bytes(request)
 
         def send() -> EmbeddingResponse:
@@ -402,6 +407,7 @@ class KemoGatewayAdapter:
     ) -> RerankResponse:
         """Call the native Kemo reranking endpoint without translation."""
 
+        validate_provider_options(request.provider_options, self._option_profile)
         body = to_json_bytes(request)
 
         def send() -> RerankResponse:

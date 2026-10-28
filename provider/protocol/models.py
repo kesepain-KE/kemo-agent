@@ -9,7 +9,7 @@ import re
 import uuid
 from collections.abc import Generator, Mapping
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, ClassVar, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
@@ -306,6 +306,9 @@ class TextContent(ProtocolModel):
 
 
 class AssetContent(ProtocolModel):
+    # Adapter-only subclasses may use a different local transport limit.
+    # This is not a wire field; the native protocol always defaults to 1 MiB.
+    _max_inline_image_bytes: ClassVar[int] = MAX_INLINE_IMAGE_BYTES
     asset_id: str | None = None
     source: MediaSource | None = None
     mime_type: str | None = None
@@ -346,8 +349,10 @@ class AssetContent(ProtocolModel):
                 decoded = base64.b64decode(payload or "", validate=True)
             except (binascii.Error, ValueError) as exc:
                 raise ValueError("内联图片必须是有效 Base64") from exc
-            if not decoded or len(decoded) > MAX_INLINE_IMAGE_BYTES:
-                raise ValueError("内联图片解码后必须为 1..1048576 字节")
+            if not decoded or len(decoded) > self._max_inline_image_bytes:
+                raise ValueError(
+                    f"内联图片解码后必须为 1..{self._max_inline_image_bytes} 字节"
+                )
         return self
 
 
