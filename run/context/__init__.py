@@ -109,6 +109,8 @@ class ContextSelection:
     recent_content_over_budget: bool
     token_limit: int
     current_rounds: int = 0
+    round_stage_applied: bool = False
+    token_stage_applied: bool = False
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -124,6 +126,8 @@ class ContextSelection:
             "output_reserve": self.output_reserve,
             "round_limit_triggered": self.round_limit_triggered,
             "token_limit_triggered": self.token_limit_triggered,
+            "round_stage_applied": self.round_stage_applied,
+            "token_stage_applied": self.token_stage_applied,
             "fixed_content_over_budget": self.fixed_content_over_budget,
             "recent_content_over_budget": self.recent_content_over_budget,
             "token_limit": self.token_limit,
@@ -210,6 +214,12 @@ def _media_estimation_projection(value: Any) -> tuple[Any, int]:
         return projected_items, media_tokens
     if not isinstance(value, dict):
         return value, 0
+    if (
+        value.get("type") in {"image", "audio", "video", "file"}
+        and value.get("asset_id")
+        and not value.get("source")
+    ):
+        return dict(value), 1024
     if value.get("kind") == "inline_base64" and isinstance(value.get("data"), str):
         clean = dict(value)
         clean["data"] = "[inline media payload]"
@@ -711,7 +721,7 @@ def build_round_groups(
     return groups
 
 
-_DOMAIN_MODULES = ("selection", "summary", "service")
+_DOMAIN_MODULES = ("selection", "summary", "service", "summary_budget", "usage")
 
 
 def __getattr__(name: str):

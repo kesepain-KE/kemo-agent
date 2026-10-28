@@ -21,10 +21,11 @@ def select_context(
     summary_message: dict[str, Any] | None = None,
     force_compress: bool = False,
     force_token_compress: bool = False,
+    token_phase: bool = False,
     max_history_rounds: int | None = None,
     allow_compress: bool = True,
 ) -> ContextSelection:
-    """Manual compression tries rounds first, then tokens if no round is removed.
+    """Every entry tries rounds first, then tokens only when still necessary.
 
     Token pressure may remove protected recent rounds, keeping at least one
     complete turn (the live turn counts). Fixed messages and live tool groups
@@ -42,25 +43,38 @@ def select_context(
     before = estimate_messages_tokens(messages_for(rounds)) + tool_tokens
     current_slots = int(current_user_message is not None)
     minimum = max(0, 1 - current_slots)
-    round_trigger = allow_compress and len(rounds) + current_slots >= policy.max_rounds
     kept = list(rounds)
-    if allow_compress and (round_trigger or force_compress):
-        keep_count = min(
-            len(rounds),
-            max(minimum, policy.recent_full_rounds - current_slots,
-                policy.rounds_after_compression - current_slots),
-        )
-        kept = rounds[-keep_count:] if keep_count else []
-    manual_token_fallback = force_compress and len(kept) == len(rounds)
     if allow_compress and max_history_rounds is not None:
         keep_count = min(len(kept), max(minimum, max_history_rounds))
         kept = kept[-keep_count:] if keep_count else []
-    token_trigger = allow_compress and (
-        before > policy.token_limit or force_token_compress or manual_token_fallback
+    initial_count = len(kept)
+    bounded_tokens = estimate_messages_tokens(messages_for(kept)) + tool_tokens
+    round_trigger = allow_compress and initial_count + current_slots >= policy.max_rounds
+    pressure = bounded_tokens >= policy.token_limit or force_token_compress
+    requested = allow_compress and (round_trigger or force_compress or pressure or token_phase)
+    if requested and not token_phase:
+        keep_count = min(
+            len(kept),
+            max(minimum, policy.recent_full_rounds - current_slots,
+                policy.rounds_after_compression - current_slots),
+        )
+        kept = kept[-keep_count:] if keep_count else []
+    round_progress = len(kept) < initial_count
+    after_rounds = estimate_messages_tokens(messages_for(kept)) + tool_tokens
+    token_stage = requested and (
+        token_phase or not round_progress or after_rounds >= policy.token_limit
     )
-    while token_trigger and len(kept) > minimum:
+    token_trigger = allow_compress and (
+        pressure or token_phase or (force_compress and not round_progress)
+    )
+    while token_stage and len(kept) > minimum:
         if estimate_messages_tokens(messages_for(kept)) + tool_tokens <= policy.input_budget:
             break
+        kept.pop(0)
+    # A server rejection / exact-usage signal can expose tokenizer differences.
+    # If both local phases see a small request, still make bounded progress;
+    # never jump directly to an empty historical window.
+    if force_token_compress and requested and len(kept) == initial_count and len(kept) > minimum:
         kept.pop(0)
     selected = messages_for(kept)
     after = estimate_messages_tokens(selected) + tool_tokens
@@ -81,4 +95,6 @@ def select_context(
         ),
         token_limit=policy.token_limit,
         current_rounds=current_slots,
+        round_stage_applied=round_progress,
+        token_stage_applied=token_stage,
     )

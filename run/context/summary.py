@@ -13,6 +13,9 @@ from typing import Any, Callable
 from events import RunEvent
 from run.agents import AgentRunner
 from run.context import RoundGroup, estimate_text_tokens
+from run.context.summary_budget import summary_budget, failure_kind
+from run.context.summary_fragments import summarize_bounded
+from run.retry import HOST_CONTROL_EXCEPTIONS
 from run.history import (
     read_context_summary,
     write_context_summary,
@@ -246,6 +249,7 @@ def get_or_create_summary(
         diagnostics.update({"failed": True, "error": "cancelled"})
         return None, diagnostics
 
+    stage = "summary_budget"
     try:
         rolling: dict[str, Any] | None = (
             dict(validated_previous["summary"])
@@ -254,38 +258,43 @@ def get_or_create_summary(
             else None
         )
         memory_extractions: list[dict[str, Any]] = []
+        budget = summary_budget(agent_runner, agent_name, chunk_token_budget, max_tokens, cancel_event)
+        stage = "summary_generation"
         chunks = _chunks(delta_groups, max(256, chunk_token_budget))
         diagnostics["chunks"] = len(chunks)
         for chunk in chunks:
             if cancel_event is not None and cancel_event.is_set():
                 raise SummaryError("cancelled")
-            model_input = {
-                "previous_summary": rolling,
-                "rounds": summary_source(chunk, round_offset=offset),
-                "trigger": trigger,
-            }
-            if skip_memory_extraction:
-                model_input["skip_memory_extraction"] = True
-            runner_kwargs: dict[str, Any] = {
-                "cancel_event": cancel_event,
-                "event_callback": event_callback,
-                "max_tokens": max_tokens,
-            }
-            if str(source or "").strip():
-                runner_kwargs["source"] = str(source).strip()
-            if str(session_id or "").strip():
-                runner_kwargs["session_id"] = str(session_id).strip()
-            result = agent_runner.run(agent_name, model_input, **runner_kwargs)
-            rolling = _normalise_summary(result.data)
-            memory_extraction = result.metadata.get("memory_extraction")
-            if isinstance(memory_extraction, dict):
-                memory_extractions.append(dict(memory_extraction))
-            if response_hook is not None:
-                response_hook(result.usage)
+            def invoke(model_input):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SummaryError("cancelled")
+                runner_kwargs: dict[str, Any] = {
+                    "cancel_event": cancel_event, "event_callback": event_callback,
+                    "max_tokens": budget.output_limit,
+                }
+                if isinstance(agent_runner, AgentRunner):
+                    runner_kwargs["input_token_limit"] = budget.input_limit
+                if str(source or "").strip():
+                    runner_kwargs["source"] = str(source).strip()
+                if str(session_id or "").strip():
+                    runner_kwargs["session_id"] = str(session_id).strip()
+                result = agent_runner.run(agent_name, model_input, **runner_kwargs)
+                if response_hook is not None:
+                    response_hook(result.usage)
+                return result
+
+            rolling, extractions = summarize_bounded(
+                summary_source(chunk, round_offset=offset), rolling,
+                trigger=trigger, skip_memory=skip_memory_extraction,
+                budget=budget, invoke=invoke, normalize=_normalise_summary,
+                diagnostics=diagnostics,
+            )
+            memory_extractions.extend(extractions)
         if rolling is None:
             raise SummaryError("摘要结果为空")
         if cancel_event is not None and cancel_event.is_set():
             raise SummaryError("cancelled")
+        stage = "summary_validation"
         previous_rounds = (
             validated_previous.get("covered_rounds", [])
             if validated_previous is not None
@@ -317,17 +326,21 @@ def get_or_create_summary(
             "memory_extractions": memory_extractions,
         }
         if persist:
+            stage = "summary_commit"
             write_context_summary(runtime_path, value)
         diagnostics["generated"] = True
         diagnostics["memory_extractions"] = memory_extractions
         return value, diagnostics
     except BaseException as exc:
-        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+        if isinstance(exc, HOST_CONTROL_EXCEPTIONS):
             raise
+        kind = "persistence_error" if stage == "summary_commit" else failure_kind(exc)
         diagnostics.update(
             {
                 "failed": True,
-                "error": str(exc),
+                "error": kind,
+                "failure_kind": kind,
+                "stage": stage,
                 "exception_type": type(exc).__name__,
             }
         )
