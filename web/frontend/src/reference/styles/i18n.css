@@ -1,0 +1,21 @@
+/* Locale changes reuse the existing theme and spacing tokens. */
+.language-setting-row { gap: var(--s-4); flex-wrap: wrap; }
+.language-setting-row .setting-copy { flex: 1 1 260px; min-width: 0; }
+.language-select { inline-size: 240px; max-inline-size: 100%; flex-shrink: 0; }
+.language-setting .settings-inline-feedback { padding: 0 var(--s-5) var(--s-4); }
+.setting-section-head, .setting-copy { overflow-wrap: anywhere; }
+.settings-content, .settings-nav-item > span { min-inline-size: 0; }
+html:not([lang="zh-CN"]) .settings-nav-item { white-space: normal; text-align: start; }
+html:not([lang="zh-CN"]) .theme-choice-copy { white-space: normal; }
+@media (max-width: 620px) {
+  .language-select { inline-size: 100%; }
+  html:not([lang="zh-CN"]) .theme-choice-group { flex-wrap: wrap; }
+  /* Long translated titles must never shrink the mobile navigation button to 0. */
+  html:not([lang="zh-CN"]) .topbar > .icon-btn { flex: 0 0 26px; }
+  html:not([lang="zh-CN"]) .topbar-title {
+    display: block; flex: 1 1 0; min-inline-size: 0;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  html:not([lang="zh-CN"]) .topbar-actions { flex: 0 0 auto; margin-inline-start: auto; margin-inline-end: 0; }
+  html:not([lang="zh-CN"]) .topbar-actions .status-pill .mono { max-inline-size: 74px; }
+}

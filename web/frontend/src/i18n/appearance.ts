@@ -1,0 +1,37 @@
+/** Same column order as core.ts. */
+export const appearanceMessages = `
+外观与主题|Appearance & theme|Apariencia y tema|Apparence et thème|Darstellung und Design|Aparência e tema|Оформление и тема|外観とテーマ|외관 및 테마
+模型与 Provider|Models & Provider|Modelos y Provider|Modèles et Provider|Modelle und Provider|Modelos e Provider|Модели и Provider|モデルとProvider|모델 및 Provider
+记忆与上下文|Memory & context|Memoria y contexto|Mémoire et contexte|Gedächtnis und Kontext|Memória e contexto|Память и контекст|メモリとコンテキスト|메모리 및 컨텍스트
+权限边界|Permissions|Permisos|Autorisations|Berechtigungen|Permissões|Разрешения|権限|권한 범위
+运行限制|Runtime limits|Límites de ejecución|Limites d’exécution|Ausführungslimits|Limites de execução|Ограничения выполнения|実行制限|실행 제한
+版本查看|Version|Versión|Version|Version|Versão|Версия|バージョン|버전 정보
+配置分类|Settings categories|Categorías de configuración|Catégories des paramètres|Einstellungskategorien|Categorias de configuração|Категории настроек|設定カテゴリ|설정 분류
+界面主题|Interface theme|Tema de interfaz|Thème de l’interface|Oberflächendesign|Tema da interface|Тема интерфейса|UIテーマ|인터페이스 테마
+网页主题|Web theme|Tema web|Thème web|Webdesign|Tema da web|Веб-тема|Webテーマ|웹 테마
+只影响当前用户的 Web 外观，不修改智能体运行配置。|Only changes this user’s web appearance, not agent runtime settings.|Solo cambia la apariencia web de este usuario, no la configuración del agente.|Modifie uniquement l’apparence web de cet utilisateur, pas les réglages de l’agent.|Ändert nur die Webdarstellung dieses Benutzers, nicht die Agenteneinstellungen.|Altera apenas a aparência web deste usuário, não a configuração do agente.|Меняет только оформление веб-интерфейса пользователя, не настройки агента.|現在のユーザーのWeb表示のみ変更し、エージェント設定は変更しません。|현재 사용자의 웹 외관만 변경하며 에이전트 실행 설정은 변경하지 않습니다.
+高级白与高级黑使用相同布局，可随时切换。|Light and dark share the same layout. Switch at any time.|Los temas claro y oscuro comparten diseño. Cámbialos cuando quieras.|Les thèmes clair et sombre partagent la même disposition.|Helles und dunkles Design verwenden dasselbe Layout.|Os temas claro e escuro usam o mesmo layout.|Светлая и тёмная темы используют одинаковую компоновку.|ライトとダークは同じレイアウトで、いつでも切り替えられます。|밝은 테마와 어두운 테마는 같은 레이아웃을 사용합니다.
+高级白|Light|Claro|Clair|Hell|Claro|Светлая|ライト|밝게
+高级黑|Dark|Oscuro|Sombre|Dunkel|Escuro|Тёмная|ダーク|어둡게
+暖白留白 · 清晰轻盈|Warm white · Clear and airy|Blanco cálido · Claro y ligero|Blanc chaleureux · Clair et léger|Warmes Weiß · Klar und leicht|Branco acolhedor · Claro e leve|Тёплый белый · Ясность и лёгкость|温かい白 · 明快で軽やか|따뜻한 흰색 · 선명하고 가벼움
+柔和黑灰 · 沉静专注|Soft charcoal · Calm and focused|Gris oscuro suave · Calma y enfoque|Gris sombre doux · Calme et concentration|Sanftes Dunkelgrau · Ruhig und fokussiert|Cinza escuro suave · Calma e foco|Мягкий тёмно-серый · Спокойствие и фокус|柔らかな黒と灰 · 静かな集中|부드러운 검정과 회색 · 차분한 집중
+文字与顶部栏关键控件同步缩放。|Text and key toolbar controls scale together.|El texto y los controles principales cambian de tamaño juntos.|Le texte et les commandes principales sont redimensionnés ensemble.|Text und wichtige Bedienelemente werden gemeinsam skaliert.|O texto e os controles principais são dimensionados juntos.|Текст и основные элементы панели масштабируются вместе.|文字と上部バーの主要操作を一緒に拡大縮小します。|텍스트와 상단 바의 주요 컨트롤이 함께 조정됩니다.
+全局界面比例|Interface scale|Escala de interfaz|Échelle de l’interface|Oberflächenskalierung|Escala da interface|Масштаб интерфейса|UIの表示倍率|전체 인터페이스 배율
+小、中、大三级，默认使用“中”；字号会同步调整正文、控件和侧栏。|Small, medium or large; medium is the default. Text, controls and sidebar scale together.|Pequeño, mediano o grande; mediano por defecto. Se ajustan texto, controles y barra lateral.|Petit, moyen ou grand ; moyen par défaut. Texte, commandes et barre latérale sont ajustés ensemble.|Klein, mittel oder groß; Standard ist mittel. Text, Elemente und Seitenleiste skalieren gemeinsam.|Pequeno, médio ou grande; o padrão é médio. Texto, controles e barra lateral são ajustados juntos.|Малый, средний или большой; по умолчанию средний. Текст, элементы и боковая панель масштабируются вместе.|小・中・大の3段階。既定は中で、文字・操作部品・サイドバーを同時に調整します。|작게, 보통, 크게 중 기본값은 보통입니다. 본문, 컨트롤, 사이드바가 함께 조정됩니다.
+界面语言|Interface language|Idioma de interfaz|Langue de l’interface|Oberflächensprache|Idioma da interface|Язык интерфейса|表示言語|인터페이스 언어
+网页语言|Web language|Idioma web|Langue du site|Websprache|Idioma da web|Язык веб-интерфейса|Web表示言語|웹 언어
+选择当前用户的网页语言|Choose this user’s web language|Elegir el idioma web de este usuario|Choisir la langue web de cet utilisateur|Websprache dieses Benutzers wählen|Escolher o idioma web deste usuário|Выбрать язык веб-интерфейса пользователя|現在のユーザーのWeb言語を選択|현재 사용자의 웹 언어 선택
+语言保存在用户配置 web_ui.language 中，仅切换界面，不翻译对话、文件或模型输出。|Saved in user config as web_ui.language. Only the interface changes; chats, files and model output are not translated.|Se guarda como web_ui.language. Solo cambia la interfaz; no traduce chats, archivos ni respuestas del modelo.|Enregistré dans web_ui.language. Seule l’interface change ; discussions, fichiers et réponses du modèle ne sont pas traduits.|Wird als web_ui.language gespeichert. Nur die Oberfläche ändert sich; Chats, Dateien und Modellausgaben bleiben unverändert.|Salvo como web_ui.language. Altera apenas a interface, sem traduzir conversas, arquivos ou respostas do modelo.|Сохраняется как web_ui.language. Меняется только интерфейс; чаты, файлы и ответы модели не переводятся.|ユーザー設定のweb_ui.languageに保存。UIのみ変更し、対話・ファイル・モデル出力は翻訳しません。|사용자 설정의 web_ui.language에 저장됩니다. 인터페이스만 변경하며 대화, 파일, 모델 출력은 번역하지 않습니다.
+语言已保存|Language saved|Idioma guardado|Langue enregistrée|Sprache gespeichert|Idioma salvo|Язык сохранён|言語を保存しました|언어가 저장되었습니다
+语言保存失败，已恢复原语言，请重试。|Could not save language. Previous language restored; please retry.|No se pudo guardar el idioma. Se restauró el anterior; inténtalo de nuevo.|Impossible d’enregistrer la langue. L’ancienne langue a été rétablie ; réessayez.|Sprache konnte nicht gespeichert werden. Vorherige Sprache wiederhergestellt; bitte erneut versuchen.|Não foi possível salvar o idioma. O anterior foi restaurado; tente novamente.|Не удалось сохранить язык. Восстановлен прежний язык; повторите попытку.|言語を保存できませんでした。元の言語に戻しました。再試行してください。|언어를 저장하지 못했습니다. 이전 언어로 복원되었습니다. 다시 시도하세요.
+运行结束音效|Completion sound|Sonido de finalización|Son de fin d’exécution|Abschlusston|Som de conclusão|Звук завершения|完了通知音|실행 완료 알림음
+运行失败音效|Failure sound|Sonido de error|Son d’échec|Fehlerton|Som de falha|Звук ошибки|失敗通知音|실행 실패 알림음
+上传音效|Upload sound|Subir sonido|Importer un son|Ton hochladen|Enviar som|Загрузить звук|通知音をアップロード|알림음 업로드
+试听|Preview sound|Escuchar|Écouter|Anhören|Ouvir|Прослушать|試聴|미리 듣기
+试听中…|Playing…|Reproduciendo…|Lecture…|Wiedergabe…|Reproduzindo…|Воспроизведение…|再生中…|재생 중…
+清除|Clear|Borrar|Effacer|Leeren|Limpar|Очистить|クリア|지우기
+选择结束音效文件|Choose completion sound|Elegir sonido de finalización|Choisir le son de fin|Abschlusston wählen|Escolher som de conclusão|Выбрать звук завершения|完了通知音ファイルを選択|완료 알림음 파일 선택
+选择失败音效文件|Choose failure sound|Elegir sonido de error|Choisir le son d’échec|Fehlerton wählen|Escolher som de falha|Выбрать звук ошибки|失敗通知音ファイルを選択|실패 알림음 파일 선택
+支持 MP3、WAV、Ogg 和 WebM 音频。|Supports MP3, WAV, Ogg and WebM audio.|Admite audio MP3, WAV, Ogg y WebM.|Accepte les fichiers audio MP3, WAV, Ogg et WebM.|Unterstützt MP3, WAV, Ogg und WebM.|Compatível com áudio MP3, WAV, Ogg e WebM.|Поддерживает MP3, WAV, Ogg и WebM.|MP3・WAV・Ogg・WebM音声に対応。|MP3, WAV, Ogg, WebM 오디오를 지원합니다.
+重启服务|Restart service|Reiniciar servicio|Redémarrer le service|Dienst neu starten|Reiniciar serviço|Перезапустить службу|サービスを再起動|서비스 재시작
+`

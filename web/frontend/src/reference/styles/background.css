@@ -1,0 +1,84 @@
+/* Wallpaper is below chrome, never a blanket opacity on application contents. */
+:root, [data-theme] {
+  /* Resolve the solid theme colors above the shell before making UI surfaces translucent. */
+  --background-solid-surface: var(--bg-surface);
+  --background-solid-raised: var(--bg-raised);
+  --background-solid-sunken: var(--bg-sunken);
+  --background-solid-inset: var(--bg-inset);
+}
+.app-shell { position: relative; isolation: isolate; }
+.web-background { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; opacity: 0; }
+.web-background[data-ready="true"] { opacity: 1; }
+.web-background > :is(img, video) {
+  width: 100%; height: 100%; object-fit: cover; object-position: center;
+  filter: blur(var(--background-blur, 0px)); transform: scale(1.05);
+}
+.web-background-shade { position: absolute; inset: 0; background: var(--bg-app); }
+.app-shell[data-background="on"] {
+  --bg-surface: color-mix(in srgb, var(--background-solid-surface) var(--background-ui-opacity, 94%), transparent);
+  --bg-raised: color-mix(in srgb, var(--background-solid-raised) var(--background-ui-opacity, 94%), transparent);
+  --bg-sunken: color-mix(in srgb, var(--background-solid-sunken) var(--background-ui-opacity, 94%), transparent);
+  --bg-inset: color-mix(in srgb, var(--background-solid-inset) var(--background-ui-opacity, 94%), transparent);
+  /* Rebind the production aliases here, not at :root where they resolve as opaque. */
+  --surface: var(--bg-surface); --surface-2: var(--bg-inset);
+  --surface-elevated: var(--bg-raised); --surface-soft: var(--bg-sunken);
+  --surface-3: var(--bg-sunken); --module-surface: var(--bg-surface);
+  --module-surface-soft: var(--bg-inset);
+}
+.app-shell[data-background="on"] > .app-main { background: transparent; }
+.app-shell[data-background="on"] .topbar { background: var(--bg-surface); }
+/* The old dock gradient painted an opaque white/black strip over the wallpaper. */
+.app-shell[data-background="on"] .composer-dock { background: transparent; }
+.app-shell[data-background="on"] .settings-nav {
+  background: var(--bg-surface); border-radius: var(--r-md);
+}
+.app-shell[data-background="on"] :is(.page-head, .welcome-inner) {
+  background: var(--bg-surface);
+  box-shadow: 0 0 0 var(--s-2) var(--bg-surface);
+  border-radius: var(--r-sm);
+}
+.app-shell[data-background="on"] :is(
+  .sidebar, .topbar, .setting-section, .settings-nav, .page-head, .welcome-inner,
+  .composer, .assistant-response > .bubble, .msg.is-user > .msg-body, .msg.is-system > .msg-body,
+  .tool-call, .trace, .plan-bubble, .panel, .context-drawer-card
+) {
+  -webkit-backdrop-filter: blur(var(--background-ui-blur, 0px));
+  backdrop-filter: blur(var(--background-ui-blur, 0px));
+}
+/* Code uses separate solid tokens; dialogs/popovers outside the shell stay readable. */
+.background-setting-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 34%); gap: var(--s-6); padding: var(--s-5); }
+.background-controls { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
+.background-ui-controls { display: flex; flex-direction: column; gap: var(--s-4); padding-top: var(--s-4); border-top: 1px solid var(--border-subtle); }
+.background-enable-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-4); }
+.background-enable-row label { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+.background-enable-row small, .background-hint { color: var(--text-tertiary); font-size: var(--t-xs); line-height: var(--lh-base, 1.6); }
+.background-enable-row .switch { flex-shrink: 0; }
+.background-range { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.background-range > span { display: flex; justify-content: space-between; gap: var(--s-3); }
+.background-range output { color: var(--text-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.background-range input { width: 100%; min-width: 0; accent-color: var(--accent); }
+.background-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.background-actions .btn { white-space: normal; }
+.background-hint { margin: 0; overflow-wrap: anywhere; }
+.background-preview-column { min-width: 0; }
+.background-preview { position: relative; aspect-ratio: 16 / 10; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; background: var(--bg-inset); }
+.background-preview > :is(img, video) { width: 100%; height: 100%; object-fit: cover; display: block; }
+.background-preview-shade { position: absolute; inset: 0; pointer-events: none; background: var(--bg-app); }
+.background-preview-label { position: absolute; top: var(--s-2); left: var(--s-2); border-radius: var(--r-sm); background: var(--bg-surface); color: var(--text-primary); padding: 3px 7px; font-size: var(--t-xs); pointer-events: none; }
+.background-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s-3); height: 100%; color: var(--text-tertiary); padding: var(--s-3); text-align: center; }
+.background-file { display: flex; justify-content: space-between; gap: var(--s-3); margin-top: var(--s-2); color: var(--text-tertiary); }
+.background-file > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.background-file > span:last-child { white-space: nowrap; }
+@media (max-width: 1100px) {
+  .background-setting-body { grid-template-columns: minmax(0, 1fr); gap: var(--s-4); }
+  .background-preview-column { grid-row: 1; max-width: 460px; width: 100%; }
+}
+@media (max-width: 900px) {
+  /* The settings nav is above the content in one-column mode, not beside it.
+     Keeping it sticky would paint/capture clicks over translucent settings cards. */
+  .settings-layout > .settings-nav { position: static; }
+}
+@media (max-width: 620px) {
+  .background-setting-body { padding: var(--s-4); }
+  .background-actions .btn { flex: 1 1 calc(50% - var(--s-2)); }
+}

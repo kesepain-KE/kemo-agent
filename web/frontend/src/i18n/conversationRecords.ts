@@ -1,0 +1,18 @@
+/** Source | en | es | fr | de | pt-BR | ru | ja | ko. */
+export const conversationRecordMessages = `
+当前对话文件历史|Current conversation files|Archivos de esta conversación|Fichiers de cette conversation|Dateien dieser Unterhaltung|Arquivos desta conversa|Файлы текущего диалога|現在の会話のファイル|현재 대화 파일
+相关文件|Related files|Archivos relacionados|Fichiers associés|Zugehörige Dateien|Arquivos relacionados|Связанные файлы|関連ファイル|관련 파일
+当前对话关联记录|Related conversation records|Registros de esta conversación|Éléments associés à cette conversation|Zugehörige Unterhaltungsprotokolle|Registros desta conversa|Связанные записи диалога|現在の会話の関連記録|현재 대화 관련 기록
+后台 Shell 记录|Background Shell records|Registros de Shell en segundo plano|Historique Shell en arrière-plan|Hintergrund-Shell-Protokolle|Registros de Shell em segundo plano|Записи фоновых Shell-задач|バックグラウンド Shell の記録|백그라운드 Shell 기록
+后台子智能体记录|Background subagent records|Registros de subagentes en segundo plano|Historique des sous-agents en arrière-plan|Hintergrund-Unteragentenprotokolle|Registros de subagentes em segundo plano|Записи фоновых субагентов|バックグラウンドサブエージェントの記録|백그라운드 하위 에이전트 기록
+后台 Shell 记录读取失败|Could not load Shell records|No se pudieron cargar los registros de Shell|Impossible de charger l’historique Shell|Shell-Protokolle konnten nicht geladen werden|Não foi possível carregar os registros de Shell|Не удалось загрузить записи Shell|Shell の記録を読み込めませんでした|Shell 기록을 불러올 수 없습니다
+子智能体记录读取失败|Could not load subagent records|No se pudieron cargar los registros de subagentes|Impossible de charger l’historique des sous-agents|Unteragentenprotokolle konnten nicht geladen werden|Não foi possível carregar os registros de subagentes|Не удалось загрузить записи субагентов|サブエージェントの記録を読み込めませんでした|하위 에이전트 기록을 불러올 수 없습니다
+加载更多 Shell 记录|Load more Shell records|Cargar más registros de Shell|Charger plus de lignes Shell|Weitere Shell-Protokolle laden|Carregar mais registros de Shell|Загрузить ещё записи Shell|Shell の記録をさらに読み込む|Shell 기록 더 불러오기
+加载更多子智能体记录|Load more subagent records|Cargar más registros de subagentes|Charger plus de sous-agents|Weitere Unteragentenprotokolle laden|Carregar mais registros de subagentes|Загрузить ещё записи субагентов|サブエージェントの記録をさらに読み込む|하위 에이전트 기록 더 불러오기
+部分子任务未返回，请在任务总览查看|Some child tasks were omitted; check the task overview|Se omitieron algunas subtareas; consulta el resumen de tareas|Certaines sous-tâches sont omises ; consultez la vue des tâches|Einige Unteraufgaben fehlen; siehe Aufgabenübersicht|Algumas subtarefas foram omitidas; consulte a visão geral|Часть подзадач не возвращена; см. обзор задач|一部の子タスクは省略されています。タスク一覧で確認してください|일부 하위 작업이 생략되었습니다. 작업 개요에서 확인하세요
+正在读取当前对话文件…|Loading conversation files…|Cargando archivos de la conversación…|Chargement des fichiers de la conversation…|Unterhaltungsdateien werden geladen…|Carregando arquivos da conversa…|Загрузка файлов диалога…|会話のファイルを読み込み中…|대화 파일 불러오는 중…
+文件历史读取失败|Could not load file history|No se pudo cargar el historial de archivos|Impossible de charger l’historique des fichiers|Dateiverlauf konnte nicht geladen werden|Não foi possível carregar o histórico de arquivos|Не удалось загрузить историю файлов|ファイル履歴を読み込めませんでした|파일 기록을 불러올 수 없습니다
+此对话还没有关联文件|No related files in this conversation yet|Esta conversación aún no tiene archivos relacionados|Aucun fichier associé à cette conversation|Noch keine Dateien in dieser Unterhaltung|Esta conversa ainda não tem arquivos relacionados|В этом диалоге пока нет связанных файлов|この会話にはまだ関連ファイルがありません|이 대화에는 아직 관련 파일이 없습니다
+输出内容|Outputs|Resultados|Résultats|Ausgaben|Resultados|Результаты|出力|출력
+来源|Sources|Fuentes|Sources|Quellen|Fontes|Источники|入力元|출처
+`
