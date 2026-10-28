@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from run.infra import cached_read_text
 
 from provider.protocol.models import (
@@ -30,6 +31,7 @@ USER_ONLY_SECTIONS = frozenset(
         "expand",
         "perception",
         "plugins",
+        "web_ui",
     }
 )
 MULTIMODAL_CAPABILITIES = frozenset(
@@ -240,6 +242,15 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     from run.extensions import validate_multimodal_config
 
     validate_multimodal_config(merged)
+    from run.config.web_ui import web_background, web_language
+
+    try:
+        language = web_language(merged, strict=True, allow_retired=True)
+        web_background(merged, strict=True)
+        if merged.get("web_ui", {}).get("language") == "ar":
+            merged["web_ui"]["language"] = language
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return merged
 
 
@@ -288,8 +299,13 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             if provider_type == "kemo"
             else "https://api.openai.com/v1"
         )
-    if provider_type == "chat" and not base_url.endswith("/v1"):
-        base_url = f"{base_url}/v1"
+    # An explicit Chat URL may use /proxy/api, a complete /chat/completions
+    # route or query parameters. Preserve those routes; a bare host retains
+    # the established /v1 default used by Chat model discovery as well.
+    if provider_type == "chat":
+        parts = urlsplit(base_url)
+        if not parts.path:
+            base_url = urlunsplit((parts.scheme, parts.netloc, "/v1", parts.query, parts.fragment))
 
     provider.update(
         {
@@ -366,6 +382,7 @@ def resolve_capability_model(config: dict[str, Any], capability: str) -> str:
 
 
 _DOMAIN_MODULES = (
+    "web_ui",
     "knowledge_classification",
     "user_skeleton",
     "source_policy",

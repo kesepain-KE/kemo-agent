@@ -1,8 +1,9 @@
 """Single source of truth for the durable user-directory skeleton.
 
 The skeleton is deliberately limited to directories.  Runtime databases,
-preferences, media, and background-job artifacts are created by their owning
-subsystems and are not copied from the repository template.
+preferences, uploaded media, and background-job artifacts are created by their
+owning subsystems. The default background.webp is a static template asset copied
+only when creating a user; directory repair never adds or replaces it.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ RUNTIME_GENERATED_DIRS = (
 )
 
 OPTIONAL_USER_FILES = ("web_preferences.json",)
+TEMPLATE_BACKGROUND_FILE = "background.webp"
 SOUND_FILE_PREFIXES = ("completion_sound.", "failure_sound.")
 TEMPLATE_ONLY_EMPTY_DIRS = ("runtime", "tools")
 
@@ -189,6 +191,7 @@ __all__ = [
     "RUNTIME_GENERATED_DIRS",
     "SOUND_FILE_PREFIXES",
     "TEMPLATE_ONLY_EMPTY_DIRS",
+    "TEMPLATE_BACKGROUND_FILE",
     "ensure_user_skeleton",
     "inspect_user_skeleton",
 ]
