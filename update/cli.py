@@ -48,6 +48,7 @@ from .manifest import (
     version_for_module,
 )
 from .migrations import (
+    backup_runtime_databases,
     initialize_runtime_state_databases,
     initialize_user_memory_databases,
     migrate_user_skeletons,
@@ -275,9 +276,14 @@ def main(argv: list[str] | None = None, *, root: Path = ROOT) -> int:
                 # when an earlier build step fails and the transaction needs
                 # to restore the source tree.
                 if "core" in selected_modules:
+                    database_backups = backup_runtime_databases(root=root, dry_run=args.dry_run)
                     migrate_user_skeletons(root=root, dry_run=args.dry_run)
-                    initialize_user_memory_databases(root=root, dry_run=args.dry_run)
-                    initialize_runtime_state_databases(root=root, dry_run=args.dry_run)
+                    initialize_user_memory_databases(
+                        root=root, dry_run=args.dry_run, backups=database_backups
+                    )
+                    initialize_runtime_state_databases(
+                        root=root, dry_run=args.dry_run, backups=database_backups
+                    )
 
                 finalize_version_document(
                     local_document,

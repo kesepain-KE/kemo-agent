@@ -34,8 +34,10 @@ def update_transaction(
 
     User directories, runtime databases, Cron runtime state, local Expand
     credentials and build/dependency caches are excluded from both backup and
-    restore.  Database migrations therefore remain forward-only, while source
-    code and version metadata are restored automatically.
+    restore. Database migrations remain forward-only, while source code and
+    version metadata are restored automatically. Core initialization first
+    saves separate SQLite snapshots under runtime/db_backups; those snapshots
+    are retained and database recovery is explicit, never an automatic downgrade.
     """
 
     if dry_run:
