@@ -102,7 +102,8 @@
   "web": {
     "max_concurrent_chats": 3,
     "max_pending_chats": 5,
-    "pending_chat_timeout": 30
+    "pending_chat_timeout": 30,
+    "sse_heartbeat_seconds": 15
   },
   "agents": {
     "enable_mid_context_compression": false,
