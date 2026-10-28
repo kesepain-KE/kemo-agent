@@ -68,8 +68,23 @@ class SessionRenameBody(BaseModel):
     title: str
 
 
+class SessionMarksBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    pinned: StrictBool | None = None
+    favorite: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def require_marks(self) -> "SessionMarksBody":
+        if not self.model_fields_set or any(
+            getattr(self, field) is None for field in self.model_fields_set
+        ):
+            raise ValueError("请提供 pinned 或 favorite 布尔值，不允许 null")
+        return self
+
+
 class SessionClientBody(BaseModel):
     client_id: str = ""
+    lease_sequence: int | None = Field(default=None, strict=True, ge=1, le=9_007_199_254_740_991)
 
 
 class SessionUndoLastRoundBody(BaseModel):
@@ -101,6 +116,13 @@ class MemoryWriteBody(BaseModel):
 class PreferencesBody(BaseModel):
     theme: str | None = None
     font_size: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def language_is_user_config(cls, value: Any) -> Any:
+        if isinstance(value, dict) and {"language", "background"}.intersection(value):
+            raise ValueError("语言与背景请通过用户配置 web_ui 保存")
+        return value
 
 
 class SkillToggleBody(BaseModel):

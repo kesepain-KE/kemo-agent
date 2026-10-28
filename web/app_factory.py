@@ -7,8 +7,19 @@ from pathlib import Path
 from typing import Any, Iterator, Protocol
 
 from fastapi import FastAPI
+from fastapi.exceptions import ResponseValidationError
 from web.auth import WebAuthConfig
+from web.auth_middleware import WebAuthMiddleware
+from web.operation_contracts import AuthStatusResponse, AuthLogoutResponse
 from web.service import WebRunService
+from web.routes.workspace import register_workspace_routes
+from web.streaming import (
+    ClosingStreamingResponse,
+    DEFAULT_SSE_HEARTBEAT_SECONDS,
+    DISCONNECT_POLL_SECONDS,
+    HEARTBEAT_FRAME,
+    StreamCleanup,
+)
 
 from web.schemas import ChatBody as _AnnotationChatBody
 from web.schemas import GuidanceBody as _AnnotationGuidanceBody
@@ -133,6 +144,7 @@ def create_app(
     )
     base = (root or project_root()).resolve()
     backend = service or WebRunService(base)
+    stream_cleanup = StreamCleanup()
     frontend_dist = (base / "web" / "frontend" / "dist").resolve()
     @asynccontextmanager
     async def lifespan(_app):
@@ -178,11 +190,13 @@ def create_app(
             yield
         finally:
             stop.set()
+            await stream_cleanup.drain()
             if worker is not None:
                 await asyncio.to_thread(worker.join, 5)
 
     app = FastAPI(title="kemo-agent Web API", version="2", lifespan=lifespan)
     app.state.web_service = backend
+    app.state.web_stream_cleanup = stream_cleanup
     configured_auth = auth_config or WebAuthConfig()
     authenticator = WebAuthenticator(configured_auth)
     auth_limiter = AuthFailureLimiter(configured_auth)
@@ -191,29 +205,8 @@ def create_app(
     restart_lock = threading.Lock()
     app.state.restart_requested = False
 
-    @app.middleware("http")
-    async def require_web_auth(request: _AnnotationRequest, call_next):
-        path = request.url.path
-        public = path in {"/api/health", "/api/logo"} or path.startswith(
-            "/api/auth/"
-        )
-        if (
-            configured_auth.enabled
-            and (path == "/api" or path.startswith("/api/"))
-            and not public
-            and not authenticator.is_authenticated(request.session)
-        ):
-            return JSONResponse(
-                status_code=401,
-                content=_error_body(
-                    "authentication_required",
-                    "需要先完成 Web 认证",
-                    401,
-                ),
-            )
-        return await call_next(request)
-
     # SessionMiddleware must wrap the auth guard so request.session is available.
+    app.add_middleware(WebAuthMiddleware, authenticator=authenticator)
     if configured_auth.enabled:
         app.add_middleware(
             SessionMiddleware,
@@ -247,6 +240,18 @@ def create_app(
             content=_error_body("invalid_request", "请求字段无效", 400),
         )
 
+    @app.exception_handler(ResponseValidationError)
+    async def response_validation_error(_: _AnnotationRequest, exc: ResponseValidationError) -> _AnnotationJSONResponse:
+        # Validation errors contain the rejected payload. Never expose it to
+        # clients or generic exception formatting (which may include secrets).
+        import logging
+        paths = [list(error.get("loc", ())) for error in exc.errors()[:20]]
+        logging.getLogger(__name__).error("Web response contract failed at fields: %s", paths)
+        return JSONResponse(
+            status_code=500,
+            content=_error_body("internal_error", "服务响应不符合接口契约", 500),
+        )
+
     @app.exception_handler(Exception)
     async def internal_error(_: _AnnotationRequest, exc: Exception) -> _AnnotationJSONResponse:
         return JSONResponse(
@@ -278,7 +283,7 @@ def create_app(
             app.state.restart_requested = True
         return {"ok": True, "port": body.port, "helper_pid": helper_pid}
 
-    @app.get("/api/auth/status")
+    @app.get("/api/auth/status", response_model=AuthStatusResponse)
     async def auth_status(request: _AnnotationRequest) -> dict[str, Any]:
         session = request.session if configured_auth.enabled else None
         return authenticator.status(session)
@@ -291,7 +296,7 @@ def create_app(
             configured_auth.trusted_proxies,
         )
 
-    @app.post("/api/auth/token")
+    @app.post("/api/auth/token", response_model=AuthStatusResponse)
     async def auth_token(body: _AnnotationTokenLoginBody, request: _AnnotationRequest) -> dict[str, Any]:
         client_ip = auth_client_ip(request)
         auth_limiter.check(client_ip, "token")
@@ -309,7 +314,7 @@ def create_app(
             auth_limiter.clear_ip(client_ip)
         return authenticator.status(request.session)
 
-    @app.post("/api/auth/login")
+    @app.post("/api/auth/login", response_model=AuthStatusResponse)
     async def auth_login(body: _AnnotationLoginBody, request: _AnnotationRequest) -> dict[str, Any]:
         if configured_auth.requires_both and not authenticator.token_stage_verified(
             request.session
@@ -333,7 +338,7 @@ def create_app(
         auth_limiter.clear_ip(client_ip)
         return authenticator.status(request.session)
 
-    @app.post("/api/auth/logout")
+    @app.post("/api/auth/logout", response_model=AuthLogoutResponse)
     async def auth_logout(request: _AnnotationRequest) -> dict[str, bool]:
         if configured_auth.enabled:
             authenticator.logout(request.session)
@@ -346,6 +351,7 @@ def create_app(
     register_session_routes(app, backend)
     register_task_routes(app, backend)
     register_setting_routes(app, backend, configured_auth)
+    register_workspace_routes(app, backend)
 
     @app.post("/api/runs/{run_id}/guidance")
     async def submit_guidance(run_id: str, body: _AnnotationGuidanceBody) -> dict[str, Any]:
@@ -378,10 +384,15 @@ def create_app(
                 content_options["uploaded_files"] = body.uploaded_files
             # stream_chat 可能在用户级并发闸前有界等待；放入工作线程，避免
             # 一个用户的排队请求阻塞 FastAPI 事件循环和其他用户的 API。
-            if body.plan_id:
-                chat_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        getattr(backend, "stream_plan"),
+            def prepare_stream():
+                interval_getter = getattr(backend, "sse_heartbeat_seconds", None)
+                interval = (
+                    interval_getter(body.user)
+                    if callable(interval_getter)
+                    else DEFAULT_SSE_HEARTBEAT_SECONDS
+                )
+                if body.plan_id:
+                    prepared = getattr(backend, "stream_plan")(
                         body.user,
                         body.session_id,
                         body.plan_id,
@@ -390,11 +401,8 @@ def create_app(
                         source=body.source,
                         client_id=body.client_id,
                     )
-                )
-            else:
-                chat_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        getattr(backend, "stream_chat"),
+                else:
+                    prepared = getattr(backend, "stream_chat")(
                         body.user,
                         body.session_id,
                         body.prompt,
@@ -404,21 +412,23 @@ def create_app(
                         client_id=body.client_id,
                         **content_options,
                     )
-                )
+                return prepared, interval
+
+            chat_task = asyncio.create_task(asyncio.to_thread(prepare_stream))
             try:
-                events = await asyncio.shield(chat_task)
+                # Before response headers exist we must preserve real HTTP
+                # validation/congestion errors. Poll disconnects rather than
+                # starting SSE early and silently converting HTTP 503 to 200.
+                while not chat_task.done():
+                    if await request.is_disconnected():
+                        raise asyncio.CancelledError
+                    await asyncio.wait({chat_task}, timeout=DISCONNECT_POLL_SECONDS)
+                events, interval = chat_task.result()
             except asyncio.CancelledError:
                 cancel_event.set()
-                # shield 保留工作线程结果；若闸门刚好放行并返回生成器，必须
-                # 主动关闭它，避免客户端断开后泄漏 Web 并发槽位。
-                try:
-                    abandoned = await chat_task
-                except BaseException:
-                    pass
-                else:
-                    close = getattr(abandoned, "close", None)
-                    if callable(close):
-                        await asyncio.to_thread(close)
+                # Keep ownership if the gate concurrently grants admission.
+                # close() must also work before the first next().
+                await stream_cleanup.abandon_preparation(chat_task)
                 raise
         except WebServiceError:
             raise
@@ -427,15 +437,39 @@ def create_app(
 
         assert events is not None
 
+        iterator = iter(events)
+        pending = None
+        cleanup_started = False
+
+        async def close_stream():
+            nonlocal cleanup_started
+            cancel_event.set()
+            if not cleanup_started:
+                cleanup_started = True
+                await stream_cleanup.close(iterator, pending)
+
         async def generate():
+            nonlocal pending
             terminal = False
-            iterator = iter(events)
             try:
                 while True:
                     if await request.is_disconnected():
                         cancel_event.set()
                         break
-                    event = await asyncio.to_thread(next, iterator, None)
+                    if pending is None:
+                        pending = asyncio.create_task(
+                            asyncio.to_thread(next, iterator, None)
+                        )
+                    # A timeout never cancels or replaces the one real read.
+                    done, _ = await asyncio.wait({pending}, timeout=interval)
+                    if not done:
+                        if await request.is_disconnected():
+                            cancel_event.set()
+                            break
+                        yield HEARTBEAT_FRAME
+                        continue
+                    event = pending.result()
+                    pending = None
                     if event is None:
                         break
                     if not isinstance(event, RunEvent):
@@ -478,18 +512,17 @@ def create_app(
                         )
                     )
             finally:
-                cancel_event.set()
-                close = getattr(iterator, "close", None)
-                if callable(close):
-                    await asyncio.to_thread(close)
+                await close_stream()
 
-        return StreamingResponse(
+        return ClosingStreamingResponse(
             generate(),
+            on_close=close_stream,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
                 "X-Kemo-Run-Id": body.run_id,
+                "X-Kemo-Heartbeat-Seconds": f"{interval:g}",
             },
         )
 

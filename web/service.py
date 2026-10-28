@@ -10,7 +10,7 @@ from pathlib import Path
 import queue
 import threading
 import time
-from typing import Any, Callable, Iterator, Generator
+from typing import Any, Callable, Iterator
 import uuid
 
 from pydantic import ValidationError
@@ -104,7 +104,9 @@ from web.errors import (
 from web.services.artifact_resolver import DownloadArtifactResolver
 from web.services.chat_stream import stream_chat as _stream_chat
 from web.services.chat_gate import _UserChatGate
+from web.services.event_stream import FinalizingEventStream, QueueEventStream
 from web.services.files import FileServiceMixin
+from web.services.backgrounds import BackgroundServiceMixin
 from web.services.identity import IdentityServiceMixin
 from web.services.knowledge import KnowledgeServiceMixin
 from web.services.memory import MemoryServiceMixin
@@ -153,6 +155,7 @@ class ActiveRun:
 
 
 class WebRunService(
+    BackgroundServiceMixin,
     RunControlServiceMixin,
     FileServiceMixin,
     IdentityServiceMixin,
@@ -373,8 +376,8 @@ class WebRunService(
             self._session_leases[key] = clients
             return len(clients)
         self._session_leases.pop(key, None)
-        # Durable presence expires naturally within 90s: refresh/BFCache and
-        # out-of-order unload requests must not erase a newer heartbeat.
+        # Memory only: legacy presence expires naturally. Sequenced page
+        # transitions are persisted separately by services.presence.
         return 0
 
     def _other_durable_session_clients_locked(
@@ -394,33 +397,6 @@ class WebRunService(
             release_durable_session_lease(
                 self.root, user, source, session_id, client_id,
             )
-
-    def session_lease(
-        self,
-        user: Any,
-        session_id: Any,
-        client_id: Any,
-        *,
-        source: Any = "web",
-    ) -> dict[str, Any]:
-        name = self.require_user(user)
-        normalized_source = self.require_source(source)
-        normalized_session = self.require_session_id(session_id)
-        normalized_client = self.require_client_id(client_id, optional=False)
-        with self._active_runs_lock:
-            clients = self._touch_session_lease_locked(
-                name, normalized_source, normalized_session, normalized_client, require_existing=True,
-            )
-            if normalized_source in {'web', 'app'} and not clients:
-                raise NotFoundError('对话不存在、已经结束或已离线清理，请新建对话')
-        return {
-            "user": name,
-            "source": normalized_source,
-            "session_id": normalized_session,
-            "client_id": normalized_client,
-            "active_clients": clients,
-            "leased": True,
-        }
 
     def reopen_session(
         self,
@@ -461,31 +437,6 @@ class WebRunService(
             "reopened": True,
             "active_clients": active_clients,
             "session": self._index_session_payload(record),
-        }
-
-    def release_session_lease(
-        self,
-        user: Any,
-        session_id: Any,
-        client_id: Any,
-        *,
-        source: Any = "web",
-    ) -> dict[str, Any]:
-        name = self.require_user(user)
-        normalized_source = self.require_source(source)
-        normalized_session = self.require_session_id(session_id)
-        normalized_client = self.require_client_id(client_id, optional=False)
-        with self._active_runs_lock:
-            remaining = self._release_session_lease_locked(
-                name, normalized_source, normalized_session, normalized_client
-            )
-        return {
-            "user": name,
-            "source": normalized_source,
-            "session_id": normalized_session,
-            "client_id": normalized_client,
-            "active_clients": remaining,
-            "released": True,
         }
 
     def cleanup_empty_web_sessions(self, stop: threading.Event | None = None) -> int:
@@ -668,7 +619,7 @@ class WebRunService(
         task_plan_mode: str = "",
         source: Any = "web",
         client_id: Any = "",
-    ) -> Generator[RunEvent, None, None]:
+    ) -> QueueEventStream:
         """Compatibility entry point delegated to the chat stream service."""
 
         return _stream_chat(
@@ -695,7 +646,7 @@ class WebRunService(
         run_id: Any = "",
         source: Any = "web",
         client_id: Any = "",
-    ) -> Iterator[RunEvent]:
+    ) -> FinalizingEventStream:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
         normalized_source = self.require_source(source)
@@ -776,25 +727,18 @@ class WebRunService(
                 store.update(normalized_plan_id, lambda value: {**value, "status": "paused"})
             raise
 
-        def events() -> Iterator[RunEvent]:
+        def finish_plan() -> None:
             try:
-                yield from source_events
-            finally:
-                close = getattr(source_events, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except BaseException:
-                        # 关闭底层生成器失败不能跳过计划状态收口。
-                        pass
-                try:
-                    current = store.read(normalized_plan_id)
-                    if current.get("status") == "running":
-                        store.update(
-                            normalized_plan_id,
-                            lambda value: {**value, "status": "paused"},
-                        )
-                except PlanError:
-                    pass
+                current = store.read(normalized_plan_id)
+                if current.get("status") == "running":
+                    store.update(
+                        normalized_plan_id,
+                        lambda value: (
+                            {**value, "status": "paused"}
+                            if value.get("status") == "running" else value
+                        ),
+                    )
+            except PlanError:
+                pass
 
-        return events()
+        return FinalizingEventStream(source_events, finish_plan)

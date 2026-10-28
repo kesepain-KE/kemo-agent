@@ -25,6 +25,16 @@ class WebAuthConfigError(ValueError):
     pass
 
 
+def validate_web_bind(host: str, config: "WebAuthConfig") -> None:
+    """Instance-admin auth is mandatory when binding beyond loopback."""
+    try:
+        loopback = ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        loopback = host.casefold() == "localhost"
+    if not loopback and not config.enabled:
+        raise WebAuthConfigError("非回环 Web 监听必须配置 WEB_ACCESS_TOKEN 或 WEB_USERNAME/WEB_PASSWORD")
+
+
 class WebAuthError(RuntimeError):
     def __init__(
         self,
@@ -375,4 +385,51 @@ def resolve_client_ip(
         if any(address in network for network in networks):
             continue
         return str(address)
-    return str(peer_address)
+    return str(chain[0]) if chain else str(peer_address)
+
+
+def local_unauthenticated_request(
+    peer: str | None, headers: Mapping[str, str], trusted_proxies: tuple[str, ...],
+) -> bool:
+    """No-auth is direct loopback only, or a strictly verified local proxy hop.
+
+    Forwarded-only deployments must enable authentication: guessing that
+    header's many address forms is not a reason to weaken this safety gate.
+    Uvicorn may already have rewritten the peer; a remote effective peer is
+    always rejected, and proxy headers never turn it back into loopback.
+    """
+    try:
+        address = ipaddress.ip_address(str(peer or ""))
+    except ValueError:
+        return False
+    if not address.is_loopback:
+        return False
+    proxy_headers = ("x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host", "x-forwarded-proto", "via")
+    if not any(name in headers for name in proxy_headers):
+        return True
+    if "forwarded" in headers or not trusted_proxies:
+        return False
+    networks = tuple(ipaddress.ip_network(item, strict=False) for item in trusted_proxies)
+    if not any(address in network for network in networks):
+        return False
+    forwarded = headers.get("x-forwarded-for")
+    real = headers.get("x-real-ip")
+    try:
+        if forwarded is not None:
+            if len(forwarded) > 4096:
+                return False
+            chain = forwarded.split(",")
+            if not 1 <= len(chain) <= 32 or any(not item.strip() for item in chain):
+                return False
+            for item in chain:
+                ipaddress.ip_address(item.strip())
+            effective = ipaddress.ip_address(resolve_client_ip(str(address), forwarded, trusted_proxies))
+        elif real is not None:
+            effective = ipaddress.ip_address(real.strip())
+        else:
+            return False
+        if real is not None and ipaddress.ip_address(real.strip()) != effective:
+            return False
+    except ValueError:
+        return False
+    return effective.is_loopback
