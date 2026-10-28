@@ -75,10 +75,37 @@ def python_node(text: str, symbol: str) -> ast.AST:
     raise ValueError(f"declaration not found: {symbol}")
 
 
+def normalized_shape(node: Any) -> Any:
+    """Interpreter-version-stable shape of an AST subtree.
+
+    A raw ast.dump differs by CPython version even for identical source:
+    3.13 stopped emitting empty-list fields, and 3.12 added
+    FunctionDef/ClassDef.type_params. Omitting empty lists from both sides
+    removes the version drift without hiding real behavior changes, because
+    an empty optional field carries no behavior.
+    """
+
+    if isinstance(node, ast.AST):
+        fields = []
+        for name, value in ast.iter_fields(node):
+            shaped = normalized_shape(value)
+            if isinstance(shaped, list) and not shaped:
+                continue
+            fields.append((name, shaped))
+        return [type(node).__name__, fields]
+    if isinstance(node, list):
+        return [normalized_shape(item) for item in node]
+    if node is None or isinstance(node, (bool, int, float, str)):
+        return node
+    if isinstance(node, bytes):
+        return node.decode("utf-8", "replace")
+    return f"{type(node).__name__}:{node!r}"
+
+
 def source_fingerprint(text: str, symbol: str) -> str:
     """AST guard detects a behavior change and requires human re-verification."""
-    tree = ast.dump(python_node(text, symbol), include_attributes=False)
-    return hashlib.sha256(tree.encode()).hexdigest()
+    shape = json.dumps(normalized_shape(python_node(text, symbol)), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(shape.encode("utf-8")).hexdigest()
 
 
 def fact_value(root: Path, source: dict[str, Any]) -> Any:
