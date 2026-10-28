@@ -1,0 +1,6 @@
+{
+  "name": "general_worker",
+  "version": "1.0.0",
+  "description": "通用执行助手：承接目标明确的文件处理、脚本执行、检索整理、批量操作和测试验证；不再调度子智能体。",
+  "trigger": "trigger.md"
+}

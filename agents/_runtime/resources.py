@@ -45,6 +45,7 @@ def _descriptor_text(descriptors: tuple[SkillDescriptor, ...], max_chars: int) -
     pieces = []
     for descriptor in descriptors:
         piece = f"### {descriptor.title}"
+        piece += f"\n来源：{descriptor.relative_path}"
         if descriptor.description:
             piece += f"\n{descriptor.description}"
         pieces.append(piece)
@@ -62,10 +63,14 @@ def build_agent_prompt_bundle(
     char_limits = prompt_config.get("char_limits") or {}
     skill_limit = max(0, int(char_limits.get("skill_prompts", 4000)))
     sources = load_prompt_source_registry(root, user)
+    policy = MainAgentSourcePolicy.from_config(config)
     skills = sources.select_skills(
         allow={
-            "shared": capabilities.shared_skills,
-            "user": (),
+            "shared": (
+                policy.shared_skills.selector()
+                if "*" in capabilities.shared_skills else capabilities.shared_skills
+            ),
+            "user": capabilities.user_skills,
         }
     )
     skill_text = _descriptor_text(skills, skill_limit)
@@ -111,7 +116,7 @@ def build_agent_tool_registry(
     discovered = discover_tools(root, user)
     allowed = set(definition.capabilities.plugin_tools)
     forbidden = {"subagent_dispatch"}
-    unknown = sorted((allowed - forbidden) - set(discovered.tools))
+    unknown = sorted((allowed - forbidden - {"*"}) - set(discovered.tools))
     if unknown:
         raise AgentCapabilityError(
             f"子代理 {definition.name} 工具白名单包含未知插件：{', '.join(unknown)}"
@@ -120,6 +125,6 @@ def build_agent_tool_registry(
     selected = {
         name: tool
         for name, tool in runtime_registry.tools.items()
-        if name in allowed and name not in forbidden
+        if ("*" in allowed or name in allowed) and name not in forbidden
     }
     return runtime_registry.selected(set(selected))

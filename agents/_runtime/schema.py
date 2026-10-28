@@ -228,13 +228,15 @@ def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabi
     inherit_request = context.get("inherit_current_request", False)
     if not isinstance(inherit_history, bool) or not isinstance(inherit_request, bool):
         raise AgentManifestError(f"context 继承开关必须是布尔值：{path}")
+    _allow_list(skills, "user", field="prompt_sources.skills", path=path)
     return AgentCapabilities(
         exposure="internal" if exposure == "internal" else "tool",
         allowed_callers=callers,
         plugin_tools=plugin_tools,
         max_tool_iterations=max_iterations,
         shared_skills=_allow_list(skills, "shared", field="prompt_sources.skills", path=path),
-        user_skills=_allow_list(skills, "user", field="prompt_sources.skills", path=path),
+        # Legacy user-skill declarations were never injected; retain that boundary.
+        user_skills=(),
         global_expand=_allow_list(expand, "global", field="prompt_sources.expand", path=path),
         shared_expand=_allow_list(expand, "shared", field="prompt_sources.expand", path=path),
         user_expand=_allow_list(expand, "user", field="prompt_sources.expand", path=path),
@@ -253,11 +255,13 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
     internal_mode = raw.get("internal_mode", True)
     global_knowledge = raw.get("global_knowledge", False)
     shared_knowledge = raw.get("shared_knowledge", False)
+    user_knowledge = raw.get("user_knowledge", False)
     inherit_main_history = raw.get("inherit_main_history", False)
     boolean_fields = {
         "internal_mode": internal_mode,
         "global_knowledge": global_knowledge,
         "shared_knowledge": shared_knowledge,
+        "user_knowledge": user_knowledge,
         "inherit_main_history": inherit_main_history,
     }
     invalid_booleans = [name for name, value in boolean_fields.items() if not isinstance(value, bool)]
@@ -285,6 +289,12 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         field="tools.shared_skills",
         path=path,
     )
+    user_skills = _allow_list(
+        tools_raw.get("user_skills"),
+        "allow",
+        field="tools.user_skills",
+        path=path,
+    )
     max_iterations = tools_raw.get("max_iterations", 80)
     if (
         isinstance(max_iterations, bool)
@@ -297,6 +307,7 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         for scope, enabled in (
             ("global", global_knowledge),
             ("shared", shared_knowledge),
+            ("user", user_knowledge),
         )
         if enabled
     )
@@ -306,7 +317,7 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         plugin_tools=plugin_tools,
         max_tool_iterations=max_iterations,
         shared_skills=shared_skills,
-        user_skills=(),
+        user_skills=user_skills,
         global_expand=(),
         shared_expand=(),
         user_expand=(),

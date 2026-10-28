@@ -1,0 +1,38 @@
+{
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "task": {"type": "string", "minLength": 1, "pattern": "\\S"},
+      "context": {"type": "string"},
+      "constraints": {"type": "array", "items": {"type": "string"}},
+      "acceptance_criteria": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["task"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string", "enum": ["completed", "partial", "blocked", "failed"]},
+      "summary": {"type": "string"},
+      "results": {"type": "array", "items": {"type": "string"}},
+      "verification": {"type": "array", "items": {"type": "string"}},
+      "remaining": {"type": "array", "items": {"type": "string"}},
+      "artifacts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "scope": {"type": "string", "enum": ["download", "file_upload"]},
+            "relative_path": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1}
+          },
+          "required": ["scope", "relative_path", "name"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["status", "summary", "results", "verification", "remaining", "artifacts"],
+    "additionalProperties": false
+  }
+}
