@@ -13,6 +13,7 @@ from run.config import MainAgentSourcePolicy
 from run.config.user_skeleton import (
     REQUIRED_USER_DIRS,
     TEMPLATE_ONLY_EMPTY_DIRS,
+    TEMPLATE_BACKGROUND_FILE,
 )
 
 from tests.template_tests.base import begin_report
@@ -84,6 +85,19 @@ def _validate(
                 "user.directories", "用户资源、记忆、知识与工作目录均已初始化"
             )
         if template_mode:
+            from PIL import Image
+
+            try:
+                background = destination / TEMPLATE_BACKGROUND_FILE
+                if background.stat().st_size > 100 * 1024 * 1024:
+                    raise ValueError("默认背景超过 100 MB")
+                with Image.open(background) as image:
+                    if image.format != "WEBP":
+                        raise ValueError("默认背景必须为有效 WebP")
+                    image.verify()
+                report.passed("user.background_template", "默认背景为静态 WebP，仅新用户复制、默认不启用")
+            except (OSError, ValueError) as exc:
+                report.failed("user.background_template", str(exc))
             for relative in TEMPLATE_ONLY_EMPTY_DIRS:
                 entries = sorted(
                     item.name for item in (destination / relative).iterdir()

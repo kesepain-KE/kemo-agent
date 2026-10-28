@@ -11,6 +11,8 @@ python -m tests.template_tests.user --target users/<name>
 - `REQUIRED_USER_DIRS` 中的必需目录可以由创建器和更新器幂等补齐；`runtime/background_jobs/`、
   `history/thumbnails/` 和 `web_preferences.json` 只在运行时按需生成；
 - 参考用户模板的 `history/` 只保留目录标记，不预置 SQLite、旧索引或会话正文；
+- 参考模板根目录包含有效的 `background.webp` 静态背景，复制给新用户但默认不启用；
+  已有用户目录修复不会补入或覆盖背景，网页背景不属于聊天附件或模型输入；
 - 参考模板只保留 `improve/.gitkeep`，不预置二进制数据库、Markdown 碎片或 `data.json`；复制为真实用户后可初始化独立 `improve/memory.sqlite3`，并通过表结构完整性检查；
 - 多用户发现和目录解析互相隔离；报告不回显 Provider 密钥。
 

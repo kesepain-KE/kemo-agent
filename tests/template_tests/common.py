@@ -159,13 +159,17 @@ try:
         package_path = getattr(package, "__path__", None)
         if package_path is not None and str(message_root) not in package_path:
             package_path.insert(0, str(message_root))
-    module_spec = importlib.util.spec_from_file_location(
-        "_kemo_template_contract_probe", path
-    )
-    if module_spec is None or module_spec.loader is None:
-        raise RuntimeError("无法创建 Python 模块加载器")
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    if path.is_relative_to(sandbox_root / "message" / "out"):
+        from message.plugin_contracts import _import_entry
+        module = _import_entry(path, "contract_probe")
+    else:
+        module_spec = importlib.util.spec_from_file_location(
+            "_kemo_template_contract_probe", path
+        )
+        if module_spec is None or module_spec.loader is None:
+            raise RuntimeError("无法创建 Python 模块加载器")
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
     checked = []
     for name, arity in specification.get("required", {}).items():
         function = getattr(module, name, None)

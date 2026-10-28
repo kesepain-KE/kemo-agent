@@ -9,6 +9,8 @@ python -m tests.template_tests.agent --target users/<user>/agents/<name>
 - 根目录清单能被 `discover_agents()` 发现，名称、指令、触发注册和能力配置有效；
 - `AGENT.md` 与 `trigger.md` 非空，公开/内部调用权限与发现结果一致；
 - 输入和输出是 object JSON Schema，声明的插件工具在当前框架存在；
+- 插件 `allow=["*"]` 是动态当前用户授权选择器，不是名为 `*` 的插件；
+  实际运行仍与用户策略及启用状态求交，并排除子代理调度；
 - 使用自定义执行器时，清单同目录的薄入口提供同步
   `execute(context, input_data) -> AgentRunResult`；
 - 动态验收使用假 Provider 和 Schema 样例完成输入到输出闭环，不消耗真实模型额度。

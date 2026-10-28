@@ -116,7 +116,7 @@ def _validate(
             str(item.tool.get("name") or "")
             for item in discover_plugin_manifests(repository_root)
         }
-        unavailable = sorted(set(definition.capabilities.plugin_tools) - plugin_names)
+        unavailable = sorted(set(definition.capabilities.plugin_tools) - {"*"} - plugin_names)
         if unavailable:
             report.failed(
                 "agent.tool_permissions",
