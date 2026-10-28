@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from run.config import user_dir
+from run.history.session_leases import delete_session_leases
 from run.history.store_core import (
     _json,
     _object,
@@ -83,10 +84,37 @@ def delete_window(directory: Path) -> bool:
             "DELETE FROM history_windows WHERE window_kind=? AND window_name=?",
             (kind, name),
         )
+        deleted = result.rowcount > 0
+        if deleted and kind == "archive" and row is not None:
+            source, session_id = str(row["source"]), str(row["session_id"])
+            remaining = database.execute(
+                "SELECT window_name FROM history_windows WHERE window_kind='archive' "
+                "AND source=? AND session_id=? ORDER BY updated_at DESC,window_name DESC LIMIT 1",
+                (source, session_id),
+            ).fetchone()
+            if remaining is None:
+                _delete_session_windows(database, source, session_id)
+                database.execute("DELETE FROM history_active_sessions WHERE source=? AND session_id=?", (source, session_id))
+                database.execute("DELETE FROM history_sessions WHERE source=? AND session_id=?", (source, session_id))
+            else:
+                from run.history.registry_store import _upsert_session_row
+                stored = database.execute(
+                    "SELECT record_json FROM history_sessions WHERE source=? AND session_id=?",
+                    (source, session_id),
+                ).fetchone()
+                if stored is not None:
+                    record = _object(stored["record_json"], {})
+                    if record.get("archive_window") == name:
+                        record["archive_window"] = str(remaining["window_name"])
+                        _upsert_session_row(database, record)
+            database.execute(
+                "INSERT INTO history_meta(key,value) VALUES('registry_revision','1') "
+                "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1"
+            )
     from run.history import runtime_cache
 
     runtime_cache.drop(window_path(root, user, name, kind="runtime"))
-    return result.rowcount > 0
+    return deleted
 
 
 def list_windows(
@@ -149,14 +177,14 @@ def rename_windows(
 
 
 def delete_session_windows(root: Path, user: str, source: str, session_id: str) -> int:
-    with connection(root, user, write=True) as database:
-        return _delete_session_windows(database, source, session_id)
+    """Compatibility alias: all public session deletion uses one orchestrator."""
+    from run.history.delete_orchestrator import delete_history_sessions
+    return delete_history_sessions(root, user, source, session_id)[1]
 
 
 def _delete_session_windows(database: sqlite3.Connection, source: str, session_id: str) -> int:
     """Shared transaction body for manual deletion and lifecycle cleanup."""
-    if source == 'web':
-        database.execute('DELETE FROM history_web_leases WHERE session_id=?', (session_id,))
+    delete_session_leases(database, source, session_id)
     database.execute(
         """
         INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
@@ -213,57 +241,6 @@ def _delete_session_windows(database: sqlite3.Connection, source: str, session_i
 
 
 def delete_source_windows(root: Path, user: str, source: str) -> tuple[int, int]:
-    with connection(root, user, write=True) as database:
-        session_rows = database.execute(
-            "SELECT DISTINCT session_id FROM history_windows WHERE source=?",
-            (str(source),),
-        ).fetchall()
-        database.executemany(
-            """
-            INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
-            VALUES(?, ?, datetime('now'))
-            ON CONFLICT(source, session_id) DO UPDATE SET
-                deleted_at=excluded.deleted_at
-            """,
-            [(str(source), str(row["session_id"])) for row in session_rows],
-        )
-        session_count = int(
-            database.execute(
-                "SELECT COUNT(DISTINCT session_id) FROM history_windows WHERE source=?",
-                (source,),
-            ).fetchone()[0]
-        )
-        windows = database.execute(
-            "SELECT window_kind, window_name, session_id, data_json "
-            "FROM history_windows WHERE source=?",
-            (source,),
-        ).fetchall()
-        for row in windows:
-            stored_data = _object(row["data_json"], {})
-            _remember_deleted_window(
-                database,
-                kind=str(row["window_kind"]),
-                name=str(row["window_name"]),
-                source=source,
-                session_id=str(row["session_id"] or ""),
-                session_generation=(
-                    str(stored_data.get("session_generation") or "")
-                    if isinstance(stored_data, dict)
-                    else ""
-                ),
-            )
-        database.executemany(
-            "DELETE FROM history_rounds WHERE window_kind=? AND window_name=?",
-            [(row["window_kind"], row["window_name"]) for row in windows],
-        )
-        database.execute(
-            "DELETE FROM history_context_summaries WHERE source=?", (source,)
-        )
-        database.execute("DELETE FROM history_messages WHERE source=?", (source,))
-        result = database.execute(
-            "DELETE FROM history_windows WHERE source=?", (source,)
-        )
-    from run.history import runtime_cache
-
-    runtime_cache.drop_source(root, user, source)
-    return session_count, result.rowcount
+    """Compatibility alias; no second, window-only deletion transaction."""
+    from run.history.delete_orchestrator import delete_history_sessions
+    return delete_history_sessions(root, user, source)

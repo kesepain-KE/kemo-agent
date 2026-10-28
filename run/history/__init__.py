@@ -30,7 +30,10 @@ from run.history.session_api import (
 )
 from run.history.session_payload import session_payload
 
-_DOMAIN_MODULES = ("index", "store", "summary_scheduler", "retention", "web_lifecycle")
+_DOMAIN_MODULES = (
+    "index", "store", "summary_scheduler", "retention", "web_lifecycle",
+    "session_marks", "archive_catalog", "archive_reader", "lease_presence",
+)
 
 
 def __getattr__(name: str):

@@ -10,6 +10,10 @@ from typing import Any, Callable, Collection
 from run.history.store_core import _object, connection, database_path
 from run.history.registry_store import _upsert_session_row
 from run.history.window_store import _delete_session_windows
+from run.history.session_leases import (
+    lease_client_key as _lease_client_key,
+    lease_scope_sql as _lease_scope_sql,
+)
 
 WEB_LEASE_SECONDS = 90
 WEB_LEASE_CHECKPOINT_SECONDS = 30
@@ -18,18 +22,6 @@ WEB_STARTUP_INSPECTION_DELAY_SECONDS = 90
 WEB_INSPECTION_RESULT_SAMPLE_LIMIT = 20
 _LEASE_SCOPE_SEPARATOR = '\x1f'
 
-
-def _lease_client_key(source: str, client_id: str) -> str:
-    # v6 Web rows predate source-scoped leases and remain plain for migration
-    # compatibility. Non-Web sources are prefixed to prevent session-id
-    # collisions from making one channel look alive in another.
-    return client_id if source == 'web' else f'{source}{_LEASE_SCOPE_SEPARATOR}{client_id}'
-
-
-def _lease_scope_sql(source: str) -> tuple[str, str]:
-    if source == 'web':
-        return "l.client_id NOT LIKE ?", f'%{_LEASE_SCOPE_SEPARATOR}%'
-    return "l.client_id LIKE ?", f'{source}{_LEASE_SCOPE_SEPARATOR}%'
 
 _HAS_DATA = """(
     s.rounds>0
@@ -49,7 +41,7 @@ def _stale_offline_sql(cutoff_placeholder: str = "?") -> str:
     AND s.memory_status!='processing' AND s.summary_status!='processing'
     AND julianday(s.updated_at)<=julianday({cutoff_placeholder})
     AND NOT EXISTS (SELECT 1 FROM history_web_leases l WHERE l.session_id=s.session_id
-        AND l.expires_at>? AND instr(l.client_id, char(31))=0)
+        AND l.expires_at>? AND l.released=0 AND instr(l.client_id, char(31))=0)
 """
 
 
@@ -76,6 +68,64 @@ _STALE_OFFLINE = _stale_offline_sql()
 _STARTUP_NEEDS_REVIEW = _startup_needs_review_sql()
 
 
+def recover_expired_processing(root: Path, user: str, *, now: float) -> int:
+    """Recycle expired worker leases, never a live/fresh processing claim."""
+    from run.history.index_core import MEMORY_CLAIM_STALE_SECONDS, SUMMARY_CLAIM_STALE_SECONDS
+    recovered = 0
+    candidate_sql = """SELECT s.record_json FROM history_sessions s
+        WHERE s.source='web' AND s.lifecycle!='deleted'
+          AND s.run_state NOT IN ('running','queued','pending','stopping')
+          AND NOT EXISTS(SELECT 1 FROM history_web_leases l
+              WHERE l.session_id=s.session_id AND l.expires_at>? AND l.released=0
+                  AND instr(l.client_id, char(31))=0)
+          AND (
+            (s.memory_status='processing' AND julianday(COALESCE(
+              NULLIF(json_extract(s.record_json,'$.memory_claimed_at'),''),
+              NULLIF(json_extract(s.record_json,'$.memory_state_updated_at'),''),s.updated_at))
+              <=julianday(?,'unixepoch'))
+            OR (s.summary_status='processing' AND julianday(COALESCE(
+              NULLIF(json_extract(s.record_json,'$.summary_claimed_at'),''),
+              NULLIF(json_extract(s.record_json,'$.summary_state_updated_at'),''),s.updated_at))
+              <=julianday(?,'unixepoch'))
+          ) ORDER BY s.updated_at,s.session_id LIMIT 100"""
+    params = (now, now - MEMORY_CLAIM_STALE_SECONDS, now - SUMMARY_CLAIM_STALE_SECONDS)
+    with connection(root, user) as db:
+        if db.execute(candidate_sql, params).fetchone() is None:
+            return 0
+    with connection(root, user, write=True) as db:
+        # Recheck under the write lease; a worker may have renewed its claim.
+        rows = db.execute(candidate_sql, params).fetchall()
+        for row in rows:
+            record = _object(row["record_json"], {})
+            changed = False
+            for kind, seconds in (("memory", MEMORY_CLAIM_STALE_SECONDS),
+                                  ("summary", SUMMARY_CLAIM_STALE_SECONDS)):
+                if record.get(f"{kind}_status") != "processing":
+                    continue
+                raw = record.get(f"{kind}_claimed_at") or record.get(f"{kind}_state_updated_at") or record.get("updated_at")
+                try:
+                    started = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    expired = now - started.timestamp() >= seconds
+                except (TypeError, ValueError, OverflowError):
+                    expired = False  # corrupt/unknown is not proof of expiry
+                if not expired:
+                    continue
+                record[f"{kind}_status"] = "queued"
+                record[f"{kind}_lease_recovered_at"] = datetime.fromtimestamp(now, timezone.utc).isoformat()
+                for key in list(record):
+                    if key.startswith(f"{kind}_claim"):
+                        record.pop(key, None)
+                changed = True
+            if changed:
+                _upsert_session_row(db, record)
+                recovered += 1
+        if recovered:
+            _bump_registry(db, datetime.fromtimestamp(now, timezone.utc).isoformat())
+    return recovered
+
+
 def touch_session_lease(root: Path, user: str, source: str, session_id: str,
                         client_id: str, *, now: float | None = None) -> bool:
     """Small durable presence checkpoint; a late heartbeat never recreates history.
@@ -86,11 +136,13 @@ def touch_session_lease(root: Path, user: str, source: str, session_id: str,
     current = time.time() if now is None else now
     stored_client_id = _lease_client_key(source, client_id)
     with connection(root, user) as db:
-        row = db.execute("""SELECT l.expires_at FROM history_sessions s
+        row = db.execute("""SELECT l.expires_at, l.released FROM history_sessions s
             LEFT JOIN history_web_leases l ON l.session_id=s.session_id AND l.client_id=?
             WHERE s.source=? AND s.session_id=? AND s.lifecycle='open'""",
             (stored_client_id, source, session_id)).fetchone()
         if row is None:
+            return False
+        if row['released']:
             return False
         if row['expires_at'] is not None and row['expires_at'] > current + WEB_LEASE_SECONDS - WEB_LEASE_CHECKPOINT_SECONDS:
             return True
@@ -98,10 +150,11 @@ def touch_session_lease(root: Path, user: str, source: str, session_id: str,
         if db.execute("SELECT 1 FROM history_sessions WHERE source=? AND session_id=? AND lifecycle='open'",
                       (source, session_id)).fetchone() is None:
             return False
-        db.execute("""INSERT INTO history_web_leases(session_id, client_id, expires_at) VALUES(?, ?, ?)
-            ON CONFLICT(session_id, client_id) DO UPDATE SET expires_at=MAX(expires_at, excluded.expires_at)""",
+        changed = db.execute("""INSERT INTO history_web_leases(session_id, client_id, expires_at) VALUES(?, ?, ?)
+            ON CONFLICT(session_id, client_id) DO UPDATE SET expires_at=MAX(expires_at, excluded.expires_at)
+            WHERE released=0""",
             (session_id, stored_client_id, current + WEB_LEASE_SECONDS))
-    return True
+        return bool(changed.rowcount)
 
 
 def touch_web_session_lease(root: Path, user: str, session_id: str, client_id: str,
@@ -124,7 +177,7 @@ def active_session_lease_clients(root: Path, user: str, source: str, session_id:
             """SELECT l.client_id FROM history_web_leases l
                JOIN history_sessions s ON s.session_id=l.session_id
                WHERE s.source=? AND s.session_id=? AND s.lifecycle='open'
-                 AND l.expires_at>? AND l.client_id!=? AND """ + scope_sql + """
+                 AND l.expires_at>? AND l.released=0 AND l.client_id!=? AND """ + scope_sql + """
                ORDER BY l.client_id""",
             (source, session_id, current, excluded, scope_value),
         ).fetchall()
@@ -135,7 +188,7 @@ def active_session_lease_clients(root: Path, user: str, source: str, session_id:
 
 def release_durable_session_lease(root: Path, user: str, source: str,
                                   session_id: str, client_id: str) -> bool:
-    """Release one explicitly closed client; pagehide still uses natural expiry."""
+    """Release an explicitly closed client; ordered pagehide uses lease_presence."""
     if not database_path(root, user).is_file():
         return False
     with connection(root, user, write=True) as db:
@@ -205,6 +258,7 @@ def inspect_stale_web_sessions(
 
     current = time.time() if now is None else now
     timestamp = datetime.fromtimestamp(current, timezone.utc).isoformat()
+    recover_expired_processing(root, user, now=current)
     idle_cutoff = datetime.fromtimestamp(
         current - max(1.0, float(idle_seconds)), timezone.utc
     ).isoformat()
@@ -257,7 +311,6 @@ def inspect_stale_web_sessions(
                         _delete_session_windows(database, 'web', session_id)
                         database.execute("DELETE FROM history_active_sessions WHERE source='web' AND session_id=?", (session_id,))
                         database.execute("DELETE FROM history_sessions WHERE source='web' AND session_id=?", (session_id,))
-                        database.execute('DELETE FROM history_web_leases WHERE session_id=?', (session_id,))
                         _bump_registry(database, timestamp)
                         action = 'deleted'
                     else:
@@ -355,7 +408,6 @@ def cleanup_empty_web_sessions(root: Path, user: str, *, now: float | None = Non
                 _delete_session_windows(db, 'web', sid)
                 db.execute("DELETE FROM history_active_sessions WHERE source='web' AND session_id=?", (sid,))
                 db.execute("DELETE FROM history_sessions WHERE source='web' AND session_id=?", (sid,))
-                db.execute('DELETE FROM history_web_leases WHERE session_id=?', (sid,))
                 _bump_registry(db, datetime.fromtimestamp(current, timezone.utc).isoformat())
             result['deleted_sessions'].append(sid)
         finally:

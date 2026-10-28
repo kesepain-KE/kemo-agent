@@ -41,6 +41,9 @@ def session_payload(
 
     return {
         "source": str(record.get("source") or ""),
+        "pinned": bool(record.get("pinned_at")),
+        "pinned_at": str(record.get("pinned_at") or ""),
+        "favorite": bool(record.get("favorite")),
         "bound_platform": str(record.get("bound_platform") or ""),
         "session_id": str(record.get("session_id") or ""),
         "conversation_id": str(record.get("conversation_id") or ""),

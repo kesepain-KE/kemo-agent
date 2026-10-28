@@ -423,62 +423,13 @@ def retry_summary(
 
 
 def remove_session(root: Path, user: str, source: str, session_id: str) -> None:
-    with index_lock(root, user):
-        # Keep a durable delete fence so an in-flight terminal writer cannot
-        # recreate this session after the registry row is removed.
-        from run.history.store import connection
-
-        with connection(root, user, write=True) as database:
-            database.execute(
-                """
-                INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
-                VALUES(?, ?, datetime('now'))
-                ON CONFLICT(source, session_id) DO UPDATE SET
-                    deleted_at=excluded.deleted_at
-                """,
-                (str(source), str(session_id)),
-            )
-        index = _load_index_unlocked(root, user)
-        index.setdefault("sessions", {}).pop(session_key(source, session_id), None)
-        for active_key, active_session in list(index.setdefault("active", {}).items()):
-            if _active_matches(active_session, source, session_id):
-                index["active"].pop(active_key, None)
-        _write_index_unlocked(root, user, index)
+    from run.history.delete_orchestrator import delete_history_sessions
+    delete_history_sessions(root, user, source, session_id)
 
 
 def remove_all_sessions(root: Path, user: str, source: str) -> int:
-    with index_lock(root, user):
-        from run.history.store import connection
-
-        index = _load_index_unlocked(root, user)
-        sessions = index.setdefault("sessions", {})
-        targets = [
-            (key, record)
-            for key, record in sessions.items()
-            if isinstance(record, dict) and record.get("source") == source
-        ]
-        target_ids = {str(record.get("session_id") or "") for _, record in targets}
-        with connection(root, user, write=True) as database:
-            database.executemany(
-                """
-                INSERT INTO history_deleted_sessions(source, session_id, deleted_at)
-                VALUES(?, ?, datetime('now'))
-                ON CONFLICT(source, session_id) DO UPDATE SET
-                    deleted_at=excluded.deleted_at
-                """,
-                [(str(source), session_id) for session_id in target_ids if session_id],
-            )
-        for key, _ in targets:
-            sessions.pop(key, None)
-        for active_key, active_session in list(index.setdefault("active", {}).items()):
-            if any(
-                _active_matches(active_session, source, session_id)
-                for session_id in target_ids
-            ):
-                index["active"].pop(active_key, None)
-        if targets:
-            _write_index_unlocked(root, user, index)
-        return len(targets)
+    from run.history.delete_orchestrator import delete_history_sessions
+    return delete_history_sessions(root, user, source)[0]
 
 
 def list_records(
@@ -512,6 +463,7 @@ def list_records_page(
     limit: int = 50,
     before_updated_at: str = "",
     archive_date: str = "",
+    favorites_only: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     records, has_more = query_session_records(
         root,
@@ -521,5 +473,6 @@ def list_records_page(
         limit=max(1, min(100, int(limit))),
         before_updated_at=before_updated_at,
         archive_date=archive_date,
+        favorites_only=favorites_only,
     )
     return [copy.deepcopy(record) for record in records], has_more

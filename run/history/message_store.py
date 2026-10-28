@@ -194,10 +194,25 @@ def _sync_archive_messages(
             candidates=candidates,
         ):
             return
-        database.execute(
-            "DELETE FROM history_messages WHERE window_name=?", (window_name,)
+        previous = {int(row["message_index"]): row for row in existing}
+        wanted = {int(candidate[1]) for candidate in candidates}
+        database.executemany(
+            "DELETE FROM history_messages WHERE window_name=? AND message_index=?",
+            [(window_name, index) for index in previous.keys() - wanted],
         )
-        database.executemany(_MESSAGE_INSERT_SQL, candidates)
+        changed = [
+            candidate for candidate in candidates
+            if (row := previous.get(int(candidate[1]))) is None
+            or str(row["message_json"]) != str(candidate[7])
+            or str(row["source"]) != source or str(row["session_id"]) != session_id
+        ]
+        database.executemany(_MESSAGE_INSERT_SQL + """
+            ON CONFLICT(window_name,message_index) DO UPDATE SET
+              source=excluded.source,session_id=excluded.session_id,
+              round_number=excluded.round_number,role=excluded.role,
+              content_text=excluded.content_text,message_json=excluded.message_json,
+              updated_at=excluded.updated_at
+        """, changed)
         return
     if len(existing) < len(candidates):
         database.executemany(_MESSAGE_INSERT_SQL, candidates[len(existing) :])

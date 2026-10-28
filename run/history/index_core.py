@@ -14,6 +14,7 @@ import hashlib
 import os
 from pathlib import Path
 import threading
+import time
 import uuid
 from typing import Any, Iterator
 
@@ -29,6 +30,7 @@ from run.history.store import (
     write_registry,
 )
 from run.config import user_dir
+from run.history.registry_store import RegistryConflictError
 
 INDEX_SCHEMA_VERSION = 3
 INDEX_FILENAME = "history.sqlite3"
@@ -438,17 +440,24 @@ def load_index(root: Path, user: str, *, reconcile: bool = True) -> dict[str, An
     """Load the per-user SQLite registry atomically."""
 
     with index_lock(root, user):
-        index = _load_index_unlocked(root, user)
-        changed = False
-        # A missing registry can be rebuilt from SQLite windows without any
-        # filesystem scan. Normal reads only repair registry-local metadata.
-        if reconcile and not index.get("sessions"):
-            changed = _reconcile_unlocked(root, user, index) or changed
-        elif reconcile:
-            changed = _reconcile_metadata_unlocked(index) or changed
-        if changed:
-            _write_index_unlocked(root, user, index)
-        return copy.deepcopy(index)
+        for attempt in range(3):
+            index = _load_index_unlocked(root, user)
+            changed = False
+            # Recompute from a fresh snapshot after conflict; never replay the
+            # stale repair over an intervening writer's real state.
+            if reconcile and not index.get("sessions"):
+                changed = _reconcile_unlocked(root, user, index) or changed
+            elif reconcile:
+                changed = _reconcile_metadata_unlocked(index) or changed
+            try:
+                if changed:
+                    _write_index_unlocked(root, user, index)
+                return copy.deepcopy(index)
+            except RegistryConflictError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+    raise AssertionError("history reconcile retry exhausted")
 
 def _load_index_unlocked(root: Path, user: str) -> dict[str, Any]:
     sessions, active = read_registry(root, user)
@@ -467,14 +476,12 @@ def _write_index_unlocked(
     root: Path, user: str, index: dict[str, Any]
 ) -> dict[str, Any]:
     index["schema_version"] = INDEX_SCHEMA_VERSION
-    index["revision"] = max(0, int(index.get("revision") or 0)) + 1
     index["updated_at"] = _now()
-    write_registry(
+    index["revision"] = write_registry(
         root,
         user,
         index.setdefault("sessions", {}),
         index.setdefault("active", {}),
-        revision=int(index["revision"]),
         updated_at=str(index["updated_at"]),
     )
     return copy.deepcopy(index)
@@ -505,8 +512,8 @@ def upsert_window(
             # A terminal writer from an older reservation must not move the
             # registry back to a session generation that has already been
             # replaced.
-            assert previous is not None  # current_generation came from this record
-            return copy.deepcopy(previous)
+            from run.history.registry_store import RegistryConflictError
+            raise RegistryConflictError("历史会话代际冲突，拒绝陈旧索引写入")
         record = build_window_record(
             source=source,
             session_id=session_id,

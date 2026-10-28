@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from run.history.history_models import (
     HistoryError,
@@ -279,41 +279,25 @@ def commit_window(
                 "items": items,
                 "data": data,
             }
-        stored_data = (
-            save_window(directory, stored_window)
-            if summary_cache is _SUMMARY_UNCHANGED
-            else save_window(
-                directory,
-                stored_window,
-                summary_cache=(
-                    summary_cache if isinstance(summary_cache, dict) else None
-                ),
-            )
-        )
+        factory: Callable[[dict[str, Any], dict[str, Any] | None], dict[str, Any]] | None = None
+        if directory.parent.name == "history" and directory.parent.parent.parent.name == "users":
+            def build_record(data, previous):
+                return build_window_record(source=str(data.get("source") or ""),
+                    session_id=str(data.get("session_id") or ""), directory=directory,
+                    data=data, previous=previous)
+            factory = build_record
+        # The summary sentinel is private to this layer, so omit it by using
+        # the storage sentinel rather than passing it through as cache data.
+        from run.history.window_rounds import _SUMMARY_UNSET
+        cache = _SUMMARY_UNSET if summary_cache is _SUMMARY_UNCHANGED else summary_cache
+        stored_data = save_window_bundle([(directory, stored_window, cache)],
+                                         session_record_factory=factory)[0]
         current_data = window.get("data")
         if isinstance(current_data, dict):
             current_data.clear()
             current_data.update(stored_data)
         else:
             window["data"] = stored_data
-        if (
-            directory.parent.name == "history"
-            and directory.parent.parent.parent.name == "users"
-        ):
-            try:
-                root = directory.parents[3]
-                upsert_index_window(
-                    root,
-                    str(stored_data.get("user") or directory.parent.parent.name),
-                    str(stored_data.get("source") or ""),
-                    str(stored_data.get("session_id") or ""),
-                    directory,
-                    stored_data,
-                )
-            except Exception:
-                # The committed window is authoritative. A missing registry
-                # can be rebuilt from the SQLite window table on the next read.
-                pass
 
 
 def commit_terminal_windows(

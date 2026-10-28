@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+# lifecycle='deleted' remains a supported legacy record value. Public deletion
+# now hard-deletes rows; read-side filters still protect imported/old records.
+
 import copy
 from pathlib import Path
 import sqlite3
 from typing import Any, Callable, Iterable, Iterator
+
+from run.history.session_listing import query_session_records, session_page_cursor
 
 from run.history.store_core import (
     _json,
@@ -16,10 +21,21 @@ from run.history.store_core import (
 )
 
 
+class RegistryConflictError(RuntimeError):
+    """A read/modify/write snapshot no longer owns the row it changes."""
+
+
+class RegistrySnapshot(dict):
+    def __init__(self, values=()):
+        super().__init__(values)
+        self.baseline = copy.deepcopy(dict(self))
+
+
 def read_registry(
     root: Path, user: str
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]]]:
     with connection(root, user) as database:
+        database.execute("BEGIN")
         session_rows = database.execute(
             "SELECT record_json FROM history_sessions"
         ).fetchall()
@@ -42,7 +58,7 @@ def read_registry(
         }
         for row in active_rows
     }
-    return sessions, active
+    return RegistrySnapshot(sessions), RegistrySnapshot(active)
 
 
 def read_registry_metadata(root: Path, user: str) -> dict[str, str]:
@@ -120,7 +136,7 @@ def _upsert_session_row(database: sqlite3.Connection, record: dict[str, Any]) ->
         and current_generation
         and incoming_generation != current_generation
     ):
-        return
+        raise RegistryConflictError("历史会话代际冲突，拒绝陈旧写入")
     database.execute(
         """
         INSERT INTO history_sessions(
@@ -336,196 +352,58 @@ def write_registry(
     sessions: dict[str, Any],
     active: dict[str, Any],
     *,
-    revision: int = 0,
     updated_at: str = "",
-) -> None:
+) -> int:
+    # Snapshots carry their original rows. Only changed keys are written and
+    # deletions are explicit (a key removed from that snapshot), never a diff
+    # against rows added by other connections after the read.
+    before = getattr(sessions, "baseline", {})
+    active_before = getattr(active, "baseline", {})
     with connection(root, user, write=True) as database:
-        existing_rows = database.execute(
-            "SELECT source, session_id, record_json FROM history_sessions"
-        ).fetchall()
-        existing = {
-            (str(row["source"]), str(row["session_id"])): str(row["record_json"])
-            for row in existing_rows
-        }
-        current_keys: set[tuple[str, str]] = set()
-        for record in sessions.values():
-            if not isinstance(record, dict):
+        for key in set(before) | set(sessions):
+            old, record = before.get(key), sessions.get(key)
+            if old == record:
                 continue
-            source = str(record.get("source") or "")
-            session_id = str(record.get("session_id") or "")
+            identity = record if isinstance(record, dict) else old
+            if not isinstance(identity, dict):
+                continue
+            source, session_id = str(identity.get("source") or ""), str(identity.get("session_id") or "")
             if not source or not session_id:
+                raise ValueError("历史会话记录缺少身份")
+            current = database.execute("SELECT record_json FROM history_sessions WHERE source=? AND session_id=?",
+                                       (source, session_id)).fetchone()
+            actual = _object(current["record_json"], {}) if current is not None else None
+            if isinstance(sessions, RegistrySnapshot) and actual != old:
+                raise RegistryConflictError(f"历史会话并发写入冲突：{source}/{session_id}")
+            if record is None:
+                database.execute("DELETE FROM history_sessions WHERE source=? AND session_id=?", (source, session_id))
+                database.execute("DELETE FROM history_active_sessions WHERE source=? AND session_id=?", (source, session_id))
+            elif _session_is_deleted(database, source=source, session_id=session_id):
+                raise RegistryConflictError("历史会话已删除，拒绝陈旧快照")
+            else:
+                _upsert_session_row(database, record)
+        for key in set(active_before) | set(active):
+            old, binding = active_before.get(key), active.get(key)
+            if old == binding:
                 continue
-            if _session_is_deleted(
-                database, source=source, session_id=session_id
-            ):
-                # A stale index snapshot must not resurrect a session that was
-                # deleted by another worker.
-                continue
-            key = (source, session_id)
-            current_keys.add(key)
-            rendered = _json(record)
-            if existing.get(key) == rendered:
-                continue
-            _upsert_session_row(database, record)
-        removed = set(existing) - current_keys
-        if removed:
-            database.executemany(
-                "DELETE FROM history_sessions WHERE source=? AND session_id=?",
-                sorted(removed),
-            )
-
-        existing_active_rows = database.execute(
-            "SELECT active_key, source, session_id FROM history_active_sessions"
-        ).fetchall()
-        existing_active = {
-            str(row["active_key"]): (str(row["source"]), str(row["session_id"]))
-            for row in existing_active_rows
-        }
-        current_active: dict[str, tuple[str, str]] = {}
-        for active_key, value in active.items():
-            if not isinstance(value, dict):
-                continue
-            source = str(value.get("source") or "")
-            session_id = str(value.get("session_id") or "")
-            if source and session_id:
-                if _session_is_deleted(
-                    database, source=source, session_id=session_id
-                ):
-                    continue
-                normalized_key = str(active_key)
-                current_active[normalized_key] = (source, session_id)
-                if existing_active.get(normalized_key) == (source, session_id):
-                    continue
-                database.execute(
-                    """
-                    INSERT INTO history_active_sessions(active_key, source, session_id)
-                    VALUES(?, ?, ?)
-                    ON CONFLICT(active_key) DO UPDATE SET
-                        source=excluded.source,
-                        session_id=excluded.session_id
-                    """,
-                    (normalized_key, source, session_id),
-                )
-        removed_active = set(existing_active) - set(current_active)
-        if removed_active:
-            database.executemany(
-                "DELETE FROM history_active_sessions WHERE active_key=?",
-                [(key,) for key in sorted(removed_active)],
-            )
-        database.execute(
-            "INSERT OR REPLACE INTO history_meta(key, value) VALUES('registry_revision', ?)",
-            (str(max(0, int(revision))),),
-        )
-        database.execute(
-            "INSERT OR REPLACE INTO history_meta(key, value) VALUES('registry_updated_at', ?)",
-            (str(updated_at or ""),),
-        )
-
-
-def query_session_records(
-    root: Path,
-    user: str,
-    *,
-    source: str | None = None,
-    query: str = "",
-    limit: int | None = None,
-    before_updated_at: str = "",
-    archive_date: str = "",
-) -> tuple[list[dict[str, Any]], bool]:
-    clauses = ["lifecycle != 'deleted'"]
-    params: list[Any] = []
-    if source is not None:
-        clauses.append("source=?")
-        params.append(source)
-    if query.strip():
-        clauses.append(
-            """(
-                lower(title) LIKE ? OR lower(summary) LIKE ? OR lower(session_id) LIKE ?
-                OR EXISTS (
-                    SELECT 1 FROM history_messages AS message
-                    WHERE message.source=history_sessions.source
-                      AND message.session_id=history_sessions.session_id
-                      AND lower(message.content_text) LIKE ?
-                )
-            )"""
-        )
-        needle = f"%{query.strip().casefold()}%"
-        params.extend((needle, needle, needle, needle))
-    if archive_date:
-        # Session timestamps are persisted as ISO-8601 UTC values.  SQLite
-        # first normalizes explicit offsets and then applies the Shanghai
-        # offset, so the filter follows the product's fixed natural-day rule.
-        clauses.append("date(updated_at, '+8 hours')=?")
-        params.append(archive_date)
-    if before_updated_at:
-        cursor_updated_at = before_updated_at
-        cursor_session_id = ""
-        cursor_source = ""
-        parsed_cursor = _object(before_updated_at, None)
-        if (
-            isinstance(parsed_cursor, list)
-            and len(parsed_cursor) in {2, 3}
-            and all(isinstance(item, str) for item in parsed_cursor)
-        ):
-            cursor_updated_at, cursor_session_id = parsed_cursor[:2]
-            if len(parsed_cursor) == 3:
-                cursor_source = parsed_cursor[2]
-        if cursor_session_id and cursor_source:
-            clauses.append(
-                """(
-                    updated_at < ? OR (
-                        updated_at = ? AND (
-                            session_id < ? OR (session_id = ? AND source < ?)
-                        )
-                    )
-                )"""
-            )
-            params.extend(
-                (
-                    cursor_updated_at,
-                    cursor_updated_at,
-                    cursor_session_id,
-                    cursor_session_id,
-                    cursor_source,
-                )
-            )
-        elif cursor_session_id:
-            clauses.append("(updated_at < ? OR (updated_at = ? AND session_id < ?))")
-            params.extend((cursor_updated_at, cursor_updated_at, cursor_session_id))
-        else:
-            # Backward compatibility for clients that used a timestamp cursor.
-            clauses.append("updated_at < ?")
-            params.append(cursor_updated_at)
-    requested = None if limit is None else max(1, int(limit))
-    sql = "SELECT record_json FROM history_sessions WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY updated_at DESC, session_id DESC, source DESC"
-    if requested is not None:
-        sql += " LIMIT ?"
-        params.append(requested + 1)
-    with connection(root, user) as database:
-        rows = database.execute(sql, params).fetchall()
-    has_more = requested is not None and len(rows) > requested
-    selected = rows[:requested] if requested is not None else rows
-    return [
-        record
-        for row in selected
-        if isinstance((record := _object(row["record_json"], {})), dict)
-    ], has_more
-
-
-def session_page_cursor(record: dict[str, Any]) -> str:
-    """Build an opaque, stable cursor for descending session pagination."""
-
-    updated_at = str(record.get("updated_at") or "")
-    session_id = str(record.get("session_id") or "")
-    source = str(record.get("source") or "")
-    return (
-        _json([updated_at, session_id, source])
-        if updated_at and session_id and source
-        else _json([updated_at, session_id])
-        if updated_at and session_id
-        else ""
-    )
+            current = database.execute("SELECT source, session_id FROM history_active_sessions WHERE active_key=?", (key,)).fetchone()
+            actual = dict(current) if current is not None else None
+            if isinstance(active, RegistrySnapshot) and actual != old:
+                raise RegistryConflictError("活跃会话绑定并发写入冲突")
+            if binding is None:
+                database.execute("DELETE FROM history_active_sessions WHERE active_key=?", (key,))
+            elif isinstance(binding, dict):
+                source, session_id = str(binding.get("source") or ""), str(binding.get("session_id") or "")
+                if not _session_is_deleted(database, source=source, session_id=session_id):
+                    database.execute("INSERT INTO history_active_sessions VALUES(?,?,?) ON CONFLICT(active_key) DO UPDATE SET source=excluded.source,session_id=excluded.session_id",
+                                     (key, source, session_id))
+        database.execute("INSERT INTO history_meta(key,value) VALUES('registry_revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(history_meta.value AS INTEGER)+1")
+        database.execute("INSERT OR REPLACE INTO history_meta(key,value) VALUES('registry_updated_at',?)", (updated_at,))
+        actual_revision = int(database.execute("SELECT value FROM history_meta WHERE key='registry_revision'").fetchone()[0])
+    for snapshot in (sessions, active):
+        if isinstance(snapshot, RegistrySnapshot):
+            snapshot.baseline = copy.deepcopy(dict(snapshot))
+    return actual_revision
 
 
 def message_windows(

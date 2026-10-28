@@ -16,10 +16,15 @@ import threading
 from typing import Any, Iterator
 
 from run.config import user_dir
+from run.infra import execute_schema, schema_migration
+from run.infra import SchemaMigrationError, schema_needs_repair
+from run.history.schema_contract import (
+    REQUIRED_COLUMNS, check_storage_references, migration_object, repair_existing_columns,
+)
 
 
 HISTORY_DB_FILENAME = "history.sqlite3"
-HISTORY_SCHEMA_VERSION = 6
+HISTORY_SCHEMA_VERSION = 8
 _SUMMARY_UNSET = object()
 _READY_DATABASES: set[str] = set()
 _READY_DATABASES_LOCK = threading.Lock()
@@ -138,27 +143,31 @@ def _migrate_archive_text_to_messages(connection: sqlite3.Connection) -> None:
         "FROM history_windows WHERE window_kind='archive'"
     ).fetchall()
     for row in rows:
-        text = _object(row["text_json"], {"schema_version": 1, "messages": []})
-        messages = text.get("messages") if isinstance(text, dict) else []
+        text = migration_object(row["text_json"], label=f"{row['window_name']}.text_json")
+        if text.get("storage") == "history_messages":
+            if "messages" in text:
+                raise SchemaMigrationError("history 正文同时含规范化引用与内联内容，拒绝覆盖")
+            continue
+        messages = text.get("messages")
+        if text.get("storage") is not None or not isinstance(messages, list):
+            raise SchemaMigrationError("history 正文格式未知，拒绝按空消息迁移")
         candidates = _message_rows(
             str(row["window_name"]),
             str(row["source"]),
             str(row["session_id"]),
             str(row["created_at"]),
             str(row["updated_at"]),
-            messages if isinstance(messages, list) else [],
+            messages,
         )
-        existing = int(
-            connection.execute(
-                "SELECT COUNT(*) FROM history_messages WHERE window_name=?",
-                (str(row["window_name"]),),
-            ).fetchone()[0]
-        )
-        if existing != len(candidates):
-            connection.execute(
-                "DELETE FROM history_messages WHERE window_name=?",
-                (str(row["window_name"]),),
-            )
+        existing = connection.execute(
+            "SELECT window_name,message_index,source,session_id,round_number,role,"
+            "content_text,message_json,created_at,updated_at "
+            "FROM history_messages WHERE window_name=? ORDER BY message_index",
+            (str(row["window_name"]),),
+        ).fetchall()
+        if existing and [tuple(value) for value in existing] != candidates:
+            raise SchemaMigrationError("history 内联正文与已有规范化消息冲突，拒绝覆盖")
+        if not existing:
             connection.executemany(
                 _MESSAGE_INSERT_SQL,
                 candidates,
@@ -184,10 +193,34 @@ def _migrate_window_partitions_to_rounds(connection: sqlite3.Connection) -> None
         "FROM history_windows"
     ).fetchall()
     for row in rows:
-        data = _object(row["data_json"], {})
-        think = _object(row["think_json"], {"schema_version": 1, "rounds": []})
-        tool = _object(row["tool_json"], {"schema_version": 1, "rounds": []})
-        items = _object(row["items_json"], {"schema_version": 2, "items": []})
+        data, think, tool, items = (
+            migration_object(row[field], label=f"{row['window_name']}.{field}")
+            for field in ("data_json", "think_json", "tool_json", "items_json")
+        )
+        references = [value.get("storage") for value in (think, tool, items)]
+        if all(value == "history_rounds" for value in references):
+            if any(key in value for key, value in (("rounds", think), ("rounds", tool), ("items", items))) or "round_metrics" in data:
+                raise SchemaMigrationError("history 轮次同时含规范化引用与内联内容，拒绝覆盖")
+            continue
+        if any(value is not None for value in references) or data.get("round_metrics_storage"):
+            raise SchemaMigrationError("history 轮次分区引用不一致，拒绝覆盖")
+        for key, value in (("rounds", think), ("rounds", tool), ("items", items)):
+            if not isinstance(value.get(key), list):
+                raise SchemaMigrationError(f"history 旧轮次缺少有效 {key} 列表")
+        # A half-migrated or damaged version marker may not authorize replacing
+        # any existing normalized rounds. Matching data can be safely replayed.
+        from run.history.window_rounds import _window_round_rows
+        candidates = _window_round_rows(
+            str(row["window_kind"]), str(row["window_name"]),
+            think=think, tool=tool, items=items, metrics=data.get("round_metrics", []),
+        )
+        existing = connection.execute(
+            "SELECT window_kind,window_name,round_number,think_json,tool_json,items_json,metric_json "
+            "FROM history_rounds WHERE window_kind=? AND window_name=? ORDER BY round_number",
+            (row["window_kind"], row["window_name"]),
+        ).fetchall()
+        if existing and [tuple(value) for value in existing] != candidates:
+            raise SchemaMigrationError("history 内联轮次与已有规范化轮次冲突，拒绝覆盖")
         _sync_window_rounds(
             connection,
             window_kind=str(row["window_kind"]),
@@ -217,7 +250,22 @@ def _migrate_window_partitions_to_rounds(connection: sqlite3.Connection) -> None
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
-    connection.executescript(
+    with schema_migration(
+        connection, target=HISTORY_SCHEMA_VERSION,
+        meta_table="history_meta", required=REQUIRED_COLUMNS,
+    ) as current_version:
+        repair_existing_columns(connection)
+        if current_version < 3 or schema_needs_repair(connection, REQUIRED_COLUMNS):
+            check_storage_references(connection)
+        _initialize_schema(connection, current_version)
+        if schema_needs_repair(connection, REQUIRED_COLUMNS):
+            raise SchemaMigrationError("history 迁移后结构仍不满足列契约，已停止初始化")
+
+
+def _initialize_schema(connection: sqlite3.Connection, current_version: int) -> None:
+    # v2/v3 transform content; v4..v8 add tables and safe presence columns.
+    # Keep additive DDL in the same transaction rather than inventing no-op steps.
+    execute_schema(connection,
         """
         CREATE TABLE IF NOT EXISTS history_meta (
             key TEXT PRIMARY KEY,
@@ -266,6 +314,18 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_history_sessions_summary
             ON history_sessions(summary_status, updated_at);
 
+        CREATE TABLE IF NOT EXISTS history_session_marks (
+            source TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            pinned_at TEXT NOT NULL DEFAULT '',
+            favorite INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1)),
+            PRIMARY KEY (source, session_id),
+            FOREIGN KEY (source, session_id)
+                REFERENCES history_sessions(source, session_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_marks_favorite
+            ON history_session_marks(favorite, source, session_id);
+
         CREATE TABLE IF NOT EXISTS history_active_sessions (
             active_key TEXT PRIMARY KEY,
             source TEXT NOT NULL,
@@ -276,6 +336,8 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             session_id TEXT NOT NULL,
             client_id TEXT NOT NULL,
             expires_at REAL NOT NULL,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            released INTEGER NOT NULL DEFAULT 0 CHECK (released IN (0, 1)),
             PRIMARY KEY (session_id, client_id)
         );
         CREATE INDEX IF NOT EXISTS idx_history_web_leases_expiry
@@ -373,21 +435,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             ON message_processed_messages(status, updated_at);
         """
     )
-    current_row = connection.execute(
-        "SELECT value FROM history_meta WHERE key='schema_version'"
-    ).fetchone()
-    try:
-        current_version = int(current_row[0]) if current_row is not None else 0
-    except (TypeError, ValueError):
-        current_version = 0
     if current_version < 2:
         _migrate_archive_text_to_messages(connection)
     if current_version < 3:
         _migrate_window_partitions_to_rounds(connection)
-    connection.execute(
-        "INSERT OR REPLACE INTO history_meta(key, value) VALUES('schema_version', ?)",
-        (str(HISTORY_SCHEMA_VERSION),),
-    )
 
 
 def _ready_key(path: Path) -> str:
@@ -405,8 +456,9 @@ def _ensure_database(path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         database = sqlite3.connect(path, timeout=5.0)
         try:
-            _configure(database, initialize=True)
+            _configure(database)
             _ensure_schema(database)
+            _configure(database, initialize=True)
             database.commit()
         finally:
             database.close()

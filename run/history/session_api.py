@@ -24,8 +24,6 @@ from run.history.session_payload import session_payload
 from run.history.store import (
     connection,
     database_path,
-    delete_session_windows,
-    delete_source_windows,
     find_window_name,
     list_windows as list_stored_windows,
     load_window_data,
@@ -231,6 +229,7 @@ def list_sessions_page(
     limit: int = 50,
     before_updated_at: str = "",
     archive_date: str = "",
+    favorites_only: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     records, has_more = list_index_records_page(
         root,
@@ -240,12 +239,13 @@ def list_sessions_page(
         limit=limit,
         before_updated_at=before_updated_at,
         archive_date=archive_date,
+        favorites_only=favorites_only,
     )
     return [session_payload(record) for record in records], has_more
 
 
-def _source_windows(root: Path, user: str, source: str) -> list[tuple[Path, str]]:
-    """Return committed logical windows for one user/source pair."""
+def _source_windows(root: Path, user: str, source: str | None) -> list[tuple[Path, str]]:
+    """Return committed logical windows for one user, optionally by source."""
 
     history_dir = user_dir(user, root) / "history"
     return [
@@ -291,24 +291,34 @@ def _remove_window_cache(directory: Path) -> None:
 def delete_session(root: Path, user: str, source: str, session_id: str) -> int:
     """Delete every verified history window belonging to a session."""
 
-    indexed = find_index_record(root, user, source, session_id)
+    from run.history.delete_orchestrator import delete_history_sessions
     directories = _matching_windows(root, user, source, session_id)
-    deleted_windows = delete_session_windows(root, user, source, session_id)
+    sessions, windows = delete_history_sessions(root, user, source, session_id)
     for directory in directories:
         _remove_window_cache(directory)
-    remove_index_session(root, user, source, session_id)
-    return max(deleted_windows, 1 if indexed is not None else 0)
+    return max(sessions, windows)
 
 
-def delete_all_sessions(root: Path, user: str, source: str) -> tuple[int, int]:
-    """Delete every verified history window for a user/source pair."""
+def delete_all_sessions(
+    root: Path, user: str, source: str | None, *, client_id: str = ""
+) -> tuple[int, int]:
+    """Delete one source, or all user history when source is explicitly None."""
 
+    if not database_path(root, user).is_file():
+        return 0, 0
     directories = [directory for directory, _ in _source_windows(root, user, source)]
-    deleted_sessions, deleted_windows = delete_source_windows(root, user, source)
+    if source is None:
+        from run.history.bulk_deletion import delete_user_history
+
+        result = delete_user_history(root, user, client_id=client_id)
+        for directory in directories:
+            _remove_window_cache(directory)
+        return result
+    from run.history.delete_orchestrator import delete_history_sessions
+    deleted_sessions, deleted_windows = delete_history_sessions(root, user, source)
     for directory in directories:
         _remove_window_cache(directory)
-    removed_index_sessions = remove_all_index_sessions(root, user, source)
-    return max(deleted_sessions, removed_index_sessions), deleted_windows
+    return deleted_sessions, deleted_windows
 
 
 def clear_session(root: Path, user: str, source: str, session_id: str) -> Path:
