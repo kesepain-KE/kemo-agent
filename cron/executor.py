@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 import threading
 import time
 from datetime import datetime
@@ -80,6 +81,7 @@ def _claim_task(store: CronStore, task_id: str) -> dict[str, Any]:
         if task["status"] != "enabled":
             raise CronError(f"任务 {task_id} 当前状态为 {task['status']!r}，无法领取")
         task["status"] = "running"
+        task["attempt_id"] = uuid.uuid4().hex
         task["latest_run_at"] = now_beijing()
         return task
 
@@ -89,11 +91,19 @@ def _claim_task(store: CronStore, task_id: str) -> dict[str, Any]:
         raise CronError(f"领取任务失败：{exc}") from exc
 
 
-def _finish_task(store: CronStore, task: dict[str, Any], *, failed: bool) -> dict[str, Any]:
+def _finish_task(store: CronStore, task: dict[str, Any], *, failed: bool, cancelled: bool = False,
+                 stop_reason: str = "cancelled") -> dict[str, Any]:
     task_id = task["task_id"]
 
     def _finish(current: dict[str, Any]) -> dict[str, Any]:
+        if task.get("attempt_id") and current.get("attempt_id") != task["attempt_id"]:
+            raise CronError("执行代际已变化，拒绝旧 attempt 写终态")
         current["latest_run_at"] = now_beijing()
+        if cancelled:
+            current["status"] = "cancelled"
+            current["last_stop_reason"] = stop_reason
+            current["next_run_at"] = ""
+            return current
         if failed:
             current["status"] = "failed"
             return current
@@ -215,7 +225,9 @@ def _execute_claimed_task(
                     pass
     except Exception as exc:
         failure = exc
-    result = _finish_task(store, task, failed=failure is not None)
+    result = _finish_task(store, task, failed=failure is not None,
+                          cancelled=bool(cancel_event is not None and cancel_event.is_set()),
+                          stop_reason=str(getattr(cancel_event, "stop_reason", "cancelled")))
     if failure is not None:
         result["_execution_error"] = {
             "type": type(failure).__name__,

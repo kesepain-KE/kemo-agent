@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from datetime import datetime
@@ -346,7 +347,10 @@ class CronScheduler:
         self._transport_registry = transport_registry
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._system_worker: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._user_executions: dict[tuple[str, str], tuple[threading.Thread, threading.Event]] = {}
+        self._execution_failures = 0
         task_config = self._config.get("task_cron_system") or {}
         if not isinstance(task_config, dict):
             task_config = {}
@@ -489,6 +493,8 @@ class CronScheduler:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            if self._system_worker is not None and self._system_worker.is_alive():
+                raise RuntimeError("上次系统维护仍在退出，不能重启调度器")
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run_loop,
@@ -501,8 +507,19 @@ class CronScheduler:
         self._stop_event.set()
         with self._lock:
             thread = self._thread
+            workers = []
+            for worker, cancel in self._user_executions.values():
+                setattr(cancel, "stop_reason", "stopped")
+                cancel.set()
+                workers.append(worker)
+            if self._system_worker is not None:
+                workers.append(self._system_worker)
+        deadline = time.monotonic() + max(0.0, timeout)
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
+        for worker in workers:
+            if worker is not threading.current_thread() and worker.is_alive():
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
         if thread is not None and thread.is_alive():
             # The worker may still be inside a long-running task.  It must keep
             # leadership until that task returns; releasing now would let a
@@ -511,7 +528,8 @@ class CronScheduler:
         with self._lock:
             self._thread = None
         self.flush_persistence()
-        self._system_lease.release()
+        if self._system_worker is None or not self._system_worker.is_alive():
+            self._system_lease.release()
 
     @property
     def running(self) -> bool:
@@ -542,7 +560,11 @@ class CronScheduler:
         executed = 0
         now = datetime.now(BEIJING)
         if include_system and not self._stop_event.is_set():
-            executed += self._scan_system_tasks(now)
+            if self.running:
+                from cron.user_execution import dispatch_system_scan
+                dispatch_system_scan(self, now)
+            else:
+                executed += self._scan_system_tasks(now)
         for user in list_users(self.root):
             if self._stop_event.is_set():
                 break
@@ -656,68 +678,23 @@ class CronScheduler:
             if self._should_backoff():
                 break
             task_id = str(task.get("task_id") or "")
-            started_at = datetime.now(BEIJING)
-            started = time.monotonic()
-            try:
-                result = execute_cron_task(
-                    root=self.root,
-                    user=user,
-                    task_id=task_id,
-                    provider_factory=self.provider_factory,
-                    tool_registry_factory=self.tool_registry_factory,
-                    cancel_event=self._stop_event,
-                    transport_registry=self._transport_registry,
-                )
-                executed += 1
-                try:
-                    result_status = str(result.get("status") or "completed")
-                    execution_error = result.get("_execution_error")
-                    LogStore(self.root).append_cron(
-                        {
-                            "schema_version": 1,
-                            "executed_at": started_at.isoformat(),
-                            "user": user,
-                            "task_id": task_id,
-                            "status": (
-                                "success"
-                                if result_status in {"enabled", "completed"}
-                                else result_status
-                            ),
-                            "duration_ms": round(
-                                (time.monotonic() - started) * 1000
-                            ),
-                            "result": _system_result_summary(result),
-                            "error": execution_error if isinstance(execution_error, dict) else None,
-                        }
-                    )
-                except Exception:
-                    pass
-                if self.on_task_executed:
-                    self.on_task_executed(user, task["task_id"], result)
-            except Exception as exc:
-                try:
-                    LogStore(self.root).append_cron(
-                        {
-                            "schema_version": 1,
-                            "executed_at": started_at.isoformat(),
-                            "user": user,
-                            "task_id": task_id,
-                            "status": "failed",
-                            "duration_ms": round(
-                                (time.monotonic() - started) * 1000
-                            ),
-                            "result": {},
-                            "error": {
-                                "type": type(exc).__name__,
-                                "message": str(exc),
-                            },
-                        }
-                    )
-                except Exception:
-                    pass
-                if self.on_error:
-                    self.on_error(user, exc)
+            if self.running:
+                executed += int(self._dispatch_user_task(user, task))
+            else:
+                executed += self._execute_user_task(user, task, self._stop_event)
         return executed
+
+    def _report_execution_error(self, user, exc):
+        from cron.user_execution import _report_execution_error
+        return _report_execution_error(self, user, exc)
+
+    def _dispatch_user_task(self, user, task):
+        from cron.user_execution import _dispatch_user_task
+        return _dispatch_user_task(self, user, task)
+
+    def _execute_user_task(self, user, task, cancel_event):
+        from cron.user_execution import _execute_user_task
+        return _execute_user_task(self, user, task, cancel_event)
 
     def _run_loop(self) -> None:
         try:
@@ -725,13 +702,14 @@ class CronScheduler:
                 try:
                     self._system_lease.try_acquire()
                     self._scan_once(include_system=self._system_lease.owned)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._report_execution_error("__system__", exc)
                 self._flush_due_success_logs()
                 self._stop_event.wait(self.poll_interval)
         finally:
             self.flush_persistence()
-            self._system_lease.release()
+            if self._system_worker is None or not self._system_worker.is_alive():
+                self._system_lease.release()
             with self._lock:
                 if self._thread is threading.current_thread():
                     self._thread = None
