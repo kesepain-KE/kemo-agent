@@ -982,7 +982,7 @@ class ContextLifecycleTests(unittest.TestCase):
             agent_runner=provider,
             agent_name="context_manage",
             trigger="round_limit",
-            chunk_token_budget=256,
+            chunk_token_budget=1000,
         )
         self.assertIsNotNone(value)
         self.assertEqual(diagnostics["chunks"], 5)

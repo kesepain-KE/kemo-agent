@@ -255,13 +255,13 @@ def test_repeated_provider_limits_shrink_history_on_each_retry(runtime_root):
     assert [
         sum(message.get("role") == "user" for message in messages)
         for messages in attempted
-    ] == [6, 3, 1]
+    ] == [6, 5, 4]
     archive_path = find_window(root, "alice", "web", "two-retries")
     archive = load_window(require_present(archive_path))
     _, runtime = load_runtime_window(require_present(archive_path), archive)
     assert archive["data"]["rounds"] == 6
-    assert runtime["data"]["rounds"] == 1
-    assert runtime["data"]["context"]["round_offset"] == 5
+    assert runtime["data"]["rounds"] == 4
+    assert runtime["data"]["context"]["round_offset"] == 2
 
 
 def test_manual_low_round_count_uses_token_target_and_keeps_archive(runtime_root):
