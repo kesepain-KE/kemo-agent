@@ -13,6 +13,7 @@ from run.history import (
 )
 from web.errors import NotFoundError, WebServiceError
 from web.services._paths import _reject_link_path, _safe_relative_target
+from web.services.native_media import media_inputs
 
 
 def _tool_text_preview(value: Any) -> tuple[str, bool]:
@@ -311,6 +312,7 @@ def history(
                     "cancelled": bool(item.get("cancelled", False)),
                     "cancel_reason": str(item.get("cancel_reason") or ""),
                     "artifacts": artifacts,
+                    "media_inputs": media_inputs(service.root, name, item.get("media_inputs"), final=True),
                 }
             )
     reasoning_by_round: dict[int, str] = {}
@@ -356,6 +358,18 @@ def history(
                     else None
                 )
                 raw_status = str(call.get("status") or "completed").casefold()
+                native_inputs = []
+                if call.get("name") == "attach_media" and isinstance(raw_result, dict) and raw_result.get("ok") is True and isinstance(tool_value, dict):
+                    audit = next((metric.get("media_inputs", []) for metric in round_metrics if metric["round"] == round_number), [])
+                    states = {value["asset_id"]: value for value in audit}
+                    assets = tool_value.get("assets")
+                    if isinstance(assets, list):
+                        assets = [{**value, "status": "unconfirmed", **states.get(str(value.get("asset_id")), {})}
+                                  for value in assets if isinstance(value, dict)]
+                    arguments = call.get("arguments") or {}
+                    native_inputs = media_inputs(service.root, name, assets,
+                        paths=arguments.get("paths") if isinstance(arguments, dict) else None,
+                        call_id=str(call.get("id") or ""), final=True)
                 status = (
                     "running"
                     if raw_status in {"running", "started", "pending", "deferred"}
@@ -375,6 +389,7 @@ def history(
                         "result_text": result_text,
                         "result_truncated": result_truncated,
                         "artifacts": artifacts,
+                        "media_inputs": native_inputs,
                     }
                 )
             tools_by_round[round_number] = calls

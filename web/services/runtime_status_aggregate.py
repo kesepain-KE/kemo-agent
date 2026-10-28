@@ -18,22 +18,21 @@ def runtime_status(
 ) -> dict[str, Any]:
     import importlib
     _status = importlib.import_module("web.services.runtime_status")
-    Any = _status.Any
-    MemoryStore = _status.MemoryStore
-    _BEIJING = _status._BEIJING
-    _nonnegative_int = _status._nonnegative_int
-    _parse_datetime = _status._parse_datetime
-    build_prompt_bundle = _status.build_prompt_bundle
-    datetime = _status.datetime
-    estimate_text_tokens = _status.estimate_text_tokens
-    load_config = _status.load_config
-    normalize_kemo_reasoning_effort = _status.normalize_kemo_reasoning_effort
-    normalize_reasoning_effort = _status.normalize_reasoning_effort
-    timezone = _status.timezone
+    _status_MemoryStore = _status.MemoryStore
+    _status__BEIJING = _status._BEIJING
+    _status__nonnegative_int = _status._nonnegative_int
+    _status__parse_datetime = _status._parse_datetime
+    _status_build_prompt_bundle = _status.build_prompt_bundle
+    _status_datetime = _status.datetime
+    _status_estimate_text_tokens = _status.estimate_text_tokens
+    _status_load_config = _status.load_config
+    _status_normalize_kemo_reasoning_effort = _status.normalize_kemo_reasoning_effort
+    _status_normalize_reasoning_effort = _status.normalize_reasoning_effort
+    _status_timezone = _status.timezone
     name = service.require_user(user)
     normalized_source = service.require_source(source)
     normalized_session = service.require_session_id(session_id) if session_id else ""
-    now = datetime.now(_BEIJING)
+    now = _status_datetime.now(_status__BEIJING)
     available_sections = {
         "summary",
         "prompt",
@@ -61,12 +60,12 @@ def runtime_status(
         if not requested_sections:
             requested_sections = set(available_sections)
 
-    config = load_config(name, service.root)
+    config = _status_load_config(name, service.root)
     settings = service.settings(name)
     provider_config = config.get("provider") or {}
     provider = settings["provider"]
-    token_limit = _nonnegative_int(settings["limits"].get("context_tokens"))
-    round_limit = _nonnegative_int(settings["limits"].get("context_rounds"))
+    token_limit = _status__nonnegative_int(settings["limits"].get("context_tokens"))
+    round_limit = _status__nonnegative_int(settings["limits"].get("context_rounds"))
     agents_config = config.get("agents") or {}
     try:
         compression_ratio = float(
@@ -165,7 +164,7 @@ def runtime_status(
 
     bundle = None
     if requested_sections & {"summary", "prompt"}:
-        bundle = build_prompt_bundle(
+        bundle = _status_build_prompt_bundle(
             service.root,
             name,
             config,
@@ -183,11 +182,11 @@ def runtime_status(
             "base_url": diagnostic_text(provider["base_url"]),
             "model": provider["model"],
             "thinking_effort": (
-                normalize_kemo_reasoning_effort(
+                _status_normalize_kemo_reasoning_effort(
                     provider_config.get("reasoning_effort")
                 )
                 if str(provider.get("type") or "").strip().casefold() == "kemo"
-                else normalize_reasoning_effort(
+                else _status_normalize_reasoning_effort(
                     provider_config.get("reasoning_effort")
                 )
             ),
@@ -250,7 +249,7 @@ def runtime_status(
                         else "injected"
                     ),
                     "chars": len(section.content),
-                    "tokens": estimate_text_tokens(section.content),
+                    "tokens": _status_estimate_text_tokens(section.content),
                     "source_files": list(section.source_files),
                     "injected_items": int(section.injected_items),
                     "original_items": int(section.original_items),
@@ -259,7 +258,7 @@ def runtime_status(
         prompt = {
             "content": bundle.text,
             "total_chars": len(bundle.text),
-            "estimated_tokens": estimate_text_tokens(bundle.text),
+            "estimated_tokens": _status_estimate_text_tokens(bundle.text),
             "components": prompt_components,
         }
 
@@ -375,16 +374,16 @@ def runtime_status(
                     promotion_by_file[str(promotion["filename"])] = promotion
         promotion_tracking = system_cron["tracking"] == "execution_log"
         memory_updates = []
-        store = MemoryStore(service.root, name, config)
+        store = _status_MemoryStore(service.root, name, config)
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         weight_activity = store.weight_activity(day_start, day_start + timedelta(days=1))
         for item in store.list_items():
-            updated = _parse_datetime(item.get("updated_at"))
+            updated = _status__parse_datetime(item.get("updated_at"))
             activity = weight_activity.get(str(item.get("filename") or ""), {})
-            applied = _parse_datetime(activity.get("applied_at"))
+            applied = _status__parse_datetime(activity.get("applied_at"))
             if applied is not None and (updated is None or applied > updated):
                 updated = applied
-            if updated is None or updated.astimezone(_BEIJING).date() != now.date():
+            if updated is None or updated.astimezone(_status__BEIJING).date() != now.date():
                 continue
             promotion = promotion_by_file.get(str(item.get("filename") or ""))
             memory_updates.append(
@@ -392,7 +391,7 @@ def runtime_status(
                     "id": f"{item.get('tier')}:{item.get('filename')}",
                     "filename": str(item.get("filename") or ""),
                     "tier": str(item.get("tier") or ""),
-                    "weight": _nonnegative_int(item.get("weight")),
+                    "weight": _status__nonnegative_int(item.get("weight")),
                     "updated_at": updated.isoformat(),
                     "weight_increments": int(activity.get("increments") or 0),
                     "upgraded": bool(promotion) if promotion_tracking else None,
@@ -402,9 +401,9 @@ def runtime_status(
             )
         important_path = service.root / "users" / name / "memory_temporary_important.md"
         if important_path.is_file() and not important_path.is_symlink():
-            important_time = datetime.fromtimestamp(
-                important_path.stat().st_mtime, timezone.utc
-            ).astimezone(_BEIJING)
+            important_time = _status_datetime.fromtimestamp(
+                important_path.stat().st_mtime, _status_timezone.utc
+            ).astimezone(_status__BEIJING)
             if important_time.date() == now.date():
                 memory_updates.append(
                     {

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from web.api_contracts import KnowledgeResponse
+
 import asyncio
 from typing import Any
 from urllib.parse import quote
@@ -98,7 +100,7 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
     ) -> dict[str, Any]:
         return backend.delete_expand_module(user, scope, module_name)
 
-    @app.get("/api/users/{user}/knowledge")
+    @app.get("/api/users/{user}/knowledge", response_model=KnowledgeResponse)
     async def knowledge(user: str) -> dict[str, Any]:
         return backend.knowledge(user)
 

@@ -168,8 +168,9 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         user: str,
         checksum: str,
         path: str = Query(default="", max_length=500),
+        area: str = Query(default="file_upload", pattern="^(file_upload|download)$"),
     ) -> _AnnotationFileResponse:
-        target = backend.attachment_thumbnail(user, checksum, path=path)
+        target = await run_in_threadpool(backend.attachment_thumbnail, user, checksum, path=path, area=area)
         return _thumbnail_response(target)
 
     @app.delete("/api/users/{user}/files/{scope}")

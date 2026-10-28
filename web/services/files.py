@@ -27,7 +27,8 @@ from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from run.extensions import AttachmentError, describe_uploaded_asset
+from run.extensions import AttachmentError, describe_uploaded_asset, describe_local_asset
+from run.extensions import _is_link_or_junction
 from web.constants import (
     AVATAR_MAX_BYTES,
     FILE_UPLOAD_MAX_BYTES,
@@ -284,26 +285,35 @@ class FileServiceMixin(SoundServiceMixin):
         checksum: Any,
         *,
         path: Any = "",
+        area: str = "file_upload",
     ) -> Path:
         """Return a cached preview, lazily backfilling legacy attachments."""
 
         name = self.require_user(user)
+        if area not in {"file_upload", "download"}:
+            raise InvalidRequestError("附件缩略图区域无效")
         normalized = str(checksum or "").strip().lower()
         target = self._attachment_thumbnail_path(name, normalized)
+        if any(_is_link_or_junction(part) for part in (target, *target.parents)):
+            raise InvalidRequestError("附件缩略图不允许符号链接或目录联接")
         if target.is_file() and not target.is_symlink():
             return target
 
         if isinstance(path, str) and path.strip():
-            upload_root = (self.root / "users" / name / "file_upload").resolve()
+            upload_root = self.root / "users" / name / area
+            if any(_is_link_or_junction(part) for part in (upload_root, *upload_root.parents)):
+                raise InvalidRequestError("附件目录不允许符号链接或目录联接")
+            upload_root = upload_root.resolve()
             _, source = _safe_relative_target(upload_root, path)
             _reject_link_path(upload_root, source)
             if (
                 source.suffix.casefold() in self._ATTACHMENT_IMAGE_SUFFIXES
                 and source.is_file()
                 and not source.is_symlink()
+                and source.stat().st_nlink == 1
             ):
                 try:
-                    descriptor = describe_uploaded_asset(
+                    descriptor = (describe_uploaded_asset if area == "file_upload" else describe_local_asset)(
                         self.root,
                         name,
                         {"path": self._project_path(source)},

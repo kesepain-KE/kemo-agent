@@ -4,7 +4,38 @@ from __future__ import annotations
 
 from pathlib import Path as _AnnotationPath
 
+import math
 from typing import Any
+
+
+def _session_cache_hit_rate(stored_usage: Any) -> float | None:
+    if not isinstance(stored_usage, dict):
+        return None
+    raw_rate = stored_usage.get("cache_hit_rate")
+    if isinstance(raw_rate, (str, int, float)) and not isinstance(raw_rate, bool):
+        try:
+            rate = float(raw_rate)
+        except (TypeError, ValueError):
+            rate = math.nan
+        if math.isfinite(rate) and 0.0 <= rate <= 1.0:
+            return rate
+
+    cached_raw = stored_usage.get(
+        "cached_prompt_tokens", stored_usage.get("cached_input_tokens")
+    )
+    missed_raw = stored_usage.get("cache_miss_tokens")
+    if cached_raw is None or missed_raw is None:
+        return None
+    try:
+        if isinstance(cached_raw, bool) or isinstance(missed_raw, bool):
+            return None
+        cached = max(0, int(cached_raw))
+        missed = max(0, int(missed_raw))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    total = cached + missed
+    return round(cached / total, 6) if total else None
+
 
 def build_overview(
     service,
@@ -44,6 +75,7 @@ def build_overview(
         "completion_tokens": 0,
         "total_tokens": 0,
         "estimated": False,
+        "cache_hit_rate": None,
     }
     rounds = 0
     selected_directory: _AnnotationPath | None = None
@@ -59,9 +91,15 @@ def build_overview(
                 usage.update(
                     {
                         key: stored_usage.get(key, usage[key])
-                        for key in usage
+                        for key in (
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "total_tokens",
+                            "estimated",
+                        )
                     }
                 )
+                usage["cache_hit_rate"] = _session_cache_hit_rate(stored_usage)
     token_limit = int(settings_data["limits"]["context_tokens"])
     round_limit = int(settings_data["limits"]["context_rounds"])
     total_tokens = max(0, int(usage.get("total_tokens") or 0))

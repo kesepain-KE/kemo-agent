@@ -46,6 +46,7 @@ from web.errors import (
     InvalidRequestError,
     NotFoundError,
 )
+from run.history import favorite_count, update_session_marks
 from web.services.history import history as _history_impl
 
 
@@ -56,6 +57,7 @@ class SessionServiceMixin:
         _other_durable_session_clients_locked = WebRunService._other_durable_session_clients_locked
         _prune_session_leases_locked = WebRunService._prune_session_leases_locked
         _release_durable_session_lease_locked = WebRunService._release_durable_session_lease_locked
+        _release_session_lease_locked = WebRunService._release_session_lease_locked
         _session_leases: dict[tuple[str, str, str], dict[str, float]]
         _touch_session_lease_locked = WebRunService._touch_session_lease_locked
         require_client_id = WebRunService.require_client_id
@@ -67,6 +69,68 @@ class SessionServiceMixin:
         root: Path
         summary_waker: Callable[[], None] | None
 
+    def session_lease(
+        self,
+        user: Any,
+        session_id: Any,
+        client_id: Any,
+        *,
+        source: Any = "web",
+        lease_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id, optional=False)
+        if lease_sequence is not None:
+            from web.services.presence import ordered_presence
+            return ordered_presence(self, name, normalized_source, normalized_session,
+                                    normalized_client, lease_sequence)
+        with self._active_runs_lock:
+            clients = self._touch_session_lease_locked(
+                name, normalized_source, normalized_session, normalized_client, require_existing=True,
+            )
+            if normalized_source in {'web', 'app'} and not clients:
+                raise NotFoundError('对话不存在、已经结束或已离线清理，请新建对话')
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "client_id": normalized_client,
+            "active_clients": clients,
+            "leased": True,
+        }
+
+    def release_session_lease(
+        self,
+        user: Any,
+        session_id: Any,
+        client_id: Any,
+        *,
+        source: Any = "web",
+        lease_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_source(source)
+        normalized_session = self.require_session_id(session_id)
+        normalized_client = self.require_client_id(client_id, optional=False)
+        if lease_sequence is not None:
+            from web.services.presence import ordered_presence
+            return ordered_presence(self, name, normalized_source, normalized_session,
+                                    normalized_client, lease_sequence, release=True)
+        with self._active_runs_lock:
+            remaining = self._release_session_lease_locked(
+                name, normalized_source, normalized_session, normalized_client
+            )
+        return {
+            "user": name,
+            "source": normalized_source,
+            "session_id": normalized_session,
+            "client_id": normalized_client,
+            "active_clients": remaining,
+            "released": True,
+        }
+
     def sessions(
         self,
         user: Any,
@@ -76,6 +140,7 @@ class SessionServiceMixin:
         limit: Any = 50,
         before: Any = "",
         archive_date: Any = "",
+        favorites_only: bool = False,
     ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_history_source(source, allow_all=True)
@@ -99,6 +164,8 @@ class SessionServiceMixin:
                 calendar_date.fromisoformat(normalized_date)
             except ValueError as exc:
                 raise InvalidRequestError("date 不是有效的自然日") from exc
+        if not isinstance(favorites_only, bool):
+            raise InvalidRequestError("favorites_only 必须是布尔值")
         sessions, has_more = list_sessions_page(
             self.root,
             name,
@@ -107,6 +174,7 @@ class SessionServiceMixin:
             limit=limit,
             before_updated_at=before.strip(),
             archive_date=normalized_date,
+            favorites_only=favorites_only,
         )
         next_cursor = session_page_cursor(sessions[-1]) if has_more and sessions else ""
         return {
@@ -114,10 +182,32 @@ class SessionServiceMixin:
             "source": normalized_source or "all",
             "query": query.strip(),
             "date": normalized_date,
+            "favorites_only": favorites_only,
+            "favorites_count": favorite_count(self.root, name),
             "sessions": sessions,
             "has_more": has_more,
             "next_cursor": next_cursor,
         }
+
+    def mark_session(
+        self, user: Any, session_id: Any, *, source: Any = "web",
+        pinned: bool | None = None, favorite: bool | None = None,
+    ) -> dict[str, Any]:
+        name = self.require_user(user)
+        normalized_source = self.require_history_source(source)
+        normalized_session = self.require_session_id(session_id)
+        if (pinned is None and favorite is None) or any(
+            value is not None and not isinstance(value, bool) for value in (pinned, favorite)
+        ):
+            raise InvalidRequestError("请提供 pinned 或 favorite 布尔值")
+        assert normalized_source is not None
+        record = update_session_marks(
+            self.root, name, normalized_source, normalized_session,
+            pinned=pinned, favorite=favorite,
+        )
+        if record is None:
+            raise NotFoundError(f"会话不存在：{normalized_session}")
+        return {"user": name, "source": normalized_source, "session": session_payload(record)}
 
     @staticmethod
     def _interactive_active_key(
@@ -299,7 +389,10 @@ class SessionServiceMixin:
             durable_clients = self._other_durable_session_clients_locked(
                 name, normalized_source, normalized_session, normalized_client
             )
-            other_clients = sorted(set([*other_clients, *durable_clients]))
+            other_clients = (
+                durable_clients if normalized_source in {"web", "app"}
+                else sorted(set([*other_clients, *durable_clients]))
+            )
             if other_clients:
                 raise ConflictError(
                     f"该对话正在其他 {len(other_clients)} 个页面中使用，暂时不能删除"
@@ -378,23 +471,35 @@ class SessionServiceMixin:
         user: Any,
         *,
         source: Any = "web",
+        client_id: Any = "",
     ) -> dict[str, Any]:
         name = self.require_user(user)
-        normalized_source = self.require_source(source)
+        # This explicit bulk operation is the sole cross-channel mutation.
+        # Individual read-only history endpoints do not gain write permission.
+        normalized_source = None if source == "all" else self.require_source(source)
+        normalized_client = self.require_client_id(client_id)
         with self._active_runs_lock:
             if any(
-                active.user == name and active.source == normalized_source
+                active.user == name
+                and (normalized_source is None or active.source == normalized_source)
                 for active in self._active_runs.values()
             ):
                 raise ConflictError("存在正在运行的会话，结束当前响应后再全部删除")
-            deleted_sessions, deleted_windows = delete_all_history_sessions(
-                self.root,
-                name,
-                normalized_source,
-            )
+            try:
+                deleted_sessions, deleted_windows = delete_all_history_sessions(
+                    self.root,
+                    name,
+                    normalized_source,
+                    client_id=normalized_client,
+                )
+            except HistoryError as exc:
+                raise ConflictError(str(exc)) from exc
+            for key in list(self._session_leases):
+                if key[0] == name and (normalized_source is None or key[1] == normalized_source):
+                    self._session_leases.pop(key, None)
         return {
             "user": name,
-            "source": normalized_source,
+            "source": normalized_source or "all",
             "deleted": True,
             "deleted_sessions": deleted_sessions,
             "deleted_windows": deleted_windows,

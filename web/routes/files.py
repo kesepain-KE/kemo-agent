@@ -63,4 +63,7 @@ def _artifact_response(target: Any, media_type: str) -> FileResponse:
 def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
     """Compatibility entry point delegated to file route registration."""
 
+    from web.routes.backgrounds import register_background_routes
+
+    register_background_routes(app, backend)
     return _register_file_routes_impl(app, backend)

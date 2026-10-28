@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from web.api_contracts import RuntimeResponse
+from web.operation_contracts import DeleteSessionResponse, DeleteSessionsResponse
+
 import asyncio
 from typing import Any, Literal
 
@@ -11,6 +14,7 @@ from web.schemas import (
     LongTaskPreferenceBody,
     SessionClientBody,
     SessionRenameBody,
+    SessionMarksBody,
     SessionUndoLastRoundBody,
 )
 from web.service import WebRunService
@@ -25,6 +29,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         limit: int = Query(default=50, ge=1, le=100),
         before: str = Query(default=""),
         archive_date: str = Query(default="", alias="date"),
+        favorites_only: bool = Query(default=False),
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             backend.sessions,
@@ -34,14 +39,18 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
             limit=limit,
             before=before,
             archive_date=archive_date,
+            **({"favorites_only": True} if favorites_only else {}),
         )
 
-    @app.delete("/api/users/{user}/sessions")
+    @app.delete("/api/users/{user}/sessions", response_model=DeleteSessionsResponse)
     async def delete_all_sessions(
         user: str,
         source: str = Query(default="web"),
+        client_id: str = Query(default=""),
     ) -> dict[str, Any]:
-        return backend.delete_all_sessions(user, source=source)
+        return await asyncio.to_thread(
+            backend.delete_all_sessions, user, source=source, client_id=client_id
+        )
 
     @app.get("/api/users/{user}/sessions/active")
     async def active_session(
@@ -102,7 +111,10 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         body: SessionClientBody,
         source: str = Query(default="web"),
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(backend.session_lease, user, session_id, body.client_id, source=source)
+        return await asyncio.to_thread(
+            backend.session_lease, user, session_id, body.client_id, source=source,
+            **({"lease_sequence": body.lease_sequence} if body.lease_sequence is not None else {}),
+        )
 
     @app.post("/api/users/{user}/sessions/{session_id}/reopen")
     async def reopen_session(
@@ -126,11 +138,23 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         body: SessionClientBody,
         source: str = Query(default="web"),
     ) -> dict[str, Any]:
-        return backend.release_session_lease(
+        return await asyncio.to_thread(
+            backend.release_session_lease,
             user,
             session_id,
             body.client_id,
             source=source,
+            **({"lease_sequence": body.lease_sequence} if body.lease_sequence is not None else {}),
+        )
+
+    @app.patch("/api/users/{user}/sessions/{session_id}/marks")
+    async def mark_session(
+        user: str, session_id: str, body: SessionMarksBody,
+        source: str = Query(default="web"),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            backend.mark_session, user, session_id, source=source,
+            pinned=body.pinned, favorite=body.favorite,
         )
 
     @app.patch("/api/users/{user}/sessions/{session_id}")
@@ -142,7 +166,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
     ) -> dict[str, Any]:
         return backend.rename_session(user, session_id, body.title, source=source)
 
-    @app.delete("/api/users/{user}/sessions/{session_id}")
+    @app.delete("/api/users/{user}/sessions/{session_id}", response_model=DeleteSessionResponse)
     async def delete_session(
         user: str,
         session_id: str,
@@ -262,7 +286,7 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         return await asyncio.to_thread(backend.runtime_logs, user, category=category,
                                        page=page, page_size=page_size, refresh=refresh)
 
-    @app.get("/api/users/{user}/runtime/status")
+    @app.get("/api/users/{user}/runtime/status", response_model=RuntimeResponse)
     async def runtime_status(
         user: str,
         session_id: str = Query(default=""),
