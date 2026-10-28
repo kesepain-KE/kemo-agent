@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Save } from 'lucide-react'
 import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
@@ -265,16 +266,19 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
 }
 
 export function SettingRow({ title, description, control, source }: { title: string; description: string; control: ReactNode; source?: 'user' | 'global' }) {
-  return <div className="setting-row"><span className="setting-copy"><strong>{title}{source ? <i className={`config-source ${source}`}>{source === 'user' ? '用户' : '全局'}</i> : null}</strong><span>{description}</span></span><span className="setting-control">{control}</span></div>
+  useLanguage()
+  return <div className="setting-row"><span className="setting-copy"><strong>{title}{source ? <i className={`config-source ${source}`}>{source === 'user' ? tr('用户') : tr('全局')}</i> : null}</strong><span>{description}</span></span><span className="setting-control">{control}</span></div>
 }
 
 export function Toggle({ checked, label, disabled = false, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (value: boolean) => void }) {
+  useLanguage()
   return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} className={`switch ${checked ? 'is-on' : ''}`} onClick={() => onChange(!checked)}>
     <span className="sr-only">{checked ? '已开启' : '已关闭'}</span>
   </button>
 }
 
 export function ProviderSelect({ value, onChange }: { value: ProviderType; onChange: (value: ProviderType) => void }) {
+  useLanguage()
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const options: Array<{ value: ProviderType; label: string; description: string }> = [
@@ -332,6 +336,7 @@ const visionRoutingOptions: Array<{ value: VisionRoutingMode; label: string; des
 ]
 
 export function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingMode; onChange: (value: VisionRoutingMode) => void }) {
+  useLanguage()
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const listboxId = useId()
@@ -394,10 +399,12 @@ export function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingM
 export { ModelSelectField } from './SettingsModelSelect'
 
 export function NumberInput({ label, value, min = 0, max, step = 1, onChange }: { label: string; value: number; min?: number; max?: number; step?: number; onChange: (value: number) => void }) {
+  useLanguage()
   return <input className="config-field config-number" type="number" aria-label={label} value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} />
 }
 
 export function TagInput({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) {
+  useLanguage()
   const [draft, setDraft] = useState('')
   const commit = () => {
     const additions = draft.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean)
@@ -425,5 +432,6 @@ export function TagInput({ label, value, onChange }: { label: string; value: str
 }
 
 export function ConfigSaveBar({ label, description, pending, saved, onSave }: { label: string; description: string; pending: boolean; saved: boolean; onSave: () => void }) {
-  return <div className="settings-savebar"><span><strong>{saved ? `${label.replace(/^保存/, '')} 已保存` : label}</strong><small>{description}</small></span><button className="module-btn primary" disabled={pending} onClick={onSave}><Save size={14} />{pending ? '保存中…' : label}</button></div>
+  useLanguage()
+  return <div className="settings-savebar"><span><strong>{saved ? `${label.replace(/^保存/, '')} 已保存` : label}</strong><small>{description}</small></span><button className="module-btn primary" disabled={pending} onClick={onSave}><Save size={14} />{pending ? tr('保存中…') : label}</button></div>
 }

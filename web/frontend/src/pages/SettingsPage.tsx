@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -41,6 +42,8 @@ import { playUserCompletionSound, playUserFailureSound } from '../utils/completi
 import { isWindowsDesktop } from '../utils/platform'
 import { ReferenceIcon } from '../reference/ReferenceIcon'
 import { scheduleRestartReturn } from './restartReturn'
+import { LanguageSetting } from './LanguageSetting'
+import { BackgroundSetting } from './BackgroundSetting'
 
 import {
   SettingsTab,
@@ -75,6 +78,7 @@ import {
 } from './settingsSupport'
 
 export function SettingsPage() {
+  useLanguage()
   const { user, sessionId, chatRunning } = useOutletContext<ShellOutletContext>()
   const client = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -82,15 +86,15 @@ export function SettingsPage() {
   const windowsDesktop = isWindowsDesktop()
   const requestedTab = searchParams.get('tab')
   const [tab, setTab] = useState<SettingsTab>(() => isSettingsTab(requestedTab) ? requestedTab : 'appearance')
-  const settingsQuery = useQuery({ queryKey: ['settings', user], queryFn: () => getSettings(user), enabled: Boolean(user) })
-  const userConfigQuery = useQuery({ queryKey: ['user-config', user], queryFn: () => getUserConfig(user), enabled: Boolean(user) })
-  const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: getGlobalConfig, enabled: Boolean(user) })
+  const settingsQuery = useQuery({ queryKey: ['settings', user], queryFn: ({ signal }) => getSettings(user, signal), enabled: Boolean(user) })
+  const userConfigQuery = useQuery({ queryKey: ['user-config', user], queryFn: ({ signal }) => getUserConfig(user, signal), enabled: Boolean(user) })
+  const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => getGlobalConfig(signal), enabled: Boolean(user) })
   const storedProviderType = record(userConfigQuery.data?.config.provider).type === 'kemo' ? 'kemo' : 'chat'
   const providerModelsQuery = useQuery({
     queryKey: ['provider-models', user, storedProviderType],
-    queryFn: async (): Promise<SettingsModelOption[]> => {
+    queryFn: async ({ signal }): Promise<SettingsModelOption[]> => {
       if (storedProviderType === 'chat') {
-        const response = await getChatProviderModels(user)
+        const response = await getChatProviderModels(user, signal)
         return response.data.map((item) => ({
           id: item.id,
           provider_id: item.owned_by || 'chat',
@@ -98,7 +102,7 @@ export function SettingsPage() {
           source: 'chat' as const,
         }))
       }
-      const response = await getKemoProviderModels(user)
+      const response = await getKemoProviderModels(user, undefined, signal)
       return response.data
         .filter((item) => item.task === 'llm' || item.task === 'unknown')
         .map((item) => ({
@@ -113,22 +117,22 @@ export function SettingsPage() {
     staleTime: 300_000,
     retry: false,
   })
-  const versionQuery = useQuery({ queryKey: ['version'], queryFn: getVersion })
+  const versionQuery = useQuery({ queryKey: ['version'], queryFn: ({ signal }) => getVersion(signal) })
   const versionCheckQuery = useQuery({
     queryKey: ['version-check'],
-    queryFn: () => getVersionCheck(),
+    queryFn: ({ signal }) => getVersionCheck(undefined, signal),
     enabled: tab === 'version',
     staleTime: 180_000,
   })
   const completionSoundQuery = useQuery({
     queryKey: ['completion-sound', user],
-    queryFn: () => getCompletionSoundStatus(user),
+    queryFn: ({ signal }) => getCompletionSoundStatus(user, signal),
     enabled: Boolean(user) && windowsDesktop && tab === 'appearance',
     retry: false,
   })
   const failureSoundQuery = useQuery({
     queryKey: ['failure-sound', user],
-    queryFn: () => getFailureSoundStatus(user),
+    queryFn: ({ signal }) => getFailureSoundStatus(user, signal),
     enabled: Boolean(user) && windowsDesktop && tab === 'appearance',
     retry: false,
   })
@@ -162,7 +166,7 @@ export function SettingsPage() {
   )
   const providerCapabilitiesQuery = useQuery({
     queryKey: ['provider-model-capabilities', user, selectedProviderModel],
-    queryFn: () => getKemoModelCapabilities(user, selectedProviderModel),
+    queryFn: ({ signal }) => getKemoModelCapabilities(user, selectedProviderModel, undefined, signal),
     enabled: providerCapabilitiesEnabled,
     staleTime: 300_000,
     retry: false,
@@ -589,76 +593,78 @@ export function SettingsPage() {
           : '控制主对话和子智能体的推理深度；不可关闭，缺省使用中度'
 
   return <div className="page"><div className="page-inner wide">
-    <div className="page-head"><div className="page-head-copy"><h1 className="page-title">配置</h1>
-      <p className="page-desc">settings 提供有效配置摘要，config/full 是用户文件的原始覆写，global-config 是全局文件；三者独立读取与保存，敏感凭据始终脱敏。</p></div>
-      <div className="page-head-actions"><RefreshActionButton pending={settingsRefreshing} label="重新读取" pendingLabel="读取中…" onClick={refreshAll} /></div></div>
+    <div className="page-head"><div className="page-head-copy"><h1 className="page-title">{tr("配置")}</h1>
+      <p className="page-desc">{tr('主题、语言与字号仅改变网页界面；其他分类分别保存运行配置。')}</p></div>
+      <div className="page-head-actions"><RefreshActionButton pending={settingsRefreshing} label={tr("重新读取")} pendingLabel={tr("读取中…")} onClick={refreshAll} /></div></div>
     {settingsQuery.isError || userConfigQuery.isError || globalConfigQuery.isError ? <ModuleError message="配置读取失败，请检查配置文件格式或 Web API。" /> : null}
     {tab === 'version' && versionQuery.isError ? <ModuleError message="版本信息读取失败，请检查 version.json。" /> : null}
     {formError ? <ModuleError message={formError} /> : null}
     <div className="settings-layout">
-      <nav className="settings-nav" aria-label="配置分类">
+      <nav className="settings-nav" aria-label={tr("配置分类")}>
         {settingsTabs.map((item) => <button key={item.id} className={`settings-nav-item ${tab === item.id ? 'active is-active' : ''}`} onClick={() => switchTab(item.id)}>
-          <ReferenceIcon name={{ appearance: 'palette', provider: 'cpu', users: 'users', memory: 'memory', permissions: 'shieldCheck', runtime: 'sliders', version: 'package' }[item.id]} /><span>{item.label}</span></button>)}
+          <ReferenceIcon name={{ appearance: 'palette', provider: 'cpu', users: 'users', memory: 'memory', permissions: 'shieldCheck', runtime: 'sliders', version: 'package' }[item.id]} /><span>{tr(item.label)}</span></button>)}
       </nav>
 
       <div className="settings-content">
         {tab === 'appearance' ? <>
+          <LanguageSetting key={user} user={user} />
           <article className="setting-section">
-            <div className="setting-section-head"><strong>界面主题</strong><span>只影响当前用户的 Web 外观，不修改智能体运行配置。</span></div>
+            <div className="setting-section-head"><strong>{tr("界面主题")}</strong><span>{tr("只影响当前用户的 Web 外观，不修改智能体运行配置。")}</span></div>
             <div className="setting-row theme-setting-row">
-              <span className="setting-copy"><strong>网页主题</strong><span>高级白与高级黑使用相同布局，可随时切换。</span></span>
-              <div className="theme-choice-group" role="radiogroup" aria-label="界面主题">
-                <button type="button" className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-label="高级白" aria-checked={ui.theme === 'light'} onClick={() => { ui.setTheme('light'); saveAppearance({ theme: 'light' }) }}><span className="theme-preview light" aria-hidden="true"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级白</strong><span>暖白留白 · 清晰轻盈</span></span><i className="theme-choice-check" aria-hidden="true">✓</i></span></button>
-                <button type="button" className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-label="高级黑" aria-checked={ui.theme === 'dark'} onClick={() => { ui.setTheme('dark'); saveAppearance({ theme: 'dark' }) }}><span className="theme-preview dark" aria-hidden="true"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>高级黑</strong><span>柔和黑灰 · 沉静专注</span></span><i className="theme-choice-check" aria-hidden="true">✓</i></span></button>
+              <span className="setting-copy"><strong>{tr("网页主题")}</strong><span>{tr("高级白与高级黑使用相同布局，可随时切换。")}</span></span>
+              <div className="theme-choice-group" role="radiogroup" aria-label={tr("界面主题")}>
+                <button type="button" className={`theme-choice ${ui.theme === 'light' ? 'active' : ''}`} role="radio" aria-label={tr("高级白")} aria-checked={ui.theme === 'light'} onClick={() => { ui.setTheme('light'); saveAppearance({ theme: 'light' }) }}><span className="theme-preview light" aria-hidden="true"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>{tr("高级白")}</strong><span>{tr("暖白留白 · 清晰轻盈")}</span></span><i className="theme-choice-check" aria-hidden="true">✓</i></span></button>
+                <button type="button" className={`theme-choice ${ui.theme === 'dark' ? 'active' : ''}`} role="radio" aria-label={tr("高级黑")} aria-checked={ui.theme === 'dark'} onClick={() => { ui.setTheme('dark'); saveAppearance({ theme: 'dark' }) }}><span className="theme-preview dark" aria-hidden="true"><span className="tp-side" /><span className="tp-top" /><span className="tp-card" /><span className="tp-line" /></span><span className="theme-choice-copy"><span><strong>{tr("高级黑")}</strong><span>{tr("柔和黑灰 · 沉静专注")}</span></span><i className="theme-choice-check" aria-hidden="true">✓</i></span></button>
               </div>
             </div>
           </article>
+          <BackgroundSetting key={`background:${user}`} user={user} />
           <article className="setting-section">
-            <div className="setting-section-head"><strong>界面字号</strong><span>文字与顶部栏关键控件同步缩放。</span></div>
-            <div className="setting-row font-setting-row"><span className="setting-copy"><strong>全局界面比例</strong><span>小、中、大三级，默认使用“中”；字号会同步调整正文、控件和侧栏。</span></span><div className="font-choice-group" role="radiogroup" aria-label="界面字号">{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? '小' : size === 'medium' ? '中' : '大'}</b></button>)}</div></div>
+            <div className="setting-section-head"><strong>{tr("界面字号")}</strong><span>{tr("文字与顶部栏关键控件同步缩放。")}</span></div>
+            <div className="setting-row font-setting-row"><span className="setting-copy"><strong>{tr("全局界面比例")}</strong><span>{tr("小、中、大三级，默认使用“中”；字号会同步调整正文、控件和侧栏。")}</span></span><div className="font-choice-group" role="radiogroup" aria-label={tr("界面字号")}>{(['small', 'medium', 'large'] as const).map((size) => <button key={size} className={ui.fontSize === size ? 'active' : ''} role="radio" aria-checked={ui.fontSize === size} onClick={() => { ui.setFontSize(size); saveAppearance({ font_size: size }) }}><b>{size === 'small' ? tr('小') : size === 'medium' ? tr('中') : tr('大')}</b></button>)}</div></div>
           </article>
           {windowsDesktop ? <article className="setting-section">
-            <div className="setting-section-head"><strong>运行结束音效</strong><span>支持 Windows 桌面网页端；格式：MP3、WAV、Ogg、WebM；智能体成功完成运行后自动播放。</span></div>
+            <div className="setting-section-head"><strong>{tr("运行结束音效")}</strong><span>{tr("支持 Windows 桌面网页端；格式：MP3、WAV、Ogg、WebM；智能体成功完成运行后自动播放。")}</span></div>
             <div className="setting-row completion-sound-row">
-              <span className="setting-copy"><strong>{completionSoundQuery.data?.available ? '已启用' : '未设置'}</strong><span>{completionSoundQuery.data?.available ? `${completionSoundQuery.data.filename} · ${formatBytes(completionSoundQuery.data.size)} · ${formatDateTime(completionSoundQuery.data.updated_at)}` : '支持 MP3、WAV、Ogg 和 WebM 音频。'}</span></span>
+              <span className="setting-copy"><strong>{completionSoundQuery.data?.available ? tr('已启用') : tr('未设置')}</strong><span>{completionSoundQuery.data?.available ? `${completionSoundQuery.data.filename} · ${formatBytes(completionSoundQuery.data.size)} · ${formatDateTime(completionSoundQuery.data.updated_at)}` : tr('支持 MP3、WAV、Ogg 和 WebM 音频。')}</span></span>
               <div className="settings-inline-actions">
                 <input
                   ref={completionSoundInputRef}
                   type="file"
                   accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/webm,.mp3,.wav,.ogg,.webm"
-                  aria-label="选择结束音效文件"
+                  aria-label={tr("选择结束音效文件")}
                   style={{ display: 'none' }}
                   onChange={(event) => {
                     chooseCompletionSound(event.target.files?.[0])
                     event.target.value = ''
                   }}
                 />
-                <button type="button" className="module-btn" disabled={completionSoundUploadMutation.isPending} onClick={() => completionSoundInputRef.current?.click()}><Upload size={15} />{completionSoundUploadMutation.isPending ? '上传中…' : '上传音效'}</button>
-                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundPreviewing} onClick={() => { void previewCompletionSound() }}><Play size={15} />{completionSoundPreviewing ? '试听中…' : '试听'}</button>
-                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundDeleteMutation.isPending} onClick={() => completionSoundDeleteMutation.mutate()}><Trash2 size={15} />清除</button>
+                <button type="button" className="module-btn" disabled={completionSoundUploadMutation.isPending} onClick={() => completionSoundInputRef.current?.click()}><Upload size={15} />{completionSoundUploadMutation.isPending ? tr('上传中…') : tr('上传音效')}</button>
+                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundPreviewing} onClick={() => { void previewCompletionSound() }}><Play size={15} />{completionSoundPreviewing ? tr('试听中…') : tr('试听')}</button>
+                <button type="button" className="module-btn" disabled={!completionSoundQuery.data?.available || completionSoundDeleteMutation.isPending} onClick={() => completionSoundDeleteMutation.mutate()}><Trash2 size={15} />{tr("清除")}</button>
               </div>
               {completionSoundFeedback ? <div className="settings-inline-feedback completion-sound-feedback" role="status">{completionSoundFeedback}</div> : null}
            </div>
            </article> : null}
            {windowsDesktop ? <article className="setting-section">
-             <div className="setting-section-head"><strong>运行失败音效</strong><span>支持 Windows 桌面网页端；运行最终失败且不是取消、暂停或受限停止时播放。</span></div>
+             <div className="setting-section-head"><strong>{tr("运行失败音效")}</strong><span>{tr("支持 Windows 桌面网页端；运行最终失败且不是取消、暂停或受限停止时播放。")}</span></div>
              <div className="setting-row completion-sound-row">
-               <span className="setting-copy"><strong>{failureSoundQuery.data?.available ? '已启用' : '未设置'}</strong><span>{failureSoundQuery.data?.available ? `${failureSoundQuery.data.filename} · ${formatBytes(failureSoundQuery.data.size)} · ${formatDateTime(failureSoundQuery.data.updated_at)}` : '支持 MP3、WAV、Ogg 和 WebM 音频。'}</span></span>
+               <span className="setting-copy"><strong>{failureSoundQuery.data?.available ? tr('已启用') : tr('未设置')}</strong><span>{failureSoundQuery.data?.available ? `${failureSoundQuery.data.filename} · ${formatBytes(failureSoundQuery.data.size)} · ${formatDateTime(failureSoundQuery.data.updated_at)}` : tr('支持 MP3、WAV、Ogg 和 WebM 音频。')}</span></span>
                <div className="settings-inline-actions">
                  <input
                    ref={failureSoundInputRef}
                    type="file"
                    accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/webm,.mp3,.wav,.ogg,.webm"
-                   aria-label="选择失败音效文件"
+                   aria-label={tr("选择失败音效文件")}
                    style={{ display: 'none' }}
                    onChange={(event) => {
                      chooseFailureSound(event.target.files?.[0])
                      event.target.value = ''
                    }}
                  />
-                 <button type="button" className="module-btn" disabled={failureSoundUploadMutation.isPending} onClick={() => failureSoundInputRef.current?.click()}><Upload size={15} />{failureSoundUploadMutation.isPending ? '上传中…' : '上传音效'}</button>
-                 <button type="button" className="module-btn" disabled={!failureSoundQuery.data?.available || failureSoundPreviewing} onClick={() => { void previewFailureSound() }}><Play size={15} />{failureSoundPreviewing ? '试听中…' : '试听'}</button>
-                 <button type="button" className="module-btn" disabled={!failureSoundQuery.data?.available || failureSoundDeleteMutation.isPending} onClick={() => failureSoundDeleteMutation.mutate()}><Trash2 size={15} />清除</button>
+                 <button type="button" className="module-btn" disabled={failureSoundUploadMutation.isPending} onClick={() => failureSoundInputRef.current?.click()}><Upload size={15} />{failureSoundUploadMutation.isPending ? tr('上传中…') : tr('上传音效')}</button>
+                 <button type="button" className="module-btn" disabled={!failureSoundQuery.data?.available || failureSoundPreviewing} onClick={() => { void previewFailureSound() }}><Play size={15} />{failureSoundPreviewing ? tr('试听中…') : tr('试听')}</button>
+                 <button type="button" className="module-btn" disabled={!failureSoundQuery.data?.available || failureSoundDeleteMutation.isPending} onClick={() => failureSoundDeleteMutation.mutate()}><Trash2 size={15} />{tr("清除")}</button>
                </div>
                {failureSoundFeedback ? <div className="settings-inline-feedback completion-sound-feedback" role="status">{failureSoundFeedback}</div> : null}
              </div>
@@ -685,8 +691,8 @@ export function SettingsPage() {
                 },
               })
             }} />} />
-            <SettingRow title="模型" description={modelPickerEnabled ? modelPickerDescription : '主对话模型标识，可自由填写或修改'} source="user" control={<ModelSelectField
-              label="模型"
+            <SettingRow title={tr("模型")} description={modelPickerEnabled ? modelPickerDescription : '主对话模型标识，可自由填写或修改'} source="user" control={<ModelSelectField
+              label={tr("模型")}
               value={userDraft.provider.model}
               placeholder="输入模型名称"
               models={providerModels}
@@ -777,7 +783,7 @@ export function SettingsPage() {
         {tab === 'memory' && globalDraft ? <>
           <ConfigSaveBar label="保存记忆与上下文" description="这些参数是全局默认值，将影响所有未覆盖对应字段的用户。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
           <article className="setting-section">
-            <div className="setting-section-head"><strong>上下文窗口</strong><span>控制 Token 预算、轮次上限和压缩后保留量。</span></div>
+            <div className="setting-section-head"><strong>{tr("上下文窗口")}</strong><span>控制 Token 预算、轮次上限和压缩后保留量。</span></div>
             <SettingRow title="中途上下文压缩" description="超过保留轮数后，将较早一轮的工具调用与思考压缩为摘要；只影响命中率优化，不改变普通轮数或 Token 压缩。" source="global" control={<Toggle checked={globalDraft.agents.enable_mid_context_compression} label="中途上下文压缩" onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, enable_mid_context_compression: value } })} />} />
             <SettingRow title="Token 上限" description="估算总量越过该值或 Provider 报超限时触发压缩" source="global" control={<NumberInput label="Token 上限" value={globalDraft.agents.token_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_limit: value } })} />} />
             <SettingRow title="Token 压缩比例" description={`输入预算为 Token 上限的 ${Math.round(globalDraft.agents.token_compression_ratio * 100)}%`} source="global" control={<div className="config-range"><input type="range" aria-label="Token 压缩比例" min="0.05" max="1" step="0.05" value={globalDraft.agents.token_compression_ratio} onChange={(event) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_compression_ratio: Number(event.target.value) } })} /><b>{Math.round(globalDraft.agents.token_compression_ratio * 100)}%</b></div>} />
@@ -824,7 +830,7 @@ export function SettingsPage() {
             <SettingRow title="连续工具失败上限" description="达到上限后，本轮临时移除该工具" source="global" control={<NumberInput label="连续工具失败上限" value={globalDraft.history.consecutive_tool_fail_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, history: { consecutive_tool_fail_limit: value } })} />} />
           </article>
           <article className="setting-section">
-            <div className="setting-section-head"><strong>任务计划</strong><span>控制计划是否需要批准，以及单个计划的最大步骤数。</span></div>
+            <div className="setting-section-head"><strong>{tr("任务计划")}</strong><span>控制计划是否需要批准，以及单个计划的最大步骤数。</span></div>
             <SettingRow title="自动接受任务计划" description="开启后跳过人工批准；只影响当前用户" source="user" control={<Toggle checked={userDraft.task_plan.auto_accept} label="自动接受任务计划" onChange={(value) => setUserDraft({ ...userDraft, task_plan: { auto_accept: value } })} />} />
             <SettingRow title="任务计划最大步骤" description="单个计划允许生成的最大步骤数" source="global" control={<NumberInput label="任务计划最大步骤" value={globalDraft.task_plan.max_steps} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, task_plan: { max_steps: value } })} />} />
           </article>
@@ -878,7 +884,7 @@ export function SettingsPage() {
                 <small>{restartState === 'confirming-force' ? '后端仍报告存在运行中的对话。强制重启将绕过运行状态检查，未完成的回复或任务可能会被中断。' : '智能体在执行任务时重启可能会出现故障。请先确认当前任务已经结束，并保存尚未提交的配置。'}</small>
                 <small>重启期间网页会短暂断开，服务恢复后将自动刷新。</small>
               </span>
-              <span className="settings-restart-confirm-actions"><button type="button" onClick={closeRestartConfirmation}>取消</button><button type="button" className="confirm" onClick={() => void confirmRestart(restartState === 'confirming-force')}>{restartState === 'confirming-force' ? '确认强制重启' : '确认重启'}</button></span>
+              <span className="settings-restart-confirm-actions"><button type="button" onClick={closeRestartConfirmation}>{tr("取消")}</button><button type="button" className="confirm" onClick={() => void confirmRestart(restartState === 'confirming-force')}>{restartState === 'confirming-force' ? '确认强制重启' : '确认重启'}</button></span>
             </section>
           </div>, document.body) : null}
         </> : null}
@@ -890,7 +896,7 @@ export function SettingsPage() {
             <SettingRow title="正式版本" description="来自项目根目录 version.json" control={<span className="settings-version-value primary">{versionLabel(versionQuery.data.version)}</span>} />
             {versionQuery.data.compatibility?.['kemo-adapter-api'] ? <SettingRow title="配套 Kemo 网关" description="已确认匹配当前 Kemo 2.0 线路协议" control={<span className="settings-version-value">v{versionQuery.data.compatibility['kemo-adapter-api']}</span>} /> : null}
             <SettingRow title="版本结构" description="version.json 使用的结构版本" control={<span className="settings-version-value">Schema {versionQuery.data.schema_version || '未声明'}</span>} />
-            <SettingRow title="页面能力" description="此栏目只能查看版本信息" control={<span className="settings-version-readonly">只读</span>} />
+            <SettingRow title="页面能力" description="此栏目只能查看版本信息" control={<span className="settings-version-readonly">{tr("只读")}</span>} />
           </article>
           {settingsQuery.data?.schema_versions ? <article className="setting-section">
             <div className="setting-section-head"><strong>配置 Schema 版本</strong><span>仅供更新校验参考；历史与记忆运行时仍以数据库内部 Schema 为准。</span></div>

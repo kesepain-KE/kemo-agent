@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { h, pageHead, LIVE_AGENTS, LIVE_MESSAGES, LIVE_EXPANDS, $$, fill, icon, statusBadge, statusText, fmtNum } from './shared.js'
 import { EXPAND_SCOPE_LABEL } from './modules.js'
 /* ============================================================================
@@ -15,9 +16,9 @@ export function renderRuntimeModulesPage(ctx) {
   }));
 
   const tabs = [
-    { key: 'agents', label: '子智能体', count: LIVE_AGENTS.summary.total },
-    { key: 'messages', label: '外部消息', count: LIVE_MESSAGES.summary.total_transports },
-    { key: 'expand', label: '拓展', count: LIVE_EXPANDS.summary.total },
+    { key: 'agents', label: tr('子智能体'), count: LIVE_AGENTS.summary.total },
+    { key: 'messages', label: tr('外部消息'), count: LIVE_MESSAGES.summary.total_transports },
+    { key: 'expand', label: tr('拓展'), count: LIVE_EXPANDS.summary.total },
   ];
   const tabBar = h('div.tabs', tabs.map((t) =>
     h('button.tab' + (t.key === tab ? '.is-active' : ''), {
@@ -43,8 +44,8 @@ export function renderRuntimeModulesPage(ctx) {
             h('div.entry-title', a.name, h('span.badge.badge-outline', 'v' + a.version)),
             h('div.entry-desc', a.description),
             h('div.entry-meta',
-              h('span', a.source === 'global' ? '全局层' : '用户层'),
-              h('span', a.enabled ? '已启用' : '已停用'),
+              h('span', a.source === 'global' ? tr('全局层') : tr('用户层')),
+              h('span', a.enabled ? tr('已启用') : '已停用'),
             ),
           ),
         )),
@@ -70,7 +71,7 @@ export function renderRuntimeModulesPage(ctx) {
             h('div.entry-desc', m.error || m.description),
             h('div.entry-meta',
               h('span', EXPAND_SCOPE_LABEL[m.scope]),
-              h('span', m.valid ? '有效' : '无效'),
+              h('span', m.valid ? tr('有效') : '无效'),
               m.injected_tokens ? h('span', fmtNum(m.injected_tokens) + ' tok') : null,
             ),
           ),

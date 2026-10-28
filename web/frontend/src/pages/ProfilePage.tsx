@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Camera, Download, Eye, FilePenLine, Globe2, Pencil, Save, UserRound } from 'lucide-react'
@@ -23,6 +24,7 @@ function isNotFound(error: unknown) {
 }
 
 export function ProfilePage() {
+  useLanguage()
   const { user } = useOutletContext<ShellOutletContext>()
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -35,13 +37,13 @@ export function ProfilePage() {
 
   const userSoulQuery = useQuery({
     queryKey: ['user-soul', user],
-    queryFn: () => getUserSoul(user),
+    queryFn: ({ signal }) => getUserSoul(user, signal),
     enabled: Boolean(user),
     retry: (count, error) => !isNotFound(error) && count < 1,
   })
   const globalSoulQuery = useQuery({
     queryKey: ['global-soul'],
-    queryFn: getGlobalSoul,
+    queryFn: ({ signal }) => getGlobalSoul(signal),
     retry: (count, error) => !isNotFound(error) && count < 1,
   })
 
@@ -102,9 +104,9 @@ export function ProfilePage() {
 
   return (
     <div className="page profile-page"><div className="page-inner">
-      <div className="page-head"><div className="page-head-copy"><h1 className="page-title">身份与人格</h1>
+      <div className="page-head"><div className="page-head-copy"><h1 className="page-title">{tr("身份与人格")}</h1>
         <p className="page-desc">用户人格可编辑，全局人格在界面上只读。下载的是浏览器本地的当前草稿，不是服务端文件。</p></div>
-        <div className="page-head-actions"><RefreshActionButton pending={soulRefreshing} label="重新读取" pendingLabel="读取中…" onClick={() => { void userSoulQuery.refetch(); void globalSoulQuery.refetch(); setAvatarRevision(Date.now()) }} /></div></div>
+        <div className="page-head-actions"><RefreshActionButton pending={soulRefreshing} label={tr("重新读取")} pendingLabel={tr("读取中…")} onClick={() => { void userSoulQuery.refetch(); void globalSoulQuery.refetch(); setAvatarRevision(Date.now()) }} /></div></div>
       {((userSoulQuery.isError && !userMissing) || (globalSoulQuery.isError && !globalMissing)) && <ModuleError message="人格文件读取失败，请检查文件编码和访问权限。" />}
       {saveNotice && <div className="banner banner-info" role="status">{saveNotice}<button className="icon-btn" onClick={() => setSaveNotice('')}>×</button></div>}
 
@@ -113,7 +115,7 @@ export function ProfilePage() {
           {!avatarFailed || previewUrl ? <img src={previewUrl || getUserAvatarUrl(user, avatarRevision)} alt={`${user} 的头像`} onError={() => setAvatarFailed(true)} /> : <span>{user.slice(0, 1).toUpperCase() || 'K'}</span>}
         </div>
         <div style={{ flex: 1, minWidth: 220 }}>
-          <div style={{ fontSize: 'var(--t-xl)', fontWeight: 620 }}>{user || '未选择用户'}</div>
+          <div style={{ fontSize: 'var(--t-xl)', fontWeight: 620 }}>{user || tr('未选择用户')}</div>
           <div className="faint mono" style={{ fontSize: 'var(--t-xs)', marginTop: 3 }}>users/{user}</div>
           <input hidden ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={(event) => chooseAvatar(event.target.files?.[0])} />
           <div style={{ display: 'flex', gap: 'var(--s-2)', marginTop: 'var(--s-4)', flexWrap: 'wrap' }}>
@@ -181,25 +183,28 @@ function SoulEditor({
   changed?: boolean
   onSave?: () => void
 }) {
+  useLanguage()
   const [mode, setMode] = useState<'edit' | 'preview'>('preview')
   const invalid = !draft.trim() || draft.length > MAX_SOUL_CHARS
   const download = () => downloadMarkdown(filename, draft)
   return <article className="editor-panel">
-    <div className="editor-head"><span>{icon}</span><div style={{ flex: 1, minWidth: 0 }}><div className="editor-title">{title}</div><div className="faint mono" style={{ fontSize: 'var(--t-2xs)', marginTop: 2 }}>{description}</div></div><span className={`badge ${changed ? 'badge-warning' : ''}`}>{missing ? '尚未创建' : changed ? '有未保存修改' : '已同步'}</span></div>
+    <div className="editor-head"><span>{icon}</span><div style={{ flex: 1, minWidth: 0 }}><div className="editor-title">{title}</div><div className="faint mono" style={{ fontSize: 'var(--t-2xs)', marginTop: 2 }}>{description}</div></div><span className={`badge ${changed ? 'badge-warning' : ''}`}>{missing ? '尚未创建' : changed ? tr('有未保存修改') : '已同步'}</span></div>
     <div className="editor-body">
       {!editable && <div className="banner banner-warning" style={{ marginBottom: 'var(--s-4)' }}>全局人格为所有用户共享的安全底线，界面不提供保存入口。</div>}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--s-2)', marginBottom: 'var(--s-3)' }} aria-label={`${title}操作`}>
-        <div className="segments"><button type="button" className={`segment ${mode === 'preview' ? 'is-active' : ''}`} aria-label={`预览${title}`} onClick={() => setMode('preview')}><Eye size={14} />预览</button>
-          <button type="button" disabled={!editable} className={`segment ${mode === 'edit' ? 'is-active' : ''}`} aria-label={`编辑${title}`} onClick={() => setMode('edit')}><Pencil size={14} />编辑</button></div>
-        <div className="spacer" />{!editable && <span className="badge">只读</span>}
+        <div className="segments"><button type="button" className={`segment ${mode === 'preview' ? 'is-active' : ''}`} aria-label={`预览${title}`} onClick={() => setMode('preview')}><Eye size={14} />{tr("预览")}</button>
+          <button type="button" disabled={!editable} className={`segment ${mode === 'edit' ? 'is-active' : ''}`} aria-label={`编辑${title}`} onClick={() => setMode('edit')}><Pencil size={14} />{tr("编辑")}</button></div>
+        <div className="spacer" />{!editable && <span className="badge">{tr("只读")}</span>}
       </div>
     {editable && mode === 'edit'
       ? <textarea className="textarea mono" rows={18} aria-label={`${title} Markdown`} value={draft} maxLength={MAX_SOUL_CHARS} spellCheck={false} placeholder={`输入${title} Markdown…`} onChange={(event) => onChange?.(event.target.value)} />
       : <div className="doc-content profile-soul-preview" role="region" tabIndex={0} aria-label={`${title} Markdown 预览`}><DocumentMarkdown content={draft || `*${title}暂无内容*`} /></div>}
-    </div><div className="editor-foot" style={{ flexWrap: 'wrap' }}>
-      <span><FilePenLine size={13} />{draft.length.toLocaleString()} / {MAX_SOUL_CHARS.toLocaleString()} 字符 · {updatedAt ? `更新于 ${formatDateTime(updatedAt)}` : '尚无文件'}</span>
+    </div><div className="editor-foot profile-editor-foot">
+      <span className="profile-editor-meta"><FilePenLine size={13} />{draft.length.toLocaleString()} / {MAX_SOUL_CHARS.toLocaleString()} 字符 · {updatedAt ? `更新于 ${formatDateTime(updatedAt)}` : '尚无文件'}</span>
+      <div className="profile-editor-actions">
       <button className="btn btn-ghost btn-sm" type="button" aria-label={`下载${title}`} onClick={download}><Download size={14} />下载草稿</button>
       {editable && <button type="button" className="btn btn-primary btn-sm" disabled={!changed || invalid || saving} onClick={onSave}><Save size={14} />{saving ? '正在保存…' : missing ? '创建人格文件' : '保存用户人格'}</button>}
+      </div>
     </div>
   </article>
 }

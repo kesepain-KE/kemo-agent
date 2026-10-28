@@ -28,47 +28,17 @@ describe('dark theme surface contracts', () => {
     expect(lastRule(css, '.stepList')).toContain('overflow-y: auto')
   })
 
-  it('keeps task page chips, details and read-only badges on theme tokens', () => {
-    const css = stylesheet('src/pages/TasksPage.module.css')
-
-    expect(lastRule(css, '.stepChip')).toContain('color: var(--text-2)')
-    expect(lastRule(css, '.stepChip')).toContain('border-color: var(--line)')
-    expect(lastRule(css, '.stepChip b')).toContain('background: var(--surface-elevated)')
-    expect(lastRule(css, '.activeStep')).toContain('background: var(--brand-soft)')
-    expect(lastRule(css, '.readonlyBadge')).toContain('background: var(--brand-soft)')
-    expect(lastRule(css, '.detailBody dd')).toContain('color: var(--text-2)')
-  })
-
-  it('distributes the four knowledge editor actions into equal columns', () => {
-    const css = stylesheet('src/styles/app.css')
-
-    expect(lastRule(css, '.knowledge-editor-toolbar')).toContain('display: grid')
-    expect(lastRule(css, '.knowledge-editor-toolbar')).toContain('grid-template-columns: repeat(4, minmax(0, 1fr))')
-    expect(lastRule(css, '.knowledge-editor-toolbar > .module-btn')).toContain('width: 100%')
-    expect(lastRule(css, '.knowledge-editor-toolbar > .module-btn')).toContain('justify-content: center')
-  })
-
-  it('derives status and category tint backgrounds from the active surface', () => {
-    const runtime = stylesheet('src/pages/RuntimeStatusPage.module.css')
-    const expand = stylesheet('src/pages/ExpandPage.module.css')
-    const sense = stylesheet('src/pages/SensePage.module.css')
-    const messages = stylesheet('src/pages/MessagesPage.module.css')
-    const skills = stylesheet('src/pages/SkillsPage.module.css')
-
-    for (const rule of [
-      lastRule(runtime, '.tone_warning'),
-      lastRule(runtime, '.tone_danger'),
-      lastRule(expand, '.summaryIcon.blue'),
-      lastRule(expand, '.moduleIcon.shared'),
-      lastRule(sense, '.summaryIcon.blue'),
-      lastRule(messages, '.summaryIcon.blue'),
-      lastRule(skills, '.categoryTag.builtin'),
-      lastRule(skills, '.categoryTag.shared'),
-      lastRule(skills, '.categoryTag.agent_generated'),
-      lastRule(skills, '.categoryTag.user_created'),
-    ]) {
-      expect(rule).toContain('color-mix(in srgb')
-      expect(rule).toContain('var(--surface)')
+  it('uses the current light/dark palette and only the current UI stylesheet chain', () => {
+    const tokens = stylesheet('src/reference/styles/tokens.css')
+    expect(tokens).toContain('[data-theme="dark"]')
+    for (const variable of ['--bg-surface:', '--text-primary:']) {
+      expect(tokens.split(variable).length - 1).toBeGreaterThanOrEqual(2)
     }
+    const main = stylesheet('src/main.tsx')
+    expect(main).toContain("import './reference/styles/index.css'")
+    expect(main).not.toMatch(/styles\/(app|prototype)\.css/)
+    const entry = stylesheet('src/reference/styles/index.css')
+    expect(entry).toContain("@import './tokens.css'")
+    expect(entry).toContain("@import './production.css'")
   })
 })

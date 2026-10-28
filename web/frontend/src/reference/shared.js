@@ -1,3 +1,5 @@
+import { t as tr } from '../i18n'
+import { useUiStore } from '../store/ui'
 
 /**
  * 原型展示层移植自 E:\\cache\\front，保留原样布局与控件。
@@ -254,6 +256,15 @@ export function fmtRelative(input) {
   const now = Date.now();
   const diff = now - d.getTime();
   const sec = Math.floor(diff / 1000);
+  const language = useUiStore.getState().language;
+  if (language !== 'zh-CN') {
+    const relative = new Intl.RelativeTimeFormat(language, { numeric: 'auto' });
+    if (sec < 45) return tr('刚刚');
+    if (sec < 60) return relative.format(-sec, 'second');
+    if (sec < 3600) return relative.format(-Math.floor(sec / 60), 'minute');
+    if (sec < 86400) return relative.format(-Math.floor(sec / 3600), 'hour');
+    return relative.format(-Math.floor(sec / 86400), 'day');
+  }
   if (sec < 45) return '刚刚';
   if (sec < 60) return sec + ' 秒前';
   const min = Math.floor(sec / 60);
@@ -460,7 +471,7 @@ export const Overlay = {
           h('div.modal-title', opts.title),
           opts.sub ? h('div.modal-sub', opts.sub) : null,
         ),
-        h('button.icon-btn', { onclick: () => close(), 'aria-label': '关闭' }, h('span', { html: icon('close') })),
+        h('button.icon-btn', { onclick: () => close(), 'aria-label': tr('关闭') }, h('span', { html: icon('close') })),
       ) : null,
       body,
       opts.foot ? h('div.modal-foot' + (opts.footBetween ? '.between' : ''), opts.foot) : null,
@@ -523,10 +534,10 @@ export const Overlay = {
           ),
         ],
         foot: [
-          h('button.btn.btn-ghost', { onclick: () => { finish(false); entry.close(); } }, opts.cancelLabel || '取消'),
+          h('button.btn.btn-ghost', { onclick: () => { finish(false); entry.close(); } }, opts.cancelLabel || tr('取消')),
           h('button.btn' + (tone === 'danger' ? '.btn-danger-solid' : '.btn-primary'), {
             onclick: () => { finish(true); entry.close(); },
-          }, opts.confirmLabel || '确认'),
+          }, opts.confirmLabel || tr('确认')),
         ],
         onClose: () => finish(false),
       });
@@ -545,7 +556,7 @@ export const Overlay = {
           opts.sub ? h('div', { style: { fontSize: 'var(--t-xs)', color: 'var(--text-tertiary)', marginTop: '2px' } }, opts.sub) : null,
         ) : h('div', { style: { flex: '1' } }),
         opts.headExtra || null,
-        h('button.icon-btn', { onclick: () => close(), 'aria-label': '关闭' }, h('span', { html: icon('close') })),
+        h('button.icon-btn', { onclick: () => close(), 'aria-label': tr('关闭') }, h('span', { html: icon('close') })),
       ),
       body,
       opts.foot ? h('div.drawer-foot', opts.foot) : null,
@@ -588,13 +599,13 @@ export const STATUS_TEXT = {
   stopped: '已停止', accepted_current_run: '已接收', queued_next_turn: '下一轮',
 };
 
-export function statusText(s) { return STATUS_TEXT[s] || s || '—'; }
+export function statusText(s) { return STATUS_TEXT[s] ? tr(STATUS_TEXT[s]) : s || '—'; }
 
 /* ---------------------------- 空态 ---------------------------- */
 export function emptyState(opts = {}) {
   return h('div.empty',
     h('div.empty-icon', h('span', { html: icon(opts.icon || 'inbox', 'icon-lg') })),
-    h('div.empty-title', opts.title || '暂无内容'),
+    h('div.empty-title', opts.title || tr('暂无内容')),
     opts.desc ? h('div.empty-desc', opts.desc) : null,
     opts.action || null,
   );
@@ -669,7 +680,7 @@ export function makeSearchBox(opts = {}) {
     type: 'search',
     placeholder: opts.placeholder || '搜索…',
     value: opts.value || '',
-    'aria-label': opts.placeholder || '搜索',
+    'aria-label': opts.placeholder || tr('搜索'),
   });
   const clear = h('button.search-clear', { 'aria-label': '清除搜索', onclick: () => { input.value = ''; input.dispatchEvent(new Event('input')); input.focus(); } },
     h('span', { html: icon('close', 'icon-sm') }));
@@ -685,7 +696,7 @@ export function makeSearchBox(opts = {}) {
 
 /* ---------------------------- 复制按钮 ---------------------------- */
 export function makeCopyButton(text, label) {
-  const btn = h('button.btn.btn-ghost' + (label ? '' : '.btn-icon'), { title: '复制' },
+  const btn = h('button.btn.btn-ghost' + (label ? '' : '.btn-icon'), { title: tr('复制') },
     h('span', { html: icon('copy', label ? 'icon-sm' : '') }),
     label || null,
   );

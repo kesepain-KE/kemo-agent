@@ -1,18 +1,21 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useState } from 'react'
-import { BrainCircuit, Download, File as FileIcon, FileX2, Image as ImageIcon, ListChecks, Music2, Trash2, UserRound, Video, X } from 'lucide-react'
+import { BrainCircuit, Download, File as FileIcon, FileX2, Image as ImageIcon, ListChecks, Music2, PanelRight, Trash2, UserRound, Video, X } from 'lucide-react'
 import { getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl } from '../api/client'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
 import type { ScheduledTaskItem, SenseDataItem } from '../components/RecentActivityCard'
 import type { ChatItem, CronTaskSummary, InputAttachment, MediaArtifact, PlanSummary, SenseSourceSummary } from '../types/api'
 import type { PendingUploadedFile } from '../store/chatDrafts'
+import { openWorkspacePath } from '../store/workspace'
 
 export function UserMessageAvatar({ avatarUrl, user }: { avatarUrl?: string; user?: string }) {
+  useLanguage()
   const [avatarFailed, setAvatarFailed] = useState(false)
 
   useEffect(() => setAvatarFailed(false), [avatarUrl])
 
   return (
-    <div className="msg-avatar user-message-avatar" role="img" aria-label={`${user || '用户'}头像`} title={user || '用户'}>
+    <div className="msg-avatar user-message-avatar" role="img" aria-label={`${user || '用户'}头像`} title={user || tr('用户')}>
       {avatarUrl && !avatarFailed
         ? <img src={avatarUrl} alt="" onError={() => setAvatarFailed(true)} />
         : <UserRound size={26} />}
@@ -27,6 +30,7 @@ export function mediaArtifactUrl(user: string, artifact: MediaArtifact) {
 }
 
 export function MediaArtifactCard({ user, artifact }: { user: string; artifact: MediaArtifact }) {
+  useLanguage()
   const url = mediaArtifactUrl(user, artifact)
   return (
     <article className={`media-artifact media-artifact-${artifact.type}`}>
@@ -35,13 +39,15 @@ export function MediaArtifactCard({ user, artifact }: { user: string; artifact: 
       {artifact.type === 'video' ? <video src={url} controls preload="metadata" /> : null}
       <div className="media-artifact-meta">
         <span><strong>{artifact.name}</strong><small>{artifact.mime_type} · {formatBytes(artifact.size)}</small></span>
-        <a href={url} download={artifact.name}><Download size={14} />下载</a>
+        <button className="btn btn-ghost btn-sm" onClick={() => openWorkspacePath(user, 'download', artifact.path, artifact.name, artifact.size)} aria-label={`${tr('在工作面板打开')} ${artifact.name}`}><PanelRight size={14} />{tr('预览')}</button>
+        <a href={url} download={artifact.name}><Download size={14} />{tr("下载")}</a>
       </div>
     </article>
   )
 }
 
 export function UserAttachmentCard({ user, attachment }: { user: string; attachment: InputAttachment }) {
+  useLanguage()
   const [unavailable, setUnavailable] = useState(!attachment.available)
   const [thumbnailFailed, setThumbnailFailed] = useState(false)
   const downloadable = attachment.scope === 'file_upload' && Boolean(attachment.relative_path) && !unavailable
@@ -99,7 +105,8 @@ export function UserAttachmentCard({ user, attachment }: { user: string; attachm
         <strong title={attachment.name}>{attachment.name}</strong>
         <small>{unavailable ? `源文件已清理 · ${attachment.mime_type}` : `${attachment.mime_type} · ${formatBytes(attachment.size)}`}</small>
       </span>
-      {downloadable ? <button type="button" onClick={() => { void download() }} aria-label={`下载附件 ${attachment.name}`}><Download size={14} />下载</button> : null}
+      {downloadable ? <button type="button" onClick={() => { void download() }} aria-label={`下载附件 ${attachment.name}`}><Download size={14} />{tr("下载")}</button> : null}
+      {downloadable ? <button type="button" onClick={() => openWorkspacePath(user, 'file_upload', attachment.relative_path, attachment.name, attachment.size)} aria-label={`${tr('在工作面板打开')} ${attachment.name}`}><PanelRight size={14} />{tr('预览')}</button> : null}
     </article>
   )
 }
@@ -113,6 +120,7 @@ export function PendingAttachmentCard({
   file: PendingUploadedFile
   onRemove: () => void
 }) {
+  useLanguage()
   const [previewFailed, setPreviewFailed] = useState(false)
   const image = file.mediaKind === 'image' || file.mimeType?.startsWith('image/')
   const mediaKind = file.mediaKind || (image ? 'image' : 'file')
@@ -162,6 +170,7 @@ export function PendingAttachmentTray({
   files: PendingUploadedFile[]
   onRemove: (index: number) => void
 }) {
+  useLanguage()
   return (
     <div className="pending-attachment-tray" role="list" aria-label="待发送附件">
       {files.map((file, index) => (
@@ -178,13 +187,14 @@ export function PendingAttachmentTray({
 
 export function greetingLabel() {
   const hour = new Date().getHours()
-  if (hour < 6) return '夜深了'
-  if (hour < 12) return '上午好'
-  if (hour < 18) return '下午好'
-  return '晚上好'
+  if (hour < 6) return tr('夜深了')
+  if (hour < 12) return tr('上午好')
+  if (hour < 18) return tr('下午好')
+  return tr('晚上好')
 }
 
 export function TaskPlanRecord({ plan, docked, onOpen }: { plan: PlanSummary; docked: boolean; onOpen: () => void }) {
+  useLanguage()
   return (
     <article className="task-plan-record" aria-label={`已创建任务计划：${plan.title}`}>
       <span className="task-plan-record-icon"><ListChecks size={17} /></span>
@@ -194,7 +204,7 @@ export function TaskPlanRecord({ plan, docked, onOpen }: { plan: PlanSummary; do
       </span>
       <span className={`task-plan-record-status status-${plan.status}`}>{statusLabel(plan.status)}</span>
       <span className="task-plan-record-progress">{plan.progress.completed}/{plan.progress.total}</span>
-      <button type="button" onClick={onOpen}>{docked ? '查看当前计划' : '任务中枢'}</button>
+      <button type="button" onClick={onOpen}>{docked ? '查看当前计划' : tr('任务中枢')}</button>
     </article>
   )
 }
@@ -258,6 +268,7 @@ export function guidanceDetailLabel(item: GuidanceDisplayItem) {
 }
 
 export function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { user: string; item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
+  useLanguage()
   const title = guidanceTitleLabel(item)
   const detail = guidanceDetailLabel(item)
   return <article className={`guidance-message guidance-${placement} ${item.status}`} data-guidance-status={item.status}>
@@ -273,7 +284,7 @@ export function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { 
       ))}
     </div> : null}
     {onRetry || onCancel ? <div className="guidance-actions">
-      {onCancel ? <button type="button" className="guidance-cancel" onClick={onCancel}>取消</button> : null}
+      {onCancel ? <button type="button" className="guidance-cancel" onClick={onCancel}>{tr("取消")}</button> : null}
       {onRetry ? <button type="button" className="guidance-retry" onClick={onRetry}>重新发送</button> : null}
     </div> : null}
   </article>

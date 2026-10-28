@@ -97,6 +97,7 @@ return async (
     historyUserMessages?: number
     uploadedFiles?: PendingUploadedFile[]
     internalNextTurn?: boolean
+    preserveDraft?: boolean
     userMessageId?: string
   } = {},
 ) => {
@@ -141,7 +142,7 @@ return async (
   beginChatRun(targetUser, activeSession, runId, historyUserMessages)
   setRunRetryNoticeFor(targetUser, activeSession, null)
   setRunErrorNoticeFor(targetUser, activeSession, null)
-  setDraft('')
+  if (!options.preserveDraft) setDraft('')
   if (uploadedFiles.length) {
     setPendingUploads((current: any) => removeSubmittedUploads(current, uploadedFiles))
   }

@@ -5,6 +5,7 @@ import type { FileListEntry } from '../types/api'
 import { DocumentMarkdown } from '../components/DocumentMarkdown'
 import { formatBytes, formatDateTime } from '../components/ModuleUi'
 import { copyText } from '../utils/clipboard'
+import { workspaceFilePath } from '../utils/filePath'
 import { ReferenceIcon } from './ReferenceIcon'
 import { toast } from './runtime.js'
 
@@ -42,8 +43,8 @@ function textDocument(text: string, ext: string) {
 }
 
 /** One bounded fetch shared by the inline and expanded preview; no third-party viewers. */
-export function FilePreview({ file, user, area, onClose }: {
-  file: FileListEntry; user: string; area: FileArea; onClose: () => void
+export function FilePreview({ file, user, area, onClose, active = true }: {
+  file: FileListEntry; user: string; area: FileArea; onClose: () => void; active?: boolean
 }) {
   const media = fileKind(file)
   const ext = fileExtension(file)
@@ -60,6 +61,8 @@ export function FilePreview({ file, user, area, onClose }: {
   const max = media === 'text' ? 4 * 1024 * 1024 : media === 'image' ? 10 * 1024 * 1024
     : media === 'audio' ? 100 * 1024 * 1024 : media === 'video' ? 300 * 1024 * 1024
       : OFFICE.has(ext) ? 32 * 1024 * 1024 : 64 * 1024 * 1024
+
+  useEffect(() => { if (!active) setExpanded(false) }, [active])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -135,7 +138,7 @@ export function FilePreview({ file, user, area, onClose }: {
               ? <DocumentMarkdown content={textDocument(text, ext)} />
               : <div className="reference-loading" role="status"><span className="spinner" />正在读取文件…</div>
               : <div className="empty"><ReferenceIcon name="file" /><div className="empty-title">此格式暂不支持预览</div><div className="empty-desc">下载后使用本地应用查看。</div></div>
-  const footer = <><button className="btn btn-ghost btn-sm" onClick={() => void copyText(file.relative_path)
+  const footer = <><button className="btn btn-ghost btn-sm" onClick={() => void copyText(workspaceFilePath(user, area, file.relative_path))
     .then(() => toast('已复制相对路径', { kind: 'success' })).catch(() => toast('复制失败', { kind: 'error' }))}>
     <ReferenceIcon name="copy" small />复制路径</button><div className="spacer" />
     <a className="btn btn-outline btn-sm" href={download} download={file.name}><ReferenceIcon name="download" small />下载</a></>

@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useOutletContext } from 'react-router-dom'
@@ -8,8 +9,10 @@ import { GlobalConfirmDialog } from '../components/GlobalConfirmDialog'
 import { FilePreview, fileKind as kind, type FileArea } from './FilePreview'
 import { formatBytes, formatDateTime } from '../components/ModuleUi'
 import { copyText } from '../utils/clipboard'
+import { workspaceFilePath } from '../utils/filePath'
 import { ReferenceIcon } from './ReferenceIcon'
 import { toast } from './runtime.js'
+import { openWorkspaceFile, useWorkspaceStore } from '../store/workspace'
 
 type Area = FileArea
 const areas: Array<{ key: Area; label: string }> = [
@@ -19,7 +22,9 @@ const areas: Array<{ key: Area; label: string }> = [
 ]
 /** 样例的文件空间布局；排序、搜索、目录和分页均交给后端，不用静态数组模拟。 */
 export function FilesPage() {
+  useLanguage()
   const { user } = useOutletContext<ShellOutletContext>()
+  const workspaceOpen = useWorkspaceStore(state => Boolean(state.users[user]?.open))
   const client = useQueryClient()
   const [area, setArea] = useState<Area>('file_upload')
   const [path, setPath] = useState('')
@@ -73,14 +78,14 @@ export function FilesPage() {
     mutation.mutate(() => api.moveUserFile(user, area, rename.relative_path, parent ? `${parent}/${newName.trim()}` : newName.trim()))
   }
   return <div className="page file-space-page"><div className="page-inner wide">
-    <div className="page-head"><div><div className="page-title">文件空间</div><div className="page-desc">三个区域的影响范围不同：用户上传与产物按用户隔离，全局临时区不隔离。列表由后端排序分页。</div></div>
-      <div className="page-head-actions"><button className="btn btn-outline" onClick={() => { setPreview(null); void fileQuery.refetch() }} disabled={fileQuery.isFetching}><ReferenceIcon name="refresh" small />刷新</button>
+    <div className="page-head"><div><div className="page-title">{tr("文件空间")}</div><div className="page-desc">三个区域的影响范围不同：用户上传与产物按用户隔离，全局临时区不隔离。列表由后端排序分页。</div></div>
+      <div className="page-head-actions"><button className="btn btn-outline" onClick={() => { setPreview(null); void fileQuery.refetch() }} disabled={fileQuery.isFetching}><ReferenceIcon name="refresh" small />{tr("刷新")}</button>
         <button className="btn btn-primary" onClick={() => inputRef.current?.click()} disabled={area === 'tmp' || mutation.isPending}><ReferenceIcon name="upload" small />上传到当前目录</button></div></div>
-    <input ref={inputRef} type="file" multiple hidden aria-label="上传文件" onChange={event => { if (event.target.files?.length) upload(event.target.files); event.currentTarget.value = '' }} />
+    <input ref={inputRef} type="file" multiple hidden aria-label={tr("上传文件")} onChange={event => { if (event.target.files?.length) upload(event.target.files); event.currentTarget.value = '' }} />
     <div className="tabs">{areas.map(item => <button key={item.key} className={`tab ${area === item.key ? 'is-active' : ''}`} onClick={() => { setArea(item.key); goPath(''); setSearch('') }}>{item.label}</button>)}</div>
-    <div className="split files-split"><div className="file-list-column">
+    <div className={`split files-split ${workspaceOpen ? 'workspace-file-view' : ''}`}><div className="file-list-column">
     <div className="toolbar file-toolbar"><div className="search-box"><ReferenceIcon name="search" small /><input className="input" type="search" aria-label="搜索当前目录" placeholder="按名称搜索当前目录…" value={search} onChange={event => { setPreview(null); setSearch(event.target.value); setPage(1); setSelected([]) }} /></div>
-      <select className="select reference-auto-width" aria-label="文件排序" value={sortBy} onChange={event => { setPreview(null); setSortBy(event.target.value as FileSortBy); setPage(1) }}><option value="name">按名称</option><option value="updated_at">按更新时间</option><option value="size">按大小</option></select>
+      <select className="select reference-auto-width" aria-label="文件排序" value={sortBy} onChange={event => { setPreview(null); setSortBy(event.target.value as FileSortBy); setPage(1) }}><option value="name">{tr("按名称")}</option><option value="updated_at">{tr("按更新时间")}</option><option value="size">按大小</option></select>
       <button className="btn btn-outline btn-sm" onClick={() => { setPreview(null); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc') }}><ReferenceIcon name={sortOrder === 'asc' ? 'arrowUp' : 'arrowDown'} small />{sortOrder === 'asc' ? '升序' : '降序'}</button><div className="spacer" /><span className="faint">{fileQuery.data?.summary.total_files ?? '—'} 文件 · {formatBytes(fileQuery.data?.summary.total_size ?? 0)}</span>
     </div>
     <div className="file-breadcrumb"><button className="file-crumb" onClick={() => goPath('')}><ReferenceIcon name="folderOpen" small /></button>
@@ -94,27 +99,29 @@ export function FilesPage() {
       {fileQuery.isLoading ? <div className="reference-loading"><span className="spinner" />正在读取目录…</div> : entries.length === 0 && !fileQuery.isError ? <div className="empty"><ReferenceIcon name="folder" /><div className="empty-title">{search ? '没有匹配的文件' : '当前目录是空的'}</div></div> : <div className="list reference-file-list">
         {entries.map(file => <div className={`list-row ${selected.includes(file.relative_path) || preview?.relative_path === file.relative_path ? 'is-active' : ''}`} key={file.relative_path}>
           <input type="checkbox" aria-label={`选择 ${file.name}`} checked={selected.includes(file.relative_path)} onChange={() => setSelected(current => current.includes(file.relative_path) ? current.filter(value => value !== file.relative_path) : [...current, file.relative_path])} />
-          <button className="reference-file-main" onClick={() => file.type === 'directory' ? goPath(file.relative_path) : setPreview(file)}>
+          <button className="reference-file-main" onClick={() => file.type === 'directory' ? goPath(file.relative_path)
+            : workspaceOpen ? openWorkspaceFile(user, area, file) : setPreview(file)}>
             <div className={`file-icon ${file.type === 'directory' ? 'is-dir' : `is-${kind(file)}`}`}><ReferenceIcon name={file.type === 'directory' ? 'folder' : ['text', 'document'].includes(kind(file)) ? 'fileText' : kind(file)} small /></div>
             <div className="reference-entry-copy"><div className="file-name">{file.name}</div><div className="file-path">{file.type === 'directory' ? `${file.child_count} 个子项` : file.relative_path}</div></div>
           </button>
           <span className="reference-file-size">{file.type === 'directory' ? '—' : formatBytes(file.size)}</span><span className="reference-file-time">{formatDateTime(file.updated_at)}</span>
           <div className="reference-file-actions">
+            {file.type === 'file' && <button className="icon-btn" aria-label={`${tr('在工作面板打开')} ${file.name}`} title={tr('在工作面板打开')} onClick={() => openWorkspaceFile(user, area, file)}><ReferenceIcon name="panelRight" small /></button>}
             {file.type === 'file' && <a className="icon-btn" href={downloadUrl(file)} download={file.name} aria-label={`下载 ${file.name}`}><ReferenceIcon name="download" small /></a>}
             <button className="icon-btn" disabled={area === 'tmp' || file.type === 'directory'} aria-label={`重命名 ${file.name}`} onClick={() => { setRename(file); setNewName(file.name); setError('') }}><ReferenceIcon name="edit" small /></button>
-            <button className="icon-btn" aria-label={`复制 ${file.name} 路径`} onClick={() => void copyText(file.relative_path).then(() => toast('已复制相对路径', { kind: 'success' })).catch(() => setError('复制失败'))}><ReferenceIcon name="copy" small /></button>
+            <button className="icon-btn" aria-label={`复制 ${file.name} 路径`} onClick={() => void copyText(workspaceFilePath(user, area, file.relative_path)).then(() => toast('已复制相对路径', { kind: 'success' })).catch(() => setError('复制失败'))}><ReferenceIcon name="copy" small /></button>
           </div>
         </div>)}
       </div>}
     </div>
-    {(fileQuery.data?.pagination.total_pages ?? 1) > 1 && <div className="pager"><button disabled={!fileQuery.data?.pagination.has_previous} onClick={() => { setPreview(null); setPage(page - 1); setSelected([]) }}>上一页</button><span>{page} / {fileQuery.data?.pagination.total_pages}</span><button disabled={!fileQuery.data?.pagination.has_next} onClick={() => { setPreview(null); setPage(page + 1); setSelected([]) }}>下一页</button></div>}
-    </div><aside className="file-detail-column">{preview
+    {(fileQuery.data?.pagination.total_pages ?? 1) > 1 && <div className="pager"><button disabled={!fileQuery.data?.pagination.has_previous} onClick={() => { setPreview(null); setPage(page - 1); setSelected([]) }}>{tr("上一页")}</button><span>{page} / {fileQuery.data?.pagination.total_pages}</span><button disabled={!fileQuery.data?.pagination.has_next} onClick={() => { setPreview(null); setPage(page + 1); setSelected([]) }}>{tr("下一页")}</button></div>}
+    </div>{!workspaceOpen && <aside className="file-detail-column">{preview
       ? <FilePreview key={`${user}:${area}:${preview.relative_path}`} file={preview} user={user} area={area} onClose={() => setPreview(null)} />
       : <section className="editor-panel file-detail-panel"><div className="editor-head"><div className="editor-title">文件详情</div></div>
         <div className="file-detail-body"><div className="empty"><ReferenceIcon name="fileText" /><div className="empty-title">选择一个文件</div>
           <div className="empty-desc">在左侧选择文件查看内容，可点击放大预览。</div></div></div></section>}
-    </aside></div>
-    {rename && <div className="overlay overlay-center" role="dialog" aria-modal="true" aria-label="重命名文件"><div className="modal modal-sm"><div className="modal-head"><div className="modal-title">重命名文件</div><button className="icon-btn" onClick={() => setRename(null)} aria-label="关闭重命名">×</button></div><div className="modal-body"><label className="field"><span className="field-label">新名称</span><input className="input" value={newName} autoFocus onChange={event => setNewName(event.target.value)} /></label>{error && <div className="banner banner-danger">{error}</div>}</div><div className="modal-foot"><button className="btn btn-ghost" onClick={() => setRename(null)}>取消</button><button className="btn btn-primary" disabled={mutation.isPending} onClick={submitRename}>{mutation.isPending ? '重命名中…' : '重命名'}</button></div></div></div>}
+    </aside>}</div>
+    {rename && <div className="overlay overlay-center" role="dialog" aria-modal="true" aria-label="重命名文件"><div className="modal modal-sm"><div className="modal-head"><div className="modal-title">重命名文件</div><button className="icon-btn" onClick={() => setRename(null)} aria-label="关闭重命名">×</button></div><div className="modal-body"><label className="field"><span className="field-label">新名称</span><input className="input" value={newName} autoFocus onChange={event => setNewName(event.target.value)} /></label>{error && <div className="banner banner-danger">{error}</div>}</div><div className="modal-foot"><button className="btn btn-ghost" onClick={() => setRename(null)}>{tr("取消")}</button><button className="btn btn-primary" disabled={mutation.isPending} onClick={submitRename}>{mutation.isPending ? '重命名中…' : '重命名'}</button></div></div></div>}
     <GlobalConfirmDialog open={Boolean(confirm)} title={confirm === 'all' ? area === 'tmp' ? '清空全局临时区' : '清空当前区域' : '删除选中的文件'}
       description={area === 'tmp' ? '临时区不按用户隔离，删除会影响所有用户可见的文件。此操作不可撤销。' : '文件和子目录会被永久删除，此操作不可撤销。'}
       detail={confirm === 'selected' ? selected.join('\n') : fileQuery.data?.root} error={error} icon={<ReferenceIcon name="alertTriangle" />} tone="danger"

@@ -19,6 +19,36 @@ function renderPage(path: string, files = false) {
 }
 
 describe('样例替换后的生产路由', () => {
+  it('调度页独立刷新共享请求池，不重建页面或请求完整提示词，切页后停止轮询', async () => {
+    const data = await loadReferenceData('/status', 'kesepain', 's1')
+    let active = 4
+    let fullReads = 0
+    let poolReads = 0
+    server.use(http.get('/api/users/kesepain/runtime/status', ({ request }) => {
+      const url = new URL(request.url)
+      if (url.searchParams.get('sections') === 'congestion') poolReads++
+      else fullReads++
+      return HttpResponse.json({ ...data.runtime, congestion: { ...data.runtime.congestion,
+        provider: { active_requests: active, max_requests: 10, available_requests: 10 - active, waiting_estimate: 1 } } })
+    }))
+    renderPage('/status?tab=maintenance')
+    const pool = await screen.findByRole('group', { name: 'Provider 请求' })
+    await within(pool).findByText('4 / 10')
+    const page = screen.getByRole('heading', { name: '运行诊断' })
+    active = 0
+    await waitFor(() => expect(pool).toHaveTextContent('0 / 10'), { timeout: 3500 })
+    expect(screen.getByRole('group', { name: 'Provider 请求' })).toBe(pool)
+    expect(screen.getByRole('heading', { name: '运行诊断' })).toBe(page)
+    expect(fullReads).toBe(1)
+    expect(poolReads).toBeGreaterThanOrEqual(2)
+    fireEvent.click(screen.getByRole('button', { name: '今日 Token' }))
+    await screen.findByText('按小时明细')
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Provider 请求' })).toBeNull())
+    const readsAfterUnmount = poolReads
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1700)) })
+    expect(poolReads).toBe(readsAfterUnmount)
+  })
+
   it('运行诊断同屏预览提示词与组件状态，小时图显示刻度和极值', async () => {
     renderPage('/status')
     await screen.findByText('系统提示词与拼接状态')
@@ -572,7 +602,7 @@ describe('样例替换后的生产路由', () => {
   })
 
   it('任务读取过滤系统 Cron 记录，并为旧记录补稳定选择键', async () => {
-    server.use(http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+    server.use(http.get('/api/users/kesepain/tasks', () => HttpResponse.json({ user: 'kesepain',
       summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 0, completed_plans: 0 },
       plans: [], cron_tasks: [], executions: [
         { kind: 'cron', user_defined: false, task_id: 'maintenance', title: '系统维护', updated_at: '2026-10-10' },
@@ -586,7 +616,7 @@ describe('样例替换后的生产路由', () => {
 
   it('任务独立六条分页，选中定时任务后读取实际 prompt', async () => {
     server.use(
-      http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+      http.get('/api/users/kesepain/tasks', () => HttpResponse.json({ user: 'kesepain',
         summary: { active_plans: 0, waiting_plans: 0, enabled_crons: 8, completed_plans: 0 },
         plans: [], executions: [], cron_tasks: Array.from({ length: 8 }, (_, i) => ({
           task_id: `cron-${i}`, title: `调度-${i}`, user_defined: true, type: 'daily', time: '18:00', status: 'enabled',

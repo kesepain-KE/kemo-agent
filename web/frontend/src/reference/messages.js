@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { LIVE_MESSAGES, Store, h, pageHead, refreshPage, icon, statTile, fill, emptyState, statusBadge, statusText, fmtRelative, fmtBytes, $$, fmtDateTime, makePager, copyText, mutate, Api, Overlay, renderMarkdownWithWidgets } from './shared.js'
 export function renderMessagesPage(ctx) {
   const transports = LIVE_MESSAGES.transports.filter((t) => t.bound_user === Store.user);
@@ -12,11 +13,11 @@ export function renderMessagesPage(ctx) {
   const inner = pageEl.firstElementChild;
 
   inner.appendChild(pageHead({
-    title: '外部消息',
+    title: tr('外部消息'),
     desc: '查看当前用户绑定的消息模块、连接状态与收发记录。状态每 30 秒刷新一次。',
     actions: [
       h('button.btn.btn-outline', { onclick: () => { void refreshPage(); } },
-        h('span', { html: icon('refresh', 'icon-sm') }), '刷新'),
+        h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
     ],
   }));
 
@@ -73,7 +74,7 @@ export function renderMessagesPage(ctx) {
           h('div.message-module-desc', t.description || t.name),
           h('div.message-module-meta',
             h('span', h('span.dot' + (t.connection_status === 'connected' ? '.dot-success' : '.dot-danger')),
-              t.connection_status === 'connected' ? '已连接' : '未连接'),
+              t.connection_status === 'connected' ? '已连接' : tr('未连接')),
             h('span', t.latency_ms != null ? t.latency_ms + ' ms' : '—'),
             h('span', `收 ${t.messages_received_today} / 发 ${t.messages_sent_today}`),
           ),
@@ -120,7 +121,7 @@ export function renderMessagesPage(ctx) {
         h('div.desc-row', h('span.desc-key', '连接状态'), h('span.desc-val',
           h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
             h('span.dot' + (t.connection_status === 'connected' ? '.dot-success' : '.dot-error')),
-            t.connection_status === 'connected' ? '已连接' : '未连接'),
+            t.connection_status === 'connected' ? '已连接' : tr('未连接')),
         )),
         h('div.desc-row', h('span.desc-key', '最后心跳'), h('span.desc-val', t.last_check ? fmtRelative(t.last_check) : '—')),
         h('div.desc-row', h('span.desc-key', '最后消息'), h('span.desc-val', t.last_message_at ? fmtRelative(t.last_message_at) : '—')),
@@ -168,7 +169,7 @@ export function renderMessagesPage(ctx) {
                 ev.currentTarget.classList.add('is-active');
                 drawDetail();
               },
-            }, k === 'all' ? '全部' : k === 'send' ? '发送' : k === 'receive' ? '接收' : '文件'),
+            }, k === 'all' ? tr('全部') : k === 'send' ? tr('发送') : k === 'receive' ? '接收' : '文件'),
           )),
         ),
         (() => {

@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { Fragment, Suspense, lazy } from 'react'
 import { Check, ChevronDown, Copy, ListChecks, Pencil, RotateCcw, Save, Trash2, Zap } from 'lucide-react'
 import { ReferenceIcon } from '../reference/ReferenceIcon'
@@ -58,6 +59,7 @@ interface ChatPageViewProps {
 }
 
 export function ChatPageView(props: ChatPageViewProps) {
+  useLanguage()
   const {
     showWelcome, conversationMenuOpen, scrollRef, handleChatScroll, sessionId, historyQuery,
     user, overview, reasoningControl, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
@@ -114,7 +116,7 @@ return (
         <section className="welcome"><div className="welcome-inner">
           <div className="welcome-hero">
             <div className="welcome-mark"><KemoLogo /></div>
-            <h1 className="welcome-hi">{greetingLabel()}，<span className="welcome-user">{user || '用户'}</span></h1>
+            <h1 className="welcome-hi">{greetingLabel()}，<span className="welcome-user">{user || tr('用户')}</span></h1>
             <p className="welcome-sub">kemo-agent 已就绪。描述目标即可开始，需要计划的任务会先生成草案再等确认。</p>
           </div>
           {activePlan && !dockedPlan && <div className="card card-pad">
@@ -122,13 +124,13 @@ return (
             <p className="page-desc">{activePlan.description}</p>
             <div className="progress-track"><div className="progress-fill" style={{ width: `${activePlan.progress.percent}%` }} /></div>
             <div className="toolbar"><button className="btn btn-ghost btn-sm" onClick={() => setActiveTaskOpen((value: boolean) => !value)}>{activeTaskOpen ? '收起步骤' : '展开步骤'}</button>
-              <button className="btn btn-outline btn-sm" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&session=${encodeURIComponent(sessionId)}`)}>任务中枢</button></div>
+              <button className="btn btn-outline btn-sm" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&session=${encodeURIComponent(sessionId)}`)}>{tr("任务中枢")}</button></div>
             {activeTaskOpen && activePlan.steps.slice(0, 6).map((step: PlanSummary['steps'][number]) => <div className="list-row" key={step.step_id}>{step.title}<span className="badge">{statusLabel(step.status)}</span></div>)}
           </div>}
           <div className="welcome-cols">
             <div className="welcome-section">
               <div className="welcome-section-head"><div className="welcome-section-title"><ReferenceIcon name="clock" small />近期活动</div>
-                <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&session=${encodeURIComponent(sessionId)}`)}>任务中枢</button></div>
+                <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&session=${encodeURIComponent(sessionId)}`)}>{tr("任务中枢")}</button></div>
               <div className="reference-recent-list">{recentTasks.slice(0, 3).map(task => <button className="recent-task" key={task.id} onClick={() => navigate(`/tasks?user=${encodeURIComponent(user)}&tab=cron`)}>
                 <div className="entry-icon"><ReferenceIcon name="clock" small /></div><div className="reference-entry-copy"><div className="rt-title truncate">{task.title}</div><div className="rt-sub">{task.schedule} · {task.nextRun}</div></div><span className="badge">{statusLabel(task.status)}</span>
               </button>)}
@@ -190,7 +192,7 @@ return (
                     {item.edited ? <span className="edited-label">编辑后重发</span> : null}
                     {editedSources.has(item.id) ? <span className="edited-label">已用于重发</span> : null}
                     {!running && item.content && lastUserMessage?.id === item.id ? <button type="button" onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label="编辑后重发"><Pencil size={12} />{conversationBusy === 'edit' ? '正在撤销…' : '编辑重发'}</button> : null}
-                    <button type="button" onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : '复制'}</button>
+                    <button type="button" onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label="复制消息">{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? '已复制' : tr('复制')}</button>
                   </div>
                 </article>
               </Fragment>
@@ -218,8 +220,8 @@ return (
                   if (item.kind === 'reasoning') return <ReasoningTrace key={item.id} item={item} />
                   if (item.kind === 'execution_marker') return null
                   if (item.kind === 'tool') return item.name === 'subagent_dispatch'
-                    ? <SubagentToolCard key={item.id} item={item} progress={liveItems} running={running} />
-                    : <ToolCallCard key={item.id} item={item} />
+                    ? <SubagentToolCard key={item.id} item={item} user={user} sessionId={sessionId} />
+                    : <ToolCallCard key={item.id} item={item} user={user} sessionId={sessionId} />
                   if (item.kind === 'media') return <MediaArtifactCard key={item.id} user={user} artifact={item.artifact} />
                   if (item.kind === 'usage') return null
                   if (item.kind === 'task_plan') return null
@@ -257,7 +259,7 @@ return (
                     )}
                     {assistantMessages.length > 0 && (
                       <button className="assistant-turn-copy" onClick={() => void copyMessage(assistantCopyId, assistantText)} disabled={!assistantText} aria-label="复制智能体回复">
-                        {copiedItem === assistantCopyId ? <Check size={13} /> : <Copy size={13} />}{copiedItem === assistantCopyId ? '已复制' : '复制'}
+                        {copiedItem === assistantCopyId ? <Check size={13} /> : <Copy size={13} />}{copiedItem === assistantCopyId ? '已复制' : tr('复制')}
                       </button>
                     )}
                   </div>
@@ -344,7 +346,7 @@ return (
           </button>
         </div>}
         value={draft}
-        placeholder={user ? running ? 'Enter 加入消息跟进；Ctrl+Enter 直接本轮引导…' : '给 kemo-agent 发送消息…' : '请先选择用户'}
+        placeholder={user ? running ? 'Enter 加入消息跟进；Ctrl+Enter 直接本轮引导…' : '给 kemo-agent 发送消息…' : tr('请先选择用户')}
         currentRound={currentRound}
         totalRounds={totalRounds}
         roundLimit={roundLimit}
@@ -364,7 +366,7 @@ return (
         notice={editingSource ? <div className="edit-resend-banner"><span>最新一轮已撤销；修改内容后发送将创建新的最新一轮。</span><button onClick={cancelEditAndResend}>取消编辑</button></div> : null}
         conversationMenu={conversationMenuOpen ? (
           <div className="conversation-menu show" role="menu">
-            <div className="conversation-menu-head">对话操作</div>
+            <div className="conversation-menu-head">{tr("对话操作")}</div>
             <button className="conversation-action" role="menuitem" disabled={running || Boolean(conversationBusy)} onClick={() => { void saveAndNewConversation() }}>
               <span className="conversation-action-icon"><Save size={16} /></span>
                 <span className="conversation-action-copy"><strong>保存此对话，创建新对话</strong><span>{conversationBusy === 'save' ? '正在保存归档并切换…' : '保留当前归档，记忆转入后台提取'}</span></span>
@@ -398,11 +400,12 @@ return (
         onNextTurn={queueFollowUp}
         onStop={() => { void stopCurrentRun() }}
       />
-      <div className="composer-hint"><span><kbd>Enter</kbd> {running ? '下一轮跟进' : '发送'}</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 引导当前轮</span><span><kbd>Ctrl</kbd> + <kbd>K</kbd> 命令面板</span></div>
+      <div className="composer-hint"><span><kbd>Enter</kbd> {running ? '下一轮跟进' : tr('发送')}</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 引导当前轮</span><span><kbd>Ctrl</kbd> + <kbd>K</kbd> {tr("命令面板")}</span></div>
     </div>
     <KnowledgeReferenceDrawer
       open={knowledgeDrawerOpen}
       documents={knowledgeQuery.data?.documents ?? []}
+      categories={knowledgeQuery.data?.categories}
       loading={knowledgeQuery.isLoading || knowledgeQuery.isFetching}
       error={knowledgeQuery.isError}
       onClose={() => setKnowledgeDrawerOpen(false)}

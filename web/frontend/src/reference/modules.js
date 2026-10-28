@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { Current, LIVE_SENSE, h, pageHead, refreshPage, icon, Bus, statTile, fmtNum, fill, fmtRelative, fmtDateTime, makeCopyButton, makeSwitch, mutate, Api, Store, Overlay, LIVE_EXPANDS, $$, emptyState, renderMarkdownWithWidgets, makePager, clamp } from './shared.js'
 import { expandDataContent, expandDataFragment } from './expandDataPreview.js'
 /* ============================================================================
@@ -59,11 +60,11 @@ export function renderSensePage(ctx) {
   const inner = pageEl.firstElementChild;
 
   inner.appendChild(pageHead({
-    title: '感知',
+    title: tr('感知'),
     desc: '全局感知模块按目录注册，一个目录一个模块，读取 global_sense/<module>/sense.json。区分「采集到的数据」与「真正进入 Prompt 的片段」── 二者经常不同。',
     actions: [
       h('button.btn.btn-outline', { onclick: () => refreshPage() },
-        h('span', { html: icon('refresh', 'icon-sm') }), '重新读取'),
+        h('span', { html: icon('refresh', 'icon-sm') }), tr('重新读取')),
       h('button.btn.btn-outline', {
         onclick: () => Bus.emit('composer:fill', { text: '帮我创建一个新的全局感知模块。' }),
       }, h('span', { html: icon('plus', 'icon-sm') }), '创建模块'),
@@ -274,11 +275,11 @@ export function renderExpandPage(ctx) {
   const inner = pageEl.firstElementChild;
 
   inner.appendChild(pageHead({
-    title: '拓展',
+    title: tr('拓展'),
     desc: '三层拓展：全局层由系统维护、共享层来自共享目录、用户层只属于当前用户。全局与共享层通过白名单准入，用户层默认进入管线。',
     actions: [
       h('button.btn.btn-outline', { onclick: () => refreshPage() },
-        h('span', { html: icon('refresh', 'icon-sm') }), '刷新'),
+        h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
       h('button.btn.btn-outline', {
         onclick: () => Bus.emit('composer:fill', { text: '创建一个新的用户拓展，扩展要求为：' }),
       }, h('span', { html: icon('plus', 'icon-sm') }), '增加到用户层'),
@@ -371,7 +372,7 @@ export function renderExpandPage(ctx) {
             ? h('div', { style: { fontSize: 'var(--t-xs)', color: 'var(--danger)', marginTop: '6px', lineHeight: '1.5' } }, m.error)
             : h('div.module-preview', m.description),
           h('div.module-meta',
-            h('span', '数据 ' + (m.open_input ? '开启' : '关闭')),
+            h('span', '数据 ' + (m.open_input ? '开启' : tr('关闭'))),
             h('span', '·'),
             h('span', m.open_control ? '控制开启' : '控制关闭'),
             h('span', '·'),
@@ -477,7 +478,7 @@ export function renderExpandPage(ctx) {
             const ok = await Overlay.confirm({
               title: '删除用户拓展',
               description: '只会删除当前用户的拓展模块，不影响全局层与共享层。',
-              detail: m.path, confirmLabel: '删除', tone: 'danger',
+              detail: m.path, confirmLabel: tr('删除'), tone: 'danger',
             });
             if (ok) await mutate(() => Api.deleteExpandModule(Store.user, m.name), '用户拓展已删除');
           },

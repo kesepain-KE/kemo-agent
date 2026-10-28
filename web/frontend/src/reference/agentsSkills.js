@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { LIVE_AGENTS, h, pageHead, refreshPage, icon, $$, statTile, fill, makeSearchBox, emptyState, copyText, fmtBytes, fmtRelative, Overlay, mutate, Api, Store, navigate, append, chooseFile, LIVE_SKILLS, makeSwitch, renderMarkdownWithWidgets, downloadUrl, clamp, makePager } from './shared.js'
 /* ============================================================================
    pages/agents-skills · 子智能体 / 工具与技能
@@ -14,11 +15,11 @@ export function renderAgentsPage(ctx) {
   const inner = pageEl.firstElementChild;
 
   inner.appendChild(pageHead({
-    title: '子智能体',
+    title: tr('子智能体'),
     desc: '全局层内置子智能体与用户层自定义子智能体。网页没有创建或修改子智能体的接口，用户层可以删除整包。',
     actions: [
       h('button.btn.btn-outline', { onclick: () => { void refreshPage(); } },
-        h('span', { html: icon('refresh', 'icon-sm') }), '刷新'),
+        h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
     ],
   }));
 
@@ -26,9 +27,9 @@ export function renderAgentsPage(ctx) {
   const detailHost = h('div');
 
   const tabBar = h('div.tabs', [
-    { key: 'all', label: '全部', count: LIVE_AGENTS.summary.total },
-    { key: 'global', label: '全局层', count: LIVE_AGENTS.summary.global },
-    { key: 'user', label: '用户层', count: LIVE_AGENTS.summary.user },
+    { key: 'all', label: tr('全部'), count: LIVE_AGENTS.summary.total },
+    { key: 'global', label: tr('全局层'), count: LIVE_AGENTS.summary.global },
+    { key: 'user', label: tr('用户层'), count: LIVE_AGENTS.summary.user },
   ].map((t) => h('button.tab' + (t.key === activeLayer ? '.is-active' : ''), {
     onclick: (ev) => {
       activeLayer = t.key;
@@ -92,11 +93,11 @@ export function renderAgentsPage(ctx) {
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
             h('span', { style: { fontSize: 'var(--t-sm)', fontWeight: '570' } }, a.name),
             h('span.badge.badge-outline', 'v' + a.version),
-            a.enabled ? h('span.badge.badge-success', '已启用') : h('span.badge', '已停用'),
+            a.enabled ? h('span.badge.badge-success', tr('已启用')) : h('span.badge', '已停用'),
           ),
           h('div', { style: { fontSize: 'var(--t-xs)', color: 'var(--text-tertiary)', marginTop: '4px', lineHeight: '1.55' } }, a.description),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-3)', marginTop: '6px' } },
-            h('span', { class: 'scope-tag scope-' + (a.source === 'global' ? 'global' : 'user') }, a.source === 'global' ? '全局层' : '用户层'),
+            h('span', { class: 'scope-tag scope-' + (a.source === 'global' ? 'global' : 'user') }, a.source === 'global' ? tr('全局层') : tr('用户层')),
             h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } }, '执行器 ' + a.executor),
             h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } }, '模型档 ' + a.model_profile),
           ),
@@ -129,12 +130,12 @@ export function renderAgentsPage(ctx) {
           h('div.editor-title', a.name),
           h('div', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)', marginTop: '2px' } }, `v${a.version} · ${a.root}`),
         ),
-        a.enabled ? h('span.badge.badge-success', '已启用') : h('span.badge', '已停用'),
+        a.enabled ? h('span.badge.badge-success', tr('已启用')) : h('span.badge', '已停用'),
       ),
       h('div.editor-body',
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--s-4)' } },
           h('div.desc-list',
-            h('div.desc-row', h('span.desc-key', '来源层级'), h('span.desc-val', a.source === 'global' ? '全局层（内置）' : '用户层')),
+            h('div.desc-row', h('span.desc-key', '来源层级'), h('span.desc-val', a.source === 'global' ? '全局层（内置）' : tr('用户层'))),
             h('div.desc-row', h('span.desc-key', '执行器'), h('span.desc-val', a.executor)),
             h('div.desc-row', h('span.desc-key', '执行方式'), h('span.desc-val', a.execution)),
             h('div.desc-row', h('span.desc-key', '模型档位'), h('span.desc-val', a.model_profile)),
@@ -211,14 +212,14 @@ export function renderSkillsPage(ctx) {
   const inner = pageEl.firstElementChild;
 
   inner.appendChild(pageHead({
-    title: '工具与技能',
+    title: tr('工具与技能'),
     desc: 'builtin 是可执行工具，其余分类主要是 Prompt 技能。是否可编辑、可切换、可下载由每项的 editable / toggleable / downloadable 决定，不能用一个开关统管。',
     actions: [
       h('button.btn.btn-outline', {
         onclick: () => chooseFile('.zip', 32, file => mutate(() => Api.uploadUserSkills(Store.user, file), '技能 ZIP 已导入')),
       }, h('span', { html: icon('upload', 'icon-sm') }), '导入技能 ZIP'),
       h('button.btn.btn-outline', { onclick: () => { void refreshPage(); } },
-        h('span', { html: icon('refresh', 'icon-sm') }), '刷新'),
+        h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
     ],
   }));
 
@@ -238,7 +239,7 @@ export function renderSkillsPage(ctx) {
         ev.currentTarget.classList.add('is-active');
         draw();
       },
-    }, c.label,
+    }, tr(c.label),
       h('span.tab-count', String(c.key === 'all'
         ? LIVE_SKILLS.catalog_summary.total
         : LIVE_SKILLS.catalog_summary[c.key] ?? 0))),
@@ -384,9 +385,9 @@ export function renderSkillsPage(ctx) {
 
     const body = h('div.editor-body');
     body.appendChild(h('div.desc-list', { style: { marginBottom: 'var(--s-4)' } },
-      h('div.desc-row', h('span.desc-key', '分类'), h('span.desc-val', (SKILL_CATEGORIES.find((c) => c.key === s.category) || {}).label || s.category)),
+      h('div.desc-row', h('span.desc-key', tr('分类')), h('span.desc-val', (SKILL_CATEGORIES.find((c) => c.key === s.category) || {}).label || s.category)),
       h('div.desc-row', h('span.desc-key', '版本'), h('span.desc-val', s.version || '—')),
-      h('div.desc-row', h('span.desc-key', '当前状态'), h('span.desc-val', s.memory_lifecycle?.status === 'stale' ? '来源已失效 · 待复核' : s.enabled ? h('span', { style: { color: 'var(--success)' } }, '已启用') : '未启用')),
+      h('div.desc-row', h('span.desc-key', '当前状态'), h('span.desc-val', s.memory_lifecycle?.status === 'stale' ? '来源已失效 · 待复核' : s.enabled ? h('span', { style: { color: 'var(--success)' } }, tr('已启用')) : '未启用')),
       s.memory_lifecycle ? h('div.desc-row', h('span.desc-key', '记忆来源'), h('span.desc-val',
         s.memory_lifecycle.sources.map(source => source.filename).join('、'),
         s.memory_lifecycle.reason ? `；${s.memory_lifecycle.reason}` : '；来源有效')) : null,
@@ -395,16 +396,16 @@ export function renderSkillsPage(ctx) {
 
     body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-2)', marginBottom: 'var(--s-3)' } },
       h('div.segments',
-        h('button.segment' + (previewMode === 'preview' ? '.is-active' : ''), { onclick: () => { previewMode = 'preview'; drawDetail(); } }, '预览'),
+        h('button.segment' + (previewMode === 'preview' ? '.is-active' : ''), { onclick: () => { previewMode = 'preview'; drawDetail(); } }, tr('预览')),
         h('button.segment' + (previewMode === 'edit' ? '.is-active' : ''), {
           onclick: () => { if (!s.editable || docLoading || docError) return; previewMode = 'edit'; drawDetail(); },
           disabled: !s.editable || docLoading || !!docError,
           style: s.editable ? {} : { opacity: '0.45' },
-        }, '编辑'),
+        }, tr('编辑')),
       ),
       h('div.spacer'),
       s.toggleable ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: 'var(--t-xs)' } },
-        h('span.muted', s.enabled ? '已启用' : '已禁用'),
+        h('span.muted', s.enabled ? tr('已启用') : tr('已禁用')),
         makeSwitch(s.enabled, (v) => mutate(() => Api.setSkillEnabled(Store.user, s.category, s.name, v), v ? '技能已启用' : '技能已禁用')),
       ) : null,
     ));
@@ -420,7 +421,7 @@ export function renderSkillsPage(ctx) {
         docLoading ? h('div', { role: 'status' }, '正在读取 SKILL.md…')
           : docError ? h('div.banner.banner-danger', { role: 'alert' },
             h('div', docError),
-            h('button.btn.btn-outline.btn-sm', { onclick: () => selectSkill(s) }, '重新读取'),
+            h('button.btn.btn-outline.btn-sm', { onclick: () => selectSkill(s) }, tr('重新读取')),
           )
           : renderMarkdownWithWidgets(docContent || 'SKILL.md 文件为空。'),
       ));
@@ -441,11 +442,11 @@ export function renderSkillsPage(ctx) {
           });
           if (ok) await mutate(() => Api.deleteSkill(Store.user, s.category, s.name), '技能包已删除');
         },
-      }, h('span', { html: icon('trash', 'icon-sm') }), '删除') : null,
+      }, h('span', { html: icon('trash', 'icon-sm') }), tr('删除')) : null,
       h('button.btn.btn-primary.btn-sm', {
         disabled: !s.editable || docLoading || !!docError,
         onclick: () => mutate(() => Api.putSkillDocument(Store.user, s.category, s.name, docContent), 'SKILL.md 已保存'),
-      }, '保存'),
+      }, tr('保存')),
     ));
 
     detailHost.appendChild(panel);

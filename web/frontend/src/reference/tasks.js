@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { LIVE_TASKS, h, pageHead, refreshPage, icon, statTile, $$, fill, Current, $, emptyState, makePager, Overlay, mutate, Api, makeSearchBox, statusBadge, fmtRelative, fmtDuration, toast, Store, append, readDetail, fmtDateTime, on, closeOverlays, renderMarkdownWithWidgets } from './shared.js'
 import { taskCleanupButton } from './taskCleanup.js'
 /* ============================================================================
@@ -6,9 +7,9 @@ import { taskCleanupButton } from './taskCleanup.js'
 
 export function renderTasksPage(ctx) {
   const tabs = [
-    { key: 'plans', label: '任务计划', count: LIVE_TASKS.summary.active_plans + LIVE_TASKS.summary.waiting_plans },
-    { key: 'cron', label: '定时任务', count: LIVE_TASKS.cron_tasks.length },
-    { key: 'exec', label: '执行记录', count: LIVE_TASKS.executions.length },
+    { key: 'plans', label: tr('任务计划'), count: LIVE_TASKS.summary.active_plans + LIVE_TASKS.summary.waiting_plans },
+    { key: 'cron', label: tr('定时任务'), count: LIVE_TASKS.cron_tasks.length },
+    { key: 'exec', label: tr('执行记录'), count: LIVE_TASKS.executions.length },
   ];
   let active = ctx.viewState.tasksTab || ctx.params.tab || 'plans';
 
@@ -16,12 +17,12 @@ export function renderTasksPage(ctx) {
   const inner = page.firstElementChild;
 
   inner.appendChild(pageHead({
-    title: '任务中枢',
+    title: tr('任务中枢'),
     desc: '任务计划、定时调度与执行记录是三个独立视图。计划由对话生成后等待确认，执行中约 1.2 秒轮询一次状态。',
     actions: [
       h('button.btn.btn-outline', {
         onclick: () => { void refreshPage(); },
-      }, h('span', { html: icon('refresh', 'icon-sm') }), '刷新'),
+      }, h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
       h('button.btn.btn-primary', {
         onclick: () => openCronDialog(null, ctx),
       }, h('span', { html: icon('plus', 'icon-sm') }), '创建定时任务'),
@@ -104,7 +105,7 @@ export function openPlanEditor(plan) {
       h('div.field',h('label.field-label','描述'),description),
       h('div.field',h('label.field-label','步骤补丁（可选 JSON 数组）'),steps),
       h('div.field-hint','提交携带原修订号与计划自己的会话/来源，冲突不会覆盖新版本。'),error),
-    foot:[h('button.btn.btn-ghost',{onclick:()=>modal.close()},'取消'),
+    foot:[h('button.btn.btn-ghost',{onclick:()=>modal.close()},tr('取消')),
       h('button.btn.btn-primary',{onclick:async()=>{
         if(!context.active)return;
         try {
@@ -230,7 +231,7 @@ export function renderPlansView() {
       }, h('span', { html: icon('rotateCcw', 'icon-sm') }), '重试步骤') : null,
       p.status === 'running' ? h('button.btn.btn-outline.btn-sm', {
         onclick: () => mutate(() => Api.commandPlan(Store.user, p.plan_id, 'pause', p.session_id, p.source), '计划已暂停'),
-      }, h('span', { html: icon('pause', 'icon-sm') }), '暂停') : null,
+      }, h('span', { html: icon('pause', 'icon-sm') }), tr('暂停')) : null,
       ['running','pending','approved','paused'].includes(p.status) ? h('button.btn.btn-danger.btn-sm',{onclick:async()=>{
         const ok=await Overlay.confirm({title:'取消任务计划',description:'未执行的步骤将不再继续；已完成的记录保留。',detail:p.plan_id,confirmLabel:'确认取消',tone:'danger'});
         if(ok)await mutate(()=>Api.commandPlan(Store.user,p.plan_id,'cancel',p.session_id,p.source),'计划已取消');
@@ -243,7 +244,7 @@ export function renderPlansView() {
           });
           if (ok) await mutate(() => Api.deletePlan(Store.user, p.plan_id, p.session_id, p.source), '计划已删除');
         },
-      }, h('span', { html: icon('trash', 'icon-sm') }), '删除') : null,
+      }, h('span', { html: icon('trash', 'icon-sm') }), tr('删除')) : null,
     ));
 
     detailCol.appendChild(panel);
@@ -388,17 +389,17 @@ export function renderCronView(ctx) {
     panel.appendChild(h('div.editor-foot', { style: { flexWrap: 'wrap' } },
       t.user_defined && t.status !== 'running'
         ? h('button.btn.btn-ghost.btn-sm', { onclick: () => readDetail(() => Api.getCron(Store.user, t.task_id), result => openCronDialog(result.cron_task, ctx)) },
-          h('span', { html: icon('edit', 'icon-sm') }), '编辑')
+          h('span', { html: icon('edit', 'icon-sm') }), tr('编辑'))
         : null,
       t.status === 'failed' ? h('button.btn.btn-outline.btn-sm', {
         onclick: () => mutate(() => Api.updateCron(Store.user, t.task_id, {status:'enabled'}), '任务已重新启用'),
       }, h('span', { html: icon('rotateCcw', 'icon-sm') }), '重新启用') : null,
       t.status === 'enabled' ? h('button.btn.btn-outline.btn-sm', {
         onclick: () => mutate(() => Api.updateCron(Store.user, t.task_id, {status:'paused'}), '定时任务已暂停'),
-      }, h('span', { html: icon('pause', 'icon-sm') }), '暂停') : null,
+      }, h('span', { html: icon('pause', 'icon-sm') }), tr('暂停')) : null,
       t.status === 'paused' ? h('button.btn.btn-outline.btn-sm', {
         onclick: () => mutate(() => Api.updateCron(Store.user, t.task_id, {status:'enabled'}), '定时任务已恢复'),
-      }, h('span', { html: icon('play', 'icon-sm') }), '恢复') : null,
+      }, h('span', { html: icon('play', 'icon-sm') }), tr('恢复')) : null,
       h('div', { style: { flex: '1' } }),
       h('button.btn.btn-danger.btn-sm', {
         onclick: async () => {
@@ -409,7 +410,7 @@ export function renderCronView(ctx) {
           });
           if (ok) await mutate(() => Api.deleteCron(Store.user, t.task_id), '定时任务已删除');
         },
-      }, h('span', { html: icon('trash', 'icon-sm') }), '删除'),
+      }, h('span', { html: icon('trash', 'icon-sm') }), tr('删除')),
     ));
 
     detailCol.appendChild(panel);
@@ -621,7 +622,7 @@ export function openCronDialog(task, ctx) {
     body,
     size: 'lg',
     foot: [
-      h('button.btn.btn-ghost', { onclick: () => Overlay.stack[Overlay.stack.length - 1].close() }, '取消'),
+      h('button.btn.btn-ghost', { onclick: () => Overlay.stack[Overlay.stack.length - 1].close() }, tr('取消')),
       h('button.btn.btn-primary', {
         onclick: () => {
           if (!validate()) return;
@@ -673,7 +674,7 @@ export function renderExecutionsView() {
               el.style.display = (k === 'all' || el.dataset.kind === k) ? '' : 'none';
             });
           },
-        }, k === 'all' ? '全部' : k === 'plan_step' ? '计划步骤' : '调度')),
+        }, k === 'all' ? tr('全部') : k === 'plan_step' ? '计划步骤' : '调度')),
       ),
     ));
 
@@ -714,7 +715,7 @@ export function renderExecutionsView() {
         h('div.desc-list',
           h('div.desc-row', h('span.desc-key', '记录类型'), h('span.desc-val', ex.kind === 'cron' ? '定时任务执行' : '计划步骤执行')),
           h('div.desc-row', h('span.desc-key', '任务 ID'), h('span.desc-val.mono', ex.task_id)),
-          h('div.desc-row', h('span.desc-key', '状态'), h('span.desc-val', statusBadge(ex.status))),
+          h('div.desc-row', h('span.desc-key', tr('状态')), h('span.desc-val', statusBadge(ex.status))),
           h('div.desc-row', h('span.desc-key', '耗时'), h('span.desc-val', ex.duration_ms ? fmtDuration(ex.duration_ms) : '—')),
           h('div.desc-row', h('span.desc-key', '执行时间'), h('span.desc-val', fmtDateTime(ex.updated_at))),
           h('div.desc-row', h('span.desc-key', '记录来源'), h('span.desc-val', ex.user_defined ? '用户创建' : '系统维护')),

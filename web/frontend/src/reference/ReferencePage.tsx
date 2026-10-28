@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -6,6 +7,7 @@ import * as api from '../api/client'
 import type { ShellOutletContext } from '../components/appShellTypes'
 import { DocumentMarkdown } from '../components/DocumentMarkdown'
 import { ModulePanel } from '../components/ModulePanel'
+import { RuntimeCongestion } from '../components/RuntimeCongestion'
 import type { ModulePanelDefinition, ModulePanelResponse, ModulePanelValue, ExpandScope } from '../types/api'
 import { disposeReferencePage, renderReferencePage, toast } from './runtime.js'
 
@@ -58,6 +60,7 @@ function EmbeddedPanel({ user, kind, name, scope, initial, panelError, refresh }
   user: string; kind: 'sense' | 'expand'; name: string; scope: ExpandScope;
   initial?: ModulePanelDefinition | null; panelError?: string; refresh: () => Promise<unknown>
 }) {
+  useLanguage()
   const client = useQueryClient()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -96,6 +99,7 @@ function EmbeddedPanel({ user, kind, name, scope, initial, panelError, refresh }
 
 /** 原样例 DOM 的 React 组合根；协议组件仍由生产版安全渲染器负责。 */
 export function ReferencePage() {
+  const language = useLanguage()
   const { user, sessionId, clientId, chatRunning, sessions } = useOutletContext<ShellOutletContext>()
   const location = useLocation()
   const navigate = useNavigate()
@@ -163,6 +167,8 @@ export function ReferencePage() {
       queueMicrotask(() => { if (ctx.active && !entry.disposed) root.render(content) })
       return node
     }
+    ctx.mountCongestion = (initial: React.ComponentProps<typeof RuntimeCongestion>['initial']) => mount(
+      <QueryClientProvider client={client}><RuntimeCongestion user={user} sessionId={sessionId} initial={initial} /></QueryClientProvider>)
     ctx.mountMarkdown = (content: string, options: { readOnly?: boolean } = {}) => mount(<DocumentMarkdown content={content} onWidgetAction={options.readOnly ? undefined : action => {
       if (action.type === 'copy') void import('../utils/clipboard').then(({ copyText }) => copyText(action.text))
       else ctx.navigate('/chat', { prompt: action.text }) // 业务文档动作只回填，不自动发起运行。
@@ -208,13 +214,13 @@ export function ReferencePage() {
       queueMicrotask(() => remaining.forEach(entry => entry.root.unmount()))
       host.replaceChildren()
     }
-  }, [pageQuery.data, route, user, sessionId, location.search, client, navigate, viewState])
+  }, [pageQuery.data, route, user, sessionId, location.search, client, navigate, viewState, language])
 
-  if (!user) return <div className="empty"><div className="empty-title">请先选择用户</div></div>
-  if (pageQuery.isLoading) return <div className="reference-loading" role="status"><span className="spinner" />正在读取真实数据…</div>
+  if (!user) return <div className="empty"><div className="empty-title">{tr("请先选择用户")}</div></div>
+  if (pageQuery.isLoading) return <div className="reference-loading" role="status"><span className="spinner" />{tr("正在读取真实数据…")}</div>
   if (pageQuery.isError && !pageQuery.data) return <div className="page"><div className="page-inner"><div className="banner banner-danger" role="alert">
-    {pageQuery.error instanceof Error ? pageQuery.error.message : '读取失败'}
-    <button className="btn btn-outline" onClick={() => void pageQuery.refetch()}>重试</button>
+    {pageQuery.error instanceof Error ? pageQuery.error.message : tr('读取失败')}
+    <button className="btn btn-outline" onClick={() => void pageQuery.refetch()}>{tr("重试")}</button>
   </div></div></div>
-  return <>{pageQuery.isError && <div className="banner banner-warning" role="alert">刷新失败，当前显示上次成功读取的数据。<button onClick={() => void pageQuery.refetch()}>重试</button></div>}<div className="reference-page-host" ref={hostRef} /></>
+  return <>{pageQuery.isError && <div className="banner banner-warning" role="alert">刷新失败，当前显示上次成功读取的数据。<button onClick={() => void pageQuery.refetch()}>{tr("重试")}</button></div>}<div className="reference-page-host" ref={hostRef} /></>
 }

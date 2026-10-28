@@ -39,7 +39,9 @@ import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, Knowl
 import { copyText } from '../utils/clipboard'
 import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { randomUUID } from '../randomId'
+import { t } from '../i18n'
 import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
+import { useScratchSender } from '../store/scratchNotes'
 import {
   archiveTerminalPlansInConversation,
   buildHistoryItems,
@@ -158,7 +160,9 @@ export function ChatPage() {
   const [knowledgeDrawerOpen, setKnowledgeDrawerOpen] = useState(false)
   const [capabilityDrawerOpen, setCapabilityDrawerOpen] = useState(false)
   const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | 'edit' | ''>('')
-  const [conversationFeedback, setConversationFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
+  const [conversationFeedback, setConversationFeedback] = useState<{
+    tone: 'success' | 'error'; text: string; retryScope?: string
+  } | null>(null)
   const [clearTarget, setClearTarget] = useState<{ user: string; sessionId: string; committed: boolean } | null>(null)
   const [clearPending, setClearPending] = useState(false)
   const [clearError, setClearError] = useState('')
@@ -256,7 +260,7 @@ export function ChatPage() {
   })
   const longTaskQuery = useQuery({
     queryKey: ['long-task', user, sessionId],
-    queryFn: () => getSessionLongTask(user, sessionId),
+    queryFn: ({ signal }) => getSessionLongTask(user, sessionId, undefined, signal),
     enabled: Boolean(user && sessionId && (hasCommitted || sessionReady)),
     retry: false,
     refetchInterval: (query) => {
@@ -266,13 +270,13 @@ export function ChatPage() {
   })
   const tasksQuery = useQuery({
     queryKey: ['tasks', user, sessionId],
-    queryFn: () => getTasks(user, sessionId),
+    queryFn: ({ signal }) => getTasks(user, sessionId, signal),
     enabled: Boolean(user && sessionId),
     refetchInterval: (query) => query.state.data?.plans.some((plan) => ['approved', 'running'].includes(plan.status)) ? 1200 : false,
   })
   const runtimeTokensQuery = useQuery({
     queryKey: ['runtime-welcome-tokens', user, sessionId],
-    queryFn: () => getRuntimeStatus(user, sessionId, ['tokens']),
+    queryFn: ({ signal }) => getRuntimeStatus(user, sessionId, ['tokens'], signal),
     enabled: Boolean(user && sessionId),
     staleTime: 30_000,
   })
@@ -289,17 +293,17 @@ export function ChatPage() {
   }, [queryClient, sessionId, tasksQuery.dataUpdatedAt, user])
   const knowledgeQuery = useQuery({
     queryKey: ['knowledge', user],
-    queryFn: () => getKnowledge(user),
+    queryFn: ({ signal }) => getKnowledge(user, signal),
     enabled: Boolean(user && knowledgeDrawerOpen),
   })
   const expandsQuery = useQuery({
     queryKey: ['expands', user],
-    queryFn: () => getExpands(user),
+    queryFn: ({ signal }) => getExpands(user, signal),
     enabled: Boolean(user && capabilityDrawerOpen),
   })
   const skillsQuery = useQuery({
     queryKey: ['skills', user],
-    queryFn: () => getSkills(user),
+    queryFn: ({ signal }) => getSkills(user, signal),
     enabled: Boolean(user && capabilityDrawerOpen),
   })
   const capabilityItems = useMemo(
@@ -335,7 +339,12 @@ export function ChatPage() {
     setKnowledgeDrawerOpen(false)
     setCapabilityDrawerOpen(false)
     setConversationBusy('')
-    setConversationFeedback(null)
+    // Save temporarily detaches the URL. A rejected close restores the same
+    // space: retain its retry feedback, but never carry it to another space/user.
+    setConversationFeedback(current => current?.retryScope && (
+      current.retryScope === conversationKey
+      || (!sessionId && current.retryScope.startsWith(`${user}\u0000`))
+    ) ? current : null)
     setLongTaskBusy(false)
     setPlanOverrides({})
     setPlanMutationNotices({})
@@ -392,6 +401,25 @@ export function ChatPage() {
     refreshOverview, setDraftText, finishChatRun, setStopping, createNewSession, creatingSendSessionRef,
   })
 
+  const scratchSendRef = useRef<(text: string) => Promise<boolean>>(async () => false)
+  const scratchScopeRef = useRef(draftKey)
+  scratchScopeRef.current = draftKey
+  scratchSendRef.current = async text => {
+    if (!user || uploading || editingSource || creatingSendSessionRef.current) return false
+    if (running || stopping) {
+      if (!liveSessionId) return false
+      queueNextTurnMessage(user, liveSessionId, {
+        id: eventId('follow_up'), content: text, uploadedFiles: [],
+        historyUserMessages: Math.max(persistedUserMessages, (liveRun?.historyUserMessages ?? persistedUserMessages) + 1),
+        status: 'queued',
+      })
+      return true
+    }
+    return send(text, { preserveDraft: true })
+  }
+  useEffect(() => useScratchSender.getState().bind(draftKey, text =>
+    scratchScopeRef.current === draftKey ? scratchSendRef.current(text) : Promise.resolve(false)), [draftKey])
+
   useEffect(() => {
     const pending = liveRun?.nextTurnQueue[0]
     if (!pending || pending.status !== 'queued' || running || uploading || stopping || consumingNextTurnRef.current || !user || !liveSessionId) return
@@ -402,6 +430,7 @@ export function ChatPage() {
       historyUserMessages: Math.max(pending.historyUserMessages, persistedUserMessages, liveRun?.historyUserMessages ?? 0),
       uploadedFiles: pending.uploadedFiles,
       internalNextTurn: true,
+      preserveDraft: true,
       userMessageId: `next_turn_${pending.id}`,
     }).then((committed) => {
       if (committed) removeNextTurnMessage(user, liveSessionId, pending.id)
@@ -495,13 +524,26 @@ export function ChatPage() {
     detachSession()
     try {
       if (previousSessionId) {
-        await closeSession(user, previousSessionId, clientId)
+        const result = await closeSession(user, previousSessionId, clientId)
+        if (result.closed !== true) {
+          if (result.deferred && typeof result.retry_after_seconds === 'number'
+            && result.retry_after_seconds > 0) {
+            throw new Error(t('另有 {count} 个页面或客户端仍在使用此对话，尚未关闭，也未启动后台提取。请关闭其他页面后重试；旧页面停止心跳后，租约预计最多 {seconds} 秒过期。',
+              { count: result.active_clients ?? 1, seconds: Math.ceil(result.retry_after_seconds) }))
+          }
+          throw new Error(t(result.deferred
+            ? '此对话仍被其他页面或客户端使用，尚未关闭，也未启动后台提取。请关闭其他页面后重试；异常断开的页面可能需要等待在线租约过期。'
+            : '当前对话尚未确认关闭，未创建新对话，请重试。'))
+        }
         previousSessionClosed = true
       }
       await newConversation()
     } catch (error) {
       if (previousSessionId && !previousSessionClosed) setSessionId(previousSessionId)
-      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '保存当前对话失败' })
+      setConversationFeedback({
+        tone: 'error', text: error instanceof Error ? error.message : '保存当前对话失败',
+        retryScope: previousSessionId && !previousSessionClosed ? `${user}\u0000${previousSessionId}` : undefined,
+      })
     } finally {
       saveExecutingRef.current = false
       setConversationBusy('')
@@ -1048,7 +1090,9 @@ export function ChatPage() {
     setNextTurnMessageStatus, setConversationMenuOpen, draft, stopping, currentRound, roundLimit, pendingUploads, uploading,
     uploadFeedback, setUploadFeedback, setPendingUploads, editingSource, cancelEditAndResend,
     saveAndNewConversation, clearConversation, compressCurrentConversation, hasCommitted,
-    toggleLongTask, regenerateLastResponse, conversationFeedback, uploadFiles, setCapabilityDrawerOpen,
+    toggleLongTask, regenerateLastResponse,
+    conversationFeedback: conversationFeedback?.retryScope && conversationFeedback.retryScope !== `${user}\u0000${sessionId}` ? null : conversationFeedback,
+    uploadFiles, setCapabilityDrawerOpen,
     setKnowledgeDrawerOpen, openCommandPanel, sendGuidance, send, stopCurrentRun, knowledgeDrawerOpen,
     knowledgeQuery, referenceKnowledge, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
     referenceCapability,

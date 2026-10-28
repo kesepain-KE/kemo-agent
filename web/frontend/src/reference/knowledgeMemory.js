@@ -1,10 +1,15 @@
+import { t as tr } from '../i18n'
 import { h, pageHead, chooseFile, mutate, Api, Store, icon, onClickOutside, toast, navigate, LIVE_KNOWLEDGE, $$, makeSearchBox, append, fill, clamp, emptyState, readDetail, truncateMiddle, fmtBytes, fmtRelative, makePager, renderMarkdownWithWidgets, Overlay, LIVE_MEMORY, LIVE_IMPORTANT_MEMORY, statusBadge, statusText, fmtDateTime, refreshPage, closeOverlays } from './shared.js'
 import { getKnowledgeCategories, getKnowledgeCategoryFilters, knowledgeCategoryKey } from '../knowledgeCategories'
 /* ============================================================================
    pages/knowledge · 三级知识库
    ========================================================================= */
 
-export const SCOPE_LABEL = { user: '用户层', shared: '共享层', global: '全局层' };
+export const SCOPE_LABEL = {
+  get user() { return tr('用户层'); },
+  get shared() { return tr('共享层'); },
+  get global() { return tr('全局层'); },
+};
 
 export function renderKnowledgePage(ctx) {
   let activeScope = 'all';
@@ -34,11 +39,11 @@ export function renderKnowledgePage(ctx) {
       activeScope === 'all' || document.scope === activeScope
     )).length;
     const items = [
-      { label: '全部分类', value: 'all', count: allCount },
+      { label: tr('全部分类'), value: 'all', count: allCount },
       ...getKnowledgeCategoryFilters(LIVE_KNOWLEDGE, activeScope),
     ];
     const categorySelect = h('select.select.knowledge-category-filter', {
-      'aria-label': '筛选知识分类',
+      'aria-label': tr('筛选知识分类'),
       onchange: (event) => { activeCategory = event.target.value; page = 1; draw(); },
     }, items.map((item) => h('option', {
       value: item.value,
@@ -66,7 +71,7 @@ export function renderKnowledgePage(ctx) {
           () => { categoryDraft = value; newCategoryDraft = ''; },
         );
       },
-    }, '新建分类');
+    }, tr('新建分类'));
     categoryHost.append(
       categorySelect,
       h('div.knowledge-category-create-controls',
@@ -77,7 +82,7 @@ export function renderKnowledgePage(ctx) {
   }
 
   inner.appendChild(pageHead({
-    title: '知识库',
+    title: tr('知识库'),
     desc: '三级目录分别是用户层、共享层与全局层。检索模式为 index_only ── 正文不会自动全量注入 Prompt，只有被引用时才进入上下文。',
     actions: [
       h('button.btn.btn-outline', {
@@ -116,7 +121,7 @@ export function renderKnowledgePage(ctx) {
         drawCategories();
         draw();
       },
-    }, s === 'all' ? '全部' : SCOPE_LABEL[s],
+    }, s === 'all' ? tr('全部') : SCOPE_LABEL[s],
       h('span.tab-count', String(s === 'all' ? LIVE_KNOWLEDGE.summary.documents : LIVE_KNOWLEDGE.summary[s + '_documents']))),
   ));
   const search = makeSearchBox({
@@ -141,7 +146,7 @@ export function renderKnowledgePage(ctx) {
     if (!rows.length) {
       listHost.appendChild(h('div.card', emptyState({
         icon: 'book',
-        title: query ? '没有匹配的知识文件' : '当前知识目录中还没有可索引文件',
+        title: query ? tr('没有匹配的知识文件') : '当前知识目录中还没有可索引文件',
         desc: query ? '调整搜索词或切换层级后重试。' : '可以从右上角导入用户层或共享层文件。',
       })));
       return;
@@ -151,13 +156,13 @@ export function renderKnowledgePage(ctx) {
     const table = h('table.table.knowledge-document-table',
       h('colgroup', [28, 9, 12, 12, 17, 9, 13].map(width => h('col', { style: { width: `${width}%` } }))),
       h('thead', h('tr',
-        h('th', '名称'),
+        h('th', tr('名称')),
         h('th', '层级'),
-        h('th', '分类'),
+        h('th', tr('分类')),
         h('th', '主智能体'),
-        h('th', '路径'),
-        h('th.num', '大小'),
-        h('th', '更新时间'),
+        h('th', tr('路径')),
+        h('th.num', tr('大小')),
+        h('th', tr('更新时间')),
       )),
       h('tbody', slice.map((d) => h('tr' + (selected && selected.relative_path === d.relative_path ? '.is-selected' : ''), {
         style: { cursor: 'pointer' },
@@ -179,7 +184,7 @@ export function renderKnowledgePage(ctx) {
         h('td', h('span', { class: 'scope-tag scope-' + d.scope }, SCOPE_LABEL[d.scope])),
         h('td', h('span', { class: 'knowledge-category-tag', title: d.category || UNCATEGORIZED }, d.category || UNCATEGORIZED)),
         h('td', d.active_for_main_agent
-          ? h('span.badge.badge-success', '已启用')
+          ? h('span.badge.badge-success', tr('已启用'))
           : h('span.badge', '已过滤')),
         h('td', h('span.file-path', { title: d.relative_path }, d.relative_path)),
         h('td.num', { style: { fontVariantNumeric: 'tabular-nums' } }, fmtBytes(d.size)),
@@ -197,7 +202,7 @@ export function renderKnowledgePage(ctx) {
     if (!selected) {
       editorHost.appendChild(h('div.editor-panel',
         h('div.editor-head', h('div.editor-title', '知识文件')),
-        h('div.editor-body', emptyState({ title: '选择知识文件', desc: '点击左侧知识文件后，可在此处编辑或预览。', icon: 'penLine' })),
+        h('div.editor-body', emptyState({ title: tr('选择知识文件'), desc: '点击左侧知识文件后，可在此处编辑或预览。', icon: 'penLine' })),
       ));
       return;
     }
@@ -266,15 +271,15 @@ export function renderKnowledgePage(ctx) {
       h('div.segments',
         h('button.segment' + (previewMode === 'preview' ? '.is-active' : ''), {
           onclick: () => { previewMode = 'preview'; drawEditor(); },
-        }, '预览'),
+        }, tr('预览')),
         h('button.segment' + (previewMode === 'edit' ? '.is-active' : ''), {
           onclick: () => { if (isGlobal) return; previewMode = 'edit'; drawEditor(); },
           disabled: isGlobal,
           style: isGlobal ? { opacity: '0.45' } : {},
-        }, '编辑'),
+        }, tr('编辑')),
       ),
       h('div.spacer'),
-      h('button.icon-btn', { title: '放大预览', 'aria-label': '放大预览', onclick: () => openKnowledgeZoom(selected, draft) },
+      h('button.icon-btn', { title: tr('放大预览'), 'aria-label': tr('放大预览'), onclick: () => openKnowledgeZoom(selected, draft) },
         h('span', { html: icon('maximize') })),
     ));
 
@@ -287,28 +292,28 @@ export function renderKnowledgePage(ctx) {
     }
     panel.appendChild(body);
 
-    const dirtyFlag = h('span.badge.badge-warning', { style: { display: 'none' } }, '有未保存修改');
+    const dirtyFlag = h('span.badge.badge-warning', { style: { display: 'none' } }, tr('有未保存修改'));
     panel.appendChild(h('div.editor-foot',
       dirtyFlag,
       h('div', { style: { flex: '1' } }),
       h('button.btn.btn-ghost.btn-sm', {
         onclick: () => { void readDetail(() => Api.getKnowledgeDocument(Store.user, selected.scope, selected.relative_path), result => { draft = result.content; drawEditor(); }); },
-      }, '撤销'),
+      }, tr('撤销')),
       h('button.btn.btn-ghost.btn-sm', {
         disabled: isGlobal,
         onclick: async () => {
           const ok = await Overlay.confirm({
             title: '删除此知识文件',
             description: '文件将被永久删除，相关索引也会失效。',
-            detail: selected.relative_path, confirmLabel: '删除', tone: 'danger',
+            detail: selected.relative_path, confirmLabel: tr('删除'), tone: 'danger',
           });
           if (ok && !isGlobal) await mutate(() => Api.deleteKnowledgeDocument(Store.user, selected.scope, selected.relative_path), '知识文件已删除');
         },
-      }, h('span', { html: icon('trash', 'icon-sm') }), '删除'),
+      }, h('span', { html: icon('trash', 'icon-sm') }), tr('删除')),
       h('button.btn.btn-primary.btn-sm', {
         disabled: isGlobal,
         onclick: () => mutate(() => Api.putKnowledgeDocument(Store.user, selected.scope, selected.relative_path, draft), '知识文件已保存；下次请求刷新索引'),
-      }, '保存'),
+      }, tr('保存')),
     ));
 
     function markDirty() { dirtyFlag.style.display = ''; }
@@ -340,7 +345,7 @@ export function openKnowledgeZoom(doc, content) {
     sub: doc.relative_path,
     size: 'xl',
     body: renderMarkdownWithWidgets(content),
-    foot: [h('button.btn.btn-ghost', { onclick: () => Overlay.stack[Overlay.stack.length - 1].close() }, '关闭')],
+    foot: [h('button.btn.btn-ghost', { onclick: () => Overlay.stack[Overlay.stack.length - 1].close() }, tr('关闭'))],
   });
 }
 
@@ -355,6 +360,8 @@ export const MEMORY_TIERS = [
   { key: 'permanent', label: '永久记忆', icon: 'star', hint: '不过期，禁止降级' },
   { key: 'important', label: '临时重要记忆', icon: 'zap', hint: '独立文件，不可删除' },
 ];
+
+const WEIGHTED_MEMORY_TIERS = new Set(['seven_days', 'one_month', 'half_year']);
 
 function formatMemoryTime(value, timeZone = 'UTC') {
   if (!value) return '—';
@@ -371,7 +378,8 @@ export function renderMemoryPage(ctx) {
   let selected = null;
   let draft = '';
   let dirty = false;
-  let query = '';
+  let query = ctx.viewState.memorySearchQuery || '';
+  let searchDraft = ctx.viewState.memorySearchDraft || '';
   let sortBy = 'updated_at';
   let page = 1;
   let previewMode = 'preview';
@@ -381,10 +389,10 @@ export function renderMemoryPage(ctx) {
   const inner = pageEl.firstElementChild;
 
   inner.appendChild(pageHead({
-    title: '记忆',
-    desc: '不同来源的会话共享当前用户的记忆。普通记忆按分层持有，权重按不同日期出现次数累计；编辑后 +1 且同日最多一次；普通记忆不能降级。',
+    title: tr('记忆'),
+    desc: '不同来源的会话共享当前用户的记忆。七日、一月、半年记忆按不同日期出现次数累计权重；编辑后 +1 且同日最多一次。永久记忆不加权；普通记忆不能降级。',
     actions: [
-      h('button.btn.btn-outline', { onclick: () => refresh() }, h('span', { html: icon('refresh', 'icon-sm') }), '重新读取'),
+      h('button.btn.btn-outline', { onclick: () => refresh() }, h('span', { html: icon('refresh', 'icon-sm') }), tr('重新读取')),
       h('button.btn.btn-primary', {
         onclick: () => openNewMemory(),
       }, h('span', { html: icon('plus', 'icon-sm') }), '新建长期记忆'),
@@ -411,7 +419,7 @@ export function renderMemoryPage(ctx) {
       },
         h('div.tier-glyph', h('span', { html: icon(t.icon, 'icon-sm') })),
         h('div', { style: { flex: '1', minWidth: '0' } },
-          h('div.tier-name', t.label),
+          h('div.tier-name', tr(t.label)),
           h('div', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } }, t.hint),
         ),
         h('span.tier-count' + (t.key === 'important' ? '.is-accent' : ''), count + (t.key === 'important' ? ' 文件' : '')),
@@ -425,13 +433,14 @@ export function renderMemoryPage(ctx) {
 
   const drawList = () => {
     fill(listHost);
+    if (!WEIGHTED_MEMORY_TIERS.has(activeTier) && sortBy === 'weight') sortBy = 'updated_at';
     layout.classList.toggle('is-important', activeTier === 'important');
     editorHost.hidden = activeTier === 'important';
     if (activeTier === 'important') {
       const memory = LIVE_IMPORTANT_MEMORY;
       const lifecycle = memory.lifecycle;
       listHost.appendChild(h('section.card.important-memory-detail', { 'aria-label': '临时重要记忆详情' },
-        h('div.card-head', h('div.section-title', '临时重要记忆'),
+        h('div.card-head', h('div.section-title', tr('临时重要记忆')),
           statusBadge(lifecycle.status, lifecycle.status === 'valid' ? '有效' : statusText(lifecycle.status)),
         ),
         h('div.card-body',
@@ -460,19 +469,58 @@ export function renderMemoryPage(ctx) {
     });
 
     const listCard = h('div.card', { style: { overflow: 'hidden' } });
-    const head = h('div.card-head',
+    const head = h('div.card-head.memory-list-head',
       h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, MEMORY_TIERS.find((t) => t.key === activeTier).label,
         h('span.section-count', String(sorted.length)),
       ),
     );
-    const search = makeSearchBox({ placeholder: '搜索记忆内容…', onInput: (v) => { query = v.toLowerCase(); page = 1; drawList(); } });
-    search.style.width = '160px';
-    const sortSel = h('select.select', { style: { width: 'auto' }, onchange: (e) => { sortBy = e.target.value; drawList(); } },
-      h('option', { value: 'updated_at', selected: sortBy === 'updated_at' }, '按更新时间'),
+    let composing = false;
+    const restoreSearchFocus = () => {
+      const next = listHost.querySelector('.memory-search-box input');
+      next?.focus();
+      next?.setSelectionRange(next.value.length, next.value.length);
+    };
+    const applySearch = () => {
+      query = searchDraft.trim().toLowerCase();
+      ctx.viewState.memorySearchQuery = query;
+      page = 1;
+      drawList();
+      restoreSearchFocus();
+    };
+    const input = h('input.input', {
+      type: 'search', placeholder: tr('搜索记忆内容…'), 'aria-label': tr('搜索记忆内容…'),
+      value: searchDraft,
+      oninput: () => {
+        searchDraft = input.value;
+        ctx.viewState.memorySearchDraft = searchDraft;
+        clear.hidden = !searchDraft;
+      },
+      oncompositionstart: () => { composing = true; },
+      oncompositionend: () => { composing = false; },
+      onkeydown: (event) => {
+        if (event.key === 'Enter' && (composing || event.isComposing || event.keyCode === 229)) event.preventDefault();
+      },
+    });
+    const clear = h('button.search-clear', {
+      type: 'button', hidden: !searchDraft, 'aria-label': tr('清除搜索'), title: tr('清除搜索'),
+      onclick: () => {
+        searchDraft = '';
+        ctx.viewState.memorySearchDraft = '';
+        applySearch();
+      },
+    }, h('span', { html: icon('close', 'icon-sm'), 'aria-hidden': 'true' }));
+    const search = h('form.search-box.memory-search-box', {
+      role: 'search', 'aria-label': tr('搜索记忆内容…'),
+      onsubmit: (event) => { event.preventDefault(); if (!composing) applySearch(); },
+    }, input, clear, h('button.memory-search-submit', {
+      type: 'submit', 'aria-label': tr('搜索'), title: tr('搜索'),
+    }, h('span', { html: icon('search', 'icon-sm'), 'aria-hidden': 'true' })));
+    const sortSel = h('select.select', { 'aria-label': '记忆排序', style: { width: 'auto' }, onchange: (e) => { sortBy = e.target.value; drawList(); } },
+      h('option', { value: 'updated_at', selected: sortBy === 'updated_at' }, tr('按更新时间')),
       h('option', { value: 'created_at', selected: sortBy === 'created_at' }, '按最早时间'),
-      activeTier !== 'permanent' ? h('option', { value: 'weight', selected: sortBy === 'weight' }, '按权重') : null,
+      WEIGHTED_MEMORY_TIERS.has(activeTier) ? h('option', { value: 'weight', selected: sortBy === 'weight' }, tr('按权重')) : null,
     );
-    head.append(h('div', { style: { display: 'flex', gap: 'var(--s-2)', alignItems: 'center' } }, search, sortSel));
+    head.append(h('div.memory-list-controls', search, sortSel));
     listCard.appendChild(head);
 
     const totalPages = Math.max(1, Math.ceil(sorted.length / PER_PAGE));
@@ -492,7 +540,7 @@ export function renderMemoryPage(ctx) {
           h('div', { style: { flex: '1', minWidth: '0' } },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-2)', marginBottom: '3px' } },
               h('span.lr-title', { style: { flex: '1' } }, m.preview.slice(0, 34) + (m.preview.length > 34 ? '…' : '')),
-              selected?.filename === m.filename && selected?.weighted_today
+              WEIGHTED_MEMORY_TIERS.has(m.tier) && selected?.filename === m.filename && selected?.weighted_today
                 ? h('span.badge.badge-warning', { title: '今日权重已锁定' }, '权重锁')
                 : null,
             ),
@@ -500,12 +548,12 @@ export function renderMemoryPage(ctx) {
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-3)', marginTop: '6px' } },
               h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)', fontFamily: 'var(--font-mono)' } }, m.filename),
               h('div', { style: { flex: '1' } }),
-              h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } },
-                '权重',
+              WEIGHTED_MEMORY_TIERS.has(m.tier) ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } },
+                tr('权重'),
                 h('span.weight-bars', Array.from({ length: 5 }, (_, i) =>
                   h('span', { class: 'weight-bar' + (i < Math.min(5, Math.ceil(m.weight / 5)) ? ' is-on' : '') }))),
                 h('span', { style: { fontVariantNumeric: 'tabular-nums' } }, String(m.weight)),
-              ),
+              ) : null,
               h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } }, fmtRelative(m.updated_at)),
             ),
           ),
@@ -535,7 +583,7 @@ export function renderMemoryPage(ctx) {
 
     panel.appendChild(h('div.editor-head',
       h('div', { style: { flex: '1', minWidth: '0' } },
-        h('div.editor-title', selected.preview.slice(0, 24) || '记忆'),
+        h('div.editor-title', selected.preview.slice(0, 24) || tr('记忆')),
         h('div', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)', marginTop: '2px', fontFamily: 'var(--font-mono)' } },
           selected.filename),
       ),
@@ -546,7 +594,9 @@ export function renderMemoryPage(ctx) {
     /* 元数据 */
     const meta = [
         ['记忆类型', MEMORY_TIERS.find((t) => t.key === selected.tier).label],
-        ['当前权重', String(selected.weight) + (selected.weighted_today ? ' · 今日已加权' : '')],
+        ...(WEIGHTED_MEMORY_TIERS.has(selected.tier)
+          ? [['当前权重', String(selected.weight) + (selected.weighted_today ? ' · 今日已加权' : '')]]
+          : []),
         ['创建时间', formatMemoryTime(selected.created_at) + '（UTC）'],
         ['内容更新', formatMemoryTime(selected.content_updated_at) + '（UTC）'],
         ['最近使用', formatMemoryTime(selected.last_used_at) + '（UTC）'],
@@ -560,11 +610,11 @@ export function renderMemoryPage(ctx) {
 
     body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-2)', marginBottom: 'var(--s-3)' } },
       h('div.segments',
-        h('button.segment' + (previewMode === 'preview' ? '.is-active' : ''), { onclick: () => { previewMode = 'preview'; drawEditor(); } }, '预览'),
-        h('button.segment' + (previewMode === 'edit' ? '.is-active' : ''), { onclick: () => { previewMode = 'edit'; drawEditor(); } }, '编辑'),
+        h('button.segment' + (previewMode === 'preview' ? '.is-active' : ''), { onclick: () => { previewMode = 'preview'; drawEditor(); } }, tr('预览')),
+        h('button.segment' + (previewMode === 'edit' ? '.is-active' : ''), { onclick: () => { previewMode = 'edit'; drawEditor(); } }, tr('编辑')),
       ),
       h('div.spacer'),
-      h('span', { class: 'badge badge-warning', style: { display: dirty ? '' : 'none' } }, '有未保存修改'),
+      h('span', { class: 'badge badge-warning', style: { display: dirty ? '' : 'none' } }, tr('有未保存修改')),
     ));
 
     if (previewMode === 'edit') {
@@ -589,7 +639,7 @@ export function renderMemoryPage(ctx) {
             });
             if (ok) await mutate(() => Api.deleteMemory(Store.user, target.tier, target.filename), '记忆已删除');
           },
-        }, h('span', { html: icon('trash', 'icon-sm') }), '删除'),
+        }, h('span', { html: icon('trash', 'icon-sm') }), tr('删除')),
       h('div', { style: { flex: '1' } }),
       h('button.btn.btn-ghost.btn-sm', {
         onclick: () => {
@@ -599,13 +649,13 @@ export function renderMemoryPage(ctx) {
             selected = {...target, ...result}; draft = result.content; dirty = false; drawEditor();
           });
         },
-      }, '恢复'),
+      }, tr('恢复')),
       h('button.btn.btn-primary.btn-sm', {
         onclick: () => {
           if (!draft.trim()) { toast('记忆内容不能为空', { kind: 'error' }); return; }
           void mutate(() => Api.putMemory(Store.user, selected.filename, draft, selected.tier), '记忆已保存');
         },
-      }, '保存'),
+      }, tr('保存')),
     ));
 
     editorHost.appendChild(panel);
@@ -632,13 +682,13 @@ export function renderMemoryPage(ctx) {
         ),
       ),
       foot: [
-        h('button.btn.btn-ghost', { onclick: () => Overlay.stack[Overlay.stack.length - 1].close() }, '取消'),
+        h('button.btn.btn-ghost', { onclick: () => Overlay.stack[Overlay.stack.length - 1].close() }, tr('取消')),
         h('button.btn.btn-primary', {
           onclick: () => {
             if (!content.trim()) { toast('内容不能为空', { kind: 'error' }); return; }
             void mutate(() => Api.putMemory(Store.user, `memory_${Date.now()}.md`, content.trim(), 'permanent'), '永久记忆已创建', closeOverlays);
           },
-        }, '创建'),
+        }, tr('创建')),
       ],
     });
   }

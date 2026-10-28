@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const stylesheet = readFileSync(resolve(process.cwd(), 'src/styles/app.css'), 'utf8')
 const production = readFileSync(resolve(process.cwd(), 'src/reference/styles/production.css'), 'utf8')
 const chatView = readFileSync(resolve(process.cwd(), 'src/pages/ChatPageView.tsx'), 'utf8')
 const welcomeStyles = readFileSync(resolve(process.cwd(), 'src/reference/styles/chat.css'), 'utf8')
@@ -167,17 +166,16 @@ describe('ChatPage guidance styles', () => {
 
 describe('ChatPage tool-call theme styles', () => {
   it('uses theme surfaces throughout the expanded tool card', () => {
-    const bodyRule = stylesheet.match(/\.tool-call-body\s*\{([^}]*)\}/g)?.at(-1) ?? ''
-    const panelRule = stylesheet.match(/\.tool-call-panel pre\s*\{([^}]*)\}/g)?.at(-1) ?? ''
-    const labelRule = stylesheet.match(/\.tool-call-panel label\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+    const bodyRule = production.match(/\.tool-call-body\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+    const panelRule = production.match(/\.tool-call-panel pre, \.tool-pre\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+    const labelRule = production.match(/\.tool-call-panel label\s*\{([^}]*)\}/g)?.at(-1) ?? ''
 
-    expect(bodyRule).toContain('background: var(--surface)')
-    expect(bodyRule).toContain('border-top-color: var(--line)')
+    expect(bodyRule).toContain('border-top: 1px solid var(--border-subtle)')
     expect(bodyRule).not.toMatch(/#fff|white/i)
-    expect(panelRule).toContain('background: var(--surface-2)')
-    expect(panelRule).toContain('color: var(--text-2)')
-    expect(panelRule).toContain('border-color: var(--line)')
-    expect(labelRule).toContain('color: var(--muted)')
+    expect(panelRule).toContain('background: var(--code-bg)')
+    expect(panelRule).toContain('color: var(--code-text)')
+    expect(panelRule).toContain('border: 1px solid var(--code-border)')
+    expect(labelRule).toContain('color: var(--text-faint)')
   })
 })
 

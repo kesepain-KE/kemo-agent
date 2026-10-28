@@ -2,6 +2,7 @@ import { taskPlanFromSummary } from '../components/TaskPlanBubble'
 import type { UserMessageMarker } from '../components/UserMessageNavigator'
 import { randomUUID } from '../randomId'
 import { reduceSubagentProgress } from './subagentProgress'
+import { reduceNativeMediaInputs } from '../components/nativeMedia'
 import type { ChatItem, HistoryResponse, InputAttachment, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
 
 const HISTORY_PAGE_SIZE = 20
@@ -28,7 +29,6 @@ export function extractPlanSummary(value: unknown): PlanSummary | null {
   const completed = steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length
   return { plan_id: raw.plan_id, title: raw.title, description: String(raw.description || ''), status: String(raw.status || 'pending'), auto_accept: Boolean(raw.auto_accept), reminder: String(raw.reminder || ''), source: String(raw.source || ''), session_id: String(raw.session_id || ''), current_step: String(raw.current_step || ''), revision: Number(raw.revision || 1), created_at: String(raw.created_at || ''), updated_at: String(raw.updated_at || ''), progress: { completed, total: steps.length, percent: steps.length ? Math.round(completed * 100 / steps.length) : 0 }, steps }
 }
-
 
 export function isNearScrollBottom(
   metrics: Pick<HTMLElement, 'scrollHeight' | 'scrollTop' | 'clientHeight'>,
@@ -276,6 +276,12 @@ function insertCurrentRoundItem(
 }
 
 export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
+  const mediaTerminal = event.type === 'done' || (event.type === 'error' && !isProvisionalRunError(event))
+  if (event.type === 'media_input_update' || mediaTerminal) {
+    const merged = reduceNativeMediaInputs(items, event, currentRoundStartIndex(items), mediaTerminal)
+    if (event.type === 'media_input_update') return merged
+    items = merged
+  }
   items = reduceSubagentProgress(items, event)
   if (event.type === 'subagent_progress') return items
   if (event.type === 'context_compression') {
@@ -562,7 +568,7 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
       })
     }
     trace?.tools.forEach((tool, toolIndex) => {
-      result.push({ id: `history_tool_${round}_${toolIndex}`, kind: 'tool', callId: tool.call_id || `history-call-${round}-${toolIndex + 1}`, name: tool.name, status: historyToolStatus(tool.status), elapsedMs: tool.elapsed_ms, argumentsText: tool.arguments_text, argumentsTruncated: tool.arguments_truncated, resultText: tool.result_text, resultTruncated: tool.result_truncated })
+      result.push({ id: `history_tool_${round}_${toolIndex}`, kind: 'tool', callId: tool.call_id || `history-call-${round}-${toolIndex + 1}`, name: tool.name, status: historyToolStatus(tool.status), elapsedMs: tool.elapsed_ms, argumentsText: tool.arguments_text, argumentsTruncated: tool.arguments_truncated, resultText: tool.result_text, resultTruncated: tool.result_truncated, mediaInputs: tool.media_inputs })
       appendArtifacts(tool.artifacts, `history_tool_media_${round}_${toolIndex}`)
       if (!tool.result_truncated) {
         try {

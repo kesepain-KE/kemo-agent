@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { h, Current, Overlay, Api, icon, mutate, toast } from './shared.js'
 
 const LABELS = { plans: '任务计划', crons: '定时任务', executions: '任务执行记录' }
@@ -54,6 +55,6 @@ export function taskCleanupButton(category) {
         button.disabled = false
       }
     },
-  }, h('span', { html: icon('trash', 'icon-sm') }), '清理已完成')
+  }, h('span', { html: icon('trash', 'icon-sm') }), tr('清理已完成'))
   return button
 }

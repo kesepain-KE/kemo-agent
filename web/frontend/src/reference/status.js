@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { icon, h, LIVE_RUNTIME, pageHead, refreshPage, fmtNum, fmtRelative, $$, fill, fmtThousands, statusText, copyText, buildTokenChart, navigate, LIVE_CAPABILITIES, statusBadge, readDetail, Api, Store, setRuntimeLogs, LIVE_RUNTIME_LOGS, emptyState, clamp, fmtDateTime, fmtDuration, makePager, renderMarkdownWithWidgets } from './shared.js'
 /* ============================================================================
    pages/status-profile · 运行诊断 / 身份与人格 / 运行模块兼容入口
@@ -25,12 +26,12 @@ export function renderStatusPage(ctx) {
   const R = LIVE_RUNTIME;
 
   inner.appendChild(pageHead({
-    title: '运行诊断',
+    title: tr('运行诊断'),
     desc: '查看提示词上下文、Token 用量、模型配置、外部组件与运行日志。',
     actions: [
       h('button.btn.btn-outline', {
         onclick: () => { void refreshPage(); },
-      }, h('span', { html: icon('refresh', 'icon-sm') }), '刷新'),
+      }, h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
     ],
   }));
 
@@ -112,7 +113,7 @@ export function renderStatusPage(ctx) {
           renderMarkdownWithWidgets(R.prompt.content || '（本次提示词为空）', { readOnly: true })),
         h('div.runtime-prompt-components',
           h('table.table',
-            h('thead', h('tr', h('th', '模块'), h('th', '状态'), h('th.num', 'Tokens（估算）'), h('th', '来源'))),
+            h('thead', h('tr', h('th', '模块'), h('th', tr('状态')), h('th.num', 'Tokens（估算）'), h('th', '来源'))),
             h('tbody', (R.prompt.components || []).map(c => h('tr',
               h('td', h('div', names[c.name] || c.name),
                 h('small', `${c.injected_items}/${c.original_items} 项 · ${fmtThousands(c.chars)} 字符`)),
@@ -144,7 +145,7 @@ export function renderStatusPage(ctx) {
         h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } }, `共 ${tk.request_count} 次请求`),
       ),
       h('div.metric-grid',
-        h('div.metric', h('div.metric-label', '发送'), h('div.metric-value', fmtThousands(tk.sent_tokens))),
+        h('div.metric', h('div.metric-label', tr('发送')), h('div.metric-value', fmtThousands(tk.sent_tokens))),
         h('div.metric', h('div.metric-label', '接收'), h('div.metric-value', fmtThousands(tk.received_tokens))),
         h('div.metric', h('div.metric-label', '合计'), h('div.metric-value', fmtThousands(tk.total_tokens))),
         h('div.metric', h('div.metric-label', '缓存命中'), h('div.metric-value', `${Number(tk.cache_rate).toFixed(1)}%`)),
@@ -295,32 +296,7 @@ export function renderStatusPage(ctx) {
   /* ---- 调度与维护 ---- */
   function drawMaintenanceTab() {
     const wrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--s-5)' } });
-    const cg = R.congestion;
-
-    wrap.appendChild(h('div.card.card-pad',
-      h('div.section-title', { style: { marginBottom: 'var(--s-4)' } }, h('span', { html: icon('activity', 'icon-sm') }), '拥塞与并发'),
-      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 'var(--s-4)' } },
-        [['Provider 请求', cg.provider, 'active_requests', 'max_requests', 'available_requests', '可用'],
-          ['Web 聊天槽位', cg.web, 'active_chats', 'max_chats', 'pending_chats', '排队'],
-          ['消息工作线程', cg.message_router, 'active_workers', 'max_workers', 'queued_messages', '排队'],
-        ].map(([label, obj, usedKey, maxKey, extraKey, extraLabel]) => {
-          const pct = (obj[usedKey] / (obj[maxKey] || 1)) * 100;
-          return h('div', { style: { padding: 'var(--s-4)', borderRadius: 'var(--r-md)', background: 'var(--bg-inset)', border: '1px solid var(--border-subtle)' } },
-            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' } },
-              h('span', { style: { fontSize: 'var(--t-xs)', fontWeight: '600' } }, label),
-              h('span', { style: { fontSize: 'var(--t-sm)', fontWeight: '620', fontVariantNumeric: 'tabular-nums' } }, `${obj[usedKey]} / ${obj[maxKey]}`),
-            ),
-            h('div.progress-track', h('div.progress-fill', {
-              style: { width: pct + '%', background: pct > 80 ? 'var(--danger)' : pct > 55 ? 'var(--warning)' : 'var(--accent)' },
-            })),
-            h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 'var(--t-2xs)', color: 'var(--text-faint)', marginTop: '6px' } },
-              h('span', `占用 ${pct.toFixed(0)}%`),
-              h('span', `${extraLabel} ${obj[extraKey]}`),
-            ),
-          );
-        }),
-      ),
-    ));
+    wrap.appendChild(ctx.mountCongestion(R.congestion));
 
     wrap.appendChild(h('div.card.card-pad',
       h('div.section-title', { style: { marginBottom: 'var(--s-4)' } }, h('span', { html: icon('memory', 'icon-sm') }), '记忆更新'),
@@ -331,7 +307,7 @@ export function renderStatusPage(ctx) {
       ),
       h('div.table-wrap', { style: { marginTop: 'var(--s-4)' } },
         h('table.table',
-          h('thead', h('tr', h('th', '层级'), h('th', '文件'), h('th.num', '权重'), h('th', '更新时间'))),
+          h('thead', h('tr', h('th', '层级'), h('th', '文件'), h('th.num', tr('权重')), h('th', tr('更新时间')))),
           h('tbody', (R.memory.updates || []).map((u) => h('tr',
             h('td', h('span', { class: 'scope-tag scope-user' }, u.tier)),
             h('td.mono', { style: { fontSize: 'var(--t-2xs)' } }, u.filename),
@@ -348,14 +324,14 @@ export function renderStatusPage(ctx) {
         h('div.metric', h('div.metric-label', '执行中计划'), h('div.metric-value', String(R.tasks.summary.active_plans))),
         h('div.metric', h('div.metric-label', '等待计划'), h('div.metric-value', String(R.tasks.summary.waiting_plans))),
         h('div.metric', h('div.metric-label', '启用调度'), h('div.metric-value', String(R.tasks.summary.enabled_crons))),
-        h('div.metric', h('div.metric-label', '已完成'), h('div.metric-value', String(R.tasks.summary.completed_plans))),
+        h('div.metric', h('div.metric-label', tr('已完成')), h('div.metric-value', String(R.tasks.summary.completed_plans))),
       ),
       h('div', { style: { marginTop: 'var(--s-4)' } },
         h('div.doc-label', { style: { marginBottom: '8px' } }, '系统维护 Cron'),
         h('div.desc-list',
           h('div.desc-row', h('span.desc-key', '跟踪状态'), h('span.desc-val', R.system_cron.tracking ? h('span', { style: { color: 'var(--success)' } }, '已跟踪') : '未跟踪')),
           h('div.desc-row', h('span.desc-key', '任务数'), h('span.desc-val.tnum', String(R.system_cron.tasks.length))),
-          h('div.desc-row', h('span.desc-key', '执行记录'), h('span.desc-val.tnum', String(R.system_cron.executions.length))),
+          h('div.desc-row', h('span.desc-key', tr('执行记录')), h('span.desc-val.tnum', String(R.system_cron.executions.length))),
         ),
       ),
       h('button.btn.btn-ghost.btn-sm', { style: { marginTop: 'var(--s-3)' }, onclick: () => navigate('/tasks') },
@@ -435,7 +411,7 @@ export function renderStatusPage(ctx) {
               ev.currentTarget.classList.add('is-active');
               render();
             },
-          }, k === 'all' ? '全部' : k === 'backend' ? '后端日志' : k === 'threads' ? '后端线程' : k === 'terminal' ? '终端日志' : '消息日志')),
+          }, k === 'all' ? tr('全部') : k === 'backend' ? '后端日志' : k === 'threads' ? '后端线程' : k === 'terminal' ? '终端日志' : '消息日志')),
         ),
         h('div', { style: { flex: '1' } }),
         h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } },
@@ -445,7 +421,7 @@ export function renderStatusPage(ctx) {
           void readDetail(() => Api.getRuntimeLogs(Store.user, requestedCategory, requestedPage, true),
             result => { if (category === requestedCategory && page === requestedPage) { setRuntimeLogs(result); render(); } });
         } },
-          h('span', { html: icon('refresh', 'icon-sm') }), '刷新'),
+          h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
       ));
 
       /* 分类说明 */
@@ -506,7 +482,7 @@ export function renderStatusPage(ctx) {
         const retention = h('span.runtime-muted');
         const errors = h('div.runtime-terminal-errors');
         const panel = h('div.card.runtime-terminal-panel',
-          h('div.card-head', h('div.section-title', 'kemo-agent 启动终端'), h('span.badge', '只读')),
+          h('div.card-head', h('div.section-title', 'kemo-agent 启动终端'), h('span.badge', tr('只读'))),
           errors,
           term,
           h('div.card-head', followButton, retention),
@@ -593,7 +569,7 @@ function messageBody(entry, direction, label, empty) {
     h('span.badge', label),
     parts.length ? parts.map(part => h('div.runtime-message-part',
       part.kind === 'file' ? h('span.badge', '附件') : null,
-      part.status === 'failed' ? h('span.badge', '失败') : null,
+      part.status === 'failed' ? h('span.badge', tr('失败')) : null,
       h('pre', part.content || '（无文本正文）'),
     )) : h('p.runtime-muted', empty),
   );
