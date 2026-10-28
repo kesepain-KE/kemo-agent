@@ -535,8 +535,13 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertEqual(request["path"], "/v1/chat/completions")
         self.assertEqual(request["authorization"], "Bearer test-key")
 
-    def test_chat_bridge_keeps_logical_reasoning_without_unconfigured_wire_fields(self) -> None:
-        chat = create_provider(self.config("chat"))
+    def test_chat_bridge_reasoning_declaration_has_effective_wire_mapping(self) -> None:
+        config = self.config("chat")
+        config["capabilities"] = {"reasoning": {"supported": True,
+            "efforts": ["minimal", "low", "medium", "high", "max"],
+            "returns": ["none", "content", "auto"]},
+            "transport": {"reasoning": {"request_format": "effort"}}}
+        chat = create_provider(config)
         request = self.request().model_copy(
             update={
                 "reasoning": ReasoningConfig.model_validate({
@@ -545,16 +550,12 @@ class ProviderTests(ServerMixin, unittest.TestCase):
                     "return_mode": "content",
                     "context": "auto",
                 }),
-                "provider_options": {
-                    "reasoning_effort": "high",
-                    "reasoning_enabled": True,
-                },
             }
         )
         response = chat.create(request)
         self.assertEqual(require_type(response, KemoResponse).status, ResponseStatus.COMPLETED)
         sent = MockChatHandler.requests[-1]["body"]
-        self.assertNotIn("reasoning_effort", sent)
+        self.assertEqual(sent["reasoning_effort"], "high")
         self.assertNotIn("reasoning_enabled", sent)
         self.assertTrue(chat.capabilities(request.model).reasoning.supported)
         self.assertEqual(
@@ -572,7 +573,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         )
         self.assertTrue(chat_selection.enabled)
         self.assertEqual(chat_selection.effort, "high")
-        self.assertEqual(chat_selection.status, "chat_reasoning_forced")
+        self.assertEqual(chat_selection.status, "enabled")
 
         class KemoCapabilities:
             def capabilities(self, model: str) -> ModelCapabilities:

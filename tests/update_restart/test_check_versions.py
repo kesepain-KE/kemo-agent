@@ -71,7 +71,8 @@ def build_release_tree(root: Path, version: str = "1.2.7") -> None:
         f"当前稳定版本为 `{version}`。\n", encoding="utf-8"
     )
     (knowledge / "version-and-update-modules.md").write_text(
-        '{"version": "%s"}\n' % version, encoding="utf-8"
+        '```json\n{"name": "kemo-agent", "version": "%s"}\n```\n' % version,
+        encoding="utf-8",
     )
     (root / "agents.md").write_text(
         "当前稳定版本：`kemo-agent %s`，本版本重点加固 Chat 兼容传输链路。\n\n## 架构\n"
@@ -157,7 +158,8 @@ class CheckVersionsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "global_knowledge" / "version-and-update-modules.md").write_text(
-                '{"version": "1.3.0", "compatibility": {"kemo-adapter-api": "0.8.2"}}\n',
+                '```json\n{"name": "kemo-agent", "version": "1.3.0", '
+                '"compatibility": {"kemo-adapter-api": "0.8.2"}}\n```\n',
                 encoding="utf-8",
             )
             (root / "agents.md").write_text(
