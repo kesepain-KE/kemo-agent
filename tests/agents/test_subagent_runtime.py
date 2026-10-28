@@ -177,6 +177,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             {
                 "context_manage",
                 "history_summary",
+                "general_worker",
                 "memory_temporary_important",
                 "self_improve",
                 "task_plan",
@@ -641,7 +642,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertFalse(raised.exception.retryable)
         self.assertTrue(raised.exception.retry_budget_exhausted)
 
-    def test_runner_forces_chat_reasoning_without_capability_lookup(self) -> None:
+    def test_runner_uses_declared_chat_reasoning_capabilities(self) -> None:
         provider = MockProvider()
         config = {
             **self.config,
@@ -662,7 +663,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "context_manage",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
-        self.assertEqual(provider.capability_calls, [])
+        self.assertEqual(provider.capability_calls, ["main-model"])
         self.assertIsNotNone(provider.requests[0].reasoning)
         self.assertTrue(provider.requests[0].reasoning.enabled)
         self.assertEqual(provider.requests[0].reasoning.effort, "high")

@@ -310,6 +310,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         registry = discover_agents(root)
         expected = {
+            "general_worker": {"main_agent"},
             "self_improve": {"main_agent", "scheduler", "context_manage"},
             "memory_temporary_important": {"main_agent", "scheduler"},
             "task_plan": {"main_agent"},
