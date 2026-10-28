@@ -168,8 +168,10 @@ class CronStoreTests(unittest.TestCase):
         task = self.store.create(self._task(status="running"))
         self.assertEqual(self.store.recover_interrupted(), [task["task_id"]])
         recovered = self.store.read(task["task_id"])
-        self.assertEqual(recovered["status"], "enabled")
-        self.assertTrue(recovered["next_run_at"].endswith("+08:00"))
+        self.assertEqual(recovered["status"], "paused")
+        self.assertEqual(recovered["next_run_at"], "")
+        self.assertEqual(recovered["last_stop_reason"], "interrupted_pending_confirmation")
+        self.assertTrue(recovered["attempt_id"])
 
     def test_user_task_count_has_a_hard_limit(self) -> None:
         with patch("run.scheduler.cron_store.MAX_USER_TASKS", 1):
@@ -879,7 +881,9 @@ class SchedulerTests(unittest.TestCase):
         self.assertNotIn("must not enter logs", json.dumps(summary))
 
     def test_system_execution_is_written_to_sqlite(self) -> None:
-        executed_at = datetime(2026, 7, 27, 20, 30, tzinfo=BEIJING)
+        # This tests persistence, not retention. A fixed July event expires
+        # under the real 90-day policy as the calendar advances.
+        executed_at = datetime.now(BEIJING)
 
         _append_system_execution(
             self.root,
