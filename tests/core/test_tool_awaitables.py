@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 from pathlib import Path
@@ -164,9 +165,16 @@ def test_awaitable_exceptions_keep_execution_boundary(
             context={"marker": "test"},
             timeout=10,
         )
-    assert str(raised.value) == (
-        "awaitable failed" if value == "error" else "awaitable cancelled"
-    )
+    message = str(raised.value)
+    if value == "error":
+        assert message == "awaitable failed"
+    elif sys.version_info >= (3, 11):
+        assert message == "awaitable cancelled"
+    else:
+        # CPython 3.10 的 asyncio.run 会把任务内自抛的 CancelledError 重新构造成
+        # 「取消」，消息随之丢失，3.11 起才原样保留。这里只放宽消息文本，
+        # 取消语义本身仍由异常类型与 remote_exception_type 校验。
+        assert message in {"", "隔离工具执行失败"}
     if isinstance(raised.value, ToolProcessError):
         assert raised.value.remote_exception_type == expected.__name__
 
