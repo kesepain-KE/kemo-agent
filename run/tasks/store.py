@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from run.config import truncate_chars
+from run.infra import add_missing_columns, execute_schema, schema_migration
 from run.tasks.errors import (
     PlanConflictError,
     PlanError,
@@ -48,6 +49,7 @@ _STORE_LOCKS_GUARD = threading.Lock()
 _READY_DATABASES: set[str] = set()
 _READY_DATABASES_GUARD = threading.Lock()
 TASK_PLAN_DB_FILENAME = "task_plans.sqlite3"
+TASK_PLAN_DB_SCHEMA_VERSION = 1
 
 
 def _store_lock(root: Path, user: str) -> threading.RLock:
@@ -79,6 +81,13 @@ class PlanStore:
         self.path = self._dir / TASK_PLAN_DB_FILENAME
         self._lock = _store_lock(self.root, self.user)
 
+    @staticmethod
+    def _needs_revision_migration(database: sqlite3.Connection) -> bool:
+        return database.execute(
+            "SELECT 1 FROM task_plans AS p WHERE NOT EXISTS ("
+            "SELECT 1 FROM task_plan_revisions AS r WHERE r.plan_id=p.plan_id) LIMIT 1"
+        ).fetchone() is not None
+
     def _ensure_database(self) -> None:
         key = str(self.path.resolve()).casefold()
         with _READY_DATABASES_GUARD:
@@ -89,100 +98,109 @@ class PlanStore:
             database = sqlite3.connect(self.path, timeout=5.0)
             database.row_factory = sqlite3.Row
             try:
-                database.execute("PRAGMA journal_mode=WAL")
-                database.execute("PRAGMA synchronous=NORMAL")
                 database.execute("PRAGMA foreign_keys=ON")
                 database.execute("PRAGMA busy_timeout=5000")
-                database.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS task_plan_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS task_plans (
-                    plan_id TEXT PRIMARY KEY,
-                    schema_version INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    user TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    auto_accept INTEGER NOT NULL,
-                    reminder TEXT NOT NULL DEFAULT '',
-                    revision INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    current_step TEXT NOT NULL DEFAULT ''
-                );
-                CREATE INDEX IF NOT EXISTS idx_task_plans_status_time
-                    ON task_plans(status, updated_at DESC, plan_id);
-                CREATE INDEX IF NOT EXISTS idx_task_plans_claim
-                    ON task_plans(status, created_at, plan_id);
-                CREATE TABLE IF NOT EXISTS task_plan_steps (
-                    plan_id TEXT NOT NULL,
-                    position INTEGER NOT NULL,
-                    step_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    tool_name TEXT,
-                    tool_arguments_json TEXT NOT NULL DEFAULT '{}',
-                    critical INTEGER NOT NULL,
-                    result_json TEXT,
-                    error_json TEXT,
-                    started_at TEXT NOT NULL DEFAULT '',
-                    finished_at TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY(plan_id, step_id),
-                    UNIQUE(plan_id, position),
-                    FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS task_plan_dependencies (
-                    plan_id TEXT NOT NULL,
-                    step_id TEXT NOT NULL,
-                    depends_on_step_id TEXT NOT NULL,
-                    position INTEGER NOT NULL,
-                    PRIMARY KEY(plan_id, step_id, depends_on_step_id),
-                    FOREIGN KEY(plan_id, step_id)
-                        REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE,
-                    FOREIGN KEY(plan_id, depends_on_step_id)
-                        REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS task_plan_revisions (
-                    plan_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    plan_json TEXT NOT NULL,
-                    note TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(plan_id, revision),
-                    FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS task_plan_revision_blobs (
-                    plan_id TEXT NOT NULL,
-                    digest TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    PRIMARY KEY(plan_id, digest),
-                    FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
-                );
-                """
-                )
-                database.execute(
-                    "INSERT INTO task_plan_meta(key, value) VALUES('schema_version', '1') "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-                )
-                for row in database.execute(
+                with schema_migration(
+                    database, target=TASK_PLAN_DB_SCHEMA_VERSION, meta_table="task_plan_meta",
+                    required={
+                        "task_plan_meta": (), "task_plans": ("reminder", "current_step"),
+                        "task_plan_steps": (), "task_plan_dependencies": (),
+                        "task_plan_revisions": (), "task_plan_revision_blobs": (),
+                    },
+                    data_migration=self._needs_revision_migration,
+                ):
+                    execute_schema(database,
                     """
-                    SELECT plan_id FROM task_plans AS plans
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM task_plan_revisions AS revisions
-                        WHERE revisions.plan_id=plans.plan_id
+                    CREATE TABLE IF NOT EXISTS task_plan_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS task_plans (
+                        plan_id TEXT PRIMARY KEY,
+                        schema_version INTEGER NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        user TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        auto_accept INTEGER NOT NULL,
+                        reminder TEXT NOT NULL DEFAULT '',
+                        revision INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        current_step TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_task_plans_status_time
+                        ON task_plans(status, updated_at DESC, plan_id);
+                    CREATE INDEX IF NOT EXISTS idx_task_plans_claim
+                        ON task_plans(status, created_at, plan_id);
+                    CREATE TABLE IF NOT EXISTS task_plan_steps (
+                        plan_id TEXT NOT NULL,
+                        position INTEGER NOT NULL,
+                        step_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        tool_name TEXT,
+                        tool_arguments_json TEXT NOT NULL DEFAULT '{}',
+                        critical INTEGER NOT NULL,
+                        result_json TEXT,
+                        error_json TEXT,
+                        started_at TEXT NOT NULL DEFAULT '',
+                        finished_at TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY(plan_id, step_id),
+                        UNIQUE(plan_id, position),
+                        FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS task_plan_dependencies (
+                        plan_id TEXT NOT NULL,
+                        step_id TEXT NOT NULL,
+                        depends_on_step_id TEXT NOT NULL,
+                        position INTEGER NOT NULL,
+                        PRIMARY KEY(plan_id, step_id, depends_on_step_id),
+                        FOREIGN KEY(plan_id, step_id)
+                            REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE,
+                        FOREIGN KEY(plan_id, depends_on_step_id)
+                            REFERENCES task_plan_steps(plan_id, step_id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS task_plan_revisions (
+                        plan_id TEXT NOT NULL,
+                        revision INTEGER NOT NULL,
+                        plan_json TEXT NOT NULL,
+                        note TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(plan_id, revision),
+                        FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS task_plan_revision_blobs (
+                        plan_id TEXT NOT NULL,
+                        digest TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        PRIMARY KEY(plan_id, digest),
+                        FOREIGN KEY(plan_id) REFERENCES task_plans(plan_id) ON DELETE CASCADE
+                    );
+                    """
                     )
-                    ORDER BY plan_id
-                    """
-                ).fetchall():
-                    plan = self._load(database, str(row["plan_id"]))
-                    if plan is not None:
-                        self._save_revision(database, plan, note="迁移现有计划")
+                    add_missing_columns(database, "task_plans", {
+                        "reminder": "TEXT NOT NULL DEFAULT ''",
+                        "current_step": "TEXT NOT NULL DEFAULT ''",
+                    })
+                    for row in database.execute(
+                        """
+                        SELECT plan_id FROM task_plans AS plans
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM task_plan_revisions AS revisions
+                            WHERE revisions.plan_id=plans.plan_id
+                        )
+                        ORDER BY plan_id
+                        """
+                    ).fetchall():
+                        plan = self._load(database, str(row["plan_id"]))
+                        if plan is not None:
+                            self._save_revision(database, plan, note="迁移现有计划")
+                database.execute("PRAGMA journal_mode=WAL")
+                database.execute("PRAGMA synchronous=NORMAL")
                 database.commit()
             finally:
                 database.close()
@@ -329,16 +347,20 @@ class PlanStore:
             """,
             (plan_id,),
         ).fetchall()
+        step_rows = database.execute(
+            "SELECT * FROM task_plan_steps WHERE plan_id=? ORDER BY position", (plan_id,)
+        ).fetchall()
+        return PlanStore._decode_plan(row, dependency_rows, step_rows)
+
+    @staticmethod
+    def _decode_plan(row, dependency_rows, step_rows) -> dict[str, Any]:
         dependencies: dict[str, list[str]] = {}
         for dependency in dependency_rows:
             dependencies.setdefault(str(dependency["step_id"]), []).append(
                 str(dependency["depends_on_step_id"])
             )
         steps = []
-        for step in database.execute(
-            "SELECT * FROM task_plan_steps WHERE plan_id=? ORDER BY position",
-            (plan_id,),
-        ).fetchall():
+        for step in step_rows:
             steps.append({
                 "step_id": str(step["step_id"]),
                 "title": str(step["title"]),
@@ -403,14 +425,36 @@ class PlanStore:
                 raise PlanNotFoundError(f"计划不存在：{plan_id}")
             return data
 
-    def list_plans(self) -> list[dict[str, Any]]:
+    def list_plans(self, *, statuses: tuple[str, ...] = (), source: str | None = None,
+                   session_id: str | None = None) -> list[dict[str, Any]]:
+        """Read scoped plans, steps and dependencies in three queries, not N+1."""
+        clauses, parameters = [], []
+        if statuses:
+            clauses.append("p.status IN (" + ",".join("?" for _ in statuses) + ")")
+            parameters.extend(statuses)
+        for name, value in (("source", source), ("session_id", session_id)):
+            if value is not None:
+                clauses.append(f"p.{name}=?")
+                parameters.append(value)
+        where = " AND ".join(clauses) or "1=1"
         with self._lock:
             try:
                 with self._connection() as database:
-                    ids = [str(row["plan_id"]) for row in database.execute(
-                        "SELECT plan_id FROM task_plans ORDER BY plan_id"
-                    ).fetchall()]
-                    return [plan for plan_id in ids if (plan := self._load(database, plan_id)) is not None]
+                    rows = database.execute(f"SELECT p.* FROM task_plans p WHERE {where} ORDER BY p.plan_id", parameters).fetchall()
+                    if not rows:
+                        return []
+                    steps: dict[str, list[Any]] = {}
+                    dependencies: dict[str, list[Any]] = {}
+                    for table, grouping, order in (
+                        ("task_plan_steps", steps, "d.position"),
+                        ("task_plan_dependencies", dependencies, "d.step_id,d.position"),
+                    ):
+                        for row in database.execute(
+                            f"SELECT d.* FROM {table} d JOIN task_plans p ON p.plan_id=d.plan_id "
+                            f"WHERE {where} ORDER BY d.plan_id,{order}", parameters):
+                            grouping.setdefault(str(row["plan_id"]), []).append(row)
+                    return [self._decode_plan(row, dependencies.get(str(row["plan_id"]), []),
+                                              steps.get(str(row["plan_id"]), [])) for row in rows]
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
 
@@ -700,7 +744,7 @@ def select_prompt_plans(
     directory = _plan_dir(root, user)
     if not directory.is_dir():
         return TaskPlanSelection("", (), 0, 0, 0, 0, False)
-    plans = PlanStore(root, user).list_plans()
+    plans = PlanStore(root, user).list_plans(statuses=("pending", "approved", "running", "paused"), source=source, session_id=session_id)
     status_map = {
         "pending": "pending",
         "approved": "active",

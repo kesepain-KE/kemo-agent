@@ -239,7 +239,9 @@ def _validate_task(data: dict[str, Any], *, system: bool | None = None) -> None:
         raise CronValidationError("达到 max_runs 的任务必须是 completed 状态")
 
     next_run = data.get("next_run_at")
-    allow_empty_next = status in {"completed", "cancelled"}
+    allow_empty_next = status in {"completed", "cancelled"} or (
+        status == "paused" and data.get("last_stop_reason") == "interrupted_pending_confirmation"
+    )
     normalized_next = _beijing_iso(
         next_run,
         field="next_run_at",
@@ -256,7 +258,7 @@ def _validate_task(data: dict[str, Any], *, system: bool | None = None) -> None:
 
     allowed = {
         "task_id", "title", "prompt", "user", "type", "next_run_at",
-        "latest_run_at", "status", "created_at",
+        "latest_run_at", "status", "created_at", "attempt_id", "last_stop_reason",
         "exec_mode", "start_date", "end_date", "max_runs", "successful_runs",
     }
     if system_mode:
@@ -527,7 +529,7 @@ class CronStore:
             return True
 
     def recover_interrupted(self) -> list[str]:
-        """启动时将中断的 running 任务恢复为 enabled。"""
+        """启动时隔离中断任务；可能已产生副作用，禁止自动重放。"""
         recovered: list[str] = []
         with self._lock:
             if not self._dir.is_dir():
@@ -540,8 +542,10 @@ class CronStore:
                     continue
                 if data.get("status") != "running":
                     continue
-                data["status"] = "enabled"
-                data["next_run_at"] = now_beijing()
+                data["status"] = "paused"
+                data["last_stop_reason"] = "interrupted_pending_confirmation"
+                data.setdefault("attempt_id", uuid.uuid4().hex)
+                data["next_run_at"] = ""
                 _validate_task(data, system=self._system)
                 _atomic_write(path, data)
                 clear_cron_runtime(self.root, self.user, self._system, str(data["task_id"]))

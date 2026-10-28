@@ -44,7 +44,7 @@ def _session_lease_active(root: Path, user: str, source: str,
             else:
                 scope_sql, scope_value = "client_id LIKE ?", f'{source}\x1f%'
             row = database.execute(
-                f"SELECT 1 FROM history_web_leases WHERE session_id=? AND expires_at>? AND {scope_sql} LIMIT 1",
+                f"SELECT 1 FROM history_web_leases WHERE session_id=? AND expires_at>? AND released=0 AND {scope_sql} LIMIT 1",
                 (session_id, now, scope_value),
             ).fetchone()
         return row is not None

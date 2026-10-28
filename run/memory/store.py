@@ -13,6 +13,7 @@ import threading
 from typing import Iterator
 
 from run.config import user_dir
+from run.infra import execute_schema, schema_migration
 
 
 MEMORY_DB_FILENAME = "memory.sqlite3"
@@ -35,7 +36,21 @@ def _configure(database: sqlite3.Connection, *, initialize: bool = False) -> Non
 
 
 def _ensure_schema(database: sqlite3.Connection) -> None:
-    database.executescript(
+    required: dict[str, tuple[str, ...]] = {name: () for name in (
+        "memory_meta", "memory_fragments", "memory_operations", "memory_skill_sources",
+        "memory_generated_skills", "memory_important_sources",
+    )}
+    required["memory_weight_events"] = ("source",)
+    required["memory_work_items"] = ("lease_token", "lease_until")
+    with schema_migration(
+        database, target=MEMORY_DB_SCHEMA_VERSION,
+        meta_table="memory_meta", required=required,
+    ):
+        _initialize_schema(database)
+
+
+def _initialize_schema(database: sqlite3.Connection) -> None:
+    execute_schema(database,
         """
         CREATE TABLE IF NOT EXISTS memory_meta (
             key TEXT PRIMARY KEY,
@@ -124,9 +139,7 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
         );
         """
     )
-    # Serialize introspection + ALTER across processes, not only the in-process
-    # ready-cache lock. DDL creation above is already idempotent.
-    database.execute("BEGIN IMMEDIATE")
+    # The migration guard already serializes introspection and ALTER across processes.
     work_columns = {str(r["name"]) for r in database.execute(
         "PRAGMA table_info(memory_work_items)").fetchall()}
     for column in ("lease_token", "lease_until"):
@@ -140,24 +153,6 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
         database.execute(
             "ALTER TABLE memory_weight_events ADD COLUMN source TEXT NOT NULL DEFAULT 'historical_migration'"
         )
-    stored = database.execute(
-        "SELECT value FROM memory_meta WHERE key='schema_version'"
-    ).fetchone()
-    if stored is None:
-        database.execute(
-            "INSERT INTO memory_meta(key, value) VALUES('schema_version', ?)",
-            (str(MEMORY_DB_SCHEMA_VERSION),),
-        )
-    elif str(stored["value"]) in {"1", str(MEMORY_DB_SCHEMA_VERSION)}:
-        database.execute(
-            "UPDATE memory_meta SET value=? WHERE key='schema_version'",
-            (str(MEMORY_DB_SCHEMA_VERSION),),
-        )
-    else:
-        value = "missing" if stored is None else str(stored["value"])
-        raise RuntimeError(
-            f"不支持的记忆数据库 schema：{value}，当前需要 {MEMORY_DB_SCHEMA_VERSION}"
-        )
 
 
 def _ensure_database(path: Path) -> None:
@@ -169,8 +164,9 @@ def _ensure_database(path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         database = sqlite3.connect(path, timeout=5.0)
         try:
-            _configure(database, initialize=True)
+            _configure(database)
             _ensure_schema(database)
+            _configure(database, initialize=True)
             database.commit()
         finally:
             database.close()
