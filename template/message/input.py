@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from util import load_token
+from .util import load_token
 
 # --- Module-level state ---
 _BOT_APP: Any = None

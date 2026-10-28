@@ -18,7 +18,7 @@ from typing import Any
 
 telegram = import_module("telegram")
 
-from util import load_token, sync_run
+from .util import load_token, sync_run
 
 
 def check(config: dict, state: dict) -> dict:

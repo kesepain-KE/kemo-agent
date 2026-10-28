@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from datetime import date, datetime
 import hashlib
 import importlib.util
+from importlib.machinery import ModuleSpec
 import json
 from pathlib import Path
 import re
+import sys
+import threading
 from types import ModuleType
 from typing import Any
 
@@ -348,20 +351,48 @@ def parse_message_buffer(text: str) -> tuple[BufferedMessage, ...]:
     return tuple(messages)
 
 
-def _load_module(path: Path, machine_id: str, role: str) -> ModuleType:
-    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
-    module_name = f"_kemo_message_{machine_id}_{role}_{digest}"
+_MODULE_LOAD_LOCK = threading.RLock()
+
+
+def _import_entry(path: Path, role: str) -> ModuleType:
+    """Load an entry in a directory-scoped package, without changing sys.path.
+
+    Relative imports such as ``from .util import helper`` stay local to this
+    transport, including when multiple transports have a util.py.
+    """
+    path = path.resolve()
+    digest = hashlib.sha256(str(path.parent).encode("utf-8")).hexdigest()[:20]
+    package_name = f"_kemo_message_{digest}"
+    entry_digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+    module_name = f"{package_name}.{role}_{entry_digest}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise MessagePluginError(f"无法加载 {role} 模块：{path}")
-    module = importlib.util.module_from_spec(spec)
+    with _MODULE_LOAD_LOCK:
+        if package_name not in sys.modules:
+            package = ModuleType(package_name)
+            package.__dict__["__path__"] = [str(path.parent)]
+            package.__package__ = package_name
+            package.__spec__ = ModuleSpec(package_name, loader=None, is_package=True)
+            sys.modules[package_name] = package
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(module_name, None)
+            raise
+        return module
+
+
+def _load_module(path: Path, machine_id: str, role: str) -> ModuleType:
+    del machine_id  # Directory identity prevents collisions across transports.
     try:
-        spec.loader.exec_module(module)
+        return _import_entry(path, role)
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise MessagePluginError(f"加载 {role} 模块失败：{path}（{exc}）") from exc
-    return module
 
 
 def _initial_state() -> dict[str, Any]:

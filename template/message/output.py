@@ -22,7 +22,7 @@ from typing import Any
 telegram = import_module("telegram")
 ParseMode = import_module("telegram.constants").ParseMode
 
-from util import guess_mime, load_token, sync_run
+from .util import guess_mime, load_token, sync_run
 
 
 def send(payload: dict) -> bool:
