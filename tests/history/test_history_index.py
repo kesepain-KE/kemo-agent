@@ -318,7 +318,8 @@ class HistoryIndexTests(unittest.TestCase):
 
         # Simulate a terminal writer that was already holding the old window in
         # memory when the user deleted and recreated the logical session.
-        commit_window(old_directory, old_window)
+        with self.assertRaisesRegex(RuntimeError, "已删除|冲突"):
+            commit_window(old_directory, old_window)
 
         self.assertFalse(window_exists(old_directory))
         current = find_record(root, "alice", "web", session_id)
@@ -347,7 +348,8 @@ class HistoryIndexTests(unittest.TestCase):
         # The old run had only prepared this physical window in memory.  There
         # is no deleted-window tombstone to catch it, so the session generation
         # fence must reject the late commit after the logical id is reused.
-        commit_window(old_directory, old_window)
+        with self.assertRaisesRegex(RuntimeError, "已删除|冲突"):
+            commit_window(old_directory, old_window)
 
         self.assertFalse(window_exists(old_directory))
         self.assertIsNone(find_window(root, "alice", "web", session_id))

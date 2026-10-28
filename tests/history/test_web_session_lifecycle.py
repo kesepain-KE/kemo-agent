@@ -25,6 +25,35 @@ from web.app import create_app
 
 
 class WebSessionLifecycleTests(unittest.TestCase):
+    def test_expired_processing_lease_returns_to_offline_review(self):
+        self.seed_data('expired-processing')
+        from run.history.registry_store import mutate_registry_record
+        old = datetime.fromtimestamp(self.now - 4000, timezone.utc).isoformat()
+        mutate_registry_record(self.root, 'alice', 'web', 'expired-processing',
+            lambda record: {**record, 'memory_status': 'processing',
+                            'memory_claim_id': 'abandoned', 'memory_claimed_at': old},
+            updated_at=old)
+        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now)
+        self.assertIn('expired-processing', result['closed_sessions'])
+
+    def test_released_document_does_not_block_expired_processing_recovery(self):
+        self.seed_data('released-processing')
+        from run.history.registry_store import mutate_registry_record
+        from run.history.lease_presence import update_presence
+        old = datetime.fromtimestamp(self.now - 4000, timezone.utc).isoformat()
+        mutate_registry_record(self.root, 'alice', 'web', 'released-processing',
+            lambda record: {**record, 'memory_status': 'processing',
+                            'memory_claim_id': 'abandoned', 'memory_claimed_at': old},
+            updated_at=old)
+        update_presence(self.root, 'alice', 'web', 'released-processing',
+                        'old_document', 1, release=True, now=self.now)
+        # A live App lease with the same session ID is not a Web processing claim.
+        reserve_session(self.root, 'alice', 'app', 'released-processing')
+        update_presence(self.root, 'alice', 'app', 'released-processing',
+                        'app_device', 1, now=self.now)
+        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now)
+        self.assertIn('released-processing', result['closed_sessions'])
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -196,7 +225,7 @@ class WebSessionLifecycleTests(unittest.TestCase):
             if kwargs.get('write') and not renewed:
                 renewed = True
                 with original(self.root, 'alice', write=True) as db:
-                    db.execute('INSERT INTO history_web_leases VALUES(?, ?, ?)', ('empty', 'racer', self.now + 90))
+                    db.execute('INSERT INTO history_web_leases(session_id,client_id,expires_at) VALUES(?, ?, ?)', ('empty', 'racer', self.now + 90))
             with original(*args, **kwargs) as db:
                 yield db
         with patch.object(web_lifecycle, 'connection', side_effect=renew_before_write):
@@ -236,7 +265,7 @@ class WebSessionLifecycleTests(unittest.TestCase):
             db.execute("UPDATE history_meta SET value='5' WHERE key='schema_version'")
         with patch.object(store_core, '_READY_DATABASES', set()):
             with connection(self.root, 'alice') as db:
-                self.assertEqual(db.execute("SELECT value FROM history_meta WHERE key='schema_version'").fetchone()[0], '6')
+                self.assertEqual(db.execute("SELECT value FROM history_meta WHERE key='schema_version'").fetchone()[0], str(store_core.HISTORY_SCHEMA_VERSION))
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM history_web_leases').fetchone()[0], 0)
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM history_sessions').fetchone()[0], 1)
 
@@ -320,7 +349,7 @@ class WebSessionLifecycleTests(unittest.TestCase):
             if kwargs.get('write') and not renewed:
                 renewed = True
                 with original(self.root, 'alice', write=True) as db:
-                    db.execute('INSERT INTO history_web_leases VALUES(?, ?, ?)',
+                    db.execute('INSERT INTO history_web_leases(session_id,client_id,expires_at) VALUES(?, ?, ?)',
                                ('race', 'arriving_page', self.now + 90))
             with original(*args, **kwargs) as db:
                 yield db

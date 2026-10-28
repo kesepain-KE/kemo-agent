@@ -76,7 +76,8 @@ class CronHistoryRetentionTests(unittest.TestCase):
             self.assertEqual(database.execute('SELECT COUNT(*) FROM history_rounds WHERE window_name=?', (old.name,)).fetchone()[0], 0)
             self.assertEqual(database.execute('SELECT COUNT(*) FROM history_deleted_windows WHERE session_id=?', ('old',)).fetchone()[0], 1)
         # Delayed terminal writers must not recreate expired sessions/windows.
-        commit_terminal_windows(old, window, runtime_window_path(old), runtime)
+        with self.assertRaisesRegex(RuntimeError, "已删除|冲突"):
+            commit_terminal_windows(old, window, runtime_window_path(old), runtime)
         self.assertFalse(window_exists(old))
         self.assertIsNone(find_record(self.root, 'alice', 'background:cron:job', 'old'))
         # A recurring task with a fixed logical session id can start a fresh
