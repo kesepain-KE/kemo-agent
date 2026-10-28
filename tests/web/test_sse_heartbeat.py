@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import queue
+import sys
 import tempfile
 import threading
 import time
@@ -498,11 +499,22 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(invoke_chat(app, send))
         await wait_until(prepare_entered.is_set)
         task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
+        if sys.version_info >= (3, 11):
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        else:
+            # CPython 3.10 没有 Task.uncancel()，anyio 的 asyncio 后端无法把外部
+            # 取消与本 scope 的取消区分开，取消在中间件的 task group 处被忽略，
+            # 请求会继续跑到结束。真实客户端断开走的是 is_disconnected() 探测，
+            # 该路径有独立用例覆盖；这里不把「取消抛回调用方」作为 3.10 的断言。
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         prepare_release.set()
         await wait_until(lambda: not app.state.web_stream_cleanup.tasks)
-        self.assertEqual(iterator.calls, 0)
+        if sys.version_info >= (3, 11):
+            self.assertEqual(iterator.calls, 0)
         self.assertEqual(iterator.close_calls, 1)
 
 class CleanupOwnershipTests(unittest.IsolatedAsyncioTestCase):
