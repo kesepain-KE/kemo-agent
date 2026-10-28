@@ -1134,11 +1134,9 @@ class UnifiedProtocolTests(unittest.TestCase):
             ],
         )
         request = chat_request_to_kemo(chat)
-        self.assertTrue(require_present(request.reasoning).enabled)
-        self.assertEqual(require_present(request.reasoning).effort, "medium")
-        self.assertEqual(require_present(request.reasoning).return_mode, "content")
+        self.assertIsNone(request.reasoning)
         restored = kemo_request_to_chat(request)
-        self.assertEqual(restored.extra["reasoning_effort"], "medium")
+        self.assertNotIn("reasoning_effort", restored.extra)
         self.assertEqual(restored.messages[0]["role"], "system")
         self.assertEqual(restored.messages[1]["content"][1]["type"], "image_url")
         restored_call_id = restored.messages[-1]["tool_call_id"]
@@ -1211,7 +1209,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             ChatRequest(
                 model="test",
                 messages=[{"role": "user", "content": "hello"}],
-                extra={"reasoning_effort": "max"},
+                extra={"reasoning_effort": "max", "reasoning_enabled": True},
             )
         )
         self.assertEqual(require_present(enabled.reasoning).effort, "max")
@@ -2187,7 +2185,7 @@ class UnifiedProtocolTests(unittest.TestCase):
                         ))[-1].response
                 self.assertEqual(require_present(converted).status, ResponseStatus.REQUIRES_ACTION)
                 reasons = [item for item in require_present(converted).output if isinstance(item, ReasoningItem)]
-                self.assertEqual(reasons[0].content, DEEPSEEK_REASONING_PLACEHOLDER)
+                self.assertFalse(any(item.content for item in reasons))
                 calls = [item for item in require_present(converted).output if isinstance(item, ToolCallItem)]
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0].arguments, {"value": "ok"})
@@ -2203,7 +2201,9 @@ class UnifiedProtocolTests(unittest.TestCase):
                     ],
                 ), deepseek=True)
                 assistant = next(m for m in continuation.messages if m["role"] == "assistant")
-                self.assertEqual(assistant["reasoning_content"], DEEPSEEK_REASONING_PLACEHOLDER)
+                self.assertNotIn("reasoning_content", assistant)
+                # DeepSeek's final transport serialization supplies its required
+                # wire placeholder, without storing it as model reasoning.
                 self.assertEqual(continuation.messages[-1]["role"], "tool")
 
     def test_deepseek_commentary_and_tools_keep_reasoning_on_same_message(self) -> None:

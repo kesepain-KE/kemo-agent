@@ -180,7 +180,13 @@ def native_request():
 @pytest.mark.parametrize("stream", [False, True])
 def test_signed_state_survives_tools_durable_history_and_api_continuation(stream) -> None:
     cfg = config()
-    cfg.pop("capabilities", None)
+    cfg["capabilities"] = {
+        "provider_id": "chat-adapter", "streaming": True,
+        "tools": {"function_calling": True, "parallel_calls": True},
+        "reasoning": {"supported": True, "efforts": ["medium"],
+                      "returns": ["none", "auto", "content"], "persisted_state": True},
+        "transport": {"reasoning": {"request_format": "effort"}},
+    }
     bridge = ChatBridgeProvider(cfg)
     native = native_request()
     captured: list[dict[str, Any]] = []
