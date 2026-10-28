@@ -2,10 +2,10 @@
 
 此目录包含部署器、测试、打包工具和四种渠道入口。**不导入主框架，不改动主框架文件；只有部署器本身零第三方依赖，应用运行依赖仍须安装。**
 
-> 当前主框架稳定版本 **1.5.1（2026-10-18 正式定档）**，配套网关为 **1.0.0**，知识图谱基线为 **1.6.0**。本页远程命令仅在
+> 当前主框架稳定版本 **1.5.2（2026-10-26 正式定档）**，配套网关为 **1.0.0**，知识图谱基线为 **1.6.0**。本页远程命令仅在
 > 安装脚本及对应 Release/npm/GHCR 产物发布后可用；Git push 不会自动发布这些资产。
 > 中英文快速开始分别见 `../readme.md`、`../README_EN.md`，日常命令与渠道选择见
-> `../global_knowledge/deployment-and-release.md`。已有 1.3.2 本地验收包不能改名充当 1.5.1，须重新构建打包。
+> `../global_knowledge/deployment-and-release.md`。已有 1.3.2 或 1.5.1 本地验收包不能改名充当 1.5.2，须重新构建打包。
 
 ## 1. 发布合同：一个版本、一份应用包
 
@@ -97,8 +97,8 @@ npm 命名空间、GHCR 权限、镜像标签和 Release 资产由发布者管�
 需要 Python 3.10+；Linux 发行版还须提供可用的 `venv`/`ensurepip`。
 
 ```powershell
-python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.5.1.zip" --install-root "D:\apps\kemo-agent" --yes
-python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.5.1.zip" --install-root "D:\apps\kemo-agent" --dry-run
+python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.5.2.zip" --install-root "D:\apps\kemo-agent" --yes
+python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.5.2.zip" --install-root "D:\apps\kemo-agent" --dry-run
 ```
 
 Windows 默认安装根为 `%USERPROFILE%\.kemo-agent`；Linux 和 npm 为
@@ -275,7 +275,12 @@ requirements 存在版本范围，因此这不是依赖可复现锁定方案。
 
 ## 7. 验证
 
+1.5.2 源码定档的当前版本、四个组件、CLI、前端 package/lock 和文档需同时通过版本门禁。
+`deploy/npm/package.json` 仍为无独立版本的 private 模板；实际 npm、Release 和 Docker 构建上下文
+由 `pack.py` 从根版本生成，不手工改模板号、不重命名旧包。
+
 ```sh
+python .github/scripts/check_versions.py --tag v1.5.2
 python -m pytest tests/deploy -q
 # 兼容仅在 deploy 子系统中运行的旧入口：
 python -B -m unittest discover -s deploy/tests -v
@@ -285,6 +290,16 @@ node --check deploy/npm/bin/kemo.cjs
 测试只在 `deploy/.test-work` 创建隔离夹具，不连接远程 Release、不改真实用户安装。
 包含：本地首装/升级、数据保留、配置合并、版本漂移、降级拒绝、ZIP 校验、只读
 dry-run、锁冲突、异常回滚、子进程强制退出后恢复、成功备份保留数量。
+
+完整本机定档验收：
+
+```powershell
+python "开发临时目录/release_check.py" --timeout 3600 --report "tmp/release-check-1.5.2.json"
+```
+
+构建后分发验收除原有安装链路外，还检查通用子代理、
+媒体装载、超时续跑和空间公平池的新文件及安装树内离线冒烟。实际记录见 `VALIDATION.md`；
+历史章节保留原版号，不充当新版本的验收证明。
 
 发布前必须另外实测：干净 Windows/Linux 首装；Docker 旧卷跨版本更新与信号退出；
 npm 在干净 Node/Python 环境安装后的命令启动；真实 Release 下载与镜像回退。
