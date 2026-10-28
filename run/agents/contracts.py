@@ -31,6 +31,13 @@ class AgentExecutionCapacityError(AgentRunError):
 class AgentToolLimitError(AgentRunError):
     """Normal bounded stop after the subagent reaches its tool-call ceiling."""
 
+    def __init__(self, message, *, partial_result=None, continuation=None):
+        super().__init__(message)
+        self.partial_result = partial_result
+        self.continuation = continuation
+        self.process_terminated = True
+        self.category = "tool_budget_exhausted"
+
 
 class AgentInputError(AgentRunError):
     pass
@@ -92,10 +99,14 @@ class AgentTimeoutError(AgentRunError):
         *,
         process_terminated: bool = False,
         completion_future: Any = None,
+        partial_result: Any = None,
+        continuation: Any = None,
     ) -> None:
         super().__init__(message)
         self.process_terminated = bool(process_terminated)
         self.completion_future = completion_future
+        self.partial_result = partial_result
+        self.continuation = continuation
 
 
 class AgentCancelledError(AgentRunError):
@@ -192,6 +203,14 @@ def validate_json_schema(
             raise AgentInputError(f"{location} 长度不能小于 {minimum}")
         if isinstance(maximum, int) and len(value) > maximum:
             raise AgentInputError(f"{location} 长度不能大于 {maximum}")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str):
+            try:
+                matches = re.search(pattern, value)
+            except re.error as exc:
+                raise AgentInputError(f"{location} Schema pattern 无效") from exc
+            if matches is None:
+                raise AgentInputError(f"{location} 不符合 pattern")
     elif isinstance(value, dict):
         properties = schema.get("properties") or {}
         required = schema.get("required") or []

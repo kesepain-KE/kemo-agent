@@ -236,6 +236,24 @@ def resolve_external_agent(root: Path, user: str, handle: str) -> ExternalAgentB
     raise ExternalAgentError(f"外部子代理未公开或不可用：{normalized}")
 
 
+def require_non_agent_expand_command(
+    root: Path, user: str, scope: str, module: str, command: str,
+) -> None:
+    """Reject declared agent bridges when a child calls Expand directly.
+
+    Resolve authorization first and fail closed on malformed bridge metadata.
+    This guards the framework route, not arbitrary Python or shell execution.
+    """
+    directory, _ = resolve_expand(root, user, scope, module, require_control=True)
+    path = directory / BRIDGE_FILENAME
+    if path.exists() or path.is_symlink():
+        if _is_link(path) or not path.is_file():
+            raise ExternalAgentError("子智能体不能调用链接或非文件形式的外部代理桥接")
+        bindings = _load_bindings(path, scope=scope, module=module)
+        if any(binding.command == command.strip() for binding in bindings):
+            raise ExternalAgentError("子智能体不能通过拓展调度其他子智能体")
+
+
 def _safe_failure(exc: object) -> str:
     text = redact_diagnostic_text(str(exc or "")).strip()
     return (text[:400] if text else "外部子代理调用失败")

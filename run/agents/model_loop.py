@@ -10,6 +10,12 @@ from __future__ import annotations
 from run.agents.contracts import AgentToolRetryError as _AnnotationAgentToolRetryError
 
 from typing import TYPE_CHECKING, Any
+from run.extensions import MediaInputHost, declared_input_token_limit
+from run.agents.continuation import restore_items
+from run.agents.loop_safepoints import drain_tool, wrap_request
+from run.agents.budgets import SegmentBudget, capture_budget, stopped_result, overridable, provider_attempt, validate_input_budget
+from run.agents.controls import take_guidance
+from run.retry import HOST_CONTROL_EXCEPTIONS
 
 if TYPE_CHECKING:
     from run.agents.runner import AgentExecutionContext, AgentRunResult
@@ -83,6 +89,9 @@ def run_model(
     # ``tool_records`` and must retain statuses such as ``completed``.
     recovery_signatures_at_start = set(retry_state.recovery)
     definition = context.definition
+    from run.tools import ShellInbox
+    shell_inbox = ShellInbox(agent_runner.root, agent_runner.user, context.source,
+                             context.session_id, owner_task_id=context.task_id)
     runtime = resolve_agent_provider_config(
         agent_runner.config,
         definition,
@@ -95,6 +104,16 @@ def run_model(
         provider,
         model=runtime["model"],
         cancel_event=context.cancel_event,
+    )
+    media_inputs = MediaInputHost(
+        root=agent_runner.root, user=agent_runner.user,
+        scope=("subagent", context.source, context.session_id, context.task_id, definition.name),
+        state=retry_state.auxiliary, config=agent_runner.config,
+        runtime_provider=runtime, provider=provider,
+        session_id=context.session_id, known=[],
+        user_text=json.dumps(input_data, ensure_ascii=False),
+        cancel_event=context.cancel_event,
+        input_limit=declared_input_token_limit(reasoning_selection.capabilities),
     )
     system = (
         context.prompt_bundle.text
@@ -115,6 +134,21 @@ def run_model(
         )
     ]
     items.extend(_agent_recovery_items(retry_state.recovery))
+    continuation = getattr(context, "continuation", None)
+    if continuation is not None and continuation.initial is not None:
+        initial = continuation.initial
+        items = restore_items(initial)
+        items.append(MessageItem.text(
+            MessageRole.USER,
+            ("[框架重试安全点恢复，运行预算不重置] " if initial.get("retry_resume") else "[框架原任务续跑] ")
+            + "保留上一轮已完成工作，不重复已有副作用；"
+            "结果未知的操作先核对。继续剩余任务，按当前权限与 output_schema 交付。"
+            + str(initial.get("guidance") or ""),
+            item_id=f"msg_{uuid.uuid4().hex}",
+        ))
+        retry_state.usage = copy.deepcopy(initial.get("usage") or {})
+        retry_state.response_ids = list(initial.get("response_ids") or [])
+        continuation.initial = None
     total_usage: dict[str, Any] = copy.deepcopy(retry_state.usage)
     tool_records: list[dict[str, Any]] = []
     final_text = ""
@@ -123,17 +157,7 @@ def run_model(
     response_ids: list[str] = list(retry_state.response_ids)
     parent_request_id: str | None = None
     tool_config = agent_runner.config.get("tools") or {}
-    raw_global_tool_calls = tool_config.get("max_iterations", 80)
-    if (
-        isinstance(raw_global_tool_calls, bool)
-        or not isinstance(raw_global_tool_calls, int)
-        or raw_global_tool_calls < 1
-    ):
-        raise AgentRunError("tools.max_iterations 必须是正整数")
-    max_tool_calls = min(
-        raw_global_tool_calls,
-        definition.capabilities.max_tool_iterations,
-    )
+    context.budget = context.budget or SegmentBudget(definition, agent_runner.config, None, definition.timeout)
     raw_invalid_tool_arguments_retries = tool_config.get(
         "invalid_tool_arguments_retries", 2
     )
@@ -146,8 +170,6 @@ def run_model(
             "tools.invalid_tool_arguments_retries 必须是大于等于 0 的整数"
         )
     invalid_tool_arguments_retry_limit = raw_invalid_tool_arguments_retries
-    max_provider_iterations = max_tool_calls + 1
-    processed_tool_calls = 0
     tool_timeout = float(tool_config.get("timeout", 240))
     agent_timeout = (agent_runner.config.get("agent_runtime") or {}).get(
         "default_timeout", 600
@@ -183,15 +205,36 @@ def run_model(
     tool_argument_retry_count = 0
     def progress(status: str, **detail: Any) -> None:
         if context.event_callback is not None:
+            from run.agents.public_trace import public_tool_data
+            # Never send raw arguments/results into event callbacks or logs.
+            for key in ("arguments", "result"):
+                if key in detail:
+                    detail[key] = public_tool_data(detail[key])
             context.event_callback(_runner.RunEvent(type="subagent_progress", metadata={
                 "phase": "subagent", "agent": definition.name,
                 "task_id": context.task_id, "source": context.source,
-                "session_id": context.session_id, "status": status, **detail,
+                "session_id": context.session_id, "status": status,
+                "budget": context.budget.snapshot(), "usage": total_usage, **detail,
             }))
 
-    for iteration in range(1, max_provider_iterations + 1):
+    from itertools import count
+    iteration = 0
+    for iteration in count(1):
         if context.cancel_event.is_set():
             raise AgentCancelledError(f"子代理 {definition.name} 已取消")
+        if overridable(definition):
+            context.budget.announce(items)
+        take_guidance(context, items)
+        capture_budget(context)
+        if context.budget.limit and context.budget.used >= context.budget.limit and shell_inbox.pending():
+            if not shell_inbox.wait(context.cancel_event,
+                    wrap_up=continuation.wrap_up if continuation is not None else None):
+                raise AgentCancelledError(f"子代理 {definition.name} 已取消")
+        shell_notification = shell_inbox.take()
+        if shell_notification:
+            items.append(MessageItem.text(MessageRole.USER, shell_notification["content"],
+                                          item_id=f"msg_shell_{uuid.uuid4().hex}"))
+        media_inputs.refresh_items(items)
         tool_schemas = context.tool_registry.schemas(exclude=failures.unavailable)
         tool_definitions = agent_runner._tool_definitions(tool_schemas)
         if context.structured_output_tool:
@@ -211,6 +254,9 @@ def run_model(
                     strict=True,
                 )
             )
+        tool_definitions, request_max_tokens = wrap_request(context, items, tool_definitions)
+        if continuation is not None:
+            continuation.capture(items, total_usage, response_ids)
         invalid_tool_arguments_retries = 0
         repair_tool_name = ""
         while True:
@@ -225,12 +271,14 @@ def run_model(
                 else system
             )
             try:
+                validate_input_budget(context, request_system, items, tool_definitions)
+                media_inputs.validate_items(items, request_system, tool_definitions)
                 progress("model_request", iteration=iteration)
                 with provider_request_slot(
                     agent_runner.config,
                     cancel_event=context.cancel_event,
                 ):
-                    response = provider.create(
+                    response = provider_attempt(context, total_usage, retry_state, provider,
                         KemoRequest.create(
                             request_id=request_id,
                             parent_request_id=parent_request_id,
@@ -240,7 +288,7 @@ def run_model(
                             system_prompt=request_system,
                             input=list(items),
                             tools=tool_definitions,
-                            generation={"max_output_tokens": context.max_tokens},
+                            generation={"max_output_tokens": request_max_tokens},
                             reasoning=(
                                 ReasoningConfig(
                                     enabled=True,
@@ -281,6 +329,11 @@ def run_model(
             agent_runner._merge_usage(total_usage, agent_runner._usage_dict(response.usage))
             retry_state.usage = copy.deepcopy(total_usage)
             final_model = response.model or runtime["model"]
+            if continuation is not None:
+                with continuation.lock:
+                    continuation.payload["usage"] = copy.deepcopy(total_usage)
+                    continuation.payload["model"] = final_model
+                    continuation.payload["response_ids"] = list(response_ids)[-160:]
             invalid_error = response_invalid_tool_arguments_error(response)
             if invalid_error is None:
                 declared_tool_schemas: dict[str, dict[str, Any]] = {}
@@ -307,6 +360,8 @@ def run_model(
                 )
             if invalid_error is None:
                 break
+            if continuation is not None and continuation.wrap_injected:
+                raise AgentOutputError("超时收尾输出无效，不自动重跑任务")
             if (
                 invalid_tool_arguments_retries
                 >= invalid_tool_arguments_retry_limit
@@ -387,6 +442,8 @@ def run_model(
                 cancelled=response.status == ResponseStatus.CANCELLED,
             )
         normalized_output = _response_items_for_next_request(response.output)
+        media_inputs.acknowledge()
+        shell_inbox.acknowledge()
         calls = [
             item for item in normalized_output if isinstance(item, ToolCallItem)
         ]
@@ -394,9 +451,33 @@ def run_model(
             item for item in normalized_output if isinstance(item, MessageItem)
         ]
         items.extend(normalized_output)
+        if continuation is not None:
+            public_text = "".join(text_from_content(item.content) for item in messages)
+            fragment = ({"status": "partial", "summary": public_text[:6000],
+                         "verification": ["阶段性公开正文，尚未通过最终输出校验。"]}
+                        if public_text and calls else None)
+            continuation.capture(items, total_usage, response_ids, conclusion=fragment)
         structured_calls = [
             call for call in calls if call.name == _STRUCTURED_OUTPUT_TOOL_NAME
         ]
+        if (not calls or (len(calls) == 1 and len(structured_calls) == 1)) and not (
+                continuation is not None and continuation.wrap_up.is_set()):
+            if not shell_inbox.wait(context.cancel_event,
+                                    wrap_up=continuation.wrap_up if continuation is not None else None):
+                raise AgentCancelledError(f"子代理 {definition.name} 已取消")
+            shell_notification = shell_inbox.take()
+            if shell_notification:
+                # A proposed structured submission is not final while results
+                # remain to be processed. Pair it before making another request.
+                for proposed in structured_calls:
+                    items.append(ToolResultItem(
+                        id=f"result_{uuid.uuid4().hex}", call_id=proposed.call_id,
+                        name=proposed.name, is_error=True,
+                        content=[JsonContent(data={"ok": False, "reason": "请先处理后台 Shell 结束通知"})],
+                    ))
+                items.append(MessageItem.text(MessageRole.USER, shell_notification["content"],
+                                              item_id=f"msg_shell_{uuid.uuid4().hex}"))
+                continue
         if structured_calls:
             raw_structured = json.dumps(
                 structured_calls[0].arguments,
@@ -439,11 +520,17 @@ def run_model(
         retry_state.progress = True
         retryable_tool_failure: _AnnotationAgentToolRetryError | None = None
         for call in calls:
-            if processed_tool_calls >= max_tool_calls:
-                raise AgentToolLimitError(
-                    f"子代理 {definition.name} 已达到最大工具调用次数 {max_tool_calls}"
-                )
-            processed_tool_calls += 1
+            if context.cancel_event.is_set():
+                raise AgentCancelledError(f"子代理 {definition.name} 已取消")
+            if continuation is not None and continuation.wrap_up.is_set():
+                break
+            import time as _tool_time
+            tool_started = _tool_time.monotonic()
+            if not context.budget.consume(context, call, items):
+                assert continuation is not None
+                capture_budget(context)
+                continuation.capture(items, total_usage, response_ids)
+                break
             signature = tool_call_signature(call.name, call.arguments)
             reuse_allowed = _agent_tool_result_reuse_allowed(
                 call.name,
@@ -503,6 +590,7 @@ def run_model(
                     try:
                         tool = context.tool_registry.get(call.name)
                         progress("tool_running", iteration=iteration, tool_name=call.name,
+                                 tool_call_id=call.call_id, arguments=call.arguments,
                                  tool_count=len(tool_records) + 1)
                         value = execute_tool(
                             tool,
@@ -515,6 +603,7 @@ def run_model(
                                 "caller": "subagent",
                                 "agent": definition.name,
                                 "task_id": context.task_id,
+                                "shell_ownership": shell_inbox.ownership(),
                                 "agent_trigger": input_data.get("trigger"),
                                 "tool_timeout": tool_timeout,
                                 "agent_timeout": agent_timeout,
@@ -524,15 +613,23 @@ def run_model(
                                         agent_runner.config,
                                     )
                                 ),
+                                "uploaded_files": list(media_inputs.known),
                             },
                             timeout=tool_timeout,
                             cancel_event=context.cancel_event,
                         )
+                        if call.name == "attach_media":
+                            value = media_inputs.accept(
+                                tool, call.arguments, value,
+                                call_id=call.call_id, tool_records=tool_records,
+                            )
                         payload = {"ok": True, "result": value}
                         status = "completed"
                     except ToolResultTooLargeError as exc:
                         payload = {"ok": False, "error": exc.error_payload()}
                         status = "result_too_large"
+                    except HOST_CONTROL_EXCEPTIONS:
+                        raise
                     except Exception as exc:
                         error = {
                             "message": safe_provider_message(
@@ -566,6 +663,12 @@ def run_model(
                             status = "timed_out_running"
                         else:
                             status = "failed"
+                        recovered = drain_tool(
+                            exc, tool_name=call.name, arguments=call.arguments,
+                            root=agent_runner.root, user=agent_runner.user,
+                        )
+                        if recovered is not None:
+                            payload, status = recovered
                     if payload.get("ok") is True:
                         if reuse_allowed:
                             seen_calls[signature] = copy.deepcopy(payload)
@@ -597,6 +700,11 @@ def run_model(
                     "consecutive_identical_calls": identical_call_count,
                 }
             )
+            progress("tool_finished", iteration=iteration, tool_name=call.name,
+                     tool_call_id=call.call_id, tool_status=status,
+                     arguments=call.arguments, result=payload,
+                     elapsed_ms=round((_tool_time.monotonic() - tool_started) * 1000),
+                     summary="执行成功" if payload.get("ok") else "执行失败")
             _record_agent_recovery(retry_state, call, payload)
             items.append(
                 ToolResultItem(
@@ -607,6 +715,9 @@ def run_model(
                     content=[JsonContent(data=payload)],
                 )
             )
+            if continuation is not None:
+                capture_budget(context)
+                continuation.capture(items, total_usage, response_ids)
             if (
                 (
                     context.retry_ledger is None
@@ -625,8 +736,6 @@ def run_model(
                 )
         if retryable_tool_failure is not None:
             raise retryable_tool_failure
-    else:
-        raise AgentRunError(f"子代理 {definition.name} 未生成最终输出")
     progress("validating", iteration=iteration)
     if final_data is None:
         try:
@@ -638,6 +747,8 @@ def run_model(
             raise AgentOutputError(str(exc), raw_text=final_text) from exc
     else:
         data = final_data
+    if continuation is not None:
+        stopped_result(context, items, total_usage, response_ids, conclusion=data)
     current_tool_ids = {
         str(record.get("id") or "")
         for record in tool_records
@@ -662,12 +773,14 @@ def run_model(
         model=final_model,
         metadata={
             "model_profile": definition.model_profile,
+            "budget": context.budget.snapshot(),
             "execution": definition.execution,
             "write_policy": definition.write_policy,
             "source": definition.source,
             "task_id": context.task_id,
             "prompt": context.prompt_bundle.diagnostics,
             "tool_calls": committed_tool_records,
+            "media_inputs": media_inputs.queue.snapshot(),
             "response_ids": response_ids,
             "tool_argument_retries": tool_argument_retry_count,
             "structured_output_transport": (

@@ -36,6 +36,7 @@ def get_agent_scheduler(
             )
             scheduler = AgentScheduler.from_runner(runner, event_callback=event_callback)
             _schedulers[key] = scheduler
+        scheduler.configure_concurrency(config)
         return scheduler
 
 
