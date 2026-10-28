@@ -41,6 +41,18 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return
+            if (id.includes('pdfjs-dist')) return 'vendor-pdf'
+            if (/mermaid|cytoscape|dagre|elkjs/.test(id)) return 'vendor-diagram'
+            if (/react-markdown|remark-|rehype-|micromark|mdast|hast|katex/.test(id)) return 'vendor-markdown'
+          },
+        },
+      },
+    },
     test: {
       environment: 'jsdom',
       setupFiles: './src/test/setup.ts',

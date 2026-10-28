@@ -1,11 +1,12 @@
 {
   "name": "kemo-agent-web",
   "private": true,
-  "version": "1.5.1",
+  "version": "1.5.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "npm run check:ui && tsc -b && vite build && npm run check:ui -- --dist",
+    "check:ui": "node scripts/check-ui-entry.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
