@@ -58,12 +58,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_eighteen_native_plugins(self) -> None:
+    def test_repository_discovers_all_nineteen_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
             names,
             [
+                "attach_media",
                 "expand_call",
                 "expand_creater",
                 "external_message",
@@ -93,7 +94,7 @@ class PluginManifestTests(unittest.TestCase):
             )
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 18)
+        self.assertEqual(len(registry.tools), 19)
         expand_call = registry.get("expand_call")
         self.assertFalse(expand_call.strict)
         self.assertFalse(expand_call.openai_schema()["function"]["strict"])

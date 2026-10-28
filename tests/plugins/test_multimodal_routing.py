@@ -685,7 +685,7 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(raised.exception.attempt_count, 1)
 
-    def test_cancellation_stops_multimodal_retry_before_second_attempt(self) -> None:
+    def test_cancelled_multimodal_request_never_calls_provider(self) -> None:
         from plugins.multimodal import tool
 
         class FailingProvider:
@@ -699,6 +699,34 @@ class MultimodalRoutingTests(unittest.TestCase):
         provider = FailingProvider()
         cancel = threading.Event()
         cancel.set()
+        with self.assertRaisesRegex(ProviderError, "已取消") as raised:
+            tool._create_with_retry(
+                provider,
+                Mock(spec=KemoRequest),
+                config={},
+                action="analyze_image",
+                cancel_event=cancel,
+            )
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(raised.exception.category, "cancelled")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(raised.exception.attempt_count, 0)
+
+    def test_cancellation_stops_multimodal_retry_before_second_attempt(self) -> None:
+        from plugins.multimodal import tool
+
+        cancel = threading.Event()
+
+        class FailingProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create(self, _request):
+                self.calls += 1
+                cancel.set()
+                raise ProviderError("temporary failure", retryable=True)
+
+        provider = FailingProvider()
         with self.assertRaisesRegex(ProviderError, "已取消"):
             tool._create_with_retry(
                 provider,
@@ -708,6 +736,48 @@ class MultimodalRoutingTests(unittest.TestCase):
                 cancel_event=cancel,
             )
         self.assertEqual(provider.calls, 1)
+
+    def test_multimodal_cancelled_while_waiting_preserves_cancelled_error(self) -> None:
+        from provider.factory import ProviderCongestionError
+        from plugins.multimodal import tool
+
+        cancel = threading.Event()
+        provider = Mock()
+
+        def cancelled_gate(*args, **kwargs):
+            cancel.set()
+            raise ProviderCongestionError("等待 Provider 并发槽位时请求已取消")
+
+        with patch.object(tool, "provider_request_slot", side_effect=cancelled_gate):
+            with self.assertRaisesRegex(ProviderError, "已取消") as raised:
+                tool._create_with_retry(
+                    provider,
+                    Mock(spec=KemoRequest),
+                    config={},
+                    action="analyze_image",
+                    cancel_event=cancel,
+                )
+        provider.create.assert_not_called()
+        self.assertEqual(raised.exception.category, "cancelled")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(raised.exception.attempt_count, 0)
+
+    def test_multimodal_wait_timeout_is_not_mislabeled_as_cancellation(self) -> None:
+        from provider.factory import ProviderCongestionError
+        from plugins.multimodal import tool
+
+        provider = Mock()
+        with patch.object(tool, "provider_request_slot",
+                          side_effect=ProviderCongestionError("等待 1s 超时")):
+            with self.assertRaisesRegex(ProviderCongestionError, "超时"):
+                tool._create_with_retry(
+                    provider,
+                    Mock(spec=KemoRequest),
+                    config={},
+                    action="analyze_image",
+                    cancel_event=threading.Event(),
+                )
+        provider.create.assert_not_called()
 
     def test_multimodal_timeout_uses_tool_budget_unless_explicitly_configured(self) -> None:
         from plugins.multimodal import tool
