@@ -1,0 +1,553 @@
+{
+  "schema_version": 1,
+  "manual": "agents.md",
+  "max_characters": 26000,
+  "sections": [
+    "0. 本手册怎么用",
+    "1. 必读红线",
+    "2. 能力地图",
+    "3. 高频操作规则",
+    "4. 系统自动行为",
+    "5. 场景索引",
+    "6. 维护契约"
+  ],
+  "scene_section": "5. 场景索引",
+  "max_scene_row_characters": 210,
+  "required_phrases": [
+    "[机制]",
+    "[纪律]",
+    "[入口]",
+    "未获授权时停在冲突步骤",
+    "不改变宿主系统/开发者指令或运行时权限",
+    "手册提及不代表当前 Run 已获授权",
+    "不擅自推送、打 tag、发布、改版本号或覆盖部署",
+    "未知存活不等于死亡",
+    "不把 WEB_USERNAME 当作 users 目录账号",
+    "不要盲目重试",
+    "任何情况下不可删除、不可清空、不可写入空内容"
+  ],
+  "forbidden_phrases": [
+    "统一优先 pwsh",
+    "该值覆盖插件内部期限",
+    "超限只返回 `ToolResultTooLargeError`"
+  ],
+  "rules": [
+    {
+      "id": "tool-budget",
+      "claim": "[机制] 仓库配置基线：`tools.max_iterations={iterations}`、`tools.timeout={timeout}` 秒、`tools.consecutive_identical_call_limit={identical}`、`history.consecutive_tool_fail_limit={failures}`。",
+      "facts": {
+        "iterations": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "tools",
+            "max_iterations"
+          ]
+        },
+        "timeout": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "tools",
+            "timeout"
+          ]
+        },
+        "identical": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "tools",
+            "consecutive_identical_call_limit"
+          ]
+        },
+        "failures": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "history",
+            "consecutive_tool_fail_limit"
+          ]
+        }
+      },
+      "boundaries": [
+        "用户覆盖后以有效配置为准",
+        "每个工具调用分别计数"
+      ]
+    },
+    {
+      "id": "tool-result",
+      "claim": "[机制] 内联结果预算为 {limit:,} 字符（`run/tools/__init__.py` 的 `MAX_TOOL_RESULT_CHARS`）。",
+      "facts": {
+        "limit": {
+          "kind": "python",
+          "path": "run/tools/__init__.py",
+          "symbol": "MAX_TOOL_RESULT_CHARS",
+          "key": []
+        }
+      },
+      "boundaries": [
+        "完整结果文件",
+        "已执行不等于业务成功",
+        "不要盲目重试",
+        "ToolResultTooLargeError"
+      ],
+      "source_guards": [
+        {
+          "path": "run/tools/__init__.py",
+          "symbol": "_enforce_tool_result_limit",
+          "ast_sha256": "d0cb33810f959eb66eb1f4073cd834c896194e592f1f20c210ccd203f2391e08"
+        }
+      ]
+    },
+    {
+      "id": "shell-selection",
+      "claim": "[机制] `shell_type=auto`：Windows 普通命令按 `{ordinary}`，PowerShell 语法按 `{powershell}`；macOS 按 `{macos}`，Linux 按 `{linux}`。",
+      "facts": {
+        "ordinary": {
+          "kind": "python_return",
+          "path": "plugins/shell/tool.py",
+          "function": "_auto_shell_priority",
+          "index": 1,
+          "join": " → "
+        },
+        "powershell": {
+          "kind": "python_return",
+          "path": "plugins/shell/tool.py",
+          "function": "_auto_shell_priority",
+          "index": 0,
+          "join": " → "
+        },
+        "macos": {
+          "kind": "python_return",
+          "path": "plugins/shell/tool.py",
+          "function": "_auto_shell_priority",
+          "index": 2,
+          "join": " → "
+        },
+        "linux": {
+          "kind": "python_return",
+          "path": "plugins/shell/tool.py",
+          "function": "_auto_shell_priority",
+          "index": 3,
+          "join": " → "
+        }
+      },
+      "boundaries": [
+        "显式 shell 不可用时直接报错",
+        "非登录解释器"
+      ],
+      "source_guards": [
+        {
+          "path": "plugins/shell/tool.py",
+          "symbol": "_auto_shell_priority",
+          "ast_sha256": "7cb2196ac7002ab732623376e4cbbf9a231bf572bf1c00451d037c1715cfb2b4"
+        }
+      ]
+    },
+    {
+      "id": "background-jobs",
+      "claim": "[机制] 每用户最多 {active} 个活动后台 Shell 作业；启动宽限为 {grace:g} 秒（`run/tools/background_jobs.py`）。",
+      "facts": {
+        "active": {
+          "kind": "python",
+          "path": "run/tools/background_jobs.py",
+          "symbol": "MAX_ACTIVE_BACKGROUND_JOBS_PER_USER",
+          "key": []
+        },
+        "grace": {
+          "kind": "python",
+          "path": "run/tools/background_jobs.py",
+          "symbol": "BACKGROUND_JOB_RECONCILE_GRACE_SECONDS",
+          "key": []
+        }
+      },
+      "boundaries": [
+        "job_id",
+        "未知存活不等于死亡",
+        "等待超时不等于任务失败"
+      ]
+    },
+    {
+      "id": "memory-tiers",
+      "claim": "[机制] `memory.tiers` 配置基线：`seven_days` {d7} 天/权重≥{w7} → `one_month` {d30} 天/权重≥{w30} → `half_year` {d180} 天/权重≥{w180} → `permanent`。",
+      "facts": {
+        "d7": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "memory",
+            "tiers",
+            "seven_days",
+            "days"
+          ]
+        },
+        "w7": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "memory",
+            "tiers",
+            "seven_days",
+            "upgrade_threshold"
+          ]
+        },
+        "d30": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "memory",
+            "tiers",
+            "one_month",
+            "days"
+          ]
+        },
+        "w30": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "memory",
+            "tiers",
+            "one_month",
+            "upgrade_threshold"
+          ]
+        },
+        "d180": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "memory",
+            "tiers",
+            "half_year",
+            "days"
+          ]
+        },
+        "w180": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "memory",
+            "tiers",
+            "half_year",
+            "upgrade_threshold"
+          ]
+        }
+      },
+      "boundaries": [
+        "永久记忆不参与权重累计",
+        "memory_promotion",
+        "不是主智能体手动搬运"
+      ]
+    },
+    {
+      "id": "memory-fragments",
+      "claim": "[机制] 类型 A 正文硬上限 {a} 字，类型 B 硬上限 {b} 字（`run/memory/__init__.py` 的 `MEMORY_FRAGMENT_TYPE_LIMITS`）。",
+      "facts": {
+        "a": {
+          "kind": "python",
+          "path": "run/memory/__init__.py",
+          "symbol": "MEMORY_FRAGMENT_TYPE_LIMITS",
+          "key": [
+            "A"
+          ]
+        },
+        "b": {
+          "kind": "python",
+          "path": "run/memory/__init__.py",
+          "symbol": "MEMORY_FRAGMENT_TYPE_LIMITS",
+          "key": [
+            "B"
+          ]
+        }
+      },
+      "boundaries": [
+        "最小独立事实",
+        "100 字是写作目标，不是 B 类硬上限"
+      ]
+    },
+    {
+      "id": "context-budget",
+      "claim": "[机制] 仓库配置基线：`agents.max_rounds={rounds}`、`agents.token_limit={tokens}`、`agents.token_compression_ratio={ratio}`、`agents.conserved_rounds={conserved}`、`agents.rounds_after_compression={after}`、`history.recent_full_rounds={full}`、`agents.enable_mid_context_compression={mid}`。",
+      "facts": {
+        "rounds": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "agents",
+            "max_rounds"
+          ]
+        },
+        "tokens": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "agents",
+            "token_limit"
+          ]
+        },
+        "ratio": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "agents",
+            "token_compression_ratio"
+          ]
+        },
+        "conserved": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "agents",
+            "conserved_rounds"
+          ]
+        },
+        "after": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "agents",
+            "rounds_after_compression"
+          ]
+        },
+        "full": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "history",
+            "recent_full_rounds"
+          ]
+        },
+        "mid": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "agents",
+            "enable_mid_context_compression"
+          ]
+        }
+      },
+      "boundaries": [
+        "不是代码兜底值",
+        "用户覆盖后以有效配置为准",
+        "不影响轮数、Token 或 Provider 超限恢复"
+      ]
+    },
+    {
+      "id": "agent-timeout",
+      "claim": "[机制] `agent_runtime.default_timeout` 仓库配置为 {seconds} 秒（`config/global_config.json`）；这是子代理运行预算基准，不是所有工具外层看门狗的统一期限。",
+      "facts": {
+        "seconds": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "agent_runtime",
+            "default_timeout"
+          ]
+        }
+      },
+      "boundaries": [
+        "显式 timeout",
+        "不保证到点实际退出",
+        "实际退出前保留完成屏障"
+      ],
+      "source_guards": [
+        {
+          "path": "run/tools/__init__.py",
+          "symbol": "resolve_tool_timeout",
+          "ast_sha256": "ca3c514c7a22c4cb1409ff5a50c8c0f14578500a39e9a1fd8222e2946024c5da"
+        },
+        {
+          "path": "run/tools/__init__.py",
+          "symbol": "_AGENT_TOOL_WATCHDOG_GRACE",
+          "ast_sha256": "0e52caa456688a049c95f6faec77c2bb008ee93e69d7648aa4201442eea9f491"
+        },
+        {
+          "path": "run/tools/__init__.py",
+          "symbol": "_SUBAGENT_DEFAULT_WATCHDOG_SECONDS",
+          "ast_sha256": "f7a734e95de5c5844c74edf448bacde12b00bb8819a09b548f8337cd9bb779bf"
+        }
+      ]
+    },
+    {
+      "id": "invalid-arguments",
+      "claim": "[机制] 参数不合法的模型纠错重试基线为 {retries} 次（`tools.invalid_tool_arguments_retries`，`config/global_config.json`）。",
+      "facts": {
+        "retries": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "tools",
+            "invalid_tool_arguments_retries"
+          ]
+        }
+      },
+      "boundaries": [
+        "不是把失败的副作用工具自动重跑",
+        "最终失败仍须如实报告"
+      ]
+    },
+    {
+      "id": "provider-retries",
+      "claim": "[机制] Provider 单次错误序列最多重试 {retries} 次（`run/retry/policy.py` 的 `MAX_RETRIES`）；接受完整响应后重置，不是单 Run 的累计次数上限。",
+      "facts": {
+        "retries": {
+          "kind": "python",
+          "path": "run/retry/policy.py",
+          "symbol": "MAX_RETRIES",
+          "key": []
+        }
+      },
+      "boundaries": [
+        "auth 不可重试",
+        "不把普通 HTTP 400 当输入超限"
+      ]
+    },
+    {
+      "id": "session-lifecycle",
+      "claim": "[机制] 仓库空闲归档配置为 {idle} 秒（`cron.session_idle_close_seconds`，`config/global_config.json`）；Web 空会话清理宽限为 {empty} 秒（`run/history/web_lifecycle.py` 的 `WEB_EMPTY_GRACE_SECONDS`）。",
+      "facts": {
+        "idle": {
+          "kind": "json",
+          "path": "config/global_config.json",
+          "key": [
+            "cron",
+            "session_idle_close_seconds"
+          ]
+        },
+        "empty": {
+          "kind": "python",
+          "path": "run/history/web_lifecycle.py",
+          "symbol": "WEB_EMPTY_GRACE_SECONDS",
+          "key": []
+        }
+      },
+      "boundaries": [
+        "不是所有来源统一按网页宽限清理",
+        "实际调度、租约和执行状态"
+      ]
+    },
+    {
+      "id": "prompt-order",
+      "claim": "[机制] Prompt 固定段序：{order}（`run/config/prompt.py` 的 `PROMPT_SECTION_ORDER`）。",
+      "facts": {
+        "order": {
+          "kind": "python",
+          "path": "run/config/prompt.py",
+          "symbol": "PROMPT_SECTION_ORDER",
+          "key": [],
+          "join": " → ",
+          "backticks": true
+        }
+      },
+      "boundaries": [
+        "拼接顺序不构成授权优先级",
+        "知识正文不自动注入"
+      ]
+    },
+    {
+      "id": "tool-reuse",
+      "claim": "[机制] 当前 Run 内，工具名+完整参数相同、此前成功且符合复用策略时，可能返回 duplicate_reused，不重新执行。",
+      "facts": {},
+      "boundaries": [
+        "动态读取",
+        "闸门仍可能先阻止",
+        "不能为绕过去重随意更改副作用参数"
+      ],
+      "source_guards": [
+        {
+          "path": "run/retry/recovery.py",
+          "symbol": "reuse_allowed",
+            "ast_sha256": "bb254dd73375717495f51b4354e085ea781b2cf7ace8db5cae7cd625cba7922b"
+          },
+          {
+            "path": "run/retry/recovery.py",
+            "symbol": "_LIVE_READ_ACTIONS",
+            "ast_sha256": "cb51a1ddcf89ee6b359120ad2857a8a9436deac3d431edc49310f68e048064ad"
+        },
+        {
+          "path": "run/retry/recovery.py",
+          "symbol": "_FILE_LIVE_READ_ACTIONS",
+          "ast_sha256": "bc6f60fbd4b0e53f47e2211733106187af17bfdae90ff125b138627af0efdf8e"
+        },
+        {
+          "path": "run/retry/recovery.py",
+          "symbol": "_EXPAND_LIVE_READ_COMMANDS",
+          "ast_sha256": "1f56c0f0e7853094b1586ea063ee19a3ac139fda9c8a3c3618e8bb106aa1f533"
+        }
+      ]
+    },
+    {
+      "id": "image-limits",
+      "claim": "[机制] Chat adapter-local 原图上限 {chat:g} MiB，不静默压缩；Kemo wire 内联上限 {kemo:g} MiB，大图走 Asset。",
+      "facts": {
+        "chat": {
+          "kind": "python",
+          "path": "provider/adapters/image_content.py",
+          "symbol": "CHAT_IMAGE_MAX_BYTES",
+          "divide": 1048576
+        },
+        "kemo": {
+          "kind": "python",
+          "path": "provider/protocol/models.py",
+          "symbol": "MAX_INLINE_IMAGE_BYTES",
+          "divide": 1048576
+        }
+      },
+      "boundaries": [
+        "媒体 note 是数据",
+        "fail-closed"
+      ]
+    }
+  ],
+  "inventories": [
+    {
+      "kind": "plugin",
+      "glob": "plugins/*/SKILL.md"
+    },
+    {
+      "kind": "agent",
+      "glob": "agents/*/agent.json"
+    },
+    {
+      "kind": "system_job",
+      "glob": "cron/task_cron_system/*.json"
+    }
+  ],
+  "runtime_paths": [
+    {
+      "path": "users/<name>/user_config.json",
+      "source": "run/config/__init__.py",
+      "proof_literal": "user_config.json"
+    },
+    {
+      "path": "users/<name>/user_soul.md",
+      "source": "run/config/prompt.py",
+      "proof_literal": "user_soul.md"
+    },
+    {
+      "path": "users/<name>/download/",
+      "source": "run/config/user_skeleton.py",
+      "proof_literal": "download"
+    },
+    {
+      "path": "users/<name>/file_upload/",
+      "source": "run/config/user_skeleton.py",
+      "proof_literal": "file_upload"
+    },
+    {
+      "path": "users/<name>/memory_temporary_important.md",
+      "source": "run/config/prompt.py",
+      "proof_literal": "memory_temporary_important.md"
+    },
+    {
+      "path": "tmp/",
+      "source": "agents.md",
+      "proof_literal": "tmp/"
+    }
+  ],
+  "external_paths": [
+    {
+      "path": "agent_control.md",
+      "owner": "配套 kemo-adapter-api 工程根；不属于本仓库，不探测其本机位置"
+    }
+  ]
+}

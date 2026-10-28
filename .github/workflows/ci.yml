@@ -28,6 +28,8 @@ jobs:
         run: python .github/scripts/check_versions.py
       - name: Check tracked repository data
         run: python .github/scripts/check_repository_hygiene.py
+      - name: Check injected manual contract
+        run: python .github/scripts/check_agents_manual.py
 
   backend-tests:
     name: Backend (${{ matrix.os }}, Python ${{ matrix.python-version }})

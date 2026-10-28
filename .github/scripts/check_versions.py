@@ -112,7 +112,16 @@ def main(argv: list[str] | None = None) -> int:
     version_guide = (
         ROOT / "global_knowledge" / "version-and-update-modules.md"
     ).read_text(encoding="utf-8")
-    if f'"version": "{version}"' not in version_guide:
+    example_match = re.search(r"```json\s*\n(.*?)\n```", version_guide, re.DOTALL)
+    try:
+        version_example = json.loads(example_match.group(1)) if example_match else None
+    except (ValueError, TypeError):
+        version_example = None
+    if (
+        not isinstance(version_example, dict)
+        or version_example.get("name") != "kemo-agent"
+        or version_example.get("version") != version
+    ):
         errors.append(f"版本与更新模块文档未展示根版本 {version}")
 
     agents_manual = (ROOT / "agents.md").read_text(encoding="utf-8")
