@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Any
 
-from provider.factory import create_provider, provider_request_slot
+from provider.factory import ProviderCongestionError, create_provider, provider_request_slot
 from provider.protocol.enums import MessageRole, ResponseStatus
 from provider.protocol.models import (
     AudioOutputConfig,
@@ -132,6 +132,15 @@ def _create_with_retry(
             if response.status != ResponseStatus.COMPLETED:
                 raise _provider_response_error(response)
             return response, attempt
+        except ProviderCongestionError as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProviderError(
+                    "多模态调用已取消",
+                    category="cancelled",
+                    retryable=False,
+                    attempt_count=attempt - 1,
+                ) from exc
+            raise
         except ProviderError as exc:
             exc.attempt_count = attempt
             if attempt >= max_attempts or not _is_transient_error(exc):

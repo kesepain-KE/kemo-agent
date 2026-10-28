@@ -202,6 +202,9 @@ def start_background(
         shell_type=resolved_shell_type,
         command_digest=deps.hashlib.sha256(command.encode("utf-8")).hexdigest(),
         timeout_seconds=timeout,
+        ownership=context.get("shell_ownership"),
+        completion_mode=str(context.get("_shell_completion_mode") or "required"),
+        label=str(context.get("_shell_label") or ""),
     )
     request = {
         "schema_version": 1,

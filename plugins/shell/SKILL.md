@@ -22,6 +22,12 @@
 - `action=cancel, job_id=...`：请求取消作业并终止已登记且身份校验通过的进程树；已结束作业重复取消是幂等操作。返回值中的 `ok` 表示取消请求是否被接受，`job_succeeded` 表示作业是否实际成功完成。
 
 后台作业按用户、来源和对话空间隔离。持久作业记录不保存原始命令，只保存命令摘要；原始命令请求由管理进程读取后立即删除。用户命令若自行再次创建完全脱离的子进程，不属于该作业的可靠生命周期范围。
+在框架主/子代理中，新后台作业绑定发起任务。有限任务默认 `completion_mode=required`：
+智能体在最终交付前等待并接收状态、完成时间、退出码及按采集顺序的最后五行输出，
+完整日志仍按返回的日志路径主动读取。服务/监听器应显式选 `completion_mode=detached`，
+不阻塞交付但不绕过 timeout 上限；退出后保留短通知，不擅自唤醒新模型请求。
+通知不是用户指令，退出码 0 也不代替业务验收。子代理退出后由所属主任务接管未处理通知，
+不回灌工具卡和整段终端日志；无新通知绑定的旧作业保持原状态查询方式。
 后台 stdout/stderr 会由管理进程流式收集，每个流有固定大小上限；超过上限的新增输出会丢弃，并在日志末尾写入截断标记。每个用户同时运行的后台作业数和后台作业目录总容量都有上限，已结束记录会在保留期后自动清理。即使日志写入失败，管理进程仍会继续读取管道，避免子进程因管道缓冲区填满而死锁。
 
 ## 会话模式
@@ -48,6 +54,8 @@ cat / type、ls / dir、mkdir、echo、rm / del 的简单字面量形式也以�
 | `action` | string | | run / status / cancel，默认 run |
 | `command` | string | 条件 | action=run 时必填；支持 && / \|\| / ; 命令链 |
 | `background` | bool | | action=run 时是否创建受管理后台作业，默认 false |
+| `label` | str | | 后台任务简短标题，最多 160 字，不填敏感信息 |
+| `completion_mode` | str | | required（默认）为本次交付依赖，完成前保留屏障；detached 用于常驻服务，不阻塞主/子任务，退出后仍保留通知 |
 | `show_terminal` | bool | | Windows 下是否为本次命令创建可见终端，默认 false；其他平台忽略 |
 | `job_id` | string | 条件 | action=status/cancel 时必填 |
 | `working_dir` | string | | 工作目录，默认继承会话 cwd 或项目根 |
@@ -80,6 +88,8 @@ cat / type、ls / dir、mkdir、echo、rm / del 的简单字面量形式也以�
         "default": false,
         "description": "action=run 时是否创建受管理后台作业；后台模式不支持 stdin"
       },
+      "label": {"type": "string", "maxLength": 160, "description": "后台任务简短标题，不填敏感信息"},
+      "completion_mode": {"type": "string", "enum": ["required", "detached"], "default": "required", "description": "后台有限任务默认 required，所属智能体需处理完成通知后再交付；常驻服务显式 detached，不阻塞交付"},
       "show_terminal": {
         "type": "boolean",
         "default": false,

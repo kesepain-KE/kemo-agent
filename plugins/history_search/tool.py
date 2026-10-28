@@ -211,7 +211,7 @@ def _serialized_chars(value: dict[str, Any]) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 
-def run(
+def _search(
     query: str,
     limit: int = 10,
     since: str = "",
@@ -388,3 +388,85 @@ def run(
     result["next_offset"] = returned_end if result["has_more"] else None
     result["page_limited_by_chars"] = page_limited_by_chars
     return result
+
+
+def run(
+    query: str = "",
+    limit: int = 10,
+    since: str = "",
+    until: str = "",
+    role: str = "any",
+    match_mode: str = "substring",
+    regex: bool = False,
+    max_snippet: int = 500,
+    context_messages: int = 0,
+    max_context_chars: int = 1000,
+    offset: int = 0,
+    page_char_limit: int = 80_000,
+    source: str = "",
+    session_id: str = "",
+    *,
+    action: str = "search",
+    date: str = "",
+    archive_id: str = "",
+    cursor: str = "",
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the old positional search contract; new operations are keyword-only."""
+    if not isinstance(action, str) or action not in {"search", "dates", "list", "read"}:
+        raise ValueError("action 必须是 search/dates/list/read")
+    if not isinstance(query, str):
+        raise ValueError("query 必须是字符串")
+    if not isinstance(since, str) or not isinstance(until, str):
+        raise ValueError("since 和 until 必须是字符串")
+    if not isinstance(source, str) or not isinstance(session_id, str):
+        raise ValueError("source 和 session_id 必须是字符串")
+    for field, value, maximum in (("date", date, 10), ("archive_id", archive_id, 4096),
+                                   ("cursor", cursor, 8192)):
+        if not isinstance(value, str) or len(value) > maximum:
+            raise ValueError(f"{field} 必须是长度不超过 {maximum} 的字符串")
+    if action == "search":
+        if date or archive_id or cursor:
+            raise ValueError("search 不接受 date/archive_id/cursor，请用 since/until/offset")
+        return _search(
+            query, limit, since, until, role, match_mode, regex, max_snippet,
+            context_messages, max_context_chars, offset, page_char_limit, source, session_id,
+            context=context,
+        )
+    if query or match_mode != "substring" or regex or context_messages or max_snippet != 500 or max_context_chars != 1000:
+        raise ValueError("query/match_mode/regex/片段与上下文参数仅适用于 search")
+    if not isinstance(role, str) or role not in _ROLES:
+        raise ValueError("role 必须是 any/user/assistant")
+    normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=100)
+    normalized_chars = _bounded_integer(page_char_limit, field="page_char_limit", minimum=1000, maximum=90_000)
+    normalized_offset = _bounded_integer(offset, field="offset", minimum=0, maximum=1_000_000)
+    try:
+        root, user = Path(context["root"]), str(context["user"])
+    except (KeyError, TypeError):
+        raise ValueError("context 必须包含 root 和 user") from None
+    if action == "read":
+        if not archive_id:
+            raise ValueError("read 必须提供 list 返回的 archive_id")
+        if date or since or until or source or session_id or offset:
+            raise ValueError("read 使用 archive_id/cursor 定位，不接受目录过滤或 offset")
+        from run.history import read_archive
+        return read_archive(root, user, archive_id=archive_id, cursor=cursor, role=role,
+                            limit=normalized_limit, page_char_limit=normalized_chars)
+    if archive_id or cursor or role != "any":
+        raise ValueError("dates/list 不接受 archive_id/cursor/role；请使用 read 或 search")
+    if date and action != "list":
+        raise ValueError("date 仅用于 list；日期目录可使用 since/until")
+    if not isinstance(since, str) or not isinstance(until, str):
+        raise ValueError("since 和 until 必须是字符串")
+    date_value = _normalize_date(date, field="date") or ""
+    since_value = _normalize_date(since, field="since") or ""
+    until_value = _normalize_date(until, field="until") or ""
+    if since_value and until_value and since_value > until_value:
+        raise ValueError("since 不能晚于 until")
+    from run.history import query_archives
+    return query_archives(
+        root, user, action=action, date=date_value, since=since_value, until=until_value,
+        source=_bounded_filter(source, field="source"),
+        session_id=_bounded_filter(session_id, field="session_id"),
+        limit=normalized_limit, offset=normalized_offset, page_char_limit=normalized_chars,
+    )

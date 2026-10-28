@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from run.extensions import invoke_expand
+from run.agents import require_non_agent_expand_command
 
 
 def run(
@@ -21,6 +22,8 @@ def run(
     user = str(context.get("user") or "").strip()
     if not user:
         raise ValueError("工具上下文缺少 user")
+    if context.get("caller") == "subagent":
+        require_non_agent_expand_command(root, user, scope, module, command)
     raw_timeout = timeout or context.get("tool_timeout")
     try:
         effective_timeout = float(raw_timeout if raw_timeout is not None else "")

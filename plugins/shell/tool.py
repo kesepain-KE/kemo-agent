@@ -638,11 +638,18 @@ def run(
     background: bool = False,
     job_id: str = "",
     show_terminal: bool = False,
+    label: str = "",
+    completion_mode: str = "required",
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     if action not in {"run", "status", "cancel"}:
         raise ValueError("action 必须是 run/status/cancel")
+    if completion_mode not in {"required", "detached"}:
+        raise ValueError("completion_mode 必须是 required/detached")
+    if not isinstance(label, str) or len(label) > 160:
+        raise ValueError("label 必须是不超过 160 字的字符串")
+    context = {**context, "_shell_completion_mode": completion_mode, "_shell_label": label}
     if not isinstance(background, bool):
         raise ValueError("background 必须是布尔值")
     if not isinstance(show_terminal, bool):

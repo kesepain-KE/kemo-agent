@@ -1,5 +1,5 @@
 # subagent_dispatch
-发现并调用当前用户可用的公开子代理；支持列出、同步调用、后台提交、状态查询和取消。
+发现并调用当前用户可用的公开子代理；支持预算披露、同步调用、后台提交、预算停止后续跑、运行中指导、显式拆分、状态查询和取消。
 
 ## 创建子代理四步流程（必须遵守）
 
@@ -70,17 +70,65 @@
 
 ## 调用已有子代理
 
-- `list`：列出当前用户可由主智能体调用的公开子代理。
-- `call`：调用公开子代理；同步等待时设置 `wait=true`，后台提交时设置 `wait=false`。
+- `list`：列出当前用户可由主智能体调用的公开子代理，含有效默认工具额度
+  max_iterations、default_timeout、supports_budget_override、supports_resume、
+  authorized_plugins（当前授权交集，不是声明的 *）和 knowledge_scopes。
+- `call/resume` 的 `max_tool_calls` 是本段工具额度：省略使用默认（resume 沿用上一段），
+  正整数覆盖默认，0 显式不限工具次数。仅公开的本地 LLM 非串行业务代理可覆盖，
+  不改变插件/技能/知识权限、不取消 timeout、取消、重复调用和连续失败保护。
+  timeout 为本段运行预算秒数，排队不消耗；resume 省略沿用上一段时长。
+  调整前先评估任务范围，广泛审计优先按可独立交付阶段拆分，不默认使用不限次数。
+- 工具额度耗尽时状态为 `tool_limit`，stop_reason 为 `tool_budget_exhausted`；
+  已退出、有有效快照且 resumable=true 才能 resume。每段获得新额度，
+  例如 80 次停止后再 resume 可再调用 80 次，budget 同时保存本段和累计数。
+  模型内部重试不重置本段工具预算；结论收尾不再开放业务工具，也不保证成功。
+  旧版 failed + AgentToolLimitError 会提示 resume_candidate；允许显式申请续跑，
+  但仍须有匹配定义/轮次/身份的有效私有安全点，不能恢复任意失败或从头补跑。
+- `guide`：task_id + guidance，向当前主任务所属的排队/运行中本地业务子代理
+  投递指导，在下一请求安全点处理；不是实时打断在途工具，不启动第二个执行器。
+- `split`：task_id + tasks（1..8 个完整 input），只拆实际已退出的预算停止或失败
+  任务的剩余工作；由主智能体明确编写阶段、输入与验收，保留 origin_task_id。
+  不自动重派。批量入队可部分成功，按 accepted_count/task_ids 核对，只补交未接受项。
+  已运行的后台 Shell 要先按 job_id 查询，不把原任务整个重新执行。
+- status 附有界预算、最后阶段、最后工具名和已确认用量，不附参数或整包日志；
+  约 80% 时子代理收到收尾提醒，主代理在请求安全点收到每段一次可确认的短预警。
+  多个同根任务同类预算停止时附聚合建议，不自动增加费用。
+- `call`：调用公开子代理；普通公开本地 LLM 非串行业务代理省略 `wait` 默认后台提交，显式 `wait=true` 同步等待、`wait=false` 后台提交。`resume` 使用相同缺省策略。
+  两者都是当前用户请求的必要依赖；后台提交后可继续其他工作，但不能把 queued 当成完成。
+  框架会在安全点自动交付子任务结果；通常不需要反复 status 轮询。主任务等待／取消与
+  网页执行详情合同见 `global_knowledge/agent-task-coordination.md`。
+- 互不依赖的多个普通任务优先以 `wait=false` 分别提交，调度器会在共享 API 请求上限内并行执行。
+  省略 wait 也会后台提交，不要求主模型靠记住额外参数才能获得并行；不要先同步等待一个再提交另一个，也无需自己用 status 轮询实现并行。
+  `wait=true` 保留同步语义；串行维护代理及特殊同步规划不强行并行。
+  网页按持久提交编号展示；同批结果通知按相同编号返回，同时完成也不会乱序。
 - `status`：使用后台任务 ID 查询状态。
+- `resume`：继续同一对话空间内已“超时停止”或“工具额度停止”且可恢复的任务；使用原 task_id，
+  可附 guidance 限定剩余工作，timeout 为新一轮运行预算，wait 控制是否同步等待。
+  沿用原任务编号与提交顺序，run_count 增加，每轮重新计时并分配新段额度；不是重新派发相同任务。
+  不能恢复仍在停止中的线程、已完成/取消任务、外部代理、自定义 Python 执行器或维护代理。
+  同任务不能并发续跑；快照失效、定义变化或权限不再允许时明确拒绝，不从头重做。
 - `cancel`：取消尚未完成的后台任务。
+- 主智能体默认只接收结论、必要证据、产物路径和未完成事项；call/status/resume
+  与后台通知不附工具记录、卡片或原始 metadata。工具过程保留在网页任务详情。
+  超时有结论时返回已有结论，无结论时明确说明；不能把执行轨迹冒充已确认结论。
 - 调用前先读取目标子代理的 `trigger.md`，按其中约定构造结构化 `input`。
 - `task_plan` 是特殊的同步调用：框架会从当前 Tool Registry 和配置强制补齐规划输入并在返回前持久化计划；调用方不要手工传入工具白名单，也不能对它使用 `wait=false`。
 - `time_plan` 的 `current_time_beijing` 由框架按 `Asia/Shanghai` 强制注入；调用方无需先调时间工具，手工提交的同名值也会被覆盖。
 - `self_improve` 由主智能体调用时只允许 `manual_review`；压缩提取和记忆晋升模式属于引擎/调度器私有入口。
 - `context_manage` 是引擎内部代理，不出现在公开列表中；手动压缩必须走 `/compress` 对应的会话管线。
-- 其他公开子代理只获得自身 `agent-config.json` 声明的能力以及调用方显式输入，不会继承主智能体的工具权限。
-- 同步调用默认遵循 `agent_runtime.default_timeout`，也可以在 `call` 中传入独立的 `timeout` 秒数；不会被普通 `tools.timeout` 提前截断。这个 `timeout` 是主智能体本次等待期限，不是到点立即杀掉子代理的命令：期限到达且任务仍在排队或运行时，调用会返回 `task_id`，子代理继续进入收尾存活期。之后使用 `action=status` 追踪，使用 `action=cancel` 请求停止。收尾存活期内自然完成会标记 `completed_after_timeout`；若调用方已经收到超时结果后底层线程才完成，状态会从 `timed_out_running` 收敛到 `completed`，并在结果元数据中标记 `completed_after_detach`。执行线程未退出时保留 `timed_out_running`，此状态仍可发起取消请求，不能描述成已经强制终止。
+- `general_worker` 是通用执行助手：明确传入 task、必要背景、约束和验收条件，可用 `wait=false`
+  后台执行。插件、技能和知识采用当前用户授权；拓展/感知不自动注入，可通过已有授权工具按需使用。
+  它不能继续委派，也不会自动继承主对话历史。调用前读取其 `trigger.md`。
+- 其他公开子代理只获得自身 `agent-config.json` 声明的能力以及调用方显式输入，
+  不会仅因主智能体拥有某项工具就自动获得授权；显式 `allow=["*"]` 才选择当前用户已授权的动态工具集。
+- 同步调用默认遵循 `agent_runtime.default_timeout`，也可以在 `call/resume` 中传入独立的
+  `timeout` 秒数；不会被普通 `tools.timeout` 提前截断。同步等待到期时先交回任务 ID，
+  实际运行预算从本轮执行开始计算。可恢复的本地 LLM 业务子代理到期进入现有宽限内的单次收尾，
+  不再启动业务工具，随后以 timed_out（超时停止）交付部分结论，resumable=true 时可显式续跑。
+  若模型/工具尚未真实退出则是 timed_out_running（超时停止中），仍保留执行槽和主任务屏障，
+  不得并发恢复。可恢复业务任务一旦进入超时流程，迟到结论仍作为超时成果保存；
+  非恢复执行器保留原有 completed_after_timeout 对账，残缺成果不算完整成功。
+  用户取消优先，不触发自动收尾或续跑；非协作线程不能被宣称立即强杀。
 
 ### 调用外部智能体
 
@@ -117,11 +165,11 @@
 ```json
 {
   "name": "subagent_dispatch",
-  "description": "发现和调度当前用户可用的公开子代理。",
+  "description": "发现和调度当前用户可用的公开子代理。普通本地 LLM 非串行业务代理 call/resume 省略 wait 默认后台提交并行执行，共用 Provider API 请求池；仍是主任务必要依赖，框架按稳定提交序号交付同批结果，无需反复查询状态。显式 wait=true 同步等待；特殊规划、串行维护和外部代理默认同步。",
   "input_schema": {
     "type": "object",
     "properties": {
-      "action": {"type": "string", "enum": ["list", "create", "call", "status", "cancel"]},
+      "action": {"type": "string", "enum": ["list", "create", "call", "resume", "guide", "split", "status", "cancel"]},
       "agent": {"type": "string", "description": "call 时使用的公开子代理名称；外部智能体使用 external:<scope>:<拓展名>:<代理名> 句柄"},
       "input": {"type": "object", "description": "call 时传给子代理的结构化输入"},
       "definition": {
@@ -171,9 +219,12 @@
         "required": ["name", "description", "instruction"],
         "additionalProperties": false
       },
-      "wait": {"type": "boolean", "description": "call 时是否同步等待；默认 true", "default": true},
-      "timeout": {"type": "number", "description": "call 时可选；本次子代理整体超时秒数，必须为正数；省略时使用 agent_runtime.default_timeout（默认 600 秒）"},
-      "task_id": {"type": "string", "description": "status 或 cancel 时使用的后台任务 ID"}
+      "wait": {"type": "boolean", "description": "call/resume 是否同步等待。普通本地 LLM 非串行业务代理省略默认 false；特殊规划、串行维护和外部代理默认 true。显式 true 保留同步等待，显式 false 仅用于支持后台的代理"},
+      "timeout": {"type": "number", "description": "call/resume 时可选；本轮子代理运行预算秒数，必须为正数；省略时使用代理默认预算"},
+      "guidance": {"type": "string", "maxLength": 8000, "description": "resume 时可选，guide 时必填；指导剩余工作，不新增权限，guide 在下一请求安全点交付"},
+      "max_tool_calls": {"type": "integer", "minimum": 0, "description": "call/resume/split 的每段工具调用额度；正整数覆盖默认，0 显式不限工具次数（仍受 timeout/取消/失败保护约束）。resume 省略沿用上一段有效额度。仅公开本地 LLM 非串行业务代理可覆盖"},
+      "tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object"}, "description": "split 时由主智能体明确给出的 1..8 个完整 input；原任务须已停止或失败且实际退出。只拆剩余工作，不重做已完成副作用"},
+      "task_id": {"type": "string", "description": "resume/status/cancel 时使用的原任务 ID"}
     },
     "required": ["action"],
     "additionalProperties": false
