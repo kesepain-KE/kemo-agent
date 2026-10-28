@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from web.api_contracts import MemoryResponse
+
 import asyncio
 from typing import Any
 
@@ -35,7 +37,7 @@ def register_setting_routes(
     async def prompt_sections(user: str) -> dict[str, Any]:
         return backend.prompt_sections(user)
 
-    @app.get("/api/users/{user}/memory/summary")
+    @app.get("/api/users/{user}/memory/summary", response_model=MemoryResponse)
     async def memory_summary(user: str) -> dict[str, Any]:
         return backend.memory_summary(user)
 
@@ -77,7 +79,9 @@ def register_setting_routes(
 
     @app.patch("/api/users/{user}/config")
     async def patch_user_config(user: str, body: dict[str, Any]) -> dict[str, Any]:
-        return backend.patch_user_config(user, body.get("changes", body))
+        # Background uploads share the config lock; never wait for media I/O on
+        # the event loop while another request is validating or replacing it.
+        return await asyncio.to_thread(backend.patch_user_config, user, body.get("changes", body))
 
     @app.get("/api/users/{user}/provider/models")
     async def kemo_provider_models(

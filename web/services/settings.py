@@ -67,6 +67,7 @@ from web.errors import (
 )
 from web.services._io import atomic_write as _atomic_write
 from web.services.provider_models import discover_chat_models
+from web.services.preferences import read_preferences, write_preferences
 from web.services.settings_support import (
     _VersionCheckFailure,
     _contains_redacted_placeholder,
@@ -103,6 +104,9 @@ _CONFIG_SOURCE_PATHS = (
     "web.max_concurrent_chats",
     "web.max_pending_chats",
     "web.pending_chat_timeout",
+    "web.sse_heartbeat_seconds",
+    "web_ui.language",
+    "web_ui.background",
     "message.max_queued_messages",
     "agent_runtime.queue_maxsize",
     "cron.avoid_congestion",
@@ -133,6 +137,18 @@ class SettingsServiceMixin:
         root: Path
         users = WebRunService.users
         version_manifest_fetcher: Callable[[str, float], dict[str, Any]]
+
+    def sse_heartbeat_seconds(self, user: str) -> float:
+        from web.streaming import heartbeat_seconds
+
+        name = self.require_user(user)
+        try:
+            config = load_config(name, self.root)
+        except ConfigError:
+            config = {}
+        web_config = config.get("web")
+        value = web_config.get("sse_heartbeat_seconds") if isinstance(web_config, dict) else None
+        return heartbeat_seconds(value)
 
     def _config_path(self, user: str) -> Path:
         return self.root / "users" / user / "user_config.json"
@@ -192,12 +208,30 @@ class SettingsServiceMixin:
         *,
         user: str | None,
     ) -> dict[str, Any]:
+        from web.services._config_lock import config_lock
+
+        with config_lock(path):
+            return self._patch_config_document_unlocked(path, changes, user=user)
+
+    def _patch_config_document_unlocked(
+        self,
+        path: Path,
+        changes: Any,
+        *,
+        user: str | None,
+    ) -> dict[str, Any]:
         if not isinstance(changes, dict) or not changes:
             raise InvalidRequestError("changes 必须是非空对象")
         if _contains_redacted_placeholder(changes):
             raise InvalidRequestError("不能把脱敏占位符 *** 写回配置")
+        if user is None and "web_ui" in changes:
+            raise InvalidRequestError("web_ui 仅支持用户配置")
         current = read_json_object(path, allow_empty=user is not None)
         updated = _merge_patch(current, changes)
+        if user is not None:
+            from web.services.web_ui_config import validate_web_ui_patch
+
+            validate_web_ui_patch(updated, changes, path, self.root)
         try:
             mid_context_compression_enabled(updated)
         except ValueError as exc:
@@ -430,33 +464,11 @@ class SettingsServiceMixin:
 
     def preferences(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
-        path = self.root / "users" / name / "web_preferences.json"
-        value = read_json_object(path, allow_empty=True)
-        appearance = (checked_435 if isinstance(checked_435 := value.get("appearance"), dict) else {})
-        return {
-            "user": name,
-            "appearance": {
-                "theme": appearance.get("theme", "light"),
-                "font_size": appearance.get("font_size", "medium"),
-            },
-        }
+        return read_preferences(self.root, name)
 
     def patch_preferences(self, user: Any, changes: Any) -> dict[str, Any]:
         name = self.require_user(user)
-        if not isinstance(changes, dict):
-            raise InvalidRequestError("appearance 必须是对象")
-        theme = changes.get("theme", self.preferences(name)["appearance"]["theme"])
-        font_size = changes.get(
-            "font_size", self.preferences(name)["appearance"]["font_size"]
-        )
-        if theme not in {"light", "dark"}:
-            raise InvalidRequestError("theme 只允许 light 或 dark")
-        if font_size not in {"small", "medium", "large"}:
-            raise InvalidRequestError("font_size 只允许 small、medium 或 large")
-        value = {"schema_version": 1, "appearance": {"theme": theme, "font_size": font_size}}
-        path = self.root / "users" / name / "web_preferences.json"
-        _atomic_write(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode())
-        return {"user": name, "appearance": value["appearance"], "updated": True}
+        return write_preferences(self.root, name, changes)
 
     def settings(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
