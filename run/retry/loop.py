@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, TypeVar
 
-from run.retry.policy import MAX_ATTEMPTS, mark_retry_exhausted
+from run.retry.policy import HOST_CONTROL_EXCEPTIONS, MAX_ATTEMPTS, mark_retry_exhausted
 
 
 T = TypeVar("T")
@@ -61,7 +61,7 @@ def run_attempts(
         attempt = ledger.begin_attempt()
         try:
             result = run_once(attempt)
-        except (KeyboardInterrupt, GeneratorExit):
+        except HOST_CONTROL_EXCEPTIONS:
             raise
         except BaseException as exc:
             progress = bool(getattr(exc, "retry_progress", False))

@@ -12,6 +12,14 @@ MAX_RETRIES = 5
 MAX_ATTEMPTS = MAX_RETRIES + 1
 BUDGET_EXHAUSTED = "retry_budget_exhausted"
 PROGRESS_SIGNAL_EVENT_TYPES = frozenset({"tool_call_result"})
+# Process control and resource exhaustion are not recoverable business failures.
+HOST_CONTROL_EXCEPTIONS = (SystemExit, KeyboardInterrupt, GeneratorExit, MemoryError)
+
+
+def raise_if_host_exception(error: BaseException) -> None:
+    """Guard best-effort handlers without turning host failures into warnings."""
+    if isinstance(error, HOST_CONTROL_EXCEPTIONS):
+        raise error
 
 
 @dataclass(frozen=True, slots=True)
