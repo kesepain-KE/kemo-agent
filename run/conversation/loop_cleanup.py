@@ -3,6 +3,31 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Iterator
+import logging
+import json
+from pathlib import Path
+import uuid
+
+_LOG = logging.getLogger(__name__)
+
+
+def _cleanup_failure(request: dict[str, Any], marker: str, *, root: Any, user: str) -> None:
+    request.setdefault("_cleanup_diagnostics", {})[marker] = True
+    _LOG.exception("Conversation cleanup failed: %s", marker)
+    try:
+        from run.config import _contains_reparse_point, user_dir
+        base = Path(root).resolve()
+        directory = user_dir(user, base) / "history" / "run_failures"
+        if _contains_reparse_point(directory, base):
+            raise ValueError("诊断目录不能是链接")
+        directory.mkdir(parents=True, exist_ok=True)
+        # Keep an independent diagnostic even when the history transaction
+        # itself is unavailable. Never persist exception bodies or prompts.
+        with (directory / f"{uuid.uuid4().hex}.json").open("x", encoding="utf-8") as handle:
+            json.dump({"schema_version": 1, marker: True,
+                       "run_id": str(request.get("run_id") or "")[:160]}, handle)
+    except Exception:
+        _LOG.error("Unable to persist cleanup diagnostic marker: %s", marker)
 
 
 def terminal_failure_events(
@@ -59,7 +84,7 @@ def cleanup_run_registration(
         try:
             terminal_committer.commit_cancelled_round()
         except Exception:
-            pass
+            _cleanup_failure(request, "cancel_commit_failed", root=base, user=user)
     if not round_state.history_run_registered:
         return
     try:
@@ -76,4 +101,4 @@ def cleanup_run_registration(
             run_id=run_id or None,
         )
     except Exception:
-        pass
+        _cleanup_failure(request, "run_state_update_failed", root=base, user=user)

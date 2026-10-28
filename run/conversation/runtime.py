@@ -18,7 +18,7 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator
+from typing import Any, AsyncGenerator, Callable, Iterator
 
 from events import RunEvent, error_event
 from provider.adapters.compat import chat_request_to_kemo
@@ -176,7 +176,7 @@ from run.conversation.helpers import (
 )
 from run.conversation.main_loop import iter_request_events_impl as _main_loop_impl
 from run.retry.loop import RetryLedger
-from run.retry.policy import backoff_seconds, is_progress_signal, view_from_event
+from run.retry.policy import HOST_CONTROL_EXCEPTIONS, backoff_seconds, is_progress_signal, view_from_event
 
 
 
@@ -244,13 +244,19 @@ def _commit_verified_manual_compression(
         snapshot = stored_data.get("context_snapshot") or {}
         if int(snapshot.get("workspace_rounds") or 0) != expected_rounds:
             raise EngineError("上下文压缩落盘校验失败：上下文快照仍指向旧工作区")
-    except BaseException:
+    except BaseException as original_error:
         rollback_errors: list[str] = []
         try:
             restore_summary_cache(runtime_path, previous_summary_cache)
             runtime_cache.store(runtime_path, original_window, version=version)
+        except HOST_CONTROL_EXCEPTIONS:
+            if isinstance(original_error, HOST_CONTROL_EXCEPTIONS):
+                raise original_error
+            raise
         except BaseException as exc:
             rollback_errors.append(f"运行窗口与摘要回滚失败：{exc}")
+        if isinstance(original_error, HOST_CONTROL_EXCEPTIONS):
+            raise
         if rollback_errors:
             raise EngineError("；".join(rollback_errors))
         raise
@@ -492,13 +498,10 @@ def _request_session_lock(
     request: dict[str, Any],
     root: Path | None,
 ):
-    try:
-        user = _required_text(request, "user")
-        source = _required_text(request, "source")
-        session_id = _required_text(request, "session_id")
-        base = (root or project_root()).resolve()
-    except Exception:
-        return nullcontext()
+    user = _required_text(request, "user")
+    source = _required_text(request, "source")
+    session_id = _required_text(request, "session_id")
+    base = (root or project_root()).resolve()
     return _session_lock(base, user, source, session_id)
 
 
@@ -512,14 +515,42 @@ def iter_request_events(
 ) -> Generator[RunEvent, None, None]:
     """Serialize one logical request, including all automatic retry attempts."""
 
+    # Copy before binding: callers may reuse the input dict for a later user
+    # message. Retries of this request share a root, unrelated messages do not.
+    request = {**request, "_agent_root_task_id": (
+        request.get("_agent_root_task_id") or f"main-task-{uuid.uuid4().hex}"
+    )}
+    from provider.request_scope import provider_request_scope
+
+    def scope():
+        return provider_request_scope(
+            root or project_root(), _required_text(request, "user"),
+            _required_text(request, "source"), _required_text(request, "session_id"),
+        )
+
     with _request_session_lock(request, root):
-        yield from _iter_request_events_unlocked(
+        iterator = _iter_request_events_unlocked(
             request,
             root=root,
             provider_factory=provider_factory,
             tool_registry_factory=tool_registry_factory,
             cancel_event=cancel_event,
         )
+        try:
+            while True:
+                # Never leave a ContextVar bound across yield: two generators
+                # can be interleaved on one thread without sharing identity.
+                with scope():
+                    try:
+                        event = next(iterator)
+                    except StopIteration:
+                        return
+                yield event
+        finally:
+            with scope():
+                close = getattr(iterator, "close", None)
+                if callable(close):
+                    close()
 
 
 async def stream_request(
@@ -529,7 +560,7 @@ async def stream_request(
     provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
     tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
     cancel_event: threading.Event | None = None,
-) -> AsyncIterator[RunEvent]:
+) -> AsyncGenerator[RunEvent, None]:
     stopped = cancel_event or threading.Event()
     iterator = iter_request_events(
         request,
@@ -538,18 +569,22 @@ async def stream_request(
         tool_registry_factory=tool_registry_factory,
         cancel_event=stopped,
     )
+    # RLock acquisition, every next(), and close() must use the same thread.
+    from concurrent.futures import ThreadPoolExecutor
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="conversation-stream")
+    loop = asyncio.get_running_loop()
     try:
         while True:
-            event = await asyncio.to_thread(next, iterator, None)
+            event = await loop.run_in_executor(executor, next, iterator, None)
             if event is None:
                 break
             yield event
-    except asyncio.CancelledError:
+    finally:
         stopped.set()
-        close = getattr(iterator, "close", None)
-        if callable(close):
-            await asyncio.to_thread(close)
-        raise
+        try:
+            await asyncio.shield(loop.run_in_executor(executor, iterator.close))
+        finally:
+            executor.shutdown(wait=False)
 
 
 def handle_request(

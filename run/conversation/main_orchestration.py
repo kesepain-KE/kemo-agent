@@ -4,6 +4,7 @@ from __future__ import annotations
 from events import RunEvent as _AnnotationRunEvent
 
 from typing import Any
+from run.retry import HOST_CONTROL_EXCEPTIONS, raise_if_host_exception
 
 def run_conversation(request, *, runtime_bindings, root=None, provider_factory=None, tool_registry_factory=None, cancel_event=None):
     (ContextLengthExceededError, ProviderLoopState, RoundRuntime, RoundState, RunDependencies, RunEvent, SUMMARY_STORE_REF, TerminalRoundCommitter, TerminalRoundContext, _build_request_context, _commit_verified_manual_compression, _committed_failure_event, _compress_per_round_tool_think, _content_display, _copy_committed_round_to_archive, _extract_round_memory, _memory_injected_chars, _merge_usage, _metric_provider_responses, _prepare_compression, _prepare_provider_request, _queue_summary_memory_extraction, _record_provider_request, _request_content_blocks, _required_text, _retry_recovery_messages, _retry_recovery_provider_responses, _run_provider_loop, _session_lock, _tool_result_reuse_allowed, _trim_to_max_rounds, _usage_from_dict, append_round_items, build_context_snapshot, build_summary_message, cleanup_run_registration, commit_terminal_windows, copy, datetime, error_event, memory_extraction_mode, patch_archive_metadata, project_root, queue_memory_extraction, restore_summary_cache, select_context, terminal_failure_events, time, timezone, tool_call_signature, update_run_state) = map(runtime_bindings.__getitem__, ('ContextLengthExceededError', 'ProviderLoopState', 'RoundRuntime', 'RoundState', 'RunDependencies', 'RunEvent', 'SUMMARY_STORE_REF', 'TerminalRoundCommitter', 'TerminalRoundContext', '_build_request_context', '_commit_verified_manual_compression', '_committed_failure_event', '_compress_per_round_tool_think', '_content_display', '_copy_committed_round_to_archive', '_extract_round_memory', '_memory_injected_chars', '_merge_usage', '_metric_provider_responses', '_prepare_compression', '_prepare_provider_request', '_queue_summary_memory_extraction', '_record_provider_request', '_request_content_blocks', '_required_text', '_retry_recovery_messages', '_retry_recovery_provider_responses', '_run_provider_loop', '_session_lock', '_tool_result_reuse_allowed', '_trim_to_max_rounds', '_usage_from_dict', 'append_round_items', 'build_context_snapshot', 'build_summary_message', 'cleanup_run_registration', 'commit_terminal_windows', 'copy', 'datetime', 'error_event', 'memory_extraction_mode', 'patch_archive_metadata', 'project_root', 'queue_memory_extraction', 'restore_summary_cache', 'select_context', 'terminal_failure_events', 'time', 'timezone', 'tool_call_signature', 'update_run_state'))
@@ -26,13 +27,15 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
         (base, user, source, session_id, run_id, prompt, content_blocks, identity) = map(request_context.__getattribute__, ('base', 'user', 'source', 'session_id', 'run_id', 'prompt', 'content_blocks', 'identity'))
         uploaded_file_context = ""
     except BaseException as exc:
-        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+        if isinstance(exc, HOST_CONTROL_EXCEPTIONS):
             raise
         yield error_event(exc, phase="request")
         return
 
     with _session_lock(identity.root, identity.user, identity.source, identity.session_id):
         terminal_committer = None
+        task_coordinator = None
+        task_outcome = "interrupted"
         try:
             from run.history import ensure_session_appendable
 
@@ -68,6 +71,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                     is not None
                 )
             except Exception as exc:
+                raise_if_host_exception(exc)
                 round_state.history_run_error = {
                     "message": str(exc),
                     "exception_type": type(exc).__name__,
@@ -169,8 +173,9 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                     }
                 if recovery_map:
                     messages.extend(_retry_recovery_messages(recovery_map))
-            context_stats = context_selection.stats()
+            context_stats = {**context_stats, **context_selection.stats()}
             context_stats["summary"] = summary_diagnostics
+            context_stats["compression_diagnostics"] = summary_diagnostics if summary_diagnostics.get("failed") else None
             context_stats["summary_usage"] = summary_usage
             round_state.context_stats = context_stats
             if compression_notice_active:
@@ -199,6 +204,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                             if queue_compression_memory and not compression_failed
                             else str((compression_memory or {}).get("status") or "")
                         ),
+                        "diagnostics": summary_diagnostics,
                     },
                 )
             for subagent_event in subagent_events:
@@ -333,8 +339,13 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                 )
                 return
 
+            from run.agents import TaskCoordinator
+            task_coordinator = TaskCoordinator(base, user, source, session_id, run_id, request)
             provider_loop_state = ProviderLoopState(values=locals(), dependencies={**runtime_bindings, **locals()})
             for provider_event in _run_provider_loop(provider_loop_state):
+                if provider_event.type in {"done", "error"}:
+                    task_outcome = "cancelled" if cancel_event is not None and cancel_event.is_set() else "failed"
+                    task_coordinator.finish(task_outcome)
                 yield provider_event
             provider_values = provider_loop_state.values
             prompt_bundle = provider_values.get("prompt_bundle", prompt_bundle)
@@ -359,6 +370,8 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                 "tool_argument_retry_count", 0
             )
             final_metadata = provider_values.get("final_metadata", {})
+            if task_coordinator.started:
+                final_metadata["root_task_id"] = task_coordinator.id
             window = provider_values.get("window", window)
             runtime_path = provider_values.get("runtime_path", runtime_path)
             task_plan_boundary = provider_values.get(
@@ -444,6 +457,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                     "provider_request_diagnostics": copy.deepcopy(
                         round_state.provider_request_diagnostics
                     ),
+                    "media_inputs": copy.deepcopy(round_state.media_inputs),
                     **(
                         {
                             "status": "completed",
@@ -510,6 +524,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                             usage_total
                         )
                 except Exception as exc:
+                    raise_if_host_exception(exc)
                     tool_think_compression = {
                         "compressed": False,
                         "round": None,
@@ -616,6 +631,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                         session_id=session_id,
                     )
                 except Exception as exc:
+                    raise_if_host_exception(exc)
                     memory_extraction = {
                         "status": "failed",
                         "candidate_count": 0,
@@ -644,6 +660,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                         run_state="idle",
                     )
                 except Exception as exc:
+                    raise_if_host_exception(exc)
                     history_index_error = history_index_error or {
                         "message": str(exc),
                         "exception_type": type(exc).__name__,
@@ -662,6 +679,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                         run_state="idle",
                     )
                 except Exception as exc:
+                    raise_if_host_exception(exc)
                     history_index_error = history_index_error or {
                         "message": str(exc),
                         "exception_type": type(exc).__name__,
@@ -689,6 +707,7 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                     "run_id": run_id,
                     "guidance_count": len(consumed_guidance),
                     "guidance_details": copy.deepcopy(consumed_guidance_details),
+                    "media_inputs": copy.deepcopy(round_state.media_inputs),
                     "context": context_stats,
                     "tool_think_compression": tool_think_compression,
                     "prompt": prompt_bundle.diagnostics,
@@ -727,10 +746,15 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                     ),
                 }
             )
+            task_coordinator.finish("completed")
+            task_outcome = "completed"
             yield RunEvent(type="done", usage=usage_total, metadata=final_metadata)
-        except (KeyboardInterrupt, GeneratorExit):
+        except HOST_CONTROL_EXCEPTIONS:
             raise
         except BaseException as exc:
+            task_outcome = "cancelled" if cancel_event is not None and cancel_event.is_set() else "failed"
+            if task_coordinator is not None:
+                task_coordinator.finish(task_outcome)
             yield from terminal_failure_events(
                 exc,
                 terminal_committer=terminal_committer,
@@ -742,6 +766,8 @@ def run_conversation(request, *, runtime_bindings, root=None, provider_factory=N
                 error_event=error_event,
             )
         finally:
+            if task_coordinator is not None and task_outcome == "interrupted":
+                task_coordinator.finish("interrupted")
             cleanup_run_registration(
                 terminal_committer=terminal_committer,
                 round_state=round_state,

@@ -8,6 +8,7 @@ from typing import Any
 from events import RunEvent
 from run.context import select_context, build_context_snapshot, build_summary_message, SUMMARY_STORE_REF
 from run.conversation.context_compaction import compact_context
+from run.context import projected_input
 
 
 @dataclass(slots=True)
@@ -41,9 +42,17 @@ def finalize_completed_context(v):
         window=window, policy=policy, system_message=v["system_message"],
         current_user_message=None, tools=v["tool_schemas"],
     )
-    candidate = select_context(**options, summary_message=build_summary_message(cache))
+    checkpoint = stats.get("usage_checkpoint")
+    measured = select_context(**options, summary_message=build_summary_message(cache), allow_compress=False)
+    usage_trigger = bool(checkpoint and projected_input(measured.estimated_tokens_after, checkpoint) >= policy.token_limit)
+    candidate = select_context(
+        **options, summary_message=build_summary_message(cache),
+        force_token_compress=usage_trigger,
+    )
     if candidate.removed_rounds:
-        trigger = "token_limit" if candidate.token_limit_triggered else "round_limit"
+        trigger = "provider_usage_limit" if usage_trigger else (
+            "token_limit" if candidate.token_limit_triggered else "round_limit"
+        )
         metadata = {
             "trigger": trigger, "phase": "round_end", "run_id": v["run_id"],
             "rounds_before": len(candidate.all_rounds),
@@ -71,6 +80,7 @@ def finalize_completed_context(v):
             cancel_event=v["cancel_event"], response_hook=record,
             event_callback=events.append, source=v["source"], session_id=v["session_id"],
             summarize=v["get_or_create_summary"],
+            force_token_compress=usage_trigger,
         )
         yield from events
         stats["end_compression"] = {**result.selection.stats(), "summary": result.diagnostics}
@@ -80,6 +90,7 @@ def finalize_completed_context(v):
             diagnostics = result.diagnostics
             window = v["_trim_to_max_rounds"](window, max(1, len(result.selection.kept_rounds)))
             applied = True
+            checkpoint = None
         yield RunEvent(
             type="context_compression",
             content="本轮结束后的上下文压缩失败，已保留完整历史" if failed else "本轮结束后的上下文压缩完成",
@@ -88,12 +99,18 @@ def finalize_completed_context(v):
                 "rounds_removed": len(result.selection.removed_rounds),
                 "rounds_remaining": len(result.selection.kept_rounds),
                 "target_reached": result.selection.estimated_tokens_after <= policy.input_budget,
+                "diagnostics": result.diagnostics,
             },
         )
         for target in (v["window"], v["archive_window"], window):
             metrics = target["data"].get("round_metrics") or []
             if metrics:
                 metrics[-1]["usage"] = dict(v["usage_total"])
+    for target in (v["window"], v["archive_window"], window):
+        metrics = target["data"].get("round_metrics") or []
+        if metrics:
+            metrics[-1]["context_usage"] = checkpoint
+            metrics[-1]["context_compression"] = stats.get("end_compression")
     # Snapshot the workspace that will actually be committed, with no additional
     # hypothetical removals that have not been covered by a summary.
     snapshot_selection = select_context(

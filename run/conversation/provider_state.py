@@ -41,7 +41,7 @@ def initialize_provider_exchange(values: dict[str, Any]) -> dict[str, Any]:
         "declared_input_token_limit"
     ](reasoning_selection.capabilities)
     reasoning_extra = (
-        {"reasoning_effort": reasoning_selection.effort}
+        {"reasoning_enabled": True, "reasoning_effort": reasoning_selection.effort}
         if reasoning_selection.enabled and reasoning_selection.effort
         else {"reasoning_enabled": False}
     )

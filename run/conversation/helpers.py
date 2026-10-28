@@ -581,7 +581,7 @@ def _committed_failure_event(
         "failure": failure,
         **{
             key: terminal_event.metadata[key]
-            for key in ("retry_progress", "retry_follows", "run_attempt")
+            for key in ("retry_progress", "retry_follows", "run_attempt", "media_inputs")
             if key in terminal_event.metadata
         },
     }

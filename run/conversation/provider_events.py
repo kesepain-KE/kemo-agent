@@ -420,6 +420,20 @@ def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
     return protocol_error(response.error)
 
 
+def is_request_size_exceeded(value: Any) -> bool:
+    """A transport limit, deliberately distinct from a model context limit."""
+    if isinstance(value, BaseException):
+        return getattr(value, "status_code", None) == 413
+    if callable(getattr(value, "model_dump", None)):
+        value = value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, dict):
+        return (
+            value.get("status_code") == 413 or value.get("provider_status") == 413
+            or any(is_request_size_exceeded(value.get(key)) for key in ("error", "details"))
+        )
+    return False
+
+
 def is_context_length_exceeded(value: Any) -> bool:
     if isinstance(value, ContextLengthExceededError):
         return True

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from run.context import select_context
@@ -46,6 +46,9 @@ def compact_context(
         max_history_rounds=max_history_rounds,
     )
     token_triggered = selection.token_limit_triggered
+    round_triggered = selection.round_limit_triggered
+    round_stage = selection.round_stage_applied
+    token_stage = selection.token_stage_applied
     offset = max(0, int(((window.get("data") or {}).get("context") or {}).get("round_offset", 0)))
     for _ in range(len(selection.all_rounds) + 1):
         removed = [group.number for group in selection.removed_rounds]
@@ -55,8 +58,10 @@ def compact_context(
             runtime_path=runtime_path, groups=selection.removed_rounds,
             agent_runner=agent_runner, agent_name="context_manage", trigger=trigger,
             cancel_event=cancel_event,
-            chunk_token_budget=min(SUMMARY_CHUNK_TOKEN_BUDGET, max(256, policy.input_budget // 2)),
-            max_tokens=min(SUMMARY_MAX_OUTPUT_TOKENS, max(256, policy.output_reserve)),
+            # The summary model has its own prompt/capacity. A small main
+            # window must not leave its summarizer less room than its schema.
+            chunk_token_budget=SUMMARY_CHUNK_TOKEN_BUDGET,
+            max_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
             response_hook=response_hook, event_callback=event_callback,
             source=source, session_id=session_id, skip_memory_extraction=True,
             previous_cache=summary_cache, round_offset=offset, persist=False,
@@ -70,12 +75,21 @@ def compact_context(
             break
         next_selection = select_context(
             **options, summary_message=build_summary_message(summary_cache),
-            force_compress=force_compress, force_token_compress=token_triggered,
+            token_phase=token_stage,
             max_history_rounds=len(selection.kept_rounds),
+        )
+        next_selection = replace(
+            next_selection,
+            token_limit_triggered=token_triggered or next_selection.token_limit_triggered,
+            round_limit_triggered=round_triggered or next_selection.round_limit_triggered,
+            round_stage_applied=round_stage or next_selection.round_stage_applied,
+            token_stage_applied=token_stage or next_selection.token_stage_applied,
         )
         if [group.number for group in next_selection.removed_rounds] == removed:
             return CompactionResult(next_selection, summary_cache, diagnostics)
         token_triggered = token_triggered or next_selection.token_limit_triggered
+        round_stage = next_selection.round_stage_applied
+        token_stage = next_selection.token_stage_applied
         selection = next_selection
     else:
         diagnostics = {**diagnostics, "failed": True, "error": "summary_did_not_converge"}

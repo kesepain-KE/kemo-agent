@@ -344,6 +344,7 @@ class TerminalRoundCommitter:
             "tool_argument_retries": context.state.tool_argument_retries,
             "guidance": list(context.state.consumed_guidance),
             "guidance_details": copy.deepcopy(context.state.consumed_guidance_details),
+            "media_inputs": copy.deepcopy(context.state.media_inputs),
             "provider_responses": metric_provider_responses,
             "provider_request_diagnostics": copy.deepcopy(
                 context.state.provider_request_diagnostics
@@ -468,6 +469,9 @@ class TerminalRoundCommitter:
             "committed": True,
             "status": status,
             "stop_reason": reason,
+            "context_usage": context.state.context_stats.get("usage_checkpoint"),
+            "context_compression": context.state.context_stats.get("compression_diagnostics"),
+            "media_inputs": copy.deepcopy(context.state.media_inputs),
         }
         if cancelled:
             terminal_metadata.update(

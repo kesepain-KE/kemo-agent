@@ -42,6 +42,7 @@ class RoundState:
     provider_responses: list[dict[str, Any]] = field(default_factory=list)
     durable_provider_responses: list[dict[str, Any]] = field(default_factory=list)
     provider_request_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    media_inputs: list[dict[str, Any]] = field(default_factory=list)
     tool_argument_retries: int = 0
     usage_total: dict[str, Any] = field(default_factory=new_usage_total)
     context_stats: dict[str, Any] = field(default_factory=dict)

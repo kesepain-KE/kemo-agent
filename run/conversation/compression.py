@@ -10,6 +10,7 @@ from typing import Any
 
 from run.conversation.runtime_state import RoundRuntime
 from run.conversation.context_compaction import compact_context
+from run.context import usage_checkpoint, projected_input
 
 
 @dataclass(slots=True)
@@ -212,6 +213,13 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
     force_compress = bool(request.get("compress", False) or compress_only)
     persisted_summary_cache = read_summary_cache(runtime_path)
     persisted_summary_message = build_summary_message(persisted_summary_cache)
+    checkpoint = usage_checkpoint(archive_window, runtime_provider, persisted_summary_cache)
+    measured = select_context(
+        window=window, policy=context_policy, system_message=system_message,
+        summary_message=persisted_summary_message, current_user_message=current_user_message,
+        tools=tool_schemas, allow_compress=False,
+    )
+    provider_usage_trigger = projected_input(measured.estimated_tokens_after, checkpoint) >= context_policy.token_limit
     context_selection = select_context(
         window=window,
         policy=context_policy,
@@ -220,6 +228,7 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
         current_user_message=current_user_message,
         tools=tool_schemas,
         force_compress=force_compress,
+        force_token_compress=provider_usage_trigger,
     )
     if not compress_only and not context_selection.removed_rounds:
         _ensure_fixed_content_fits(context_selection, system_message=system_message)
@@ -242,6 +251,7 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
     compression_notice_active = bool(context_selection.removed_rounds)
     projected_current_rounds = 0 if compress_only else 1
     compression_trigger = (
+        "provider_usage_limit" if provider_usage_trigger and checkpoint else
         "token_limit"
         if context_selection.token_limit_triggered
         else ("manual" if force_compress else "round_limit")
@@ -294,6 +304,7 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
         tools=tool_schemas, previous_cache=persisted_summary_cache,
         agent_runner=agent_runner, trigger=compression_trigger,
         cancel_event=cancel_event, force_compress=force_compress,
+        force_token_compress=provider_usage_trigger,
         response_hook=lambda raw: _record_provider_request(summary_usage, _usage_from_dict(raw)),
         event_callback=subagent_events.append, source=source, session_id=session_id,
         summarize=get_or_create_summary,
@@ -304,6 +315,10 @@ def prepare_compression(rt: RoundRuntime, *, cancel_event: Any) -> CompressionPr
     if not compress_only:
         _ensure_fixed_content_fits(context_selection, system_message=system_message)
     context_stats = context_selection.stats()
+    context_stats["usage_checkpoint"] = (
+        None if result.selection.removed_rounds and not result.diagnostics.get("failed")
+        else checkpoint
+    )
 
     rt.runtime_path = runtime_path
     rt.window = window

@@ -1,9 +1,35 @@
 """Tool-batch execution for the conversation provider loop."""
 
 from __future__ import annotations
+from run.retry import HOST_CONTROL_EXCEPTIONS
 
 from dataclasses import dataclass, replace
 from typing import Any
+
+
+def raise_retryable_tool_failure(failure: dict[str, Any], provider_error: Any) -> None:
+    """Lift a retryable tool result into the provider loop's existing recovery."""
+    failure_error = failure.get("error")
+    if not isinstance(failure_error, dict):
+        failure_error = {}
+    retry_after_ms: int | None = None
+    try:
+        raw_retry_after = failure_error.get("retry_after_ms")
+        if raw_retry_after is not None:
+            retry_after_ms = max(0, int(raw_retry_after))
+    except (TypeError, ValueError):
+        retry_after_ms = None
+    raise provider_error(
+        "工具调用失败，正在准备自动重试",
+        category="tool_error",
+        status_code=(
+            int(failure_error["status_code"])
+            if str(failure_error.get("status_code") or "").isdigit()
+            else None
+        ),
+        retryable=True,
+        retry_after_ms=retry_after_ms,
+    )
 
 
 def _subagent_callback(request: dict[str, Any], call_id: str):
@@ -179,6 +205,8 @@ def execute_tool_batch(context: ToolBatchContext):
             else:
                 try:
                     definition = registry.get(call.name)
+                    if values.get("task_coordinator") is not None:
+                        values["task_coordinator"].phase("tool_running", call.name)
                     result = execute_tool(
                         definition,
                         call.arguments,
@@ -187,6 +215,10 @@ def execute_tool_batch(context: ToolBatchContext):
                             "user": user,
                             "source": source,
                             "session_id": session_id,
+                            "shell_ownership": (
+                                values["shell_inbox"].ownership()
+                                if values.get("shell_inbox") is not None else None
+                            ),
                             "window": window_path.name,
                             "tool_timeout": tool_timeout,
                             "agent_timeout": agent_timeout,
@@ -200,6 +232,13 @@ def execute_tool_batch(context: ToolBatchContext):
                                 _subagent_callback(request, call.id)
                                 if call.name == "subagent_dispatch" else None
                             ),
+                            "task_ownership": (
+                                values["task_coordinator"].ownership(call.id)
+                                if call.name == "subagent_dispatch"
+                                and call.arguments.get("action") in {"call", "resume"}
+                                and values.get("task_coordinator") is not None
+                                else None
+                            ),
                             "knowledge_scopes": list(
                                 source_policy.direct_knowledge_scopes()
                             ),
@@ -210,10 +249,25 @@ def execute_tool_batch(context: ToolBatchContext):
                         timeout=tool_timeout,
                         cancel_event=cancel_event,
                     )
-                    result_payload = {"ok": True, "result": result}
-                    status = "completed"
+                    if call.name == "attach_media":
+                        result = values["media_inputs"].accept(
+                            definition, call.arguments, result,
+                            call_id=call.id, tool_records=tool_records,
+                        )
+                    succeeded = not (isinstance(result, dict) and result.get("ok") is False)
+                    result_payload = {"ok": succeeded, "result": result}
+                    if not succeeded:
+                        result_payload["error"] = {
+                            "message": str(result.get("error") or result.get("message") or "工具报告执行失败"),
+                            "category": "tool_result_error",
+                        }
+                    if (call.name == "subagent_dispatch"
+                            and isinstance(result, dict) and result.get("status") in {"completed", "timed_out", "tool_limit", "failed", "interrupted"}
+                            and result.get("task_id") and values.get("task_coordinator") is not None):
+                        values["task_coordinator"].acknowledge_sync(result["task_id"])
+                    status = "completed" if succeeded else "failed"
                 except BaseException as exc:
-                    if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                    if isinstance(exc, HOST_CONTROL_EXCEPTIONS):
                         raise
                     cancelled_tool = isinstance(exc, ToolCancelledError)
                     oversized_result = isinstance(

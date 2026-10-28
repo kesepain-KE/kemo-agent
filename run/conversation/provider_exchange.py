@@ -1,5 +1,6 @@
 """Provider streaming, recovery, and tool exchange implementation."""
 from __future__ import annotations
+from run.retry import HOST_CONTROL_EXCEPTIONS, mark_retry_exhausted
 
 from events import RunEvent as _AnnotationRunEvent
 from provider.schema import ToolCall as _AnnotationToolCall
@@ -9,8 +10,11 @@ from provider.schema import Usage
 from run.tasks import TaskPlanCreationBoundary
 from typing import Any
 from run.conversation.provider_state import finalize_provider_loop, initialize_provider_exchange
-from run.conversation.tool_batch import ToolBatchContext, execute_tool_batch
-from run.conversation.request_diagnostics import record_provider_request_diagnostic
+from run.conversation.tool_batch import ToolBatchContext, execute_tool_batch, raise_retryable_tool_failure
+from run.conversation.request_diagnostics import record_provider_request_diagnostic, tool_context_guard, project_context_input, record_context_checkpoint, request_output_limit
+from run.conversation.media_inputs import initialize_media_inputs
+from run.conversation.provider_tasks import prepare_shell_request, settle_children
+from run.conversation.provider_events import is_request_size_exceeded
 def run_provider_exchange(state):
     values = state.values
     dependencies = state.dependencies
@@ -36,6 +40,8 @@ def run_provider_exchange(state):
         "effective_tool_context_limit": effective_tool_context_limit,
     }
     round_state.context_stats = context_stats
+    media_inputs = initialize_media_inputs(values, effective_tool_context_limit)
+    values["media_inputs"] = media_inputs
     stream = initialized["stream"]
     guidance_channel = initialized["guidance_channel"]
     retry_state = initialized["retry_state"]
@@ -54,9 +60,15 @@ def run_provider_exchange(state):
     context_retry_count = 0
     tool_argument_retry_count = 0
     task_plan_boundary: TaskPlanCreationBoundary | None = None
-    last_provider_input_tokens: int | None = None
-    last_sent_local_tokens: int | None = None
+    checkpoint = context_stats.get("usage_checkpoint")
+    last_provider_input_tokens: int | None = checkpoint["input_tokens"] if checkpoint else None
+    last_sent_local_tokens: int | None = checkpoint["local_tokens"] if checkpoint else None
     guidance_messages_for_retry: list[dict[str, Any]] = []
+    task_coordinator = values.get("task_coordinator")
+    from run.tools import ShellInbox
+    shell_inbox = ShellInbox(base, user, source, session_id,
+                             root_task_id=task_coordinator.id if task_coordinator else run_id)
+    values["shell_inbox"] = shell_inbox
 
     def prepare_pending_guidance(values: list[Any]) -> list[dict[str, Any]]:
         """Prepare new text/media guidance and register its run assets."""
@@ -84,6 +96,7 @@ def run_provider_exchange(state):
                 uploaded_descriptors.append(descriptor)
                 known_ids.add(asset_id)
         guidance_messages_for_retry.extend(copy.deepcopy(prepared.messages))
+        media_inputs.visible_asset_ids.update(prepared.direct_asset_ids)
         pending_guidance_ack.extend(prepared.inputs)
         _remember_retry_guidance(retry_state, prepared.inputs)
         return prepared.messages
@@ -153,6 +166,10 @@ def run_provider_exchange(state):
         if recovery.memory is not None:
             compression_memory = recovery.memory
         if recovery.result is None:
+            for event in recovery.events or []:
+                if event.metadata.get("status") == "failed":
+                    context_stats["compression_diagnostics"] = event.metadata.get("diagnostics")
+                    round_state.context_stats = context_stats
             return False, recovery.events or []
         context_retry_count += 1
         context_selection = recovery.result.selection
@@ -167,6 +184,7 @@ def run_provider_exchange(state):
             "configured_token_limit": context_policy.token_limit,
             "provider_declared_input_limit": declared_provider_input_limit,
             "effective_tool_context_limit": effective_tool_context_limit,
+            "usage_checkpoint": None,
         }
         update_terminal_context()
         return True, recovery.events or []
@@ -184,97 +202,77 @@ def run_provider_exchange(state):
         if cancel_event is not None and cancel_event.is_set():
             yield commit_cancelled_round()
             return
+        if not (yield from prepare_shell_request(
+            shell_inbox, last_iteration=iteration == max_provider_iterations, messages=messages,
+            cancel_event=cancel_event, commit_cancelled_round=commit_cancelled_round,
+        )):
+            return
+        if task_coordinator is not None:
+            notification = task_coordinator.notifications()
+            if notification:
+                messages.append(notification)
+            task_coordinator.phase("model_request")
         refresh_dynamic_system_message()
-        if iteration > 1:
-            active_tool_schemas = (
-                registry.schemas(exclude=failures.unavailable) or None
+        media_inputs.refresh_messages(messages)
+        if media_inputs.audit:
+            yield RunEvent(type="media_input_update", metadata={"media_inputs": copy.deepcopy(media_inputs.audit)})
+        media_inputs.validate_request(messages)
+        # Guard the first request too, including restored usage calibration.
+        active_tool_schemas = (
+            registry.schemas(exclude=failures.unavailable) or None
+        )
+        current_local_tokens = estimate_messages_tokens(
+            messages
+        ) + estimate_tools_tokens(
+            active_tool_schemas
+        )
+        incremental_tokens, projected_tokens, measurement = project_context_input(
+            current_local_tokens, last_provider_input_tokens, last_sent_local_tokens,
+        )
+        if projected_tokens >= effective_tool_context_limit:
+            recovered_context, retry_events = prepare_context_retry(
+                iteration=iteration,
+                preserve_live_tail=True,
+                trigger="tool_context_limit",
             )
-            current_local_tokens = estimate_messages_tokens(
-                messages
-            ) + estimate_tools_tokens(
-                active_tool_schemas
-            )
-            if (
-                last_provider_input_tokens is not None
-                and last_sent_local_tokens is not None
-            ):
-                incremental_tokens = (
-                    current_local_tokens - last_sent_local_tokens
+            for retry_event in retry_events:
+                yield retry_event
+            if recovered_context:
+                active_tool_schemas = (
+                    registry.schemas(exclude=failures.unavailable) or None
                 )
-                projected_tokens = max(
-                    0,
-                    last_provider_input_tokens + incremental_tokens,
-                )
-                measurement = "provider_plus_increment"
-            else:
+                current_local_tokens = estimate_messages_tokens(
+                    messages
+                ) + estimate_tools_tokens(active_tool_schemas)
                 incremental_tokens = None
                 projected_tokens = current_local_tokens
-                measurement = "local_estimate"
+                measurement = "local_estimate_after_compression"
+                last_provider_input_tokens = None
+                last_sent_local_tokens = None
             if projected_tokens > effective_tool_context_limit:
-                recovered_context, retry_events = prepare_context_retry(
-                    iteration=iteration,
-                    preserve_live_tail=True,
-                    trigger="tool_context_limit",
+                terminal_event = commit_terminal_round(
+                    status="limited",
+                    reason="tool_context_limit",
+                    marker=(
+                        "[本轮工具循环已达到上下文保护上限；"
+                        "为避免拆散工具消息组，本轮已停止]"
+                    ),
+                    pending_message=(
+                        "工具调用因本轮达到上下文保护上限而未执行"
+                    ),
+                    pending_exception_type="ToolContextLimitExceeded",
                 )
-                for retry_event in retry_events:
-                    yield retry_event
-                if recovered_context:
-                    active_tool_schemas = (
-                        registry.schemas(exclude=failures.unavailable) or None
-                    )
-                    current_local_tokens = estimate_messages_tokens(
-                        messages
-                    ) + estimate_tools_tokens(active_tool_schemas)
-                    incremental_tokens = None
-                    projected_tokens = current_local_tokens
-                    measurement = "local_estimate_after_compression"
-                    last_provider_input_tokens = None
-                    last_sent_local_tokens = None
-                if projected_tokens > effective_tool_context_limit:
-                    terminal_event = commit_terminal_round(
-                        status="limited",
-                        reason="tool_context_limit",
-                        marker=(
-                            "[本轮工具循环已达到上下文保护上限；"
-                            "为避免拆散工具消息组，本轮已停止]"
-                        ),
-                        pending_message=(
-                            "工具调用因本轮达到上下文保护上限而未执行"
-                        ),
-                        pending_exception_type="ToolContextLimitExceeded",
-                    )
-                    terminal_event.metadata["context_guard"] = {
-                        "measurement": measurement,
-                        "provider_input_tokens": last_provider_input_tokens,
-                        "previous_local_tokens": last_sent_local_tokens,
-                        "current_local_tokens": current_local_tokens,
-                        "incremental_tokens": incremental_tokens,
-                        "projected_tokens": projected_tokens,
-                        "token_limit": effective_tool_context_limit,
-                        "configured_token_limit": context_policy.token_limit,
-                        "provider_declared_input_limit": (
-                            declared_provider_input_limit
-                        ),
-                        "effective_token_limit": effective_tool_context_limit,
-                        "iteration": iteration,
-                        "latest_tools": _tool_context_diagnostics(
-                            tool_records,
-                            iteration=iteration - 1,
-                        ),
-                    }
-                    yield terminal_event
-                    return
-        else:
-            active_tool_schemas = tool_schemas
-        configured_max_tokens = runtime_provider.get("max_tokens")
-        request_max_tokens = (
-            min(
-                context_policy.output_reserve,
-                max(1, int(configured_max_tokens)),
-            )
-            if configured_max_tokens is not None
-            else None
-        )
+                terminal_event.metadata["context_guard"] = tool_context_guard(
+                    measurement=measurement, provider_input_tokens=last_provider_input_tokens,
+                    previous_local_tokens=last_sent_local_tokens, current_local_tokens=current_local_tokens,
+                    incremental_tokens=incremental_tokens, projected_tokens=projected_tokens,
+                    token_limit=effective_tool_context_limit, configured_token_limit=context_policy.token_limit,
+                    provider_declared_input_limit=declared_provider_input_limit, iteration=iteration,
+                    latest_tools=_tool_context_diagnostics(tool_records, iteration=iteration - 1),
+                )
+                yield terminal_event
+                return
+        request_max_tokens = request_output_limit(runtime_provider, context_policy)
         provider_attempt = 0
         invalid_tool_arguments_retries = 0
         repair_tool_name = ""
@@ -319,7 +317,9 @@ def run_provider_exchange(state):
                 max_tokens=request_max_tokens,
                 extra=dict(reasoning_extra),
             )
-            protocol_request = chat_request_to_kemo(chat_request).model_copy(
+            protocol_request = chat_request_to_kemo(
+                chat_request, transport=str(runtime_provider.get("type") or ""),
+            ).model_copy(
                 update={
                     "request_id": f"req_{uuid.uuid4().hex}",
                     "parent_request_id": protocol_parent_request_id,
@@ -443,6 +443,8 @@ def run_provider_exchange(state):
                             yield event
                         elif event.type == "error":
                             _raise_if_context_length_exceeded(event.error)
+                            if is_request_size_exceeded(event.error):
+                                raise ProviderError("API 请求体超过传输大小上限", status_code=413)
                             can_retry_invalid_arguments = (
                                 _is_invalid_tool_arguments_error(event.error)
                                 and invalid_tool_arguments_retries
@@ -507,28 +509,31 @@ def run_provider_exchange(state):
                 )
                 return
             except BaseException as exc:
-                if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                if isinstance(exc, HOST_CONTROL_EXCEPTIONS):
                     raise
                 if cancel_event is not None and cancel_event.is_set():
                     flush_iteration_observed()
                     yield commit_cancelled_round()
                     return
                 context_length_error = _is_context_length_exceeded(exc)
-                if context_length_error:
+                request_size_error = is_request_size_exceeded(exc)
+                recoverable_size = context_length_error or request_size_error
+                if recoverable_size:
                     # A Provider context rejection is still a real Provider
                     # request even when the gateway returned no usage object.
                     # Count it explicitly so request totals and cache
                     # diagnostics do not silently under-report retries.
                     record_attempt_usage()
-                if not context_length_error or context_retry_count >= 2:
+                if not recoverable_size or context_retry_count >= 2:
                     flush_iteration_observed()
                     record_attempt_usage()
+                    if recoverable_size:
+                        mark_retry_exhausted(exc, attempts=context_retry_count + 1, max_attempts=3)
                     terminal_event = commit_failed_round(
                         exc,
                         reason=(
-                            "provider_context_limit"
-                            if context_length_error
-                            else "provider_exception"
+                            "provider_context_limit" if context_length_error
+                            else "provider_request_size" if request_size_error else "provider_exception"
                         ),
                     )
                     yield _committed_failure_event(
@@ -539,14 +544,23 @@ def run_provider_exchange(state):
                 recovered_context, retry_events = prepare_context_retry(
                     iteration=iteration,
                     preserve_live_tail=iteration > 1,
-                    trigger="api_context_length",
+                    trigger="api_context_length" if context_length_error else "api_request_size",
                 )
                 for retry_event in retry_events:
                     yield retry_event
                 if not recovered_context:
-                    raise ContextLengthExceededError(
+                    if request_size_error:
+                        mark_retry_exhausted(exc, attempts=context_retry_count + 1, max_attempts=3)
+                        yield _committed_failure_event(
+                            error_event(exc, phase="provider"),
+                            commit_failed_round(exc, reason="provider_request_size"),
+                        )
+                        return
+                    exhausted = ContextLengthExceededError(
                         "Provider 上下文超限，但没有可继续裁剪的历史轮次"
-                    ) from exc
+                    )
+                    mark_retry_exhausted(exhausted, attempts=context_retry_count + 1, max_attempts=3)
+                    raise exhausted from exc
                 last_provider_input_tokens = None
                 last_sent_local_tokens = None
 
@@ -627,6 +641,9 @@ def run_provider_exchange(state):
             )
             return
         round_state.retry_progress_observed = True
+        media_inputs.acknowledge()
+        if media_inputs.audit:
+            yield RunEvent(type="media_input_update", metadata={"media_inputs": copy.deepcopy(media_inputs.audit)})
         if iteration_usage is None:
             iteration_usage = _usage_from_dict(iteration_done.usage)
         if retry_preview_text:
@@ -661,17 +678,17 @@ def run_provider_exchange(state):
                 yield commit_cancelled_round()
                 return
             yield usage_event
-        if (
-            iteration_usage is not None
-            and not iteration_usage.estimated
-            and iteration_usage.prompt_tokens > 0
-        ):
-            last_provider_input_tokens = iteration_usage.prompt_tokens
-            last_sent_local_tokens = request_local_tokens
+        last_provider_input_tokens, last_sent_local_tokens = record_context_checkpoint(
+            context_stats, iteration_usage, request_local_tokens, runtime_provider, summary_cache,
+            previous=(last_provider_input_tokens, last_sent_local_tokens),
+        )
         all_text.extend(iteration_text)
         all_reasoning.extend(iteration_reasoning)
         flush_iteration_observed()
         record_attempt_usage()
+        if task_coordinator is not None:
+            task_coordinator.acknowledge()
+        shell_inbox.acknowledge()
         final_metadata = dict(iteration_done.metadata)
         provider_response = _event_provider_response(iteration_done)
         if isinstance(provider_response, dict):
@@ -690,6 +707,26 @@ def run_provider_exchange(state):
         protocol_parent_request_id = protocol_request.request_id
 
         if not calls:
+            if task_coordinator is not None:
+                task_action = yield from settle_children(
+                    task_coordinator, messages=messages, iteration_text=iteration_text,
+                    all_text=all_text, observed_text=observed_text, cancel_event=cancel_event,
+                    guidance_channel=guidance_channel, drain_guidance=_drain_guidance,
+                    prepare_guidance=prepare_pending_guidance, commit_cancelled_round=commit_cancelled_round,
+                )
+                if task_action == "cancelled":
+                    return
+                if task_action == "continue":
+                    continue
+            from run.conversation.provider_tasks import settle_shell
+            shell_action = yield from settle_shell(
+                shell_inbox, messages=messages, iteration_text=iteration_text,
+                cancel_event=cancel_event, commit_cancelled_round=commit_cancelled_round,
+            )
+            if shell_action == "cancelled":
+                return
+            if shell_action == "continue":
+                continue
             pending_guidance = (
                 _drain_or_close_guidance(guidance_channel)
                 if iteration < max_provider_iterations
@@ -734,27 +771,7 @@ def run_provider_exchange(state):
         pending_guidance = _drain_guidance(guidance_channel)
         messages.extend(prepare_pending_guidance(pending_guidance))
         if retryable_tool_failure is not None:
-            failure_error = retryable_tool_failure.get("error")
-            if not isinstance(failure_error, dict):
-                failure_error = {}
-            retry_after_ms: int | None = None
-            try:
-                raw_retry_after = failure_error.get("retry_after_ms")
-                if raw_retry_after is not None:
-                    retry_after_ms = max(0, int(raw_retry_after))
-            except (TypeError, ValueError):
-                retry_after_ms = None
-            raise ProviderError(
-                "工具调用失败，正在准备自动重试",
-                category="tool_error",
-                status_code=(
-                    int(failure_error["status_code"])
-                    if str(failure_error.get("status_code") or "").isdigit()
-                    else None
-                ),
-                retryable=True,
-                retry_after_ms=retry_after_ms,
-            )
+            raise_retryable_tool_failure(retryable_tool_failure, ProviderError)
 
     if not completed:
         yield commit_terminal_round(
@@ -769,6 +786,8 @@ def run_provider_exchange(state):
         yield commit_cancelled_round()
         return
 
+    if task_coordinator is not None:
+        task_coordinator.finish("completed")
 
     finalize_provider_loop(state, {**globals(), **locals()})
 
