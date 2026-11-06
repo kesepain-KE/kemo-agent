@@ -4,7 +4,7 @@
 
 ## kemo app 桥接状态拓展
 
-`global_expand/kemo_app/` 使用 `_activated.json` 记录明确的启用意愿。配置已经就绪但该文件不存在时，属于用户主动停用：拓展保持 `open_input=false`、健康状态正常，不检查进程也不自动拉起服务。
+`expand/global/kemo_app/` 使用 `_activated.json` 记录明确的启用意愿。配置已经就绪但该文件不存在时，属于用户主动停用：拓展保持 `open_input=false`、健康状态正常，不检查进程也不自动拉起服务。
 
 若 `_activated.json` 路径存在但不可读取、不是合法 JSON 或顶层不是对象，则不能把它等同于主动停用。刷新任务会写入“激活记录异常”诊断，把清单健康标为异常，并在激活意愿恢复可信之前跳过进程状态检查和自动恢复，避免误启动或错误接管桥接进程。
 
@@ -23,9 +23,9 @@ App 用户到智能体用户的绑定。其他桥接配置只读，不通过组�
 
 ## Kemo 网关运行状态拓展
 
-当前稳定代码版本 `kemo-agent 1.5.2` 配套 `kemo-adapter-api 1.0.0`，Kemo 2.0 Provider 线路协议匹配已确认。状态拓展继续只依赖网关独立的只读 `GET /status` 合同；版本匹配不扩大其管理权限。
+当前代码版本 `kemo-agent 2.0.0` 配套 `kemo-adapter-api 1.0.0`，Kemo 2.0 Provider 线路协议匹配已确认。状态拓展继续只依赖网关独立的只读 `GET /status` 合同；版本匹配不扩大其管理权限。
 
-`global_expand/kemo_gateway_status/` 是框架内置、默认未激活的全局拓展。它面向“一个 kemo-agent 连接一个 Kemo 网关”的常见部署方式，通过网关公开的只读状态接口采集运行信息，并生成适合主智能体使用的摘要、脱敏快照和 PNG 图表。
+`expand/global/kemo_gateway_status/` 是框架内置、默认未激活的全局拓展。它面向“一个 kemo-agent 连接一个 Kemo 网关”的常见部署方式，通过网关公开的只读状态接口采集运行信息，并生成适合主智能体使用的摘要、脱敏快照和 PNG 图表。
 
 ### 权限与接口边界
 
@@ -141,9 +141,9 @@ Web“用户配置”页允许管理员修改知识图谱协议、IP/主机、�
 
 框架内置两项互补资源：
 
-- `global_expand/kemo_graph/`：注册外部文档库，执行状态、扫描、同步、构建和查询。
-- `plugins/kemo_graph/`：只读取本地注册表并生成规范 `expand_call` 参数；自身不联网、
-  不扫盘、不构建图谱。
+- `expand/global/kemo_graph/`：注册外部文档库，执行状态、扫描、同步、构建和查询。
+- `plugins/kemo_graph_read/` 与 `plugins/kemo_graph_write/`：分别按读写权限生成规范
+  `expand_call` 参数；插件自身不联网、不扫盘、不构建图谱。
 
 所有真实操作统一进入：
 
@@ -164,11 +164,12 @@ Kemo Graph 外挂必须满足以下不变量：
 6. 不注册 Cron、RuntimeHost 专用线程或其他自动同步/自动 ingest 链路。
 7. 服务不可达、Store 构建中或查询失败时，只影响本次外挂操作，不影响正常对话。
 
-框架级 `global_config.json` 和用户 `user_config.json` 不再包含 `kemo_graph` 开关。访问控制
+框架级 `global_config.yaml` 和用户 `user_config.yaml` 不再包含 `kemo_graph` 开关。访问控制
 完全复用普通模块权限：
 
 - `expand.global_whitelist` 控制 `global:kemo_graph` 目录摘要和操控入口；
-- `plugins.whitelist` 控制 `kemo_graph` 引导插件与 `expand_call` 执行工具。
+- `plugins.whitelist` 控制图谱读写引导插件与 `expand_call` 执行工具；`plugins.permissions`
+  可单独关闭写入类工具。
 
 空白名单仍表示全部允许；非空白名单必须显式包含对应资源名。
 
@@ -177,7 +178,7 @@ Kemo Graph 外挂必须满足以下不变量：
 管理员配置位于：
 
 ```text
-global_expand/kemo_graph/graph_config.json
+expand/global/kemo_graph/graph_config.json
 ```
 
 示例：
@@ -239,7 +240,7 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 
 全局 Expand 白名单是第一层授权，Library ACL 是第二层授权。`owner_id` 只是 Store
 元数据，不等于 kemo-agent 权限。全局 `input_data.md` 仅展示公共库；私有 Library ID
-和绝对路径只能通过带调用用户上下文的 `kemo_graph libraries` 获取。
+和绝对路径只能通过带调用用户上下文的 `kemo_graph_read libraries` 获取。
 
 注册或替换配置时，`store_root` 与 `source_roots` 必须分离，不能相同或互相嵌套；路径
 本身及父路径不能包含符号链接或目录联接。这样可以避免扫描派生数据库、路径逃逸和 Store
@@ -323,6 +324,8 @@ Store 物理位置由 kemo-graph 自身配置管理。一个注册表最多声�
 
 游标位于 `data/library_sync_state.json`，只保存文件指纹、kemo-graph `source_id`、派生相对
 路径、Store ID 和注册配置签名，不复制文档正文。
+仅文件不存在时创建空游标；读取失败、损坏 JSON、未知版本或无效 `libraries` 均停止
+扫描和同步并保留原文件，不调用远端 Store，不以空游标覆盖已有记录。
 
 同步语义：
 

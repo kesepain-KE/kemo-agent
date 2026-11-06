@@ -18,6 +18,10 @@ list.default_wait 披露缺省策略；后台提交仍受必要依赖完成屏�
 Provider 返回工具调用是否完整、Chat/Kemo 两条协议怎样判断可执行终态，另见
 `provider-reliability.md`。本文从插件注册和运行时执行角度补充该文档。
 
+工具异常返回模型前统一经过 `diagnostic_text()` 脱敏，包含 `api key: value`、`api_key=value`、
+Bearer 和 URL 口令；`path` / `url` 诊断字段先移除 query，再脱敏及截断。异常类型、错误码和
+重试分类保持不变，结果过大错误仍保留“执行已完成”的事实，不能据此盲目重放副作用。
+
 ## 位置与发现
 
 可执行工具只从仓库根目录的直接子目录发现：
@@ -98,7 +102,7 @@ Schema 负责机器可验证的输入边界，说明文本负责使用顺序、�
 | `timeout_grace_seconds` | 否 | 显式 `timeout` 的外层看门狗清理宽限，默认 0、范围 0～30 秒；只用于整理正常结果，不得增加业务等待时长 |
 | `execution_mode` | 否 | `process`（默认）在独立子进程执行并可在超时后终止；只有必须访问进程内对象的插件才声明 `thread` |
 
-`process` 模式只向子进程传递可序列化的运行上下文，并重新加载清单声明的入口；超时或用户取消会终止整个隔离进程树。插件若依赖 Transport 注册表、进程内连接池或其他不可序列化对象，必须显式声明 `thread`，并实现对 `context.cancel_event` 的协作取消。不要仅为减少启动开销改成 `thread`：线程无法被 Python 安全强杀，超时后只能由看门狗限制残留数量和同调用重入。
+`process` 模式只向子进程传递可序列化的运行上下文，并重新加载清单声明的入口；超时或用户取消会终止整个隔离进程树。普通插件若依赖进程内连接池等不可序列化对象，可显式声明 `thread` 并实现协作取消。`file` 写操作、`shell` 和 `external_message` 的清单入口强制进程隔离，不接受清单线程降级；框架直接注入的内存 callable 仍保留现有执行边界。外部消息由主宿主验证存活注册、用户归属及能力，再将目录 Transport 的发送出口快照交给子进程；只加载 output，不启动 input/轮询/WebSocket，不传整个注册表。没有可隔离出口的自定义内存 Transport 明确拒绝，不能偷偷线程发送。
 
 ### strict 的边界
 
@@ -114,7 +118,7 @@ Schema 负责机器可验证的输入边界，说明文本负责使用顺序、�
 默认策略是 `argument_or_default`：
 
 - 工具 Schema 明确声明 `timeout`，且调用参数提供该字段时，使用调用值；
-- 否则使用 `config/global_config.json → tools.timeout`，当前默认 240 秒。
+- 否则使用 `config/global_config.yaml → tools.timeout`，当前默认 240 秒。
 
 `agent_runtime` 只用于 `subagent_dispatch` 这类自身管理子代理整体期限的调度工具。它使用
 子代理整体期限并增加外层看门狗宽限，避免普通工具超时先于子代理运行时。普通插件不得借该
@@ -229,14 +233,10 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
   → Provider 继续推理或给出最终回答
 ```
 
-`tools.max_iterations` 当前统计一轮主对话实际执行的工具调用数量，而不是简单统计 Provider
-请求次数。默认值为 80。为了允许执行 N 次工具后再生成最终回答，运行时内部 Provider 循环
-上限设为 N+1；该内部上限不改变配置字段的工具调用语义。
-
-一个 Provider 响应可以包含多个工具调用，每个调用分别占用一次额度。达到上限后，尚未执行的
-调用标记为未执行，本轮以 `limited / max_tool_iterations` 结束。
-
-子代理未显式指定时取全局 `tools.max_iterations` 与代理默认额度的较小值。
+主对话从用户输入到最终正文默认持续执行；没有工具调用总数、Provider 请求轮数限制或长任务开关。
+同一响应中的并行调用仍逐个统计，但不会因总次数产生未执行调用或切换 Run。
+单工具超时、连续相同调用、失败防护、取消及上下文容量检查继续生效。
+子代理保留各自独立的工具与时间预算。
 公开本地 LLM 非串行业务子代理可由主智能体通过 call/resume 的 `max_tool_calls`
 覆盖本段额度，0 为不限次数；仍受独立 timeout、重复调用、连续失败、取消和 API 池保护。
 超额返回 tool_limit / tool_budget_exhausted，保留安全点、结论和用量，显式续跑不重放副作用；
@@ -247,18 +247,30 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
 
 ### 连续相同调用
 
-`tools.consecutive_identical_call_limit` 默认 8。签名由完整工具名和规范化后的完整参数组成。
-只有连续、完全相同的调用才累计；工具名或任一参数改变后计数重置。
+`tools.consecutive_identical_call_limit` 默认 3。签名由完整工具名和规范化后的完整参数组成。
+只有连续、完全相同的**真实执行**才累计；另一个签名实际执行后重置。
+副作用重复拦截、连续调用闸门拒绝及不可用拒绝均不累计执行次数。
+默认真实执行三次后拒绝第四次；文件写入等的第二次重复已先由 block 拒绝。
 
-同一逻辑 Run 内，成功且符合 `run/retry/recovery.py::reuse_allowed` 策略的相同签名可以重放，
-返回 `duplicate_reused`，不重新执行。该策略会排除 file 的动态读取、expand_call 的
-status/query 等动态命令，以及 subagent_dispatch list/status、shell status、
-network get/read，避免返回陈旧观测。成功的消息发送、Shell 启动、子任务派发/续跑、
-写操作和未知插件仍默认可复用；不能误写成“只有无副作用结果才复用”，
-因为禁止复用实际意味着重新执行，并非阻止副作用。
-成功回执不证明本次重新执行；也不能为了强制重跑副作用随意改变参数绕过签名。
-连续相同调用闸门可能先于复用分支阻止调用，不能假设相同签名永远返回旧结果。
-两者的有效范围与错误序列恢复分别见 `run/conversation/tool_batch.py` 和 `run/retry/recovery.py`。
+主循环和子代理共用 `run/retry/tool_dedup.py::AttemptToolDedup` 保护相同参数的副作用，
+但绝不缓存或回填之前的工具结果。查询类工具和拓展命令每次都真实执行，以便取得最新状态；
+包括查询失败后的 Provider 恢复也会重新查询。相同签名的已知副作用成功后，或失败后遇到
+Provider 恢复时，再次请求会返回 `ok=false`、`error.code=duplicate_blocked`，
+并明确说明本次未执行、未返回旧结果。同一推理轮次收到明确失败时允许模型根据失败回执重试。
+未知工具默认按副作用保护，除非被明确分类为查询。
+该规则适用于同一轮和 Provider 故障恢复后的重试。
+
+查询动作包括 web_search、history_search、get_current_time、expand_call、
+file 动态读取、network get/read、shell status、subagent_dispatch list/status，
+以及 memory_manage、task_time、task_plan、模块管理工具中明确声明的读取动作。
+副作用动作包括 file 写入、Shell run/cancel、external_message、network 写请求，
+任务/记忆/计划变更和多媒体生成等。维护动作分类表时，应将新增内置工具的每个 action
+明确归入查询或副作用；不得通过相同参数命中旧回执来代替查询。
+
+`expand.json` 不接受 `reuse_policy`；拓展读取与写入均以当前调用为准。
+重复拦截和真实执行分别记录，不把副作用拦截记为一次执行。连续相同真实调用仍受
+`tools.consecutive_identical_call_limit` 保护（默认 3），副作用则在第二次同签名请求时拦截。
+跨 Provider 尝试恢复只保留副作用签名保护与实际执行历史；提供给模型的恢复回执不含旧工具结果。
 
 ### 连续工具失败
 
@@ -276,6 +288,10 @@ network get/read，避免返回陈旧观测。成功的消息发送、Shell 启�
 - 工具达到期限时设置取消信号，等待短清理宽限后返回 `ToolTimeoutError`；
 - Python 线程不能安全强杀，插件应主动检查 `context["cancel_event"]`，尤其是循环、网络等待和
   大批文件处理。
+
+未退出的线程保留 watchdog 登记、真实 Future 和会话执行保护，异常携带 `still_running=true`，运行诊断记为 running，工具回执显示 timed_out_running。网页流式与历史使用独立 still_running 状态，标为“超时后未确认退出”，展示原回执和已知耗时；不持续转圈或递增耗时，不因主响应结束改成失败。主响应结束不代表执行已退出，不能自动重试副作用。真实退出回调才释放登记。
+
+残留配额按安装根/用户/工具分桶，上限8；同来源/会话的残留仍拒绝重入。任一残留废弃满5分钟，或本桶达到8个残留时，新的独立调用从清单入口降级为可终止的进程执行；原线程登记继续保留，不按时间假回收或重跑原调用。另一角色或工具不受该桶耗尽影响。直接注入的内存 callable 不能无损重载，需明确报告容量保护，不能伪装已隔离。降级启动不额外扩大工具权限。
 
 插件不得用吞掉取消异常、无限重试或启动无人管理的后台线程来绕过工具生命周期。如果任务天然
 需要后台状态，应明确设计任务 ID、status/cancel 操作和持久化边界。
@@ -301,14 +317,24 @@ expand 不另设 256k 事后失败阈值，使用同一回传边界。
 
 ### 失败与模型纠错状态
 
-结果级 `ok=false` 和异常都按相应分类处理；失败不存成功缓存，已有签名缓存会被清除。
+主循环与子代理循环统一采用显式成功合同：返回对象只有 `ok` **为布尔值 `true`**
+才算业务成功；`ok=false`、缺失 `ok`、`ok=1` 或非对象返回都不能推断为成功。
+内置插件在已确认的业务出口提供 `ok`；自定义插件升级时也须显式返回该字段，
+框架不会把未知旧结果自动补成成功。缺字段会记录 `tool_result_missing_ok`
+诊断（含工具名，不复制原结果）；超长回执落文件同样不能把缺合同结果提升为成功。
+
+结果级失败和异常都按相应分类处理；查询失败不会阻止后续同参查询，副作用恢复只保留拦截签名而不保留旧结果。
+子代理 `timed_out` / `tool_limit` 的结论是部分成果，回传 `ok=false`，
+不能以同步成功回执提前确认；仍由既有失败结果通知及 Provider 接受后的确认链收齐。
+插件报告 `duplicate` / `cached` 时，外层 `execution.note` 同时向模型解释这些标记，
+不凭插件标记断言副作用已重新执行。
 `limited` 表示本轮额度不足，`temporarily_unavailable` 表示连续失败达到系统阈值，
 `identical_call_blocked` 表示连续相同签名超限；它们不能统一解释成成功。
-`duplicate_reused` 是既有成功结果复用；`retry_reuse_blocked` 是恢复阶段保留的拒绝回执，
-两者都不证明本次执行。查看外层 ok、error 和具体 status，再决定调整方案或对账。
+`duplicate_blocked` 是同签名副作用被拒绝，回执不包含此前工具结果，也不证明本次执行。
+查看外层 ok、error 和具体 status，再决定调整方案或对账。
 
 `tools.invalid_tool_arguments_retries` 仓库配置为 2，由模型纠正不合法调用参数；
-这不是无条件重跑已失败的副作用工具。来源为 `config/global_config.json` 和模型循环的参数恢复管线。
+这不是无条件重跑已失败的副作用工具。来源为 `config/global_config.yaml` 和模型循环的参数恢复管线。
 手册内的“两次分析/三次停止”是行为纪律，系统 `history.consecutive_tool_fail_limit` 是独立的配置闸门。
 
 ## 工具上下文
@@ -379,6 +405,12 @@ expand 不另设 256k 事后失败阈值，使用同一回传边界。
 符号链接及目录联接（包括父目录）；重发前再次验证存在性与内容校验和。
 外部消息资产仍保留来源模块与绑定用户验证，不因换成路径就降低来源校验。
 
+专用 `multimodal.paths` 复用同一个 `resolve_media_attachment` 授权入口，在创建专用
+Provider、查询能力或上传前完成路径及内容检查；不以 `instruction` 内模型自行拼入的路径
+代替用户授权。宿主仅给该工具传入当前 Run 的用户原文和此前工具记录快照，失败结果及参数
+不算成功观测；子代理仅收到其自身显式输入的 JSON 原文和自身此前结果。已有
+`asset_ids` 仍走各自来源解析，不改变原生 `attach_media` 队列、权限或生命周期。
+
 队列不继承到下一用户轮次或其他会话；子代理拥有自己的队列，仅接收其显式输入及本轮
 取得的文件，不继承主会话媒体。子代理必须在自身 `agent-config.json` 插件白名单授权
 `attach_media`；没有因此扩大任何内置子代理的默认权限。模型 override 按实际运行模型
@@ -428,7 +460,9 @@ Kemo 使用现有 Asset 上传／就绪接口，并发送图片、音频、视�
 模型、用户、资产与校验和；未过期成功上传不重复执行，过期后换幂等键重新上传。
 已经由用户附件原生传入的资产不再上传或追加一次。
 
-媒体在本 Run 后续请求中继续可用，Run 结束即释放队列；不将 Base64 或完整媒体输入
+媒体只进入登记后的下一次成功 Provider 请求；同一逻辑请求的传输重试可复用原请求快照，
+但成功响应后不再自动把实际媒体投影到后续请求。模型之后明确再次调用 `attach_media`
+可重新装载。Run 结束即释放队列；不将 Base64 或完整媒体输入
 消息写入长期历史。持久历史中的工具回执只是元数据，下一用户轮次需要再看时必须重新
 登记。请求预算使用现有上下文保护及每个媒体块至少 1024 Token 的本地估算，**不是厂商
 精确计费或可解码保证**；超预算先按既有规则压缩历史，仍放不下则明确受限停止。暂时网络

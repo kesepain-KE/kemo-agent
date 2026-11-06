@@ -23,7 +23,7 @@
 | 子代理 | `tests/template_tests/agent/STANDARD.md` | `python -m tests.template_tests.agent --target users/<user>/agents/<name>` |
 | 拓展 | `tests/template_tests/expand/STANDARD.md` | `python -m tests.template_tests.expand --target users/<user>/expand/<name>` |
 | 外部消息路由 | `tests/template_tests/message/STANDARD.md` | `python -m tests.template_tests.message --target message/out/<platform>` |
-| 感知 | `tests/template_tests/sense/STANDARD.md` | `python -m tests.template_tests.sense --target global_sense/<name>` |
+| 感知 | `tests/template_tests/sense/STANDARD.md` | `python -m tests.template_tests.sense --target sense/<name>` |
 | 技能 | `tests/template_tests/skills/STANDARD.md` | `python -m tests.template_tests.skills --target users/<user>/user_skills/<scope>` |
 | 用户包 | `tests/template_tests/user/STANDARD.md` | `python -m tests.template_tests.user --target users/<name>` |
 

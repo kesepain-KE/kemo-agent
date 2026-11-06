@@ -32,7 +32,9 @@
     "receive_file",
     "send_file"
   ],
-  "allowed_tools": null,
+  "allowed_tools": ["history_search"],
+  "allowed_chat_ids": [],
+  "allowed_sender_ids": ["external-owner-id"],
   "message_buffer": "message.md",
   "files_dir": "files"
 }
@@ -40,7 +42,19 @@
 
 清单拒绝未知字段。`modules` 必须且只能包含 input/output/detect；所有路径必须是模块目录内的相对路径。`bound_user` 必须是现有内部用户。
 
-`capabilities` 可选值只有 `receive_text`、`send_text`、`receive_file`、`send_file`，并且前两项必需。`allowed_tools=null` 表示不增加 Transport 级工具限制，仍受用户插件配置约束；空数组表示该入口不开放工具。
+`bound_user` 只决定归属，不代表任意发送者获准调用。可选 `allowed_sender_ids` 明确列出平台发送者 ID；
+未配置时，发送者须等于内部用户名，或经既有 `IdentityResolver` 绑定解析到该用户。可提供身份却不匹配时，
+返回 `rejected/sender_not_allowed`，不创建历史会话、不调用模型。原先仅配置 `bound_user` 的模块升级时应
+显式填写实际发送者 ID 或补充原有绑定，不能将 `external_user_id` 随意伪造成内部用户名。
+标准消息合同要求非空发送者 ID；绕过标准合同且无法提供 ID 的传统入口保留兼容，但返回
+`sender_verified=false` 和“该平台无法验证发送者”警告，并记录运行事件，绝不假称已校验。
+
+框架当前只实现 `direct` 触发：只允许私聊进入 Run；群聊及 channel 只记录一次
+`ignored/direct_only` 决策，不预留会话、不领取幂等记录、不发回复。`mention/prefix` 仅预留语义，
+不实现群聊 @ 或前缀触发。`allowed_chat_ids` 是可选的**私聊** ID 允许列表，省略或空数组保持兼容放行；
+非空时，列表外私聊返回 `ignored/chat_not_allowed`。这不是框架群 ID 绑定配置。
+
+`capabilities` 可选值只有 `receive_text`、`send_text`、`receive_file`、`send_file`，并且前两项必需。省略 `allowed_tools` 时只允许 `history_search`；`file`、`memory_manage` 同时包含写动作，工具名级白名单无法只开放其只读动作，因此不在默认集。显式 `allowed_tools=null` 表示不增加 Transport 级工具限制，仍受用户插件配置约束；空数组表示该入口不开放工具。现有显式 null 不自动改写，管理员应按实际需求收窄。
 
 ## 三入口合同
 
@@ -81,6 +95,8 @@ def send(payload: dict) -> bool:
 
 `payload` 包含 `chat_type`、`external_chat_id`、`text`、`file_path`、`reply_to`。失败应抛出带平台原因的异常，不能返回伪成功。
 
+上层 `Transport.send` 必须返回 `True` 或含布尔 `ok=true` 的对象；文件适配器只在底层返回 `True` 后回传 `True`。主动发送和路由回复均核对显式成功；空值、假值、其他格式和发送异常统一视为未确认，返回失败并提示先核对目标会话。消息可能已经送达，`retryable=false`，核心不自动补发；远端异常正文不透传给模型、幂等记录或异常通知。
+
 ### detect.py
 
 ```python
@@ -89,6 +105,9 @@ def check(config: dict, state: dict) -> dict:
 ```
 
 健康值只能是 `unknown`、`healthy`、`degraded`、`dead`。检测不能消费用户消息或产生昂贵副作用。
+Web 已接入宿主健康检查时，以运行中 Transport 的结果或错误为准；宿主检查失败不另建
+离线实例返回成功。普通模块检测异常仍记录 `dead`；`KeyboardInterrupt`、`SystemExit`、
+`GeneratorExit` 和 `MemoryError` 直接向宿主传播，不作为可重试的模块故障处理。
 
 ## message.md 队列格式
 
@@ -142,12 +161,12 @@ attachments:
 
 ## 长存活与历史会话
 
-外部历史会话由核心持久化，不依赖平台输入线程的内存状态。活跃绑定键由 `platform + chat_type + external_chat_id` 组成，事务写入 `users/<user>/history/history.sqlite3` 的活跃会话表；框架或输入模块重启后，同一个外部聊天会继续使用原来的 `conv_<uuid>` 会话。
+外部历史会话由核心持久化，不依赖平台输入线程的内存状态。活跃绑定键由 `platform + chat_type + external_chat_id` 组成，事务写入 `users/<user>/cards.sqlite3` 的 `card_bindings`；框架或输入模块重启后，同一个外部聊天会继续使用原来的 `conv_<uuid>` 会话。外部消息幂等仍由消息领域独立维护，RAW/VIEW 压缩不会重置领取或发送回执。
 
 - 私聊按外部聊天 ID 隔离。
-- 群聊默认以整个群的聊天 ID 共享一个会话。
+- 群聊默认不进入 Run；模块可自行采集/合批，但不因此获得框架群聊触发权限。
 - `/new` 关闭当前会话并为同一外部聊天建立新会话。
-- `/clear` 只清空当前外部聊天绑定的会话。
+- `/clear` 首次只申请确认；同一发送者须在同一聊天、同一活跃会话的60秒内发送返回的 `/clear <令牌>` 才清空。令牌一次有效，只存当前路由进程内存，过期或重启需重申请，不调用模型。
 - 平台模块不得自行生成或缓存内部 `session_id`，也不得把输入线程重启解释为新对话。
 
 入站幂等键 `<platform>:<message_id>` 也存入同一历史库的 `message_processed_messages`。群聊合批使用单事务领取；任一键已存在时整批拒绝。启动时遗留的 `processing` 只改为 `failed`，不会自动重放可能已经发生的副作用。
@@ -169,6 +188,7 @@ attachments:
 
 - 所有外部输入都不可信，不能变成系统提示词或代码直接执行。
 - 使用 `allowed_tools` 最小化外部入口权限。
+- `external_message.send_file` 仅接受本安装当前用户 `download/`、`file_upload/` 与项目 `tmp/` 内普通文件的绝对路径；其他用户、配置、`kemo.yaml`、`.env` 和含符号链接/目录联接的父路径均拒绝。拒绝记录 `external_message_file_denied` 无值诊断，不记录路径或文件正文；目录允许不代替目标与内容授权。
 - 不记录 Token、Cookie 或完整凭据；日志中的用户内容和附件也应按隐私数据管理。
 - 输入线程、检测和输出都必须有超时，并能在 RuntimeHost 关闭时退出。
 - 模块可以保留任意内部工程结构，但声明路径和运行时读写必须留在模块作用域；被入口导入的代码与入口具有相同信任级别，不能加载不可信项目。

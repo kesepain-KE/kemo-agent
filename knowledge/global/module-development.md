@@ -12,13 +12,13 @@
 
 | 作用域 | 路径 | 创建方式 | 自动刷新 |
 |--------|------|----------|----------|
-| 全局 | `global_expand/<name>/` | 管理员手动维护 | RuntimeHost 按 `task_cron_system.expand_update_rate` 刷新 |
-| 共享 | `shared_expand/<name>/` | `expand_creater` 的 `scope=shared` | 与全局层同周期、每轮只刷新一次 |
+| 全局 | `expand/global/<name>/` | 管理员手动维护 | RuntimeHost 按 `task_cron_system.expand_update_rate` 刷新 |
+| 共享 | `expand/share/<name>/` | `expand_creater` 的 `scope=shared` | 与全局层同周期、每轮只刷新一次 |
 | 用户 | `users/<user>/expand/<name>/` | `expand_creater` 的 `scope=user` | 同一系统任务按用户身份隔离刷新 |
 
 `expand_creater` 不创建全局拓展。共享和全局拓展可被用户配置白名单过滤；当前用户拓展按用户目录实时发现。
 
-框架内置的 `global_expand/kemo_gateway_status/` 是默认未激活的只读网关状态拓展。它的激活方式、独立 `STATUS_TOKEN`、脱敏产物和更新保留规则见 `builtin-expansions.md`。
+框架内置的 `expand/global/kemo_gateway_status/` 是默认未激活的只读网关状态拓展。它的激活方式、独立 `STATUS_TOKEN`、脱敏产物和更新保留规则见 `builtin-expansions.md`。
 
 `expand_update` 到期后先以 `__system__` 身份刷新全局层和共享层，再为每个有效用户分别执行其私有目录。全局/共享模块不会因用户数量重复运行，用户模块也不会跨用户拼接结果。每个更新入口在独立 Python 子进程中执行，受 `task_cron_system.module_update_timeout` 限制；热插拔模块不会被导入 Web/Runtime 主进程。
 
@@ -137,11 +137,11 @@ def execute(command: str, params: dict | None = None) -> dict:
 
 ### 位置与发现
 
-感知只有全局层。框架把 `global_sense/<name>/` 这个直接子目录视为一个完整感知模块，只识别 `sense.json` 声明的清单、数据出口和更新入口；这几项是框架合同，不是模块目录的完整结构。
+感知只有全局层。框架把 `sense/<name>/` 这个直接子目录视为一个完整感知模块，只识别 `sense.json` 声明的清单、数据出口和更新入口；这几项是框架合同，不是模块目录的完整结构。
 
 除清单声明的文件外，模块目录内部可以包含任意数量、任意层级和任意用途的文件或目录，也可以容纳一个完整工程。框架不会注册、注入或自动执行这些内部文件。智能体可以按实际需求自由组织实现，也可以把整个功能写成一个极小入口；不得因为模板只附带少量骨架文件，就把所有客户端、解析、缓存或业务逻辑强行堆进 `data_update.py`。
 
-模块必须是 `global_sense/` 的直接子目录。名称匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`。根目录 `global_sense/register.py` 注册整个感知来源，用户配置 `perception.global_whitelist` 决定主智能体可见模块。
+模块必须是 `sense/` 的直接子目录。名称匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`。根目录 `sense/register.py` 注册整个感知来源，用户配置 `perception.global_whitelist` 决定主智能体可见模块。
 
 RuntimeHost 启用后台调度时，系统任务按 `task_cron_system.sense_update_rate` 扫描所有合法全局感知模块并执行其 `start_update`。每个入口都运行在独立、受超时约束的 Python 子进程中，不会把热插拔代码导入 Web/Runtime 主进程。
 
@@ -227,7 +227,7 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 |-------|------|--------|
 | `agent_create` | `users/<user>/user_skills/agent_create/<name>/` | 主智能体与 `self_improve` |
 | `user_create` | `users/<user>/user_skills/user_create/<name>/` | 当前用户主智能体 |
-| `shared` | `shared_skills/<name>/` | 所有允许该共享技能的用户主智能体 |
+| `shared` | `skills/<name>/` | 所有允许该共享技能的用户主智能体 |
 
 共享技能受 `skills.shared_whitelist` 过滤；空数组表示全部允许。用户技能按当前用户目录发现。目录可以嵌套，白名单名称使用相对路径，例如 `development/python`。
 
@@ -297,7 +297,7 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 |------|------|------|
 | 内置 | `agents/<name>/` | 框架受信任子智能体，可携带执行代码 |
 | 用户 | `users/<user>/agents/<name>/` | 当前用户热插拔子智能体，不能覆盖内置名称 |
-| 外部绑定 | `global_expand/<name>/agent_bridge.json`、`shared_expand/<name>/agent_bridge.json` 或 `users/<user>/expand/<name>/agent_bridge.json` | 通过已授权拓展隔离进程调用外部智能体；不把远程地址或凭据交给核心 |
+| 外部绑定 | `expand/global/<name>/agent_bridge.json`、`expand/share/<name>/agent_bridge.json` 或 `users/<user>/expand/<name>/agent_bridge.json` | 通过已授权拓展隔离进程调用外部智能体；不把远程地址或凭据交给核心 |
 
 发现管线每次执行前重新扫描，因此用户子智能体新增或修改后通常无需重启。自定义 Python 执行器会被主进程直接导入，没有代码沙箱，只能安装可信代码。
 
@@ -505,8 +505,8 @@ kemo-agent、其他 Agent 服务或本地代理程序，同时保留核心现有
 在拓展模块同一目录增加可选文件：
 
 ```text
-global_expand/<module>/agent_bridge.json
-shared_expand/<module>/agent_bridge.json
+expand/global/<module>/agent_bridge.json
+expand/share/<module>/agent_bridge.json
 users/<user>/expand/<module>/agent_bridge.json
 ```
 
@@ -702,7 +702,7 @@ masked 字段仍不回显。
 面板完全由框架 React 组件渲染，不接受模块自带 HTML、CSS、JavaScript、iframe、事件处理器或
 `innerHTML`。新增原语时必须同步后端归一化/校验、前端类型与渲染、模板、专题文档和回归测试。
 
-内置实例可参考 `global_expand/kemo_app/module/`、`global_expand/kemo_gateway_status/module/` 和
-`global_expand/kemo_graph/module/`：它们分别演示 masked Token 状态与替换、用户身份绑定、
+内置实例可参考 `expand/global/kemo_app/module/`、`expand/global/kemo_gateway_status/module/` 和
+`expand/global/kemo_graph/module/`：它们分别演示 masked Token 状态与替换、用户身份绑定、
 连接端点配置和只读在线检测。实例仍遵守同一边界：面板只声明允许操作的 command，模块入口必须
 再次做权限、范围和失败语义校验；配置值与状态不会因为出现在面板中就自动进入数据注入层。
