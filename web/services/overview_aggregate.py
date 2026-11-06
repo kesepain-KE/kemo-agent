@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path as _AnnotationPath
-
 import math
 from typing import Any
+from run.agents import discover_agents
+from run.config import load_config
+from run.history import find_record, list_sessions, session_statistics
+from web.services.runtime_status import _nonnegative_int
 
 
 def _session_cache_hit_rate(stored_usage: Any) -> float | None:
@@ -44,16 +46,6 @@ def build_overview(
     session_id: Any = "",
     source: Any = "web",
 ) -> dict[str, Any]:
-    import importlib
-    _overview = importlib.import_module("web.services.overview")
-    Any = _overview.Any
-    Path = _overview.Path
-    _nonnegative_int = _overview._nonnegative_int
-    discover_agents = _overview.discover_agents
-    find_window = _overview.find_window
-    list_sessions = _overview.list_sessions
-    load_config = _overview.load_config
-    load_window = _overview.load_window
     name = service.require_user(user)
     normalized_source = service.require_source(source)
     normalized_session = ""
@@ -77,31 +69,12 @@ def build_overview(
         "estimated": False,
         "cache_hit_rate": None,
     }
-    rounds = 0
-    selected_directory: _AnnotationPath | None = None
-    if normalized_session:
-        selected_directory = find_window(
-            service.root, name, normalized_source, normalized_session
-        )
-        if selected_directory is not None:
-            data = load_window(selected_directory).get("data") or {}
-            rounds = max(0, int(data.get("rounds") or 0))
-            stored_usage = data.get("token_usage")
-            if isinstance(stored_usage, dict):
-                usage.update(
-                    {
-                        key: stored_usage.get(key, usage[key])
-                        for key in (
-                            "prompt_tokens",
-                            "completion_tokens",
-                            "total_tokens",
-                            "estimated",
-                        )
-                    }
-                )
-                usage["cache_hit_rate"] = _session_cache_hit_rate(stored_usage)
+    selected_record = find_record(service.root, name, normalized_source, normalized_session) if normalized_session else None
+    statistics = session_statistics(service.root, name, normalized_source, normalized_session) if selected_record else {}
+    integration_count = statistics.get("integration_count", 0)
+    usage.update(statistics.get("usage", {}))
+    usage["cache_hit_rate"] = _session_cache_hit_rate(usage)
     token_limit = int(settings_data["limits"]["context_tokens"])
-    round_limit = int(settings_data["limits"]["context_rounds"])
     total_tokens = max(0, int(usage.get("total_tokens") or 0))
     percent = min(100, round(total_tokens * 100 / token_limit)) if token_limit > 0 else 0
 
@@ -116,14 +89,8 @@ def build_overview(
         normalized_session,
         config=config,
         token_limit=token_limit,
-        round_limit=round_limit,
         configured_ratio=compression_ratio,
         source=normalized_source,
-    )
-    active_context_rounds = (
-        max(0, int(current_context.get("rounds") or 0))
-        if current_context.get("available") is True
-        else rounds
     )
     context_snapshot = current_context.get("context_snapshot")
     if not isinstance(context_snapshot, dict):
@@ -140,44 +107,13 @@ def build_overview(
             "total_tokens": 0,
             "capacity_tokens": token_limit,
             "percent": 0.0,
-            "foreground_rounds": 0,
+            "cards_active": 0, "last_seq": 0, "view_epoch": 0, "active_integrations": 0,
         }
 
-    session_tool_calls = 0
-    if selected_directory is not None:
-        try:
-            archive = load_window(selected_directory)
-        except Exception:
-            archive = {}
-        selected_data = archive.get("data") or {}
-        metrics = selected_data.get("round_metrics") or []
-        if isinstance(metrics, list) and metrics:
-            session_tool_calls = sum(
-                _nonnegative_int(metric.get("tool_calls"))
-                for metric in metrics
-                if isinstance(metric, dict)
-            )
-        else:
-            item_container = archive.get("items") or {}
-            items = (
-                item_container.get("items")
-                if isinstance(item_container, dict)
-                else []
-            )
-            session_tool_calls = sum(
-                item.get("type") == "tool_call"
-                for item in (items or [])
-                if isinstance(item, dict)
-            )
-    foreground_rounds = _nonnegative_int(
-        current_context.get("rounds")
-    )
-    session_total_rounds = _nonnegative_int(
-        current_context.get("session_total_rounds")
-    )
-    background_archived_rounds = max(
-        0, session_total_rounds - foreground_rounds
-    )
+    session_tool_calls = statistics.get("tool_calls", 0)
+    cards_active = _nonnegative_int(current_context.get("cards_active"))
+    last_seq = _nonnegative_int(current_context.get("last_seq"))
+    active_integrations = _nonnegative_int(current_context.get("active_integrations"))
 
     sense_data = service.sense(name)
     expand_data = service.expands(name)
@@ -198,7 +134,7 @@ def build_overview(
             (item for item in task_data["plans"] if item["status"] in active_statuses),
             None,
         )
-        if selected_directory is not None
+        if selected_record is not None
         else None
     )
     activities = []
@@ -206,7 +142,7 @@ def build_overview(
         activities.append(
             {
                 "type": "session",
-                "title": f"Web 对话已保存 · {int(session.get('rounds') or 0)} 轮",
+                "title": f"Web 对话已保存 · {int(session.get('integration_count') or 0)} 次整合",
                 "detail": str(session.get("session_id") or ""),
                 "status": "saved",
                 "updated_at": str(session.get("updated_at") or ""),
@@ -256,10 +192,9 @@ def build_overview(
             "usage": usage,
             "limit": token_limit,
             "percent": percent,
-            "rounds": active_context_rounds,
-            "session_total_rounds": rounds,
-            "archived_rounds": max(0, rounds - active_context_rounds),
-            "round_limit": round_limit,
+            "engine": "cardstream", "cards_active": cards_active,
+            "last_seq": last_seq, "integration_count": integration_count,
+            "active_integrations": active_integrations,
         },
         "provider": settings_data["provider"],
         "counts": {
@@ -306,10 +241,10 @@ def build_overview(
                 "captured_at": str(context_snapshot.get("captured_at") or ""),
             },
             "conversation": {
-                "foreground_rounds": foreground_rounds,
-                "archived_rounds": background_archived_rounds,
+                "cards_active": cards_active, "last_seq": last_seq,
+                "active_integrations": active_integrations,
                 "total_tool_calls": session_tool_calls,
-                "session_total_rounds": session_total_rounds,
+                "integration_count": integration_count,
                 "session_tool_calls": session_tool_calls,
             },
             "tasks": {
@@ -343,22 +278,22 @@ def build_overview(
                     ((settings_data.get("source_policy") or {}).get("expand") or {}).get(
                         "injection_mode"
                     )
-                    or "round"
+                    or "dynamic"
                 ),
                 "perception": str(
                     ((settings_data.get("source_policy") or {}).get("perception") or {}).get(
                         "injection_mode"
                     )
-                    or "round"
+                    or "dynamic"
                 ),
             },
         },
         "context_snapshot": context_snapshot,
         "session_context_stats": {
             "selected": bool(normalized_session),
-            "foreground_rounds": foreground_rounds,
-            "background_archived_rounds": background_archived_rounds,
-            "session_total_rounds": session_total_rounds,
+            "cards_active": cards_active, "last_seq": last_seq,
+            "active_integrations": active_integrations,
+            "integration_count": integration_count,
             "session_tool_calls": session_tool_calls,
         },
         "agents": agents,

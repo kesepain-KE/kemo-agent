@@ -19,11 +19,7 @@ if TYPE_CHECKING:
 from pathlib import Path
 from typing import Any
 
-from run.agents import discover_agents
-from run.config import load_config
-from run.context import read_summary_cache
-from run.history import find_window, list_sessions, load_window, runtime_window_path
-from web.services.runtime_status import _nonnegative_int
+from run.cards import CardStore
 from web.services.overview_aggregate import build_overview as _build_overview_impl
 
 
@@ -52,44 +48,15 @@ class OverviewServiceMixin:
             owner=name, ttl=0.5,
         )[0]
 
-    def _summary_cache_status(
-        self,
-        user: str,
-        session_id: str,
-        *,
-        source: str = "web",
-    ) -> dict[str, Any]:
-        empty = {
-            "exists": False,
-            "covered_rounds": [],
-            "created_at": "",
-            "window": "",
-        }
-        if not session_id:
-            return empty
-        directory = find_window(self.root, user, source, session_id)
-        if directory is None:
-            return empty
-        runtime_path = runtime_window_path(directory)
-        try:
-            value = read_summary_cache(runtime_path)
-        except Exception:
-            return {
-                **empty,
-                "exists": False,
-                "window": directory.name,
-                "invalid": True,
-            }
-        if value is None:
-            return {**empty, "window": directory.name}
-        return {
-            "exists": True,
-            "covered_rounds": [
-                int(item) for item in value.get("covered_rounds", []) if isinstance(item, int)
-            ] if isinstance(value, dict) else [],
-            "created_at": str(value.get("created_at") or "") if isinstance(value, dict) else "",
-            "window": directory.name,
-        }
+    def _summary_cache_status(self, user, session_id, *, source="web"):
+        store = CardStore(self.root, user)
+        state = store.session(source, session_id) if session_id and store.path.is_file() else None
+        snapshot = store.snapshot(source, session_id) if state else None
+        card = next((card for card in snapshot.cards if card.view_kind == "summary"), None) if snapshot else None
+        return {"exists": card is not None, "engine": "cardstream", "card_id": card.card_id if card else None,
+                "host_seq": card.seq if card else None,
+                "compression_stage": card.compression_stage if card else 0,
+                "view_epoch": snapshot.view_epoch if snapshot else 0}
 
     def _runtime_status(self) -> dict[str, Any]:
         if self.runtime_status_provider is None:
