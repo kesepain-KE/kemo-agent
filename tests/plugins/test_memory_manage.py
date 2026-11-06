@@ -37,9 +37,9 @@ class MemoryManageTests(unittest.TestCase):
         (self.root / "config").mkdir()
         (self.root / "users" / "alice").mkdir(parents=True)
         (self.root / "users" / "bob").mkdir(parents=True)
-        (self.root / "config" / "global_config.json").write_text("{}", "utf-8")
+        (self.root / "config" / "global_config.yaml").write_text("{}", "utf-8")
         for user in ("alice", "bob"):
-            (self.root / "users" / user / "user_config.json").write_text(
+            (self.root / "users" / user / "user_config.yaml").write_text(
                 "{}",
                 "utf-8",
             )
@@ -622,6 +622,59 @@ class MemoryManageTests(unittest.TestCase):
                 **invalid_options,
             )
 
+    def test_list_all_paginates_four_tiers_and_excludes_important(self) -> None:
+        expected = []
+        for tier in ("seven_days", "one_month", "half_year", "permanent"):
+            for index in range(2):
+                added = add_fragment(
+                    self.root, "alice", self.config, tier,
+                    f"{tier}-{index}", f"body-{tier}-{index}",
+                )
+                expected.append((tier, added["filename"]))
+        important = self.root / "users" / "alice" / "memory_temporary_important.md"
+        important.write_text("HOT VIEW", "utf-8")
+        entries = []
+        offset = 0
+        for page_size in (3, 3, 2):
+            page = run_memory_manage(
+                "list", "all", limit=3, offset=offset, compact=True, include_content=True,
+                context={"root": str(self.root), "user": "alice"},
+            )
+            self.assertEqual(page["tier"], "all")
+            self.assertEqual(page["total"], 8)
+            self.assertEqual(len(page["entries"]), page_size)
+            entries.extend(page["entries"])
+            offset += page_size
+            self.assertEqual(page["has_more"], offset < 8)
+            self.assertEqual(page["next_offset"], offset if offset < 8 else None)
+        self.assertEqual([(item["tier"], item["filename"]) for item in entries], expected)
+        for item in entries:
+            self.assertEqual(item["memory_ref"], f"{item['tier']}:{item['filename']}")
+            self.assertEqual(item["content"], f"body-{item['tier']}-{Path(item['filename']).stem.rsplit('-', 1)[1]}")
+            self.assertEqual(item["weight"], None if item["tier"] == "permanent" else 0)
+            self.assertNotIn("expires_at", item)
+        detailed = list_entries(self.root, "alice", self.config, "all", limit=1)
+        self.assertIn("expires_at", detailed["entries"][0])
+        self.assertNotIn("content", detailed["entries"][0])
+        self.assertEqual(list_entries(self.root, "bob", self.config, "all")["total"], 0)
+
+    def test_list_all_character_budget_continues_across_tier_boundaries(self) -> None:
+        tiers = ("seven_days", "one_month", "half_year", "permanent")
+        for tier in tiers:
+            add_fragment(self.root, "alice", self.config, tier, tier, "x" * 700)
+        for offset, tier in enumerate(tiers):
+            page = list_entries(
+                self.root, "alice", self.config, "all", limit=500, offset=offset,
+                compact=True, include_content=True, page_char_limit=1000,
+            )
+            self.assertEqual(page["total"], 4)
+            self.assertEqual(len(page["entries"]), 1)
+            self.assertEqual(page["entries"][0]["tier"], tier)
+            self.assertEqual(page["entries"][0]["content"], "x" * 700)
+            self.assertEqual(page["has_more"], offset < 3)
+            self.assertEqual(page["next_offset"], offset + 1 if offset < 3 else None)
+            self.assertEqual(page["page_limited_by_chars"], offset < 3)
+
     def test_list_content_pages_are_bounded_by_serialized_character_budget(
         self,
     ) -> None:
@@ -939,8 +992,54 @@ class MemoryManageTests(unittest.TestCase):
         self.assertEqual(title_result["total_matches"], 4)
         self.assertEqual(len(title_result["matches"]), 2)
         self.assertTrue(title_result["truncated"])
-        with self.assertRaisesRegex(ValueError, "不支持的记忆层级：all"):
-            list_entries(self.root, "alice", self.config, "all")
+        listed = list_entries(self.root, "alice", self.config, "all")
+        self.assertEqual(listed["total"], 4)
+        self.assertEqual({entry["tier"] for entry in listed["entries"]},
+                         {"seven_days", "one_month", "half_year", "permanent"})
+
+    def test_history_match_modes_work_for_single_and_batch_searches(self) -> None:
+        add_fragment(self.root, "alice", self.config, "permanent", "Vim", "Vim")
+        add_fragment(self.root, "alice", self.config, "one_month", "Neovim", "Neovim")
+        add_fragment(self.root, "alice", self.config, "seven_days", "Vim editor", "Vim editor")
+        context = {"root": str(self.root), "user": "alice"}
+        for mode, query, regex, sensitive, expected in (
+            ("substring", "vim", False, False, {"Vim.md", "Neovim.md", "Vim editor.md"}),
+            ("word", "vim", False, False, {"Vim.md", "Vim editor.md"}),
+            ("exact", "vim", False, False, {"Vim.md"}),
+            ("exact", "vim", False, True, set()),
+            ("substring", r"^(?:Neo)?vim$", True, False, {"Vim.md", "Neovim.md"}),
+            ("substring", r"^vim$", True, True, set()),
+        ):
+            for action in ("search_by_title", "search_by_content", "search_many"):
+                with self.subTest(mode=mode, regex=regex, sensitive=sensitive, action=action):
+                    params = ({"queries": [{"title": query, "content": query}]}
+                              if action == "search_many" else {"query": query})
+                    result = run_memory_manage(
+                        action, "all", **params, match_mode=mode, regex=regex,
+                        case_sensitive=sensitive, context=context,
+                    )
+                    matches = (result["results"][0]["matches"] if action == "search_many"
+                               else result["matches"])
+                    self.assertEqual({item["filename"] for item in matches}, expected)
+                    for item in matches:
+                        self.assertNotIn("content", item)
+                        self.assertTrue(item["memory_ref"].endswith(item["filename"]))
+
+    def test_search_rejects_invalid_modes_and_regular_expressions(self) -> None:
+        for action in ("search_by_title", "search_by_content", "search_many"):
+            for options, error in (
+                ({"match_mode": "fuzzy"}, "match_mode"),
+                ({"regex": "true"}, "regex"),
+                ({"regex": True}, "正则"),
+            ):
+                with self.subTest(action=action, options=options):
+                    params = ({"queries": [{"title": "["}]}
+                              if action == "search_many" else {"query": "["})
+                    with self.assertRaisesRegex(ValueError, error):
+                        run_memory_manage(
+                            action, "all", **params, **options,
+                            context={"root": str(self.root), "user": "alice"},
+                        )
 
     def test_manifest_exposes_batch_search_and_bounded_parameters(self) -> None:
         tool = discover_tools(PROJECT_ROOT, "kesepain").get("memory_manage")
@@ -968,6 +1067,8 @@ class MemoryManageTests(unittest.TestCase):
             "page_char_limit",
             "context_chars",
             "case_sensitive",
+            "match_mode",
+            "regex",
             "memory_type",
         ):
             self.assertIn(field, schema["properties"])

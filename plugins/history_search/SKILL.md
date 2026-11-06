@@ -1,6 +1,6 @@
 # history_search
 
-查询当前用户已提交的历史归档：`dates` 查看归档日期目录，`list` 列出某天或全部归档，`read` 分页读取指定归档真实正文，`search` 搜索用户与助手文本（默认兼容旧调用）。不会读取运行中未提交内容、思考记录或工具日志。
+查询当前用户的历史归档：`dates` 查看归档日期目录，`list` 列出某天或全部归档，`read` 分页读取指定归档真实正文，`search` 搜索用户正文、引导正文与智能体正文。搜索命中、相邻上下文和 read 均只提取正文 text，不返回工具调用、参数、回执、思考或其他载荷；工具 RAW 仍完整保存在历史库中。
 
 ## 归档目录与正文读取
 
@@ -17,40 +17,30 @@
 
 1. **与 memory 搜索的区别**：`history_search` 搜索原始对话文本，即用户和助手曾经说过什么；`memory_manage` 的 `search_by_title`、`search_by_content` 搜索提炼后的长期记忆、临时记忆与规则。想找“上次讨论树莓派时说了什么”使用 `history_search`，想找“树莓派的 IP 是多少”优先搜索记忆。
 2. **时间过滤优先**：要看某天有哪些归档时使用 `action=list,date=...`；要找某个时间范围使用 `dates/list` 的 `since/until`（上海自然日、按归档更新时间）。仅当执行旧关键词 `search` 时，`since/until` 继续按创建日期筛选。正文来自结构化消息表，不扫描历史目录。
-3. **角色过滤**：用户问“我上次说过什么”时使用 `role=user`；问“你之前怎么回答的”时使用 `role=assistant`。
-4. **上下文按需获取**：需要还原对话脉络时传入 `context_messages`，一般取 2–3；只确认是否提到某个词时保持默认值 0。
+3. **角色过滤**：用户问“我上次说过什么”时使用 `role=user`，包含初始用户正文和引导正文；问“你之前怎么回答的”时使用 `role=assistant`，包含智能体阶段正文和最终正文。默认 any 也只包含这两类正文，不搜索工具信息。
+4. **上下文按需获取**：需要还原对话脉络时传入 `context_messages`，一般取 2–3；前后各 N 条按正文消息计数，跳过中间工具卡片，不因工具调用较多而丢掉相邻发言。只确认是否提到某个词时保持默认值 0。
 5. **搜索精度**：搜索 `AI` 等缩写且不希望命中 `main`、`email` 时，使用 `match_mode=word`。只有用户明确需要模式匹配时才启用 `regex=true`。
 6. **优先限定会话范围**：已知入口或逻辑会话时，在 search 或 list 中传入 `source`、`session_id` 精确过滤。list 仍会按不同物理归档分别返回，不会把同 session_id 的多个窗口混成一个 archive。
 7. **控制返回规模并分页**：search 使用 `next_offset`；dates/list 使用 `next_offset`，可同时设 `limit` 与 `page_char_limit`；read 使用 `next_cursor`（必须重复同一个 archive_id/role）。只有 `has_more=false` 表示已读完。search 可按需缩小 `max_snippet` 与 `context_messages`；read 的 `page_limited_by_chars=true` 表示长消息被切成片段，可无损接着读。
 
-## 参数说明
+## 中文全文检索
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `action` | string | search | search / dates / list / read；省略时兼容旧搜索 |
-| `date` | string | 无 | list 的单日筛选，YYYY-MM-DD |
-| `archive_id` | string | 无 | read 必填；原样使用 list 返回的稳定标识 |
-| `cursor` | string | 无 | read 续页使用 next_cursor |
-| `query` | string | 空 | search 的搜索关键词；空白保留旧行为返回空匹配；`regex=true` 时为正则表达式 |
-| `limit` | integer | 10 | 本页最多匹配数、日期数、归档数或消息片段数（1–100） |
-| `since` | string | 无 | 起始日期 `YYYY-MM-DD`，包含当天；search 按创建日期，dates/list 按最后更新日 |
-| `until` | string | 无 | 结束日期 `YYYY-MM-DD`，包含当天；search 按创建日期，dates/list 按最后更新日 |
-| `role` | string | any | 角色过滤：`any`、`user`、`assistant` |
-| `match_mode` | string | substring | `substring`=子串、`word`=整词边界、`exact`=去除首尾空白后完全相等 |
-| `regex` | boolean | false | 将 query 作为正则表达式处理，并忽略 `match_mode` |
-| `max_snippet` | integer | 500 | 每条匹配片段的字符上限（1–5000，包含省略号） |
-| `context_messages` | integer | 0 | 匹配消息前后各取 N 条上下文（0–20） |
-| `max_context_chars` | integer | 1000 | 每条上下文消息的文本上限（50–5000），超出时追加省略号 |
-| `offset` | integer | 0 | search/dates/list 分页偏移；下一页使用返回的 `next_offset`；read 用 cursor |
-| `page_char_limit` | integer | 80000 | 单页结果项的紧凑 JSON 字符预算（1000–90000），与 limit 共同限制规模；read 可分片长消息 |
-| `source` | string | 无 | 精确过滤对话来源，如 `web`、`app`、`cli`、`cron` |
-| `session_id` | string | 无 | 精确过滤逻辑会话 ID；可与 source 组合使用 |
+查找相关历史正文时优先显式使用 `match_mode="fulltext"`，例如
+`{"query":"历史 压缩","match_mode":"fulltext","role":"user","limit":10}`。
+使用 SQLite FTS5 + simple 的 `jieba_query` 分词，查询词之间为 AND，按 BM25 相关性排序，
+同分按时间与卡片 ID 倒序。建议输入 2～4 个核心词，不是自然语言语义检索。
+本版关闭拼音扩展，避免英文关键词误命中中文；全文检索不区分大小写。
+返回 `engine="sqlite-fts5/simple"` 和每条 `rank`（越小越相关）；角色、来源、会话、日期、正文上下文和分页预算继续生效。
+全文查询最多 1000 字符，不能包含 NUL；用户文本不会作为 SQL 或原始 FTS 表达式执行。
+旧默认仍是 `substring`，`word`、`exact`、`regex=true` 的行为不变；正则优先于 fulltext。
+全文索引只保存正文索引，不收录工具、元数据或思考。扩展随安装包离线分发，缺失或不兼容会明确报错，不静默退回扫描。
 
 ## 返回字段
 
 | 字段 | 说明 |
 |------|------|
 | `query` | 原始搜索词 |
+| `engine` / `rank` | fulltext 的检索引擎与 BM25 排名；rank 越小越相关，其他匹配模式不返回 |
 | `matches` | 匹配结果数组 |
 | `total_matches` | 实际命中总数，包含被 limit 截断的结果 |
 | `truncated` | 兼容字段，与 `has_more` 同义；受 limit、offset 与字符预算共同影响 |
@@ -64,14 +54,14 @@
 | `role` | 匹配消息角色 |
 | `snippet` | 围绕首次命中位置生成的有界片段 |
 | `match_index` | 匹配消息在归档 text 逻辑分区中的索引 |
-| `context` | 上下文消息数组，仅在 `context_messages > 0` 时返回 |
+| `context` | 命中正文及其前后各 N 条正文，保持原始 seq 顺序；仅在 `context_messages > 0` 时返回，不含工具卡片 |
 | `context_index` | 匹配消息在 context 数组中的位置，仅在 `context_messages > 0` 时返回 |
 | `dates` | dates 的日期与对应已提交物理归档数；含无法推定日期的 null 组 |
 | `archives` | list 的物理归档元数据与 archive_id；含 title/summary/source/session_id/创建更新时间/轮数/date |
 | `total` / `offset` / `next_offset` / `has_more` | dates/list 的筛选后总日期/归档数及分页状态 |
 | `date_basis` / `timezone` | dates/list 的日期计算口径标识及 `Asia/Shanghai` |
 | `archive` | read 当前物理归档的元数据 |
-| `messages` | read 的 user/assistant 纯文本内容片段；不返回媒体负载、思考或工具数据 |
+| `messages` | read 的用户、引导与智能体正文片段；不返回媒体负载、思考或工具数据，total_messages/has_more 也只计正文 |
 | `message_index` / `round_number` | read 的原始消息索引与轮次 |
 | `content_offset` / `next_content_offset` / `total_content_bytes` | read 当前消息片段的 UTF-8 字节范围 |
 | `message_complete` | 当前片段是否包含整条消息；片段可跨页 |
@@ -82,47 +72,21 @@
 ```json
 {
   "name": "history_search",
-  "description": "查询当前用户已提交历史归档：action=dates 查看日期目录，list 列出某天或全部归档，read 通过 archive_id/next_cursor 分页读取真实用户与助手正文，search（默认）保留关键词搜索。不读取思考、工具日志或未提交运行内容。",
+  "description": "查询当前用户历史归档：dates 查看日期目录，list 列出归档，read 通过 archive_id/next_cursor 分页读取正文，search（默认）按关键词搜索；相关正文优先显式选 match_mode=fulltext，使用 simple 中文分词和 BM25。只含用户、引导和智能体正文，不含工具、参数、回执或思考。",
   "input_schema": {
     "type": "object",
     "properties": {
       "action": {
         "type": "string",
-        "enum": [
-          "search",
-          "dates",
-          "list",
-          "read"
-        ],
+        "enum": ["search", "dates", "list", "read"],
         "default": "search",
         "description": "省略时兼容旧关键词搜索；dates/list 无需 query"
       },
-      "date": {
-        "type": "string",
-        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-        "description": "仅用于 list；按归档最后更新时间的上海自然日筛选"
-      },
-      "archive_id": {
-        "type": "string",
-        "maxLength": 4096,
-        "description": "read 必填；原样使用 list 返回的归档标识，不是文件路径"
-      },
-      "cursor": {
-        "type": "string",
-        "maxLength": 8192,
-        "description": "read 续页时原样使用 next_cursor；需保持相同 archive_id/role"
-      },
-      "query": {
-        "type": "string",
-        "description": "仅用于 search 的关键词；regex=true 时为正则表达式；空白返回空匹配"
-      },
-      "limit": {
-        "type": "integer",
-        "description": "本页匹配数/日期数/归档数/消息片段数上限",
-        "minimum": 1,
-        "maximum": 100,
-        "default": 10
-      },
+      "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "仅用于 list；按归档最后更新时间的上海自然日筛选"},
+      "archive_id": {"type": "string", "maxLength": 4096, "description": "read 必填；原样使用 list 返回的归档标识，不是文件路径"},
+      "cursor": {"type": "string", "maxLength": 8192, "description": "read 续页时原样使用 next_cursor；需保持相同 archive_id/role"},
+      "query": {"type": "string", "description": "仅用于 search 的关键词；regex=true 时为正则表达式；空白返回空匹配"},
+      "limit": {"type": "integer", "description": "本页匹配数/日期数/归档数/消息片段数上限", "minimum": 1, "maximum": 100, "default": 10},
       "since": {
         "type": "string",
         "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
@@ -133,51 +97,22 @@
         "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
         "description": "包含当天；search 按创建日期，dates/list 按最后更新日期（上海自然日）"
       },
-      "role": {
-        "type": "string",
-        "enum": [
-          "any",
-          "user",
-          "assistant"
-        ],
-        "default": "any",
-        "description": "角色过滤"
-      },
+      "role": {"type": "string", "enum": ["any", "user", "assistant"], "default": "any", "description": "正文角色过滤；user 包含引导，assistant 包含阶段与最终正文，any 包含全部正文"},
       "match_mode": {
         "type": "string",
-        "enum": [
-          "substring",
-          "word",
-          "exact"
-        ],
+        "enum": ["substring", "word", "exact", "fulltext"],
         "default": "substring",
-        "description": "匹配方式；regex=true 时忽略"
+        "description": "建议相关正文查询显式选 fulltext（中文分词+BM25）；substring/word/exact 保留原义；regex=true 时忽略"
       },
-      "regex": {
-        "type": "boolean",
-        "default": false,
-        "description": "是否将 query 作为正则表达式"
-      },
-      "max_snippet": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 5000,
-        "default": 500,
-        "description": "每条匹配片段的最大字符数，包含省略号"
-      },
-      "context_messages": {
-        "type": "integer",
-        "minimum": 0,
-        "maximum": 20,
-        "default": 0,
-        "description": "匹配消息前后各取 N 条上下文"
-      },
+      "regex": {"type": "boolean", "default": false, "description": "是否将 query 作为正则表达式"},
+      "max_snippet": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 500, "description": "每条匹配片段的最大字符数，包含省略号"},
+      "context_messages": {"type": "integer", "minimum": 0, "maximum": 20, "default": 0, "description": "匹配正文前后各取 N 条正文上下文，跳过工具卡片"},
       "max_context_chars": {
         "type": "integer",
         "minimum": 50,
         "maximum": 5000,
         "default": 1000,
-        "description": "每条上下文消息的最大字符数，超出时追加省略号"
+        "description": "每条正文上下文的最大字符数，超出时截断"
       },
       "offset": {
         "type": "integer",
@@ -193,22 +128,15 @@
         "default": 80000,
         "description": "本页结果项紧凑 JSON 字符预算（不含外层元数据）；read 长消息自动分片可续读"
       },
-      "source": {
-        "type": "string",
-        "maxLength": 200,
-        "description": "精确过滤对话来源"
-      },
-      "session_id": {
-        "type": "string",
-        "maxLength": 200,
-        "description": "精确过滤逻辑会话 ID"
-      }
+      "source": {"type": "string", "maxLength": 200, "description": "精确过滤对话来源"},
+      "session_id": {"type": "string", "maxLength": 200, "description": "精确过滤逻辑会话 ID"}
     },
     "required": [],
     "additionalProperties": false
   },
   "version": "1.3.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "read"
 }
 ```

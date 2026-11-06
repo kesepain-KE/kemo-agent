@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
-from typing import Any, Pattern
-from zoneinfo import ZoneInfo
+from typing import Any
 
-from run.history import message_windows
+from run.history.archive_query_common import raw_search_rows, raw_text_context
+from run.history.fulltext import search_rows as fulltext_rows
+from run.infra.fulltext import match_positions
+from run.infra.text_search import compile_query as _compile_query, match_span as _match_span
 
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_WINDOW_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}(?:-|$)")
 _ROLES = frozenset({"any", "user", "assistant"})
-_MATCH_MODES = frozenset({"substring", "word", "exact"})
-_BEIJING = ZoneInfo("Asia/Shanghai")
+_MATCH_MODES = frozenset({"substring", "word", "exact", "fulltext"})
 
 
 def _normalize_date(value: str, *, field: str) -> str | None:
@@ -28,100 +28,6 @@ def _normalize_date(value: str, *, field: str) -> str | None:
     except ValueError:
         raise ValueError(f"{field} 不是有效日期：{normalized}") from None
     return normalized
-
-
-def _parse_history_time(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    normalized = value.strip()
-    if normalized.endswith("Z"):
-        normalized = normalized[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _history_date(dirname: str, data: dict[str, Any]) -> str | None:
-    """Return the conversation start date in Beijing time with legacy fallback."""
-
-    for field in ("created_at", "updated_at"):
-        parsed = _parse_history_time(data.get(field))
-        if parsed is not None:
-            return parsed.astimezone(_BEIJING).date().isoformat()
-    if _WINDOW_PATTERN.match(dirname):
-        return dirname[:10]
-    return None
-
-
-def _history_sort_time(dirname: str, data: dict[str, Any]) -> float:
-    """Prefer the latest metadata timestamp; opaque directory names are not dates."""
-
-    for field in ("updated_at", "created_at"):
-        parsed = _parse_history_time(data.get(field))
-        if parsed is not None:
-            return parsed.timestamp()
-    if _WINDOW_PATTERN.match(dirname):
-        try:
-            return (
-                datetime.fromisoformat(dirname[:10])
-                .replace(tzinfo=_BEIJING)
-                .timestamp()
-            )
-        except ValueError:
-            pass
-    return float("-inf")
-
-
-def _in_time_range(
-    window_date: str | None,
-    since: str | None,
-    until: str | None,
-) -> bool:
-    """Return whether a committed history window is inside the date range."""
-
-    if window_date is None:
-        return since is None and until is None
-    if since and window_date < since:
-        return False
-    if until and window_date > until:
-        return False
-    return True
-
-
-def _compile_query(query: str, match_mode: str, use_regex: bool) -> Pattern[str] | None:
-    if use_regex:
-        try:
-            return re.compile(query, re.IGNORECASE)
-        except re.error as exc:
-            raise ValueError(f"query 不是有效正则表达式：{exc}") from None
-    if match_mode == "word":
-        return re.compile(rf"\b{re.escape(query)}\b", re.IGNORECASE)
-    return None
-
-
-def _match_span(
-    content: str,
-    query: str,
-    match_mode: str,
-    pattern: Pattern[str] | None,
-) -> tuple[int, int] | None:
-    if pattern is not None:
-        matched = pattern.search(content)
-        return matched.span() if matched else None
-    if match_mode == "exact":
-        stripped = content.strip()
-        if stripped.casefold() != query.casefold():
-            return None
-        start = len(content) - len(content.lstrip())
-        return start, start + len(stripped)
-    position = content.casefold().find(query.casefold())
-    if position < 0:
-        return None
-    return position, min(len(content), position + len(query))
 
 
 def _snippet(content: str, match_span: tuple[int, int], max_chars: int) -> str:
@@ -156,40 +62,6 @@ def _snippet(content: str, match_span: tuple[int, int], max_chars: int) -> str:
     prefix = "…" if start > 0 else ""
     suffix = "…" if end < len(content) else ""
     return f"{prefix}{content[start:end]}{suffix}"[:max_chars]
-
-
-def _context_messages(
-    text: dict[str, Any], match_index: int, count: int, max_chars: int
-) -> tuple[list[dict[str, str]], int]:
-    raw_messages = text.get("messages")
-    messages = raw_messages if isinstance(raw_messages, list) else []
-    eligible: list[tuple[int, dict[str, str]]] = []
-    match_position = 0
-    for index, message in enumerate(messages):
-        if not isinstance(message, dict) or message.get("role") not in {
-            "user",
-            "assistant",
-        }:
-            continue
-        content = message.get("content")
-        if not isinstance(content, str):
-            continue
-        stored_index = message.get("_history_message_index", index)
-        try:
-            archive_index = int(stored_index)
-        except (TypeError, ValueError):
-            archive_index = index
-        if archive_index == match_index:
-            match_position = len(eligible)
-        rendered = content
-        if len(rendered) > max_chars:
-            rendered = rendered[: max(0, max_chars - 1)] + "…"
-        eligible.append(
-            (archive_index, {"role": str(message["role"]), "content": rendered})
-        )
-    start = max(0, match_position - count)
-    end = min(len(eligible), match_position + count + 1)
-    return [item for _, item in eligible[start:end]], match_position - start
 
 
 def _bounded_integer(value: int, *, field: str, minimum: int, maximum: int) -> int:
@@ -244,7 +116,7 @@ def _search(
     if normalized_role not in _ROLES:
         raise ValueError(f"role 必须是 any/user/assistant，而不是 {role}")
     if normalized_mode not in _MATCH_MODES:
-        raise ValueError(f"match_mode 必须是 substring/word/exact，而不是 {match_mode}")
+        raise ValueError(f"match_mode 必须是 substring/word/exact/fulltext，而不是 {match_mode}")
     normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=100)
     normalized_snippet = _bounded_integer(
         max_snippet, field="max_snippet", minimum=1, maximum=5000
@@ -269,6 +141,7 @@ def _search(
         raise ValueError("since 不能晚于 until")
 
     result: dict[str, Any] = {
+        "ok": True,
         "query": query,
         "matches": [],
         "total_matches": 0,
@@ -293,92 +166,55 @@ def _search(
         user = str(context["user"])
     except (KeyError, TypeError):
         raise ValueError("context 必须包含 root 和 user") from None
-    candidates: list[tuple[float, str, dict[str, Any], dict[str, Any]]] = []
-    for stored in message_windows(
-        root,
-        user,
-        source=normalized_source,
-        session_id=normalized_session_id,
-    ):
-        window_name = str(stored.get("window_name") or "")
-        data = stored.get("data")
-        if not isinstance(data, dict) or data.get("complete") is not True:
-            continue
-        window_date = _history_date(window_name, data)
-        if not _in_time_range(window_date, since_value, until_value):
-            continue
-        candidates.append(
-            (
-                _history_sort_time(window_name, data),
-                window_name,
-                stored,
-                data,
-            )
-        )
-
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     matches: list[dict[str, Any]] = []
     total_matches = 0
     rendered_chars = 0
     page_limited_by_chars = False
     collection_closed = False
-    for _, window_name, stored, data in candidates:
-        text = stored.get("text")
-        if not isinstance(text, dict) or not isinstance(text.get("messages"), list):
+    indexed = normalized_mode == "fulltext" and not regex
+    if indexed:
+        total_matches, rows = fulltext_rows(
+            root, user, needle, source=normalized_source, session_id=normalized_session_id,
+            since=since_value or "", until=until_value or "", role=normalized_role,
+            limit=normalized_limit, offset=normalized_offset,
+        )
+        result["engine"] = "sqlite-fts5/simple"
+    else:
+        rows = raw_search_rows(
+            root, user, source=normalized_source, session_id=normalized_session_id,
+            since=since_value or "", until=until_value or "",
+        )
+    for message in rows:
+        message_role, content = message["role"], message["content"]
+        if normalized_role != "any" and message_role != normalized_role:
             continue
-
-        for index, message in enumerate(text["messages"]):
-            if not isinstance(message, dict):
-                continue
-            message_role = message.get("role")
-            if message_role not in {"user", "assistant"}:
-                continue
-            if normalized_role != "any" and message_role != normalized_role:
-                continue
-            content = message.get("content")
-            if not isinstance(content, str):
-                continue
+        if indexed:
+            if collection_closed:
+                break
+            span = match_positions(content, message["positions"])[0]
+        else:
             span = _match_span(content, needle, normalized_mode, pattern)
             if span is None:
                 continue
-
             total_matches += 1
-            if total_matches <= normalized_offset:
+            if total_matches <= normalized_offset or collection_closed or len(matches) >= normalized_limit:
                 continue
-            if collection_closed or len(matches) >= normalized_limit:
-                continue
-            stored_index = message.get("_history_message_index", index)
-            try:
-                match_index = int(stored_index)
-            except (TypeError, ValueError):
-                match_index = index
-            entry: dict[str, Any] = {
-                "window": window_name,
-                "source": data.get("source"),
-                "session_id": data.get("session_id"),
-                "role": message_role,
-                "snippet": _snippet(content, span, normalized_snippet),
-                "match_index": match_index,
-            }
-            if normalized_context > 0:
-                context_result, context_index = _context_messages(
-                    text,
-                    match_index,
-                    normalized_context,
-                    normalized_context_chars,
-                )
-                entry["context"] = context_result
-                entry["context_index"] = context_index
-            entry_chars = _serialized_chars(entry)
-            if matches and rendered_chars + entry_chars > normalized_page_chars:
-                page_limited_by_chars = True
-                collection_closed = True
-                continue
-            matches.append(entry)
-            rendered_chars += entry_chars
-            if rendered_chars > normalized_page_chars:
-                page_limited_by_chars = True
-                collection_closed = True
+        entry = {key: message[key] for key in (
+            "source", "session_id", "card_id", "integration_id", "seq", "raw_kind", "created_at", "role")}
+        entry["snippet"] = _snippet(content, span, normalized_snippet)
+        if indexed:
+            entry["rank"] = message["rank"]
+        if normalized_context:
+            entry["context"] = raw_text_context(
+                root, user, source=message["source"], session_id=message["session_id"],
+                seq=message["seq"], count=normalized_context, max_chars=normalized_context_chars,
+            )
+        entry_chars = _serialized_chars(entry)
+        if rendered_chars + entry_chars + _serialized_chars(result) + 128 > normalized_page_chars:
+            page_limited_by_chars = collection_closed = True
+            continue
+        matches.append(entry)
+        rendered_chars += entry_chars
 
     result["matches"] = matches
     result["total_matches"] = total_matches
@@ -450,8 +286,10 @@ def run(
         if date or since or until or source or session_id or offset:
             raise ValueError("read 使用 archive_id/cursor 定位，不接受目录过滤或 offset")
         from run.history import read_archive
-        return read_archive(root, user, archive_id=archive_id, cursor=cursor, role=role,
-                            limit=normalized_limit, page_char_limit=normalized_chars)
+        return {"ok": True, **read_archive(
+            root, user, archive_id=archive_id, cursor=cursor, role=role,
+            limit=normalized_limit, page_char_limit=normalized_chars,
+        )}
     if archive_id or cursor or role != "any":
         raise ValueError("dates/list 不接受 archive_id/cursor/role；请使用 read 或 search")
     if date and action != "list":
@@ -464,9 +302,9 @@ def run(
     if since_value and until_value and since_value > until_value:
         raise ValueError("since 不能晚于 until")
     from run.history import query_archives
-    return query_archives(
+    return {"ok": True, **query_archives(
         root, user, action=action, date=date_value, since=since_value, until=until_value,
         source=_bounded_filter(source, field="source"),
         session_id=_bounded_filter(session_id, field="session_id"),
         limit=normalized_limit, offset=normalized_offset, page_char_limit=normalized_chars,
-    )
+    )}

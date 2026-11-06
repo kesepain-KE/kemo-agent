@@ -34,6 +34,8 @@ def run(
     page_char_limit: int = 80_000,
     context_chars: int = 240,
     case_sensitive: bool = False,
+    match_mode: str = "keywords",
+    regex: bool = False,
     *,
     context: dict[str, Any],
 ) -> dict[str, Any]:
@@ -107,6 +109,8 @@ def run(
             query or "",
             limit=limit,
             case_sensitive=case_sensitive,
+            match_mode=match_mode,
+            regex=regex,
         )
     if action == "search_by_content":
         return search_by_content(
@@ -118,6 +122,8 @@ def run(
             limit=limit,
             context_chars=context_chars,
             case_sensitive=case_sensitive,
+            match_mode=match_mode,
+            regex=regex,
         )
     if action == "search_many":
         if agent == "self_improve":
@@ -131,6 +137,8 @@ def run(
             limit=limit,
             context_chars=context_chars,
             case_sensitive=case_sensitive,
+            match_mode=match_mode,
+            regex=regex,
             include_content=include_content,
         )
     if action == "delete":

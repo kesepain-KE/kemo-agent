@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
 from pathlib import Path
 from typing import Any
+
+from run.infra.text_search import compile_query
+from run.infra.fulltext import match_positions
+from plugins.memory_manage.search_matching import search_match, validate_search_options
 
 from run.memory import (
     TEMPORARY_TIERS,
@@ -25,10 +27,7 @@ from plugins.memory_manage.important_view import (
 
 
 MANAGED_TIERS = frozenset((*TIERS, "important"))
-SEARCH_ALL_TIERS = (*TIERS,)
-_SEARCH_PART_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+")
-_SEARCH_COMPACT_RE = re.compile(r"[^A-Za-z0-9\u4e00-\u9fff]+")
-_SEARCH_TIER_RANK = {name: index for index, name in enumerate(SEARCH_ALL_TIERS)}
+_SEARCH_TIER_RANK = {name: index for index, name in enumerate(TIERS)}
 
 
 def _memory_ref(tier: str, filename: str) -> str:
@@ -41,9 +40,9 @@ def _validate_tier(tier: str) -> str:
     return tier
 
 
-def _search_tiers(tier: str) -> tuple[str, ...]:
+def _read_tiers(tier: str) -> tuple[str, ...]:
     if tier == "all":
-        return SEARCH_ALL_TIERS
+        return TIERS
     return (_validate_tier(tier),)
 
 
@@ -101,6 +100,7 @@ def _summary(item: dict[str, Any], tier: str) -> dict[str, Any]:
     temporary = tier in TEMPORARY_TIERS
     filename = str(item["filename"])
     return {
+        **({"domain": item["domain"]} if item.get("domain", "fact") != "fact" else {}),
         "memory_ref": _memory_ref(tier, filename),
         "filename": filename,
         "weight": int(item.get("weight", 0)) if temporary else None,
@@ -122,7 +122,6 @@ def list_entries(
     include_content: bool = False,
     page_char_limit: int = 80_000,
 ) -> dict[str, Any]:
-    _validate_tier(tier)
     normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
     normalized_offset = _bounded_integer(
         offset,
@@ -140,64 +139,29 @@ def list_entries(
         minimum=1_000,
         maximum=90_000,
     )
-    if tier == "important":
-        items = _important_entry(root, user, config)
-        names = [IMPORTANT_FILENAME] if items else []
-        by_name = {IMPORTANT_FILENAME: items[0]} if items else {}
-        entries = []
-        for filename in names[normalized_offset : normalized_offset + normalized_limit]:
-            entry = {
-                "memory_ref": _memory_ref(tier, filename),
-                "filename": filename,
-                "weight": None,
-            }
-            if not compact:
+    items = _read_entries(root, user, config, tier)
+    entries = []
+    for current_tier, item in items[normalized_offset : normalized_offset + normalized_limit]:
+        filename = str(item["filename"])
+        temporary = current_tier in TEMPORARY_TIERS
+        entry = {
+            "memory_ref": _memory_ref(current_tier, filename),
+            "filename": filename,
+            "weight": int(item.get("weight", 0)) if temporary else None,
+        }
+        if tier == "all":
+            entry["tier"] = current_tier
+        if not compact:
+            if temporary:
+                entry.update({
+                    key: item.get(key)
+                    for key in ("created_at", "content_updated_at", "last_used_at", "expires_at")
+                })
+            else:
                 entry["expires_at"] = None
-            if include_content:
-                entry["content"] = str(by_name[filename].get("content") or "")
-            entries.append(entry)
-    elif tier == "permanent":
-        items = MemoryStore(root, user, config).load_tier("permanent")
-        names = [str(item["filename"]) for item in items]
-        by_name = {str(item["filename"]): item for item in items}
-        entries = []
-        for filename in names[normalized_offset : normalized_offset + normalized_limit]:
-            entry = {
-                "memory_ref": _memory_ref(tier, filename),
-                "filename": filename,
-                "weight": None,
-            }
-            if not compact:
-                entry["expires_at"] = None
-            if include_content:
-                entry["content"] = str(by_name[filename].get("content") or "")
-            entries.append(entry)
-    else:
-        items = MemoryStore(root, user, config).load_tier(tier)
-        names = [str(item["filename"]) for item in items]
-        by_name = {str(item["filename"]): item for item in items}
-        selected_names = names[normalized_offset : normalized_offset + normalized_limit]
-        entries = []
-        for filename in selected_names:
-            entry = {
-                "memory_ref": _memory_ref(tier, filename),
-                "filename": filename,
-                "weight": int(by_name[filename].get("weight", 0)),
-            }
-            if not compact:
-                entry.update(
-                    {
-                        "created_at": by_name[filename].get("created_at"),
-                        "content_updated_at": by_name[filename].get(
-                            "content_updated_at"
-                        ),
-                        "last_used_at": by_name[filename].get("last_used_at"),
-                        "expires_at": by_name[filename].get("expires_at"),
-                    }
-                )
-            if include_content:
-                entry["content"] = str(by_name[filename].get("content") or "")
-            entries.append(entry)
+        if include_content:
+            entry["content"] = str(item.get("content") or "")
+        entries.append(entry)
     page_limited_by_chars = False
     if include_content:
         bounded_entries: list[dict[str, Any]] = []
@@ -216,13 +180,13 @@ def list_entries(
             rendered_chars += entry_chars
         entries = bounded_entries
     page_end = normalized_offset + len(entries)
-    has_more = page_end < len(names)
+    has_more = page_end < len(items)
     return {
-        "action": "list",
+        "ok": True, "action": "list",
         "tier": tier,
         "timezone": "UTC",
         "entries": entries,
-        "total": len(names),
+        "total": len(items),
         "offset": normalized_offset,
         "next_offset": page_end if has_more else None,
         "has_more": has_more,
@@ -261,7 +225,7 @@ def get_fragment(
             raise FileNotFoundError(f"记忆不存在：{tier}/{normalized}")
         normalized = str(item["filename"])
     return {
-        "action": "get",
+        "ok": True, "action": "get",
         "tier": tier,
         "memory_ref": _memory_ref(
             tier, normalized if tier != "important" else IMPORTANT_FILENAME
@@ -280,137 +244,7 @@ def get_fragment(
     }
 
 
-def _normalize_search_text(value: Any, *, case_sensitive: bool) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).strip()
-    return text if case_sensitive else text.casefold()
-
-
-def _compact_search_text(value: str) -> str:
-    return _SEARCH_COMPACT_RE.sub("", value)
-
-
-def _search_segments(query: str, *, case_sensitive: bool) -> list[dict[str, Any]]:
-    normalized = _normalize_search_text(query, case_sensitive=case_sensitive)
-    segments: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for part in _SEARCH_PART_RE.findall(normalized):
-        is_cjk = all("\u4e00" <= char <= "\u9fff" for char in part)
-        if not is_cjk and len(part) < 2 and not part.isdigit():
-            continue
-        key = ("cjk" if is_cjk else "word", part)
-        if key in seen:
-            continue
-        seen.add(key)
-        grams: tuple[str, ...] = ()
-        if is_cjk and len(part) >= 2:
-            grams = tuple(
-                dict.fromkeys(part[index : index + 2] for index in range(len(part) - 1))
-            )
-        segments.append(
-            {
-                "text": part,
-                "kind": key[0],
-                "grams": grams,
-            }
-        )
-    return segments
-
-
-def _search_match(
-    query: str,
-    haystack: str,
-    *,
-    case_sensitive: bool,
-) -> dict[str, Any] | None:
-    normalized_query = _normalize_search_text(query, case_sensitive=case_sensitive)
-    normalized_haystack = _normalize_search_text(
-        haystack, case_sensitive=case_sensitive
-    )
-    compact_query = _compact_search_text(normalized_query)
-    compact_haystack = _compact_search_text(normalized_haystack)
-    segments = _search_segments(query, case_sensitive=case_sensitive)
-    if not compact_query or not segments:
-        return None
-
-    phrase_index = normalized_haystack.find(normalized_query)
-    compact_exact = compact_query in compact_haystack
-    if phrase_index >= 0 or compact_exact:
-        if phrase_index < 0:
-            phrase_index = next(
-                (
-                    normalized_haystack.find(segment["text"])
-                    for segment in segments
-                    if normalized_haystack.find(segment["text"]) >= 0
-                ),
-                0,
-            )
-        return {
-            "match_score": round(100.0 + min(len(compact_query), 100) / 100, 3),
-            "match_coverage": 1.0,
-            "exact_match": True,
-            "matched_terms": [segment["text"] for segment in segments][:8],
-            "match_index": phrase_index,
-            "match_length": max(1, len(normalized_query)),
-        }
-
-    haystack_parts = set(_SEARCH_PART_RE.findall(normalized_haystack))
-    strengths: list[float] = []
-    matched_terms: list[str] = []
-    matched_indexes: list[tuple[int, int]] = []
-    exact_segments = 0
-    positive_segments = 0
-    for segment in segments:
-        text = str(segment["text"])
-        kind = str(segment["kind"])
-        index = normalized_haystack.find(text)
-        if (kind == "word" and text in haystack_parts) or (
-            kind == "cjk" and index >= 0
-        ):
-            strengths.append(1.0)
-            positive_segments += 1
-            exact_segments += 1
-            matched_terms.append(text)
-            matched_indexes.append((max(0, index), len(text)))
-            continue
-        grams = tuple(str(item) for item in segment.get("grams") or ())
-        gram_hits = [gram for gram in grams if gram in normalized_haystack]
-        strength = len(gram_hits) / len(grams) if grams else 0.0
-        if strength >= (1 / 3):
-            positive_segments += 1
-            matched_terms.extend(gram_hits)
-            for gram in gram_hits:
-                matched_indexes.append((normalized_haystack.find(gram), len(gram)))
-        else:
-            strength = 0.0
-        strengths.append(strength)
-
-    coverage = sum(strengths) / len(segments)
-    if len(segments) == 1:
-        segment = segments[0]
-        if segment["kind"] == "cjk" and len(str(segment["text"])) > 2:
-            accepted = strengths[0] >= 0.6 and len(set(matched_terms)) >= 2
-        else:
-            accepted = strengths[0] == 1.0
-    else:
-        accepted = positive_segments >= 2 and coverage >= 0.5
-    if not accepted:
-        return None
-
-    unique_terms = list(dict.fromkeys(matched_terms))
-    valid_indexes = [item for item in matched_indexes if item[0] >= 0]
-    match_index, match_length = min(valid_indexes, default=(0, 1))
-    score = coverage * 60 + positive_segments * 8 + exact_segments * 6
-    return {
-        "match_score": round(score, 3),
-        "match_coverage": round(coverage, 3),
-        "exact_match": False,
-        "matched_terms": unique_terms[:8],
-        "match_index": match_index,
-        "match_length": max(1, match_length),
-    }
-
-
-def _search_entries(
+def _read_entries(
     root: Path,
     user: str,
     config: dict[str, Any],
@@ -418,7 +252,7 @@ def _search_entries(
 ) -> list[tuple[str, dict[str, Any]]]:
     return [
         (current_tier, item)
-        for current_tier in _search_tiers(tier)
+        for current_tier in _read_tiers(tier)
         for item in _tier_entries(root, user, config, current_tier)
     ]
 
@@ -452,6 +286,44 @@ def _snippet_for_match(
     )[:context_chars]
 
 
+def _fulltext_results(root, user, tier, queries, limit, context_chars, include_content):
+    from run.memory.fulltext import search_batch
+
+    tiers = _read_tiers(tier)
+    if tier == "important":
+        raise ValueError("fulltext 仅检索四个记忆碎片层；important 请使用 keywords 或文本匹配")
+    results = []
+    for index, (total, rows) in enumerate(search_batch(root, user, tiers, queries, limit)):
+        matches = []
+        for item in rows:
+            title = item["filename"]
+            content = item["content"]
+            title_spans = match_positions(title, item["title_positions"])
+            content_spans = match_positions(content, item["content_positions"])
+            match = {
+                **_summary(item, item["tier"]), "tier": item["tier"],
+                "rank": item["rank"], "match_score": -item["rank"],
+                "matched_by": (["title"] if title_spans else []) + (["content"] if content_spans else []),
+                "matched_terms": list(dict.fromkeys(
+                    [title[start:end] for start, end in title_spans]
+                    + [content[start:end] for start, end in content_spans]
+                ))[:12],
+            }
+            if content_spans:
+                start, end = content_spans[0]
+                match["snippet"] = _snippet_for_match(content, {
+                    "match_index": start, "match_length": end - start,
+                }, context_chars)
+            if include_content:
+                match["content"] = content
+            matches.append(match)
+        results.append({
+            "index": index, "title": queries[index][0], "content": queries[index][1],
+            "matches": matches, "total_matches": total, "truncated": total > len(matches),
+        })
+    return results
+
+
 def search_by_title(
     root: Path,
     user: str,
@@ -460,18 +332,29 @@ def search_by_title(
     query: str,
     limit: int = 50,
     case_sensitive: bool = False,
+    *,
+    match_mode: str = "keywords",
+    regex: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query 不能为空；列出全部记忆请使用 list action")
-    if not isinstance(case_sensitive, bool):
-        raise ValueError("case_sensitive 必须是布尔值")
+    validate_search_options(match_mode, regex, case_sensitive)
+    needle = query.strip()
+    pattern = compile_query(needle, match_mode, regex, case_sensitive=case_sensitive)
     normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
     all_matches: list[dict[str, Any]] = []
-    for current_tier, item in _search_entries(root, user, config, tier):
-        detail = _search_match(
-            query,
+    if match_mode == "fulltext" and not regex:
+        page = _fulltext_results(root, user, tier, [(needle, "")], normalized_limit, 240, False)[0]
+        return {
+            "ok": True, "action": "search_by_title", "tier": tier, "timezone": "UTC", "query": query,
+            "engine": "sqlite-fts5/simple", "matches": page["matches"],
+            "total_matches": page["total_matches"], "truncated": page["truncated"],
+        }
+    for current_tier, item in _read_entries(root, user, config, tier):
+        detail = search_match(
+            needle,
             Path(str(item["filename"])).stem,
-            case_sensitive=case_sensitive,
+            case_sensitive=case_sensitive, match_mode=match_mode, pattern=pattern,
         )
         if detail is None:
             continue
@@ -492,7 +375,7 @@ def search_by_title(
         all_matches.append(match)
     all_matches.sort(key=_search_sort_key)
     return {
-        "action": "search_by_title",
+        "ok": True, "action": "search_by_title",
         "tier": tier,
         "timezone": "UTC",
         "query": query,
@@ -511,19 +394,32 @@ def search_by_content(
     limit: int = 50,
     context_chars: int = 240,
     case_sensitive: bool = False,
+    *,
+    match_mode: str = "keywords",
+    regex: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query 不能为空；列出全部记忆请使用 list action")
-    if not isinstance(case_sensitive, bool):
-        raise ValueError("case_sensitive 必须是布尔值")
+    validate_search_options(match_mode, regex, case_sensitive)
+    needle = query.strip()
+    pattern = compile_query(needle, match_mode, regex, case_sensitive=case_sensitive)
     normalized_limit = _bounded_integer(limit, field="limit", minimum=1, maximum=500)
     normalized_context = _bounded_integer(
         context_chars, field="context_chars", minimum=60, maximum=2000
     )
     matches: list[dict[str, Any]] = []
-    for current_tier, item in _search_entries(root, user, config, tier):
+    if match_mode == "fulltext" and not regex:
+        page = _fulltext_results(root, user, tier, [("", needle)], normalized_limit, normalized_context, False)[0]
+        return {
+            "ok": True, "action": "search_by_content", "tier": tier, "timezone": "UTC", "query": query,
+            "engine": "sqlite-fts5/simple", "matches": page["matches"],
+            "total_matches": page["total_matches"], "truncated": page["truncated"],
+        }
+    for current_tier, item in _read_entries(root, user, config, tier):
         content = str(item.get("content") or "")
-        detail = _search_match(query, content, case_sensitive=case_sensitive)
+        detail = search_match(
+            needle, content, case_sensitive=case_sensitive, match_mode=match_mode, pattern=pattern,
+        )
         if detail is None:
             continue
         match = {
@@ -540,7 +436,7 @@ def search_by_content(
         matches.append(match)
     matches.sort(key=_search_sort_key)
     return {
-        "action": "search_by_content",
+        "ok": True, "action": "search_by_content",
         "tier": tier,
         "timezone": "UTC",
         "query": query,
@@ -561,13 +457,14 @@ def search_many(
     context_chars: int = 240,
     case_sensitive: bool = False,
     include_content: bool = False,
+    match_mode: str = "keywords",
+    regex: bool = False,
 ) -> dict[str, Any]:
     """Search several candidates against one in-memory snapshot of all tiers."""
 
     if not isinstance(include_content, bool):
         raise ValueError("include_content 必须是布尔值")
-    if not isinstance(case_sensitive, bool):
-        raise ValueError("case_sensitive 必须是布尔值")
+    validate_search_options(match_mode, regex, case_sensitive)
     if not isinstance(queries, list) or not queries:
         raise ValueError("search_many 需要非空 queries 数组")
     if len(queries) > 20:
@@ -581,8 +478,7 @@ def search_many(
     normalized_context = _bounded_integer(
         context_chars, field="context_chars", minimum=60, maximum=2000
     )
-    entries = _search_entries(root, user, config, tier)
-    results: list[dict[str, Any]] = []
+    prepared_queries = []
     for index, raw_query in enumerate(queries):
         if not isinstance(raw_query, dict):
             raise ValueError(f"queries[{index}] 必须是对象")
@@ -590,20 +486,38 @@ def search_many(
         content = str(raw_query.get("content") or "").strip()
         if not title and not content:
             raise ValueError(f"queries[{index}] 至少需要 title 或 content")
+        prepared_queries.append((
+            title, content,
+            compile_query(title, match_mode, regex, case_sensitive=case_sensitive) if title else None,
+            compile_query(content, match_mode, regex, case_sensitive=case_sensitive) if content else None,
+        ))
+    if match_mode == "fulltext" and not regex:
+        return {
+            "ok": True, "action": "search_many", "tier": tier, "timezone": "UTC",
+            "include_content": include_content, "engine": "sqlite-fts5/simple",
+            "results": _fulltext_results(root, user, tier, [(t, c) for t, c, _, _ in prepared_queries],
+                                         normalized_limit, normalized_context, include_content),
+        }
+    entries = _read_entries(root, user, config, tier)
+    results: list[dict[str, Any]] = []
+    for index, (title, content, title_pattern, content_pattern) in enumerate(prepared_queries):
         matches: list[dict[str, Any]] = []
         for current_tier, item in entries:
             title_detail = (
-                _search_match(
+                search_match(
                     title,
                     Path(str(item["filename"])).stem,
-                    case_sensitive=case_sensitive,
+                    case_sensitive=case_sensitive, match_mode=match_mode, pattern=title_pattern,
                 )
                 if title
                 else None
             )
             item_content = str(item.get("content") or "")
             content_detail = (
-                _search_match(content, item_content, case_sensitive=case_sensitive)
+                search_match(
+                    content, item_content, case_sensitive=case_sensitive,
+                    match_mode=match_mode, pattern=content_pattern,
+                )
                 if content
                 else None
             )
@@ -662,7 +576,7 @@ def search_many(
             }
         )
     return {
-        "action": "search_many",
+        "ok": True, "action": "search_many",
         "tier": tier,
         "timezone": "UTC",
         "include_content": include_content,
@@ -685,14 +599,14 @@ def delete_fragment(
     location = store.locate_in_tier(tier, normalized)
     if location is None:
         return {
-            "action": "delete",
+            "ok": True, "action": "delete",
             "tier": tier,
             "filename": normalized,
             "deleted": False,
         }
     deleted = store.delete_fragment(tier, location.filename)
     return {
-        "action": "delete",
+        "ok": True, "action": "delete",
         "tier": tier,
         "memory_ref": _memory_ref(tier, location.filename),
         "filename": location.filename,
@@ -726,7 +640,7 @@ def add_fragment(
             raise FileExistsError("临时重要记忆文件已存在，请使用 edit")
         write_important_memory(root, user, body)
         return {
-            "action": "add",
+            "ok": True, "action": "add",
             "tier": tier,
             "memory_ref": _memory_ref(tier, IMPORTANT_FILENAME),
             "filename": IMPORTANT_FILENAME,
@@ -736,7 +650,7 @@ def add_fragment(
     item = store.create_fragment(tier, normalized, body)
     normalized = str(item["filename"])
     return {
-        "action": "add",
+        "ok": True, "action": "add",
         "tier": tier,
         "memory_ref": _memory_ref(tier, normalized),
         "filename": normalized,
@@ -767,7 +681,7 @@ def edit_fragment(
             raise FileNotFoundError("临时重要记忆文件不存在")
         write_important_memory(root, user, body)
         return {
-            "action": "edit",
+            "ok": True, "action": "edit",
             "tier": tier,
             "memory_ref": _memory_ref(tier, IMPORTANT_FILENAME),
             "filename": IMPORTANT_FILENAME,
@@ -786,7 +700,7 @@ def edit_fragment(
         now=utc_now(),
     )
     return {
-        "action": "edit",
+        "ok": True, "action": "edit",
         "tier": tier,
         "timezone": "UTC",
         "memory_ref": _memory_ref(tier, target_name),
