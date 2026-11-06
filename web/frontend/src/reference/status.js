@@ -90,11 +90,11 @@ export function renderStatusPage(ctx) {
     const names = {
       user_soul: '用户人格', global_soul: '全局人格', agents: '运行手册',
       global_agents: '全局子智能体', user_agents: '用户子智能体', plugins: '工具插件',
-      skills: '技能指令', knowledge: '知识库索引', permanent_memory: tr('永久记忆'),
+      skills: '技能指令', permanent_memory: tr('永久记忆'),
       important_memory: tr('临时重要记忆'), task_plan: tr('任务计划'), expand_data: '拓展数据',
       perception: '感知数据',
       agents_manual: '运行手册', global_subagent_registry: '全局子智能体',
-      user_subagent_registry: '用户子智能体', knowledge_index: '知识库索引',
+      user_subagent_registry: '用户子智能体',
       'temporary_memory:half_year': tr('半年记忆'), 'temporary_memory:one_month': '月记忆',
       'temporary_memory:seven_days': '周记忆',
     };

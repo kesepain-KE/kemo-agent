@@ -26,7 +26,8 @@ describe('业务文档复用知识库放大预览', () => {
       user: 'kesepain', scope: 'user', relative_path: 'notes.md', content: document, size: document.length, updated_at: 1,
     })))
     renderPage('/knowledge')
-    fireEvent.click(await screen.findByText('个人笔记'))
+    fireEvent.click(await screen.findByRole('treeitem', { name: '用户' }))
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'notes.md' }))
     await screen.findByRole('heading', { name: '统一文档' })
     const preview = window.document.querySelector('.knowledge-document-preview .document-markdown')!
     const html = preview.innerHTML
@@ -36,6 +37,7 @@ describe('业务文档复用知识库放大预览', () => {
     expect(within(preview as HTMLElement).getByRole('button', { name: '复制' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: '放大预览' }))
     const dialog = await screen.findByRole('dialog')
+    expect(dialog.querySelector('.modal')).toHaveClass('modal-knowledge')
     await within(dialog).findByRole('heading', { name: '统一文档' })
     expect(dialog.querySelector('.document-markdown')?.innerHTML).toBe(html)
     fireEvent.click(within(dialog).getAllByRole('button', { name: '关闭' })[0])
