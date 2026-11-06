@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, StrictBool, StrictStr, model_validator
 
@@ -108,8 +108,14 @@ class TextBody(BaseModel):
     content: str
 
 
-class KnowledgeClassificationBody(BaseModel):
-    category: str = Field(default="", max_length=80)
+class KnowledgeEntryBody(BaseModel):
+    kind: Literal["file", "directory"]
+
+
+class KnowledgeTransferBody(BaseModel):
+    action: Literal["copy", "move"]
+    target_scope: Literal["user", "shared", "global"]
+    target_path: str
 
 
 class MemoryWriteBody(BaseModel):

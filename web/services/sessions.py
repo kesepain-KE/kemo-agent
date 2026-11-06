@@ -504,7 +504,7 @@ class SessionServiceMixin:
             "source": normalized_source or "all",
             "deleted": True,
             "deleted_sessions": deleted_sessions,
-            "raw_preserved": True,
+            "raw_preserved": False,
         }
 
     def history(

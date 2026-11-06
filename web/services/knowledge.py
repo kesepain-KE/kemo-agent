@@ -1,38 +1,21 @@
-"""三层知识文件领域服务。"""
+"""三层知识库：真实目录、文本预览与文件操作。"""
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from web.service import WebRunService
 
 import json
 import os
 from pathlib import Path
-from typing import Any
+import shutil
+from typing import Any, TYPE_CHECKING
 
-from run.config import load_config
-from run.config import IGNORED_RUNTIME_DIRECTORY_NAMES, iter_files
-from run.config import MainAgentSourcePolicy
-from run.config import (
-    CLASSIFICATION_FILENAME,
-    KnowledgeClassificationError,
-    UNCATEGORIZED,
-    classification_path,
-    ensure_classification_file,
-    read_classifications,
-    remove_classification,
-    rename_classification,
-    set_classification,
-)
+from run.config import IGNORED_RUNTIME_DIRECTORY_NAMES, MainAgentSourcePolicy, load_config
 from web.constants import _KNOWLEDGE_SCOPES, _KNOWLEDGE_SUFFIXES
 from web.errors import ConflictError, InvalidRequestError, NotFoundError
-from web.services._io import (
-    atomic_write as _atomic_write,
-    validated_text as _validated_text,
-)
+from web.services._io import atomic_write as _atomic_write, validated_text as _validated_text
 from web.services._paths import _reject_link_path, _safe_relative_target
+
+if TYPE_CHECKING:
+    from web.service import WebRunService
 
 
 class KnowledgeServiceMixin:
@@ -42,99 +25,70 @@ class KnowledgeServiceMixin:
 
     def knowledge(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
-        config = load_config(name, self.root)
-        source_policy = MainAgentSourcePolicy.from_config(config)
-        policy_summary = source_policy.public_summary()
+        policy = MainAgentSourcePolicy.from_config(load_config(name, self.root))
+        roots = []
+        directories = []
         documents = []
-        classifications: dict[str, dict[str, str]] = {}
-        classification_errors: list[str] = []
-        for scope, base in (
-            ("user", self.root / "users" / name / "knowledge"),
-            ("shared", self.root / "knowledge" / "share"),
-            ("global", self.root / "knowledge" / "global"),
-        ):
-            try:
-                ensure_classification_file(base)
-                classifications[scope] = read_classifications(base)
-            except KnowledgeClassificationError as exc:
-                classifications[scope] = {}
-                classification_errors.append(f"{scope} 层分类标记不可用：{exc}")
-            for path in iter_files(base, suffixes={".md", ".txt", ".json"}):
-                try:
-                    stat = path.stat()
-                    size = stat.st_size
-                    updated_at = stat.st_mtime
-                except OSError:
-                    size = 0
-                    updated_at = 0
-                relative_path = path.relative_to(base).as_posix()
-                documents.append(
-                    {
+        for scope in ("user", "shared", "global"):
+            _, base = self._knowledge_root(name, scope)
+            active = scope in policy.direct_knowledge_scopes()
+            roots.append({
+                "scope": scope,
+                "relative_path": base.relative_to(self.root).as_posix(),
+                "absolute_path": str(base.resolve()),
+                "active_for_main_agent": active,
+            })
+            for current, dirs, files in os.walk(base, followlinks=False):
+                directory = Path(current)
+                dirs[:] = sorted(
+                    (item for item in dirs if self._knowledge_visible(directory / item)),
+                    key=str.casefold,
+                )
+                for item in dirs:
+                    target = directory / item
+                    directories.append({
                         "scope": scope,
-                        "relative_path": relative_path,
-                        "title": path.stem,
-                        "size": size,
-                        "updated_at": updated_at,
-                        "category": classifications.get(scope, {}).get(
-                            relative_path,
-                            UNCATEGORIZED,
-                        ),
-                        "active_for_main_agent": scope
-                        in source_policy.direct_knowledge_scopes(),
-                    }
-                )
-        category_counts: dict[str, dict[str, int]] = {
-            scope: {UNCATEGORIZED: 0} for scope in _KNOWLEDGE_SCOPES
-        }
-        category_counts["all"] = {UNCATEGORIZED: 0}
-        for document in documents:
-            category = str(document["category"])
-            for scope in ("all", document["scope"]):
-                counts = category_counts[scope]
-                counts[category] = counts.get(category, 0) + 1
-        categories = {
-            scope: [
-                {"name": category, "count": count}
-                for category, count in sorted(
-                    counts.items(),
-                    key=lambda item: (
-                        0 if item[0] == UNCATEGORIZED else 1,
-                        item[0].casefold(),
-                        item[0],
-                    ),
-                )
-            ]
-            for scope, counts in category_counts.items()
-        }
+                        "relative_path": target.relative_to(base).as_posix(),
+                        "name": item,
+                        "updated_at": target.stat().st_mtime,
+                    })
+                for item in sorted(files, key=str.casefold):
+                    target = directory / item
+                    if not self._knowledge_visible(target) or target.suffix.lower() not in _KNOWLEDGE_SUFFIXES:
+                        continue
+                    stat = target.stat()
+                    documents.append({
+                        "scope": scope,
+                        "relative_path": target.relative_to(base).as_posix(),
+                        "title": target.stem,
+                        "size": stat.st_size,
+                        "updated_at": stat.st_mtime,
+                        "active_for_main_agent": active,
+                    })
         return {
             "user": name,
             "enabled": True,
-            "retrieval": {
-                "mode": "index_only",
-                "full_index": True,
-            },
+            "retrieval": {"mode": "index_only", "full_index": True},
             "summary": {
                 "documents": len(documents),
-                "user_documents": sum(item["scope"] == "user" for item in documents),
-                "shared_documents": sum(item["scope"] == "shared" for item in documents),
-                "global_documents": sum(item["scope"] == "global" for item in documents),
+                **{f"{scope}_documents": sum(d["scope"] == scope for d in documents)
+                   for scope in _KNOWLEDGE_SCOPES},
             },
+            "roots": roots,
+            "directories": directories,
             "documents": documents,
-            "categories": categories,
-            "classification_file": CLASSIFICATION_FILENAME,
-            "classification_errors": classification_errors,
-            "source_policy": policy_summary,
+            "source_policy": policy.public_summary(),
         }
 
-    def _knowledge_classifications(self, user: Any, scope: Any) -> tuple[str, Path, dict[str, str]]:
-        name, root = self._knowledge_root(user, scope)
-        path = classification_path(root)
-        try:
-            _reject_link_path(root.resolve(), path)
-            ensure_classification_file(root)
-            return name, root, read_classifications(root)
-        except KnowledgeClassificationError as exc:
-            raise InvalidRequestError(f"{CLASSIFICATION_FILENAME} 格式无效：{exc}") from None
+    @staticmethod
+    def _knowledge_visible(path: Path) -> bool:
+        return (
+            not path.name.startswith(".")
+            and path.name.casefold() not in IGNORED_RUNTIME_DIRECTORY_NAMES
+            and path.name not in {"__pycache__", "classify.sql", "classify.sqlite3"}
+            and not path.is_symlink()
+            and not getattr(path, "is_junction", lambda: False)()
+        )
 
     def _knowledge_root(self, user: Any, scope: Any) -> tuple[str, Path]:
         name = self.require_user(user)
@@ -145,53 +99,44 @@ class KnowledgeServiceMixin:
             "shared": self.root / "knowledge" / "share",
             "global": self.root / "knowledge" / "global",
         }
-        return name, roots[scope]
+        base = roots[scope]
+        _reject_link_path(self.root.resolve(), base)
+        return name, base
 
-    def _knowledge_target(self, user: Any, scope: Any, path: Any) -> tuple[str, str, Path]:
+    def _knowledge_entry_target(self, user: Any, scope: Any, path: Any) -> tuple[str, str, Path]:
         name, root = self._knowledge_root(user, scope)
         relative, target = _safe_relative_target(root, path)
-        if any(
-            part.casefold() in IGNORED_RUNTIME_DIRECTORY_NAMES
-            for part in Path(relative).parts
-        ):
-            raise InvalidRequestError("知识图谱运行时目录不能作为知识文件访问或修改")
+        if relative == ".":
+            raise InvalidRequestError("不能修改知识库根目录")
         _reject_link_path(root.resolve(), target)
-        if Path(relative).suffix.lower() not in _KNOWLEDGE_SUFFIXES:
-            raise InvalidRequestError("知识文件只允许 .md、.txt 或 .json")
+        if any(not self._knowledge_visible(root.joinpath(*Path(relative).parts[:index + 1]))
+               for index in range(len(Path(relative).parts))):
+            raise InvalidRequestError("知识库内部数据或隐藏路径不能作为知识条目操作")
         return name, str(scope), target
 
+    def _knowledge_target(self, user: Any, scope: Any, path: Any) -> tuple[str, str, Path]:
+        result = self._knowledge_entry_target(user, scope, path)
+        if result[2].suffix.lower() not in _KNOWLEDGE_SUFFIXES:
+            raise InvalidRequestError("知识文件只允许 .md、.txt 或 .json")
+        return result
+
     def knowledge_document(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
-        name, normalized_scope, target = self._knowledge_target(user, scope, path)
+        name, scope, target = self._knowledge_target(user, scope, path)
         if not target.is_file():
             raise NotFoundError(f"知识文件不存在：{path}")
         try:
             content = target.read_text("utf-8")
         except UnicodeDecodeError:
             raise InvalidRequestError("知识文件不是有效 UTF-8 文本") from None
-        _, root, classifications = self._knowledge_classifications(name, normalized_scope)
         return {
-            "user": name,
-            "scope": normalized_scope,
-            "relative_path": target.relative_to(
-                self._knowledge_root(name, normalized_scope)[1]
-            ).as_posix(),
-            "content": content,
-            "size": len(content.encode("utf-8")),
+            "user": name, "scope": scope,
+            "relative_path": target.relative_to(self._knowledge_root(name, scope)[1]).as_posix(),
+            "content": content, "size": len(content.encode("utf-8")),
             "updated_at": target.stat().st_mtime,
-            "category": classifications.get(
-                target.relative_to(root).as_posix(),
-                UNCATEGORIZED,
-            ),
         }
 
-    def put_knowledge_document(
-        self,
-        user: Any,
-        scope: Any,
-        path: Any,
-        content: Any,
-    ) -> dict[str, Any]:
-        name, normalized_scope, target = self._knowledge_target(user, scope, path)
+    def put_knowledge_document(self, user: Any, scope: Any, path: Any, content: Any) -> dict[str, Any]:
+        name, scope, target = self._knowledge_target(user, scope, path)
         text = _validated_text(content)
         if target.suffix.lower() == ".json":
             try:
@@ -199,135 +144,87 @@ class KnowledgeServiceMixin:
             except json.JSONDecodeError as exc:
                 raise InvalidRequestError(f"JSON 知识文件格式无效：{exc.msg}") from None
         _atomic_write(target, text.encode("utf-8"))
-        ensure_classification_file(self._knowledge_root(name, normalized_scope)[1])
         return {
-            "user": name,
-            "scope": normalized_scope,
-            "relative_path": target.relative_to(
-                self._knowledge_root(name, normalized_scope)[1]
-            ).as_posix(),
-            "size": len(text.encode("utf-8")),
-            "updated": True,
-            "index_refresh": "next_request",
+            "user": name, "scope": scope,
+            "relative_path": target.relative_to(self._knowledge_root(name, scope)[1]).as_posix(),
+            "size": len(text.encode("utf-8")), "updated": True, "index_refresh": "next_request",
         }
 
-    def set_knowledge_category(
-        self,
-        user: Any,
-        scope: Any,
-        path: Any,
-        category: Any,
+    def create_knowledge_entry(self, user: Any, scope: Any, path: Any, kind: str) -> dict[str, Any]:
+        name, scope, target = self._knowledge_entry_target(user, scope, path)
+        if target.exists():
+            raise ConflictError(f"目标已存在：{path}")
+        if kind == "directory":
+            target.mkdir(parents=True)
+        elif kind == "file":
+            self._knowledge_target(name, scope, path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("x", encoding="utf-8") as stream:
+                stream.write("{}\n" if target.suffix.lower() == ".json" else "")
+        else:
+            raise InvalidRequestError("kind 只允许 file 或 directory")
+        return {"user": name, "scope": scope, "relative_path": path, "created": True}
+
+    def _validate_knowledge_subtree(self, target: Path) -> None:
+        # A recursive action must not silently affect hidden runtime data or links.
+        for current, dirs, files in os.walk(target, followlinks=False):
+            for item in (*dirs, *files):
+                if not self._knowledge_visible(Path(current) / item):
+                    raise InvalidRequestError("目录包含内部数据、隐藏文件或链接，不能整体操作")
+
+    def transfer_knowledge_entry(
+        self, user: Any, scope: Any, path: Any, *, action: str,
+        target_scope: str, target_path: str,
     ) -> dict[str, Any]:
-        name, normalized_scope, target = self._knowledge_target(user, scope, path)
-        if not target.is_file():
-            raise NotFoundError(f"知识文件不存在：{path}")
-        root = self._knowledge_root(name, normalized_scope)[1]
-        try:
-            _reject_link_path(root.resolve(), classification_path(root))
-            assigned = set_classification(
-                root,
-                target.relative_to(root).as_posix(),
-                category,
-            )
-        except KnowledgeClassificationError as exc:
-            raise InvalidRequestError(f"分类标记无效：{exc}") from None
+        name, scope, source = self._knowledge_entry_target(user, scope, path)
+        _, target_scope, target = self._knowledge_entry_target(name, target_scope, target_path)
+        if not source.exists():
+            raise NotFoundError(f"知识条目不存在：{path}")
+        if target.exists():
+            raise ConflictError(f"目标已存在：{target_path}")
+        if target.is_relative_to(source):
+            raise InvalidRequestError("不能将目录复制或移动到自身内部")
+        if source.is_dir():
+            self._validate_knowledge_subtree(source)
+        else:
+            self._knowledge_target(name, scope, path)
+            self._knowledge_target(name, target_scope, target_path)
+        if action not in {"copy", "move"}:
+            raise InvalidRequestError("action 只允许 copy 或 move")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if action == "move":
+            shutil.move(str(source), str(target))
+        elif source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
         return {
-            "user": name,
-            "scope": normalized_scope,
-            "relative_path": target.relative_to(root).as_posix(),
-            "category": assigned,
-            "updated": True,
-            "classification_file": CLASSIFICATION_FILENAME,
+            "user": name, "scope": scope, "relative_path": path,
+            "target_scope": target_scope, "new_relative_path": target_path, "action": action,
         }
+
+    def delete_knowledge_entry(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
+        name, scope, target = self._knowledge_entry_target(user, scope, path)
+        if target.is_dir():
+            self._validate_knowledge_subtree(target)
+            shutil.rmtree(target)
+        elif target.is_file():
+            self._knowledge_target(name, scope, path)
+            target.unlink()
+        else:
+            raise NotFoundError(f"知识条目不存在：{path}")
+        return {"user": name, "scope": scope, "relative_path": path, "deleted": True}
 
     def delete_knowledge_document(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
-        name, normalized_scope, target = self._knowledge_target(user, scope, path)
+        _, _, target = self._knowledge_target(user, scope, path)
         if not target.is_file():
             raise NotFoundError(f"知识文件不存在：{path}")
-        root = self._knowledge_root(name, normalized_scope)[1]
-        relative_path = target.relative_to(root).as_posix()
-        try:
-            # Validate the sidecar before changing the document.  A malformed
-            # classification file must never be silently discarded.
-            read_classifications(root)
-            original_bytes = target.read_bytes()
-        except (KnowledgeClassificationError, OSError) as exc:
-            if isinstance(exc, KnowledgeClassificationError):
-                raise InvalidRequestError(
-                    f"{CLASSIFICATION_FILENAME} 格式无效：{exc}"
-                ) from None
-            raise InvalidRequestError(f"知识文件无法读取：{exc}") from None
-        try:
-            target.unlink()
-            remove_classification(root, relative_path)
-        except (KnowledgeClassificationError, OSError) as exc:
-            # Keep the document and its metadata in sync if the sidecar
-            # update fails after the document has been removed.
-            if not target.exists():
-                try:
-                    target.write_bytes(original_bytes)
-                except OSError:
-                    pass
-            if isinstance(exc, KnowledgeClassificationError):
-                raise InvalidRequestError(
-                    f"{CLASSIFICATION_FILENAME} 格式无效：{exc}"
-                ) from None
-            raise InvalidRequestError(f"知识文件删除失败：{exc}") from None
-        return {
-            "user": name,
-            "scope": normalized_scope,
-            "relative_path": relative_path,
-            "deleted": True,
-        }
+        return self.delete_knowledge_entry(user, scope, path)
 
-    def move_knowledge_document(
-        self,
-        user: Any,
-        scope: Any,
-        path: Any,
-        new_path: Any,
-    ) -> dict[str, Any]:
-        name, normalized_scope, source = self._knowledge_target(user, scope, path)
-        _, _, target = self._knowledge_target(user, scope, new_path)
-        if not source.is_file():
+    def move_knowledge_document(self, user: Any, scope: Any, path: Any, new_path: Any) -> dict[str, Any]:
+        _, _, target = self._knowledge_target(user, scope, path)
+        if not target.is_file():
             raise NotFoundError(f"知识文件不存在：{path}")
-        if target.exists():
-            raise ConflictError(f"知识文件已存在：{new_path}")
-        root = self._knowledge_root(name, normalized_scope)[1]
-        source_relative = source.relative_to(root).as_posix()
-        target_relative = target.relative_to(root).as_posix()
-        try:
-            # Validate before moving so a malformed sidecar cannot leave the
-            # document at a new path with stale metadata.
-            read_classifications(root)
-        except KnowledgeClassificationError as exc:
-            raise InvalidRequestError(f"{CLASSIFICATION_FILENAME} 格式无效：{exc}") from None
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.replace(source, target)
-            rename_classification(
-                root,
-                source_relative,
-                target_relative,
-            )
-        except KnowledgeClassificationError as exc:
-            try:
-                if target.exists() and not source.exists():
-                    os.replace(target, source)
-            except OSError:
-                pass
-            raise InvalidRequestError(f"{CLASSIFICATION_FILENAME} 格式无效：{exc}") from None
-        except OSError as exc:
-            try:
-                if target.exists() and not source.exists():
-                    os.replace(target, source)
-            except OSError:
-                pass
-            raise InvalidRequestError(f"知识文件移动失败：{exc}") from None
-        return {
-            "user": name,
-            "scope": normalized_scope,
-            "relative_path": source_relative,
-            "new_relative_path": target_relative,
-            "moved": True,
-        }
+        self._knowledge_target(user, scope, new_path)
+        return {**self.transfer_knowledge_entry(user, scope, path, action="move",
+                                               target_scope=scope, target_path=new_path), "moved": True}

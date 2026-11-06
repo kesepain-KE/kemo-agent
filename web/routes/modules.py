@@ -12,7 +12,8 @@ from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.responses import Response
 
 from web.schemas import (
-    KnowledgeClassificationBody,
+    KnowledgeEntryBody,
+    KnowledgeTransferBody,
     ModulePanelActionBody,
     ModulePanelValuesBody,
     SkillToggleBody,
@@ -121,14 +122,21 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
     ) -> dict[str, Any]:
         return backend.put_knowledge_document(user, scope, path, body.content)
 
-    @app.patch("/api/users/{user}/knowledge/{scope}/classification")
-    async def classify_knowledge_document(
-        user: str,
-        scope: str,
-        body: KnowledgeClassificationBody,
-        path: str = Query(...),
-    ) -> dict[str, Any]:
-        return backend.set_knowledge_category(user, scope, path, body.category)
+    @app.post("/api/users/{user}/knowledge/{scope}/entry")
+    async def create_knowledge_entry(user: str, scope: str, body: KnowledgeEntryBody,
+                                     path: str = Query(...)) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.create_knowledge_entry, user, scope, path, body.kind)
+
+    @app.patch("/api/users/{user}/knowledge/{scope}/entry")
+    async def transfer_knowledge_entry(user: str, scope: str, body: KnowledgeTransferBody,
+                                       path: str = Query(...)) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.transfer_knowledge_entry, user, scope, path,
+                                      action=body.action, target_scope=body.target_scope,
+                                      target_path=body.target_path)
+
+    @app.delete("/api/users/{user}/knowledge/{scope}/entry")
+    async def delete_knowledge_entry(user: str, scope: str, path: str = Query(...)) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.delete_knowledge_entry, user, scope, path)
 
     @app.delete("/api/users/{user}/knowledge/{scope}/document")
     async def delete_knowledge_document(

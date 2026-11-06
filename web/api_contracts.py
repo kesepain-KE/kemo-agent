@@ -161,10 +161,26 @@ class KnowledgeDocumentResponse(ResponseObject):
     active_for_main_agent: bool
 
 
+class KnowledgeRootResponse(ResponseObject):
+    scope: str
+    relative_path: str
+    absolute_path: str
+    active_for_main_agent: bool
+
+
+class KnowledgeDirectoryResponse(ResponseObject):
+    scope: str
+    relative_path: str
+    name: str
+    updated_at: float
+
+
 class KnowledgeResponse(ResponseObject):
     user: str
     summary: KnowledgeSummaryResponse
     documents: list[KnowledgeDocumentResponse]
+    roots: list[KnowledgeRootResponse]
+    directories: list[KnowledgeDirectoryResponse]
 
 
 class MemoryResponse(ResponseObject):

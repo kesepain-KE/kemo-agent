@@ -18,7 +18,8 @@ def tasks(backend, user, *, source="", session_id="", page=1, page_size=20):
     ledger = TaskLedger(backend.root, user)
     if not ledger.path.exists():
         return {"tasks": [], "total": 0, "page": page, "total_pages": 1}
-    records, total = ledger.records(source, session_id, parent="", offset=(page - 1) * page_size, limit=page_size)
+    records, total = ledger.records(source, session_id, parent="", with_children=True,
+                                   offset=(page - 1) * page_size, limit=page_size)
     result = []
     for parent in records:
         children, child_total = ledger.records(parent["source"], parent["session_id"], parent=parent["id"], limit=1000)

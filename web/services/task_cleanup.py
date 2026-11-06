@@ -82,7 +82,8 @@ class TaskCleanupServiceMixin:
         with LogStore(self.root)._connection() as db:
             for row in db.execute(
                     """SELECT task_id, event_key, occurred_at FROM cron_execution_logs
-                       WHERE user=? AND status='completed' ORDER BY id DESC""", (user,)).fetchall():
+                       WHERE user=? AND status IN ('completed','success')
+                       ORDER BY id DESC""", (user,)).fetchall():
                 if row["task_id"] in system_ids:
                     continue
                 records.append({"kind": "cron", "record_id": f"{row['task_id']}:{row['event_key']}",
