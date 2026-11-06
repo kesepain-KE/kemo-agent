@@ -17,43 +17,11 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 
 优先使用满足需求的最轻 action。已有明确 URL 时不要重新 `search`；只需站点目录时不要直接 `crawl`；只有复杂、多来源、需要成文报告的任务才使用 `research`。
 
-## 参数速查
+## 使用边界
 
-### 关键参数
-
-| 参数 | 可用值 | 效果 |
-|---|---|---|
-| `include_answer` | `"true"` / `"false"` / `"basic"` / `"advanced"` | `search` 的 AI 摘要：开启、关闭、简短或深度；默认 `"basic"` |
-| `include_raw_content` | `"true"` / `"false"` / `"markdown"` / `"text"` | `search` 是否附带原文，以及原文格式；默认 `"false"` |
-| `search_depth` | `"basic"` / `"advanced"` / `"fast"` / `"ultra-fast"` | `search` 的速度和深度；日常用 `basic`，严格查证用 `advanced` |
-| `topic` | `"general"` / `"news"` / `"finance"` | `search` 的话题分类；默认 `general` |
-| `time_range` | `"day"` / `"week"` / `"month"` / `"year"` | `search` 的相对时间范围 |
-| `extract_depth` | `"basic"` / `"advanced"` | `extract` / `crawl` 的正文提取深度；默认 `basic` |
-| `format` | `"markdown"` / `"text"` | `extract` / `crawl` 的正文格式；默认 `markdown` |
-| `model` | `"mini"` / `"pro"` / `"auto"` | `research` 模型：快速、深度或自动选择；默认 `auto` |
-| `citation_format` | `"numbered"` / `"mla"` / `"apa"` / `"chicago"` | `research` 引用格式；默认 `numbered` |
-
-`include_answer` 和 `include_raw_content` 在工具 schema 中是字符串参数，因此调用时应使用上表中的字符串值，而不是 JSON 布尔值。
-
-### 搜索精度选择
-
-| 场景 | `search_depth` |
-|---|---|
-| 极低延迟、只需快速线索 | `ultra-fast` 或 `fast` |
-| 日常搜索、寻找资料 | `basic`（默认） |
-| 严格查证、多源交叉验证 | `advanced` |
-
-### AI 摘要选择
-
-| 场景 | `include_answer` |
-|---|---|
-| 只需要链接，不需要 Tavily 生成答案 | `"false"` |
-| 快速摘要 | `"basic"`（默认） |
-| 详细综合分析 | `"advanced"` |
-
-### URL 与列表参数
-
-`urls`、`include_domains`、`exclude_domains`、`select_paths`、`exclude_paths` 和 `select_domains` 使用逗号分隔字符串。`urls` 在 `extract` 中可包含多个地址，在 `crawl` / `map` 中只使用第一个入口地址。
+参数、取值和默认值以工具 schema 为准。`urls`、`include_domains`、`exclude_domains`、
+`select_paths`、`exclude_paths` 和 `select_domains` 使用逗号分隔字符串；`urls` 在
+`extract` 中可包含多个地址，在 `crawl` / `map` 中只使用第一个入口地址。
 
 ## 典型示例
 
@@ -65,7 +33,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
   "query": "2026年 AI Agent 框架对比",
   "max_results": 5,
   "search_depth": "basic",
-  "include_answer": "basic"
+  "answer": "basic"
 }
 ```
 
@@ -227,7 +195,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 | 字段 | 出现位置 | 说明 |
 |---|---|---|
 | `content_truncated` | `search.results[]` | `content` 搜索片段是否超过 10000 字符 |
-| `raw_content_truncated` | `search.results[]` | 启用 `include_raw_content` 后，`raw_content` 是否超过 10000 字符 |
+| `raw_content_truncated` | `search.results[]` | `raw_content` 不是 `none` 时，原文是否超过 10000 字符 |
 | `content_truncated` | `extract.results[]` / `crawl.results[]` | `raw_content` 是否超过 10000 字符 |
 | `truncated` | `research` | 研究报告是否超过 100000 字符；流式和轮询模式均可能出现 |
 
@@ -260,15 +228,23 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
       "query": {"type": "string", "description": "搜索关键词(search) 或聚焦查询(extract)"},
       "input": {"type": "string", "description": "research 的研究课题"},
       "urls": {"type": "string", "description": "extract/crawl/map 的 URL，多个地址用逗号分隔"},
-      "search_depth": {"type": "string", "enum": ["basic", "advanced", "fast", "ultra-fast"], "description": "搜索深度，默认 basic。fast=快速，basic=日常，advanced=严格查证"},
+      "search_depth": {
+        "type": "string",
+        "enum": ["basic", "advanced", "fast", "ultra-fast"],
+        "description": "搜索深度，默认 basic。fast=快速，basic=日常，advanced=严格查证"
+      },
       "topic": {"type": "string", "enum": ["general", "news", "finance"], "description": "话题分类，默认 general"},
       "time_range": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "search 相对时间范围"},
       "start_date": {"type": "string", "description": "search 起始日期 YYYY-MM-DD"},
       "end_date": {"type": "string", "description": "search 结束日期 YYYY-MM-DD"},
       "days": {"type": "integer", "minimum": 0, "description": "search 最近 N 天"},
       "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "description": "search 最多返回条数，默认 5"},
-      "include_answer": {"type": "string", "description": "search AI 摘要: true=开启, false=关闭, basic=简短, advanced=深度"},
-      "include_raw_content": {"type": "string", "description": "search 原文: true=返回, false=不返回, markdown=保留格式, text=纯文本"},
+      "answer": {
+        "type": "string",
+        "enum": ["none", "basic", "advanced"],
+        "description": "search AI 摘要：none=关闭，basic=简短，advanced=深度；默认 basic"
+      },
+      "raw_content": {"type": "string", "enum": ["none", "markdown", "text"], "description": "search 原文格式；none=不返回，默认 none"},
       "include_images": {"type": "boolean", "description": "search/extract/crawl 是否返回图片"},
       "include_image_descriptions": {"type": "boolean", "description": "search 是否返回图片描述"},
       "include_favicon": {"type": "boolean", "description": "是否返回站点图标"},
@@ -288,7 +264,11 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
       "select_domains": {"type": "string", "description": "crawl/map 域名白名单，逗号分隔"},
       "allow_external": {"type": "boolean", "description": "crawl/map 是否允许外部域名"},
       "model": {"type": "string", "enum": ["mini", "pro", "auto"], "description": "research 模型：mini=快速, pro=深度, auto=自动"},
-      "citation_format": {"type": "string", "enum": ["numbered", "mla", "apa", "chicago"], "description": "research 引用格式，默认 numbered"},
+      "citation_format": {
+        "type": "string",
+        "enum": ["numbered", "mla", "apa", "chicago"],
+        "description": "research 引用格式，默认 numbered"
+      },
       "output_schema": {"type": "string", "description": "research 结构化输出 JSON Schema 字符串"},
       "stream": {"type": "boolean", "description": "research 是否消费流式结果"}
     },
@@ -297,6 +277,7 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
   },
   "version": "1.1.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "external"
 }
 ```

@@ -39,7 +39,7 @@ def _get_client() -> SearchClient:
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
-            "网络搜索尚未配置：请在项目 .env 中设置 TAVILY_API_KEY，"
+            "网络搜索尚未配置：请在项目 kemo.yaml 中设置 TAVILY_API_KEY，"
             "然后重启智能体。获取密钥：https://app.tavily.com/"
         )
     if not HAS_TAVILY or TavilyClient is None:
@@ -57,18 +57,22 @@ def _csv(value: Any) -> list[str] | None:
     return items or None
 
 
-def _boolish(value: Any, *, default: bool | str = False) -> bool | str:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().casefold()
-        if normalized in {"basic", "advanced", "markdown", "text"}:
-            return normalized
-        if normalized in {"true", "1", "yes", "on"}:
-            return True
-        if normalized in {"false", "0", "no", "off", ""}:
-            return False
-    return default
+def _search_answer_mode(value: Any) -> str:
+    mode = "basic" if value is None else value
+    if not isinstance(mode, str) or mode not in {"none", "basic", "advanced"}:
+        raise ValueError(
+            "answer 只接受 none / basic / advanced（替代原 include_answer）"
+        )
+    return mode
+
+
+def _search_raw_content_mode(value: Any) -> str:
+    mode = "none" if value is None else value
+    if not isinstance(mode, str) or mode not in {"none", "markdown", "text"}:
+        raise ValueError(
+            "raw_content 只接受 none / markdown / text（替代原 include_raw_content）"
+        )
+    return mode
 
 
 def _content(value: Any, limit: int = _CONTENT_LIMIT) -> tuple[str, bool]:
@@ -77,14 +81,24 @@ def _content(value: Any, limit: int = _CONTENT_LIMIT) -> tuple[str, bool]:
 
 
 def _search(client: SearchClient, timeout: float, **kwargs: Any) -> dict[str, Any]:
+    if "include_answer" in kwargs:
+        raise ValueError(
+            "answer 只接受 none / basic / advanced（替代原 include_answer）"
+        )
+    if "include_raw_content" in kwargs:
+        raise ValueError(
+            "raw_content 只接受 none / markdown / text（替代原 include_raw_content）"
+        )
     query = str(kwargs.get("query") or "").strip()
     if not query:
         raise ValueError("search 需要 query 参数")
+    answer_mode = _search_answer_mode(kwargs.get("answer"))
+    raw_content_mode = _search_raw_content_mode(kwargs.get("raw_content"))
     params: dict[str, Any] = {
         "query": query,
         "max_results": max(1, min(int(kwargs.get("max_results") or 5), 20)),
-        "include_answer": _boolish(kwargs.get("include_answer"), default="basic"),
-        "include_raw_content": _boolish(kwargs.get("include_raw_content"), default=False),
+        "include_answer": answer_mode if answer_mode != "none" else False,
+        "include_raw_content": raw_content_mode if raw_content_mode != "none" else False,
         "include_images": bool(kwargs.get("include_images", False)),
         "timeout": timeout,
     }

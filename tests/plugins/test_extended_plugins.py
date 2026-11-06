@@ -51,14 +51,14 @@ from run.tools.background_jobs import (
 )
 from run.tools.background_worker import MAX_LOG_BYTES, _capture_stream
 from run.scheduler import CronStore
-from run.tools import discover_tools, validate_arguments
+from run.tools import discover_tools, execute_tool, validate_arguments
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_nineteen_native_plugins(self) -> None:
+    def test_repository_discovers_all_twenty_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
@@ -71,7 +71,8 @@ class PluginManifestTests(unittest.TestCase):
                 "file",
                 "get_current_time",
                 "history_search",
-                "kemo_graph",
+                "kemo_graph_read",
+                "kemo_graph_write",
                 "memory_manage",
                 "multimodal",
                 "network",
@@ -94,7 +95,72 @@ class PluginManifestTests(unittest.TestCase):
             )
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 19)
+        self.assertEqual(len(registry.tools), 20)
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(
+                    registry.schemas(),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "4fd89475632e421dc7fb0866ee26cfe1313583debe075403ded5a831464ee468",
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(
+                    list(registry.tools),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "35d71ef8fbeed49737fcc55a6c0ff17b067774a1f0288617e98b822a62fdacf4",
+        )
+        self.assertTrue(
+            all(
+                manifest.tool.get("permission") in {"read", "write", "delete", "external"}
+                for manifest in manifests
+            )
+        )
+        self.assertEqual(
+            registry.get("kemo_graph_read").permission,
+            "read",
+        )
+        self.assertEqual(
+            registry.get("kemo_graph_write").permission,
+            "write",
+        )
+        self.assertNotIn(
+            "permission",
+            json.dumps(registry.schemas(), ensure_ascii=False),
+        )
+        self.assertTrue(
+            all(tool.permission is None for tool in registry.protocol_tools())
+        )
+        self.assertEqual(
+            set(registry.get("file").input_schema["properties"]["mode"]["enum"]),
+            {"name", "content"},
+        )
+        web_schema = registry.get("web_search").input_schema["properties"]
+        self.assertEqual(
+            set(web_schema["answer"]["enum"]),
+            {"none", "basic", "advanced"},
+        )
+        self.assertEqual(
+            set(web_schema["raw_content"]["enum"]),
+            {"none", "markdown", "text"},
+        )
+
+    def test_graph_read_plugin_runs_through_isolated_tool_entrypoint(self) -> None:
+        registry = discover_tools(PROJECT_ROOT, "alice")
+        result = execute_tool(
+            registry.get("kemo_graph_read"),
+            {"action": "overview"},
+            context={"root": str(PROJECT_ROOT), "user": "alice"},
+            timeout=10,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["module"], "global:kemo_graph")
         expand_call = registry.get("expand_call")
         self.assertFalse(expand_call.strict)
         self.assertFalse(expand_call.openai_schema()["function"]["strict"])
@@ -270,7 +336,6 @@ class FilePluginTests(unittest.TestCase):
                 expected_old_text="\n".join(item["text"] for item in written["lines"]),
                 expected_hash=written["sha256"],
                 new_text="gamma\ndelta",
-                create_backup=False,
                 context=context,
             )
             self.assertTrue(edited["changed"])
@@ -395,7 +460,6 @@ class FilePluginTests(unittest.TestCase):
                 old_text="alpha",
                 content="gamma",
                 expected_count=1,
-                create_backup=False,
                 context=context,
             )
             self.assertTrue(edited["ok"])
@@ -478,7 +542,6 @@ class FilePluginTests(unittest.TestCase):
                         edit_mode="replace_text",
                         old_text="alpha\nbeta",
                         new_text="one\ntwo",
-                        create_backup=False,
                         context=context,
                     )
                     self.assertEqual(target.read_bytes(), expected)
@@ -493,7 +556,6 @@ class FilePluginTests(unittest.TestCase):
                 edit_mode="replace_text",
                 old_text="b\nc",
                 new_text="B\nC",
-                create_backup=False,
                 context=context,
             )
             self.assertEqual(mixed.read_bytes(), b"a\r\nB\nC\rd")
@@ -507,7 +569,6 @@ class FilePluginTests(unittest.TestCase):
                 edit_mode="replace_text",
                 old_text="alpha",
                 new_text="ALPHA",
-                create_backup=False,
                 context=context,
             )
             self.assertEqual(bom.read_bytes(), b"\xef\xbb\xbfALPHA\r\nbeta\r\n")
@@ -526,7 +587,6 @@ class FilePluginTests(unittest.TestCase):
                 line=1,
                 expected_old_text="A",
                 new_text="X\n",
-                create_backup=False,
                 context=context,
             )
             self.assertEqual(with_eof.read_bytes(), b"X\r\nB\r\n")
@@ -540,7 +600,6 @@ class FilePluginTests(unittest.TestCase):
                 line=2,
                 expected_old_text="B",
                 new_text="X\n",
-                create_backup=False,
                 context=context,
             )
             self.assertEqual(without_eof.read_bytes(), b"A\nX")
@@ -555,7 +614,6 @@ class FilePluginTests(unittest.TestCase):
                 end_line=2,
                 expected_old_text="A\nB",
                 new_text="X\nY\n",
-                create_backup=False,
                 context=context,
             )
             self.assertEqual(ranged.read_bytes(), b"X\r\nY\r\nC\r\n")
@@ -573,7 +631,6 @@ class FilePluginTests(unittest.TestCase):
                 edit_mode="replace_text",
                 old_text="alpha",
                 content="ALPHA",
-                create_backup=False,
                 context=context,
             )
             self.assertTrue(legacy["changed"])
@@ -583,7 +640,6 @@ class FilePluginTests(unittest.TestCase):
                 edit_mode="replace_text",
                 old_text=" beta",
                 new_text="",
-                create_backup=False,
                 context=context,
             )
             self.assertEqual(target.read_bytes(), b"ALPHA\n")
@@ -621,10 +677,21 @@ class FilePluginTests(unittest.TestCase):
                 context=context,
             )
             self.assertFalse(noop["changed"])
-            self.assertFalse(noop["backup_created"])
+            self.assertFalse((root / "edit.txt.bak").exists())
+            edited = run_file(
+                "edit",
+                target.name,
+                edit_mode="replace_text",
+                old_text="ALPHA",
+                new_text="changed",
+                context=context,
+            )
+            self.assertTrue(edited["changed"])
+            self.assertNotIn("backup_created", edited)
+            self.assertNotIn("backup_path", edited)
             self.assertFalse((root / "edit.txt.bak").exists())
 
-    def test_guarded_line_edits_explicit_deletion_and_versioned_backups(self) -> None:
+    def test_guarded_line_edits_explicit_deletion_without_backups(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             context = {"root": str(root)}
@@ -679,7 +746,7 @@ class FilePluginTests(unittest.TestCase):
                 context=context,
             )
             self.assertEqual(target.read_bytes(), b"A\r\nC\r\nexternal\r\n")
-            self.assertTrue(Path(first["backup_path"]).name.endswith(".bak"))
+            self.assertNotIn("backup_path", first)
 
             second = run_file(
                 "edit",
@@ -691,14 +758,8 @@ class FilePluginTests(unittest.TestCase):
                 context=context,
             )
             self.assertEqual(target.read_bytes(), b"A\r\n")
-            self.assertTrue(Path(second["backup_path"]).name.endswith(".bak.1"))
-            self.assertEqual(
-                (root / "guarded.txt.bak").read_bytes(),
-                before.replace(b"D", b"external"),
-            )
-            self.assertEqual(
-                (root / "guarded.txt.bak.1").read_bytes(), b"A\r\nC\r\nexternal\r\n"
-            )
+            self.assertNotIn("backup_path", second)
+            self.assertEqual(list(root.glob("guarded.txt.bak*")), [])
 
             with self.assertRaisesRegex(ValueError, "delete_range"):
                 run_file(
@@ -726,7 +787,6 @@ class FilePluginTests(unittest.TestCase):
                     edit_mode="replace_text",
                     old_text="before",
                     new_text="after",
-                    create_backup=False,
                     context=context,
                 )
             self.assertFalse(result["ok"])
@@ -758,6 +818,25 @@ class FilePluginTests(unittest.TestCase):
             )
             self.assertEqual(result["skipped_large"], ["large.txt"])
             self.assertFalse(result["truncated"])
+
+    def test_search_mode_accepts_only_name_and_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "needle.txt").write_text("needle in content", "utf-8")
+            context = {"root": str(root)}
+            by_name = run_file(
+                "search", ".", query="needle", mode="name", context=context
+            )
+            by_content = run_file(
+                "search", ".", query="needle", mode="content", context=context
+            )
+            self.assertEqual(len(by_name["results"]), 1)
+            self.assertEqual(len(by_content["results"]), 1)
+            rejected = run_file(
+                "search", ".", query="needle", mode="file", context=context
+            )
+            self.assertFalse(rejected["ok"])
+            self.assertIn("旧值 file、name 对应 name", rejected["error"])
 
     def test_hash_copy_and_move_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2431,7 +2510,7 @@ class WebSearchPluginTests(unittest.TestCase):
             patch("plugins.web_search.tool.TavilyClient") as client,
         ):
             with self.assertRaisesRegex(
-                RuntimeError, r"\.env.*TAVILY_API_KEY.*重启智能体"
+                RuntimeError, r"kemo\.yaml.*TAVILY_API_KEY.*重启智能体"
             ):
                 run_web_search("search", query="kemo", context={})
         client.assert_not_called()
@@ -2465,6 +2544,26 @@ class WebSearchPluginTests(unittest.TestCase):
         params = client.calls[0][1]
         self.assertEqual(params["include_domains"], ["example.com", "docs.example.com"])
         self.assertEqual(params["timeout"], 17.0)
+
+    def test_search_answer_and_raw_content_modes_and_rejects_old_parameters(self) -> None:
+        client = _FakeTavily()
+        with patch("plugins.web_search.tool._get_client", return_value=client):
+            run_web_search(
+                "search",
+                query="kemo",
+                answer="advanced",
+                raw_content="markdown",
+                context={},
+            )
+        params = client.calls[0][1]
+        self.assertEqual(params["include_answer"], "advanced")
+        self.assertEqual(params["include_raw_content"], "markdown")
+
+        with patch("plugins.web_search.tool._get_client", return_value=client):
+            with self.assertRaisesRegex(ValueError, "替代原 include_answer"):
+                run_web_search(
+                    "search", query="kemo", include_answer="true", context={}
+                )
 
     def test_map_and_completed_research_use_current_sdk_shapes(self) -> None:
         client = _FakeTavily()

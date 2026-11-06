@@ -271,7 +271,7 @@ def _search_result(
 def _run_search(
     path: str,
     query: str = "",
-    mode: str = "text",
+    mode: str = "content",
     file_glob: str = "",
     max_results: int = 50,
     context_lines: int = 0,
@@ -281,6 +281,21 @@ def _run_search(
     encoding: str = "",
     **_kw: Any,
 ) -> dict[str, Any]:
+    if mode not in {"name", "content"}:
+        return _result(
+            False,
+            path=path,
+            action="search",
+            query=query,
+            results=[],
+            count=0,
+            skipped_large=[],
+            truncated=False,
+            error=(
+                f"mode 只接受 name / content；旧值 file、name 对应 name，"
+                f"旧值 text、content、code 对应 content。收到：{mode}"
+            ),
+        )
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"搜索路径不存在: {path}")
@@ -291,7 +306,7 @@ def _run_search(
     results: list[dict[str, Any]] = []
     walk_root = p if p.is_dir() else p.parent
 
-    if mode in ("file", "name"):
+    if mode == "name":
         pattern = query.replace("*", ".*").replace("?", ".") if not regex else query
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
@@ -322,8 +337,6 @@ def _run_search(
                         return _search_result(path, query, results, skipped_large, True)
         return _search_result(path, query, results, skipped_large, False)
 
-    if mode not in ("text", "content", "code"):
-        raise ValueError(f"未知搜索模式: {mode}")
     try:
         pattern = re.compile(query if regex else re.escape(query), re.IGNORECASE)
     except re.error as error:

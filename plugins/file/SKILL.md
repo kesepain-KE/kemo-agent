@@ -6,7 +6,7 @@
 ## 使用原则
 
 1. **未知大文件先检查**：先用 `stat` 查看文件大小。框架对单次工具内联结果执行 100,000 字符硬限制，超限正文会被完全省略并要求缩小范围；因此只有确认是小文件时才使用 `read`，其他情况使用 `read_range` 的 `start_line`/`end_line` 或 `tail` 分段读取。底层扫描默认最多 50 MB，超过限制还会返回 `truncated=true`。
-2. **编辑前后均要读取**：用 `edit` 前先读取并确认当前内容，优先使用 `read_range.lines` 中的显式行号；编辑后检查工具返回的 `preview`，必要时再次读取。`edit` 默认创建不覆盖的编号备份（`.bak`、`.bak.1`……），除非明确不需要，否则保持 `create_backup=true`。
+2. **编辑前后均要读取**：用 `edit` 前先读取并确认当前内容，优先使用 `read_range.lines` 中的显式行号；编辑后检查工具返回的 `preview`，必要时再次读取。
 3. **批量操作先确认范围**：移动、复制或删除前先用 `list_dir`/`tree_dir` 查看范围。目录结果带 `total`、`has_more` 和 `next_offset`；存在下一页时沿 `next_offset` 分页读取，不能把当前页误当完整目录。`delete` 只删除文件，不删除目录。
 4. **搜索与浏览分工**：找文件或搜索代码使用 `search`；查看目录树使用 `tree_dir`；查看单层目录使用 `list_dir`。
 5. **目录复制须显式授权**：复制目录必须设置 `recursive=true`。文件和目录都不能复制或移动到自身子目录。
@@ -17,35 +17,6 @@
 10. **行编辑必须带原文保护**：`replace_line`、`replace_range`、`delete_line`、`delete_range` 必须传入从最近一次读取获得的 `expected_old_text`；Tab、空格和文本必须一致。`insert` 必须传入最近一次读取返回的 `sha256` 作为 `expected_hash`。校验失败后重新读取，禁止猜行号继续修改。
 11. **不要手工补行尾**：`replace_line` 和 `replace_range` 会保留目标区域原有的行尾，`new_text` 末尾无需附加换行。编辑器会保留文件编码、BOM、LF/CRLF/CR 和末尾换行；未修改区域不会被统一改写。
 12. **新文件可直接安全续编**：`write` 成功后会返回完整文件 `sha256` 和有界的带行号 `lines` 快照。刚创建的文件可依据这些字段定位后续 `edit`；快照被截断时仍应先使用 `read_range` 获取目标区域，不能猜测行号。
-
-## 参数说明
-
-### 通用参数
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `path` | string | 操作路径（必填；相对路径基于运行上下文根目录） |
-| `encoding` | string | 文本编码，默认 UTF-8 |
-
-### 各 action 专属参数
-
-| action | 额外参数 |
-|--------|----------|
-| `exists` | 无 |
-| `stat` | 无 |
-| `read` | `max_bytes`：最大底层读取字节数，默认 50 MB、最高 512 MB；返回正文仍受框架 100,000 字符硬限制 |
-| `read_range` | `start_line`/`end_line`：行范围；`tail`：尾部 N 行；`max_lines`：最大返回行数；`max_bytes`：最大扫描字节数 |
-| `write` | `content`：覆盖写入内容 |
-| `append` | `content`：追加内容 |
-| `edit` | `edit_mode`、`new_text`（推荐）/`content`（兼容）、`old_text`、`expected_old_text`、`expected_hash`、`expected_count`、`line`、`column`、`end_line`、`end_column`、`create_backup` |
-| `list_dir` | `offset`、`limit`（默认 200、最高 1000） |
-| `tree_dir` | `max_depth`、`max_entries`（兼容页大小）、`offset`、`limit`、`include_hidden` |
-| `search` | `query`、`mode`、`file_glob`、`regex`、`max_results`、`context_lines`、`include_hidden`、`max_file_bytes` |
-| `hash` | `algorithm`：md5/sha1/sha256，默认 sha256 |
-| `copy` | `dst_path`、`overwrite`、`recursive`（目录必须为 true） |
-| `move` | `dst_path`、`overwrite` |
-| `make_dir` | `parents`：是否递归创建父目录，默认 true |
-| `delete` | 无；只能删除文件 |
 
 ## 输出字段
 
@@ -68,11 +39,9 @@
 | `type` | exists/stat/copy/move | file 或 dir |
 | `exists` | exists | 路径是否存在 |
 | `hash`/`algorithm` | hash | 十六进制哈希值及算法 |
-| `backup_created` | edit | 是否创建备份 |
-| `backup_path` | edit | 实际备份路径；连续编辑依次使用 `.bak`、`.bak.1` 等，不覆盖旧备份 |
 | `before_hash`/`after_hash` | edit | 编辑前后的 SHA256 |
 | `preview` | edit | 编辑后目标位置附近带行号的内容 |
-| `changed` | edit | 文件内容是否实际发生变化；无变化时不会写盘或创建备份 |
+| `changed` | edit | 文件内容是否实际发生变化 |
 | `replacements` | edit | 实际替换次数 |
 | `changed_lines` | edit | 本次触及的原始行数 |
 | `newline_style` | edit | 编辑后换行风格：LF、CRLF、CR、mixed 或 none |
@@ -98,42 +67,86 @@
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["exists", "read", "read_range", "write", "append", "edit", "list_dir", "tree_dir", "stat", "search", "hash", "copy", "move", "make_dir", "delete"],
+        "enum": [
+          "exists",
+          "read",
+          "read_range",
+          "write",
+          "append",
+          "edit",
+          "list_dir",
+          "tree_dir",
+          "stat",
+          "search",
+          "hash",
+          "copy",
+          "move",
+          "make_dir",
+          "delete"
+        ],
         "description": "操作类型"
       },
       "path": {"type": "string", "minLength": 1, "description": "文件或目录路径"},
       "content": {"type": "string", "description": "write/append 写入内容；edit 旧版新文本参数，仅为兼容保留"},
-      "new_text": {"type": "string", "description": "edit 的新文本（推荐）；replace_text 可传空字符串删除精确匹配，删除整行使用 delete_line/delete_range"},
+      "new_text": {
+        "type": "string",
+        "description": "edit 的新文本（推荐）；replace_text 可传空字符串删除精确匹配，删除整行使用 delete_line/delete_range"
+      },
       "encoding": {"type": "string", "description": "文本编码，默认 utf-8，失败时尝试系统编码"},
       "start_line": {"type": "integer", "minimum": 0, "description": "read_range 起始行号（1-based；0 表示默认）"},
       "end_line": {"type": "integer", "minimum": 0, "description": "read_range 结束行号或 edit replace_range/delete_range 结束行号"},
       "tail": {"type": "integer", "minimum": 0, "description": "read_range 读取尾部 N 行"},
       "max_lines": {"type": "integer", "minimum": 1, "maximum": 50000, "description": "read_range 最大返回行数，默认 500"},
-      "max_bytes": {"type": "integer", "minimum": 1, "maximum": 536870912, "description": "read/read_range 最大读取字节数，默认 52428800（50 MB）"},
-      "edit_mode": {"type": "string", "enum": ["insert", "replace_line", "replace_range", "replace_text", "delete_line", "delete_range"], "description": "edit 编辑模式；删除完整行必须使用 delete_line/delete_range"},
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 536870912,
+        "description": "read/read_range 最大读取字节数，默认 52428800（50 MB）"
+      },
+      "edit_mode": {
+        "type": "string",
+        "enum": ["insert", "replace_line", "replace_range", "replace_text", "delete_line", "delete_range"],
+        "description": "edit 编辑模式；删除完整行必须使用 delete_line/delete_range"
+      },
       "old_text": {"type": "string", "description": "edit replace_text 要替换的原文"},
-      "expected_old_text": {"type": "string", "description": "replace_line/replace_range/delete_line/delete_range 当前目标区域的精确原文；必须来自最近一次 read_range"},
-      "expected_hash": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$", "description": "读取时返回的整个文件 SHA256；insert 必填，其他编辑可选，用于拒绝陈旧写入"},
+      "expected_old_text": {
+        "type": "string",
+        "description": "replace_line/replace_range/delete_line/delete_range 当前目标区域的精确原文；必须来自最近一次 read_range"
+      },
+      "expected_hash": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "description": "读取时返回的整个文件 SHA256；insert 必填，其他编辑可选，用于拒绝陈旧写入"
+      },
       "expected_count": {"type": "integer", "minimum": -1, "description": "edit 期望匹配次数；-1 跳过检查"},
       "line": {"type": "integer", "minimum": 1, "description": "edit 起始行号（1-based）"},
       "column": {"type": "integer", "minimum": 1, "description": "edit 起始列号（1-based）"},
       "end_column": {"type": "integer", "minimum": 0, "description": "edit replace_range 结束列号"},
-      "create_backup": {"type": "boolean", "description": "edit 是否创建 .bak 备份，默认 true"},
       "dst_path": {"type": "string", "minLength": 1, "description": "copy/move 目标路径"},
       "overwrite": {"type": "boolean", "description": "copy/move 是否覆盖已有目标"},
       "recursive": {"type": "boolean", "description": "copy 是否递归复制目录；目录复制必须为 true"},
       "max_depth": {"type": "integer", "minimum": 0, "maximum": 50, "description": "tree_dir 最大深度，默认 2"},
       "max_entries": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "tree_dir 最大条目数，默认 200"},
       "offset": {"type": "integer", "minimum": 0, "description": "list_dir/tree_dir 分页偏移，默认 0"},
-      "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "list_dir/tree_dir 当前页最大条目数，默认 200；tree_dir 省略时兼容使用 max_entries"},
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "description": "list_dir/tree_dir 当前页最大条目数，默认 200；tree_dir 省略时兼容使用 max_entries"
+      },
       "include_hidden": {"type": "boolean", "description": "tree_dir/search 是否包含隐藏文件"},
       "query": {"type": "string", "description": "search 搜索词或正则"},
-      "mode": {"type": "string", "enum": ["file", "name", "text", "content", "code"], "description": "search 搜索模式"},
+      "mode": {"type": "string", "enum": ["name", "content"], "description": "search 搜索模式：name 按文件名匹配，content 按文件内容匹配"},
       "file_glob": {"type": "string", "description": "search 文件名 glob 过滤"},
       "max_results": {"type": "integer", "minimum": 1, "maximum": 5000, "description": "search 最大结果数，默认 50"},
       "context_lines": {"type": "integer", "minimum": 0, "maximum": 100, "description": "search 匹配行上下文行数"},
       "regex": {"type": "boolean", "description": "search 是否按正则处理 query"},
-      "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 536870912, "description": "search 单文件最大读取字节数，默认 52428800（50 MB）"},
+      "max_file_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 536870912,
+        "description": "search 单文件最大读取字节数，默认 52428800（50 MB）"
+      },
       "algorithm": {"type": "string", "enum": ["md5", "sha1", "sha256"], "description": "hash 算法，默认 sha256"},
       "parents": {"type": "boolean", "description": "make_dir 是否递归创建父目录，默认 true"}
     },
@@ -142,6 +155,7 @@
   },
   "version": "1.4.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "delete"
 }
 ```

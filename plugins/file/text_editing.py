@@ -206,18 +206,6 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         temp.unlink(missing_ok=True)
 
 
-def next_backup_path(path: Path) -> Path:
-    first = path.with_suffix(path.suffix + ".bak")
-    if not first.exists():
-        return first
-    index = 1
-    while True:
-        candidate = path.with_suffix(path.suffix + f".bak.{index}")
-        if not candidate.exists():
-            return candidate
-        index += 1
-
-
 def line_entries(lines: list[str], start_index: int) -> list[dict[str, Any]]:
     return [
         {"line": start_index + offset + 1, "text": value}

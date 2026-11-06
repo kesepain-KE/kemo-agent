@@ -5,7 +5,6 @@ import hashlib
 import locale
 import os
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +24,6 @@ from plugins.file.text_editing import (
     newline_near as _newline_near,
     newline_style as _newline_style,
     newline_tokens as _newline_tokens,
-    next_backup_path as _next_backup_path,
     normalize_newlines as _normalize_newlines,
     normalized_with_boundaries as _normalized_with_boundaries,
     preview_lines as _preview_lines,
@@ -317,7 +315,6 @@ def _run_edit(
     column: int = 1,
     end_line: int = 0,
     end_column: int = 0,
-    create_backup: bool = True,
     encoding: str = "",
     **_kw: Any,
 ) -> dict[str, Any]:
@@ -489,17 +486,11 @@ def _run_edit(
             replacements=0,
             changed_lines=0,
             newline_style=_newline_style(original),
-            backup_created=False,
-            backup_path="",
             before_hash=before_hash,
             after_hash=before_hash,
             preview=_preview_lines(original, line),
         )
 
-    backup_path: Path | None = None
-    if create_backup:
-        backup_path = _next_backup_path(p)
-        shutil.copy2(p, backup_path)
     updated_bytes = updated.encode(used_encoding)
     after_hash = hashlib.sha256(updated_bytes).hexdigest()
     _atomic_write_bytes(p, updated_bytes)
@@ -513,8 +504,6 @@ def _run_edit(
         replacements=replacements,
         changed_lines=changed_lines,
         newline_style=_newline_style(updated),
-        backup_created=create_backup,
-        backup_path=str(backup_path) if backup_path is not None else "",
         before_hash=before_hash,
         after_hash=after_hash,
         preview=_preview_lines(updated, line),
