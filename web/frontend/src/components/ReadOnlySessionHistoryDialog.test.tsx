@@ -13,11 +13,11 @@ const session: SessionSummary = {
   source: 'background:cron:cron_1234abcd',
   state: 'closed',
   run_state: 'idle',
-  rounds: 1,
+  integration_count: 1,
   updated_at: '2026-09-20T14:00:00+08:00',
   memory_status: 'completed',
-  memory_processed_round: 1,
-  memory_target_round: 1,
+  memory_processed_seq: 1,
+  memory_target_seq: 1,
 }
 
 function renderDialog(targetSession = session) {

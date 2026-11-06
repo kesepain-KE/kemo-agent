@@ -4,7 +4,7 @@ import { SessionActions } from './SessionActions'
 import type { SessionSummary } from '../types/api'
 import { useUiStore } from '../store/ui'
 
-const session: SessionSummary = { source: 'web', session_id: 's1', window: 'w', title: '用户标题', rounds: 4, updated_at: '2026-10-20' }
+const session: SessionSummary = { source: 'web', session_id: 's1', window: 'w', title: '用户标题', title_source: 'manual', integration_count: 4, updated_at: '2026-10-20' }
 afterEach(() => useUiStore.getState().setLanguage('zh-CN', ''))
 
 function mount(overrides: Partial<SessionSummary> = {}, callbacks = {}) {

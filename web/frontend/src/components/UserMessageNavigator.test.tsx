@@ -1,12 +1,12 @@
-import { createRef, useState } from 'react'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { createRef } from 'react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { compactUserMessagePreview, UserMessageNavigator, type UserMessageMarker } from './UserMessageNavigator'
 
 const markers: UserMessageMarker[] = [
-  { id: 'message-1', content: '# 第一条\n\n请检查运行状态。', round: 4 },
-  { id: 'message-2', content: '第二条用户消息', round: 5 },
-  { id: 'message-3', content: '第三条用户消息', round: 6 },
+  { id: 'message-1', content: '# 第一条\n\n请检查运行状态。', integration_number: 4 },
+  { id: 'message-2', content: '第二条用户消息', integration_number: 5 },
+  { id: 'message-3', content: '第三条用户消息', integration_number: 6 },
 ]
 
 describe('UserMessageNavigator', () => {
@@ -21,7 +21,7 @@ describe('UserMessageNavigator', () => {
             <article data-user-message-id="message-2" />
           </div>
         </div>
-        <UserMessageNavigator markers={markers} scrollContainerRef={scrollRef} totalRounds={10} onNavigate={onNavigate} />
+        <UserMessageNavigator markers={markers} scrollContainerRef={scrollRef} integrationCount={10} onNavigate={onNavigate} />
       </div>,
     )
 
@@ -77,94 +77,57 @@ describe('UserMessageNavigator', () => {
     expect(screen.getByRole('button', { name: /第 6 轮：第三条用户消息/ })).toHaveAttribute('aria-current', 'true')
   })
 
-  it('全局短进度条只记录预选轮次，滚轮仍保留当前附近十条消息', () => {
+  it('展开时一次挂载全部用户卡片，首尾预选不会替换或丢弃其他轮次', () => {
     const manyMarkers = Array.from({ length: 24 }, (_, index) => ({
       id: `message-${index + 1}`,
       content: `消息 ${index + 1}`,
-      round: index + 1,
+      integration_number: index + 1,
     }))
     render(
       <UserMessageNavigator
         markers={manyMarkers}
         scrollContainerRef={createRef<HTMLDivElement>()}
-        totalRounds={100}
+        integrationCount={100}
         onNavigate={() => undefined}
       />,
     )
     const rail = screen.getByLabelText('轮次位置：当前预选第 24 轮，共 100 轮')
     fireEvent.pointerEnter(rail)
-    expect(within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')).toHaveLength(10)
-    expect(screen.queryByRole('button', { name: /第 14 轮/ })).not.toBeInTheDocument()
-    const earliestVisible = screen.getByRole('button', { name: /第 15 轮：消息 15/ })
-    fireEvent.pointerEnter(earliestVisible)
-    expect(screen.getByRole('progressbar', { name: '当前预选轮次' })).toHaveAttribute('aria-valuenow', '15')
+    const allCards = within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')
+    expect(allCards).toHaveLength(24)
+    const firstCard = screen.getByRole('button', { name: /第 1 轮：消息 1$/ })
+    fireEvent.keyDown(rail, { key: 'Home' })
+    expect(firstCard).toHaveAttribute('aria-current', 'true')
     expect(screen.getByRole('progressbar', { name: '当前预选轮次' })).toHaveAttribute('aria-valuemax', '100')
-    fireEvent.keyDown(earliestVisible, { key: 'ArrowUp' })
-    expect(within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')).toHaveLength(10)
-    expect(screen.getByRole('button', { name: /第 14 轮：消息 14/ })).toHaveAttribute('aria-current', 'true')
-  })
-
-  it('存在未加载历史时不展示旧按钮，只在越过已加载边界时增量加载', () => {
-    const onLoadEarlierMessages = vi.fn()
-    render(
-      <UserMessageNavigator
-        markers={markers.slice(0, 1)}
-        scrollContainerRef={createRef<HTMLDivElement>()}
-        totalRounds={12}
-        hasEarlierMessages
-        onLoadEarlierMessages={onLoadEarlierMessages}
-        onNavigate={() => undefined}
-      />,
-    )
-
-    const rail = screen.getByLabelText('轮次位置：当前预选第 4 轮，共 12 轮')
-    fireEvent.pointerEnter(rail)
-    expect(screen.queryByRole('button', { name: '加载更早消息' })).not.toBeInTheDocument()
-    expect(onLoadEarlierMessages).not.toHaveBeenCalled()
+    fireEvent.keyDown(rail, { key: 'End' })
+    expect(screen.getByRole('button', { name: /第 24 轮：消息 24/ })).toHaveAttribute('aria-current', 'true')
+    expect(within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')).toEqual(allCards)
+    fireEvent.keyDown(rail, { key: 'Home' })
     fireEvent.keyDown(rail, { key: 'ArrowUp' })
-    expect(onLoadEarlierMessages).toHaveBeenCalledTimes(1)
+    expect(firstCard).toHaveAttribute('aria-current', 'true')
   })
 
-  it('加载上一页后把动态窗口移动到新出现的更早轮次', async () => {
-    const allMarkers = Array.from({ length: 13 }, (_, index) => ({
-      id: `message-${index + 1}`,
-      content: `消息 ${index + 1}`,
-      round: index + 1,
-    }))
-    function Harness() {
-      const [loadedMarkers, setLoadedMarkers] = useState(allMarkers.slice(-3))
-      const hasEarlierMessages = loadedMarkers.length < allMarkers.length
-      return (
-        <UserMessageNavigator
-          markers={loadedMarkers}
-          scrollContainerRef={createRef<HTMLDivElement>()}
-          totalRounds={allMarkers.length}
-          hasEarlierMessages={hasEarlierMessages}
-          onLoadEarlierMessages={() => { setLoadedMarkers(allMarkers) }}
-          onNavigate={() => undefined}
-        />
-      )
-    }
-
-    render(<Harness />)
-    fireEvent.pointerEnter(screen.getByLabelText(/轮次位置/))
-    const earliestLoadedCard = screen.getByRole('button', { name: /第 11 轮：消息 11/ })
-    fireEvent.pointerEnter(earliestLoadedCard)
-    fireEvent.keyDown(earliestLoadedCard, { key: 'ArrowUp' })
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /第 10 轮：消息 10/ })).toHaveAttribute('aria-current', 'true')
-    })
-  })
-
-  it('不足两条且没有更早历史时隐藏，并压缩 Markdown 长文本', () => {
-    const { container } = render(
-      <UserMessageNavigator
-        markers={markers.slice(0, 1)}
-        scrollContainerRef={createRef<HTMLDivElement>()}
-        onNavigate={() => undefined}
-      />,
+  it('空会话隐藏，首条用户发言出现后即可展开预览并定位', () => {
+    const onNavigate = vi.fn()
+    const scrollRef = createRef<HTMLDivElement>()
+    const { container, rerender } = render(
+      <UserMessageNavigator markers={[]} scrollContainerRef={scrollRef} onNavigate={onNavigate} />,
     )
     expect(container).toBeEmptyDOMElement()
+
+    rerender(
+      <UserMessageNavigator
+        markers={markers.slice(0, 1)}
+        scrollContainerRef={scrollRef}
+        onNavigate={onNavigate}
+      />,
+    )
+    const rail = screen.getByRole('button', { name: '轮次位置：当前预选第 4 轮，共 4 轮' })
+    fireEvent.click(rail)
+    const card = screen.getByRole('button', { name: /第 4 轮：第一条 请检查运行状态/ })
+    expect(card).toHaveAttribute('data-wheel-angle', '180')
+    fireEvent.click(card)
+    expect(onNavigate).toHaveBeenCalledExactlyOnceWith('message-1')
     expect(compactUserMessagePreview('**标题**\n\n[链接](https://example.com) 后续内容', 8)).toBe('标题 链接 后续…')
   })
 
@@ -206,21 +169,6 @@ describe('UserMessageNavigator', () => {
     expect(rail).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(rail)
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6')
-  })
-
-  it('加载边界的连续操作不会重复发起历史请求', async () => {
-    let resolve!: () => void
-    const onLoadEarlierMessages = vi.fn(() => new Promise<void>((done) => { resolve = done }))
-    render(<UserMessageNavigator markers={markers.slice(0, 1)} scrollContainerRef={createRef<HTMLDivElement>()}
-      hasEarlierMessages totalRounds={12} onLoadEarlierMessages={onLoadEarlierMessages} onNavigate={vi.fn()} />)
-    const rail = screen.getByRole('button', { name: /轮次位置/ })
-    fireEvent.click(rail)
-    fireEvent.keyDown(rail, { key: 'ArrowUp' })
-    fireEvent.keyDown(rail, { key: 'ArrowUp' })
-    expect(onLoadEarlierMessages).toHaveBeenCalledTimes(1)
-    expect(screen.getByRole('status')).toHaveTextContent('正在加载更早消息')
-    await act(async () => { resolve() })
-    expect(screen.getByRole('status')).not.toHaveTextContent('正在加载更早消息')
   })
 
   it('卡片采用可缩放百分比弧线，激活同一轮只触发一次跳转', () => {

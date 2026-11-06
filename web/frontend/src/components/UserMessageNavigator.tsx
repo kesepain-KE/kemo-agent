@@ -13,16 +13,14 @@ import styles from './UserMessageNavigator.module.css'
 export interface UserMessageMarker {
   id: string
   content: string
-  round: number
+  integration_number: number
 }
 
 interface UserMessageNavigatorProps {
   markers: UserMessageMarker[]
   scrollContainerRef: RefObject<HTMLElement | null>
-  totalRounds?: number
-  hasEarlierMessages?: boolean
-  loadingEarlierMessages?: boolean
-  onLoadEarlierMessages?: () => void | Promise<void>
+  integrationCount?: number
+  navigating?: boolean
   onNavigate: (id: string) => void
 }
 
@@ -36,7 +34,6 @@ type RoundProgressStyle = CSSProperties & {
   '--round-progress': string
 }
 
-const MAX_WHEEL_ITEMS = 10
 const CLOSE_DELAY_MS = 180
 const WHEEL_THROTTLE_MS = 75
 
@@ -96,25 +93,20 @@ function wheelCardStyle(index: number, count: number, activeIndex: number): Whee
 export function UserMessageNavigator({
   markers,
   scrollContainerRef,
-  totalRounds = 0,
-  hasEarlierMessages = false,
-  loadingEarlierMessages = false,
-  onLoadEarlierMessages,
+  integrationCount = 0,
+  navigating = false,
   onNavigate,
 }: UserMessageNavigatorProps) {
   const markerIds = markers.map((marker) => marker.id).join('\u0001')
   const [viewportActiveId, setViewportActiveId] = useState(markers.at(-1)?.id ?? '')
   const [previewId, setPreviewId] = useState('')
   const [open, setOpen] = useState(false)
-  const [requestingEarlier, setRequestingEarlier] = useState(false)
   const navigatorRef = useRef<HTMLElement | null>(null)
   const railRef = useRef<HTMLDivElement | null>(null)
   const wheelId = useId()
   const frameRef = useRef<number | null>(null)
   const closeTimerRef = useRef<number | null>(null)
   const lastWheelTimeRef = useRef(Number.NEGATIVE_INFINITY)
-  const loadRequestRef = useRef(false)
-  const loadAnchorIdRef = useRef('')
   const markersRef = useRef(markers)
   markersRef.current = markers
 
@@ -123,24 +115,18 @@ export function UserMessageNavigator({
     : markers.some((marker) => marker.id === viewportActiveId)
       ? viewportActiveId
       : markers.at(-1)?.id ?? ''
-  const activeMarkerIndex = Math.max(0, markers.findIndex((marker) => marker.id === activeId))
-  const maxWindowStart = Math.max(0, markers.length - MAX_WHEEL_ITEMS)
-  const windowStart = clamp(
-    activeMarkerIndex - Math.floor(MAX_WHEEL_ITEMS / 2),
-    0,
-    maxWindowStart,
+  const activeIndex = Math.max(0, markers.findIndex((marker) => marker.id === activeId))
+  const selectedRound = markers[activeIndex]?.integration_number ?? markers.at(-1)?.integration_number ?? 1
+  const globalRoundCount = markers.reduce(
+    (count, marker) => Math.max(count, marker.integration_number),
+    Math.max(integrationCount, selectedRound),
   )
-  const visibleMarkers = markers.slice(windowStart, windowStart + MAX_WHEEL_ITEMS)
-  const activeIndex = Math.max(0, visibleMarkers.findIndex((marker) => marker.id === activeId))
-  const selectedRound = markers[activeMarkerIndex]?.round ?? markers.at(-1)?.round ?? 1
-  const globalRoundCount = Math.max(totalRounds, selectedRound, ...markers.map((marker) => marker.round))
   const roundProgress = globalRoundCount <= 1
     ? 1
     : clamp((selectedRound - 1) / (globalRoundCount - 1), 0, 1)
   const progressStyle: RoundProgressStyle = {
     '--round-progress': `${roundProgress * 100}%`,
   }
-  const isLoadingEarlier = loadingEarlierMessages || requestingEarlier
 
   const clearCloseTimer = useCallback(() => {
     if (closeTimerRef.current === null) return
@@ -162,43 +148,22 @@ export function UserMessageNavigator({
   }, [clearCloseTimer])
 
   const previewAt = useCallback((index: number) => {
-    const marker = visibleMarkers[clamp(index, 0, Math.max(0, visibleMarkers.length - 1))]
+    const marker = markers[clamp(index, 0, Math.max(0, markers.length - 1))]
     if (!marker) return
     clearCloseTimer()
     setPreviewId(marker.id)
     setOpen(true)
-  }, [clearCloseTimer, visibleMarkers])
-
-  const requestEarlierMessages = useCallback(async () => {
-    if (!hasEarlierMessages || !onLoadEarlierMessages || loadingEarlierMessages || loadRequestRef.current) return
-    loadRequestRef.current = true
-    loadAnchorIdRef.current = markersRef.current[0]?.id ?? ''
-    clearCloseTimer()
-    setOpen(true)
-    setRequestingEarlier(true)
-    try {
-      await onLoadEarlierMessages()
-    } catch {
-      loadAnchorIdRef.current = ''
-    } finally {
-      loadRequestRef.current = false
-      setRequestingEarlier(false)
-    }
-  }, [clearCloseTimer, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, requestingEarlier])
+  }, [clearCloseTimer, markers])
 
   const movePreview = useCallback((direction: -1 | 1) => {
     const currentMarkers = markersRef.current
     const currentIndex = currentMarkers.findIndex((marker) => marker.id === activeId)
-    if (direction < 0 && currentIndex <= 0 && hasEarlierMessages) {
-      void requestEarlierMessages()
-      return
-    }
     const marker = currentMarkers[clamp(currentIndex + direction, 0, Math.max(0, currentMarkers.length - 1))]
     if (!marker) return
     clearCloseTimer()
     setPreviewId(marker.id)
     setOpen(true)
-  }, [activeId, clearCloseTimer, hasEarlierMessages, requestEarlierMessages])
+  }, [activeId, clearCloseTimer])
 
   const activate = useCallback((marker: UserMessageMarker) => {
     setViewportActiveId(marker.id)
@@ -268,6 +233,7 @@ export function UserMessageNavigator({
   useEffect(() => {
     const container = scrollContainerRef.current
     if (!container || markersRef.current.length === 0) return
+    const knownIds = new Set(markersRef.current.map((marker) => marker.id))
 
     const updateActiveMarker = () => {
       const viewportCenter = container.getBoundingClientRect().top + container.clientHeight / 2
@@ -275,7 +241,7 @@ export function UserMessageNavigator({
       let closestDistance = Number.POSITIVE_INFINITY
       for (const element of markerElements(container)) {
         const id = element.dataset.userMessageId || ''
-        if (!markersRef.current.some((marker) => marker.id === id)) continue
+        if (!knownIds.has(id)) continue
         const rect = element.getBoundingClientRect()
         const distance = Math.abs(rect.top + rect.height / 2 - viewportCenter)
         if (distance < closestDistance) {
@@ -316,28 +282,9 @@ export function UserMessageNavigator({
     if (!currentMarkers.some((marker) => marker.id === previewId)) setPreviewId('')
   }, [markerIds, previewId, viewportActiveId])
 
-  useEffect(() => {
-    const anchorId = loadAnchorIdRef.current
-    if (!anchorId) return
-    const currentMarkers = markersRef.current
-    const anchorIndex = currentMarkers.findIndex((marker) => marker.id === anchorId)
-    if (anchorIndex > 0) {
-      const marker = currentMarkers[anchorIndex - 1]
-      loadAnchorIdRef.current = ''
-      setPreviewId(marker.id)
-      setOpen(true)
-      return
-    }
-    if (anchorIndex < 0 && !isLoadingEarlier) {
-      loadAnchorIdRef.current = ''
-      return
-    }
-    if (!isLoadingEarlier && !hasEarlierMessages) loadAnchorIdRef.current = ''
-  }, [hasEarlierMessages, isLoadingEarlier, markerIds])
-
   useEffect(() => () => clearCloseTimer(), [clearCloseTimer])
 
-  if (markers.length < 2 && !hasEarlierMessages) return null
+  if (markers.length === 0) return null
 
   return (
     <nav
@@ -356,19 +303,19 @@ export function UserMessageNavigator({
         <span className={styles.glow} aria-hidden="true" />
         {open ? (
           <>
-            {visibleMarkers.map((marker, index) => {
+            {markers.map((marker, index) => {
               const preview = compactUserMessagePreview(marker.content)
               const active = index === activeIndex
-              const angle = wheelPosition(index, visibleMarkers.length, activeIndex).angle
+              const angle = wheelPosition(index, markers.length, activeIndex).angle
               return (
                 <button
                   key={marker.id}
                   className={`user-message-wheel-card ${styles.card}${active ? ` active ${styles.active}` : ''}`}
-                  style={wheelCardStyle(index, visibleMarkers.length, activeIndex)}
+                  style={wheelCardStyle(index, markers.length, activeIndex)}
                   type="button"
                   data-wheel-angle={Math.round(angle)}
                   aria-current={active ? 'true' : undefined}
-                  aria-label={`第 ${marker.round} 轮：${preview}`}
+                  aria-label={`第 ${marker.integration_number} 轮：${preview}`}
                   onPointerEnter={() => previewAt(index)}
                   onFocus={() => previewAt(index)}
                   onPointerDown={(event) => {
@@ -379,7 +326,7 @@ export function UserMessageNavigator({
                   }}
                   onKeyDown={handleKeyDown}
                 >
-                  {active ? <span className={styles.cardMeta}><small>第 {marker.round} 轮</small><em>{globalRoundCount} 轮对话</em></span> : null}
+                  {active ? <span className={styles.cardMeta}><small>第 {marker.integration_number} 轮</small><em>{globalRoundCount} 轮对话</em></span> : null}
                   <strong>{active ? `“${preview}”` : preview}</strong>
                   {active ? <span className={styles.cardHint}>点击定位这一轮 <span aria-hidden="true">↗</span></span> : null}
                 </button>
@@ -403,7 +350,7 @@ export function UserMessageNavigator({
         tabIndex={0}
       >
         <span
-          className={`user-message-progress ${styles.progress}${isLoadingEarlier ? ` loading ${styles.loading}` : ''}`}
+          className={`user-message-progress ${styles.progress}${navigating ? ` loading ${styles.loading}` : ''}`}
           role="progressbar"
           aria-label="当前预选轮次"
           aria-valuemin={1}
@@ -416,7 +363,7 @@ export function UserMessageNavigator({
         <span className={styles.railLabel} aria-hidden="true">{selectedRound}</span>
       </div>
       <span className={`user-message-progress-status ${styles.status}`} role="status" aria-live="polite">
-        {isLoadingEarlier ? '正在加载更早消息。' : ''}当前预选第 {selectedRound} 轮，共 {globalRoundCount} 轮
+        {navigating ? '正在定位消息。' : ''}当前预选第 {selectedRound} 轮，共 {globalRoundCount} 轮
       </span>
     </nav>
   )

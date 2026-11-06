@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { ExternalLink, MoreHorizontal, Pencil, Pin, PinOff, Star, Trash2 } from 'lucide-react'
 import type { SessionSummary } from '../types/api'
 import { t, useLanguage } from '../i18n'
+import { sessionDisplayName } from '../utils/sessionDisplayName'
 import { GlobalConfirmDialog } from './GlobalConfirmDialog'
 import styles from './SessionActions.module.css'
 
@@ -36,7 +37,10 @@ export function SessionActions({
   const inputRef = useRef<HTMLInputElement>(null)
   const restoreRef = useRef<HTMLElement | null>(null)
   const mutable = (session.source || 'web') === 'web'
-  const name = session.title || t('未命名对话')
+  const name = sessionDisplayName(session)
+  const hasResolvedTitle = session.title_source === 'manual'
+    || session.title_source === 'summary'
+    || session.summary_status === 'completed'
   const restoreFocus = () => {
     const element = restoreRef.current?.isConnected ? restoreRef.current : triggerRef.current
     element?.focus({ preventScroll: true })
@@ -130,7 +134,7 @@ export function SessionActions({
   const beginDialog = (value: 'rename' | 'delete') => {
     setAnchor(null)
     setError('')
-    setTitle(session.title || '')
+    setTitle(hasResolvedTitle ? session.title || '' : '')
     setDialog(value)
   }
   const trigger = <button ref={triggerRef} className={styles.trigger} type="button"
@@ -150,10 +154,10 @@ export function SessionActions({
     {anchor && createPortal(<div ref={menuRef} className={styles.menu} style={position}
       role="menu" aria-label={`${t('对话操作')} ${name}`}>
       <button role="menuitem" disabled={pending || !onMark} onClick={() => void mark({ pinned: !session.pinned })}>
-        {session.pinned ? <PinOff size={16} /> : <Pin size={16} />}{t(session.pinned ? '取消置顶' : '置顶')}
+        {session.pinned ? <PinOff size={16} /> : <Pin size={16} />}{session.pinned ? t('取消置顶') : t('置顶')}
       </button>
       <button role="menuitem" disabled={pending || !onMark} onClick={() => void mark({ favorite: !session.favorite })}>
-        <Star size={16} fill={session.favorite ? 'currentColor' : 'none'} />{t(session.favorite ? '取消收藏' : '收藏')}
+        <Star size={16} fill={session.favorite ? 'currentColor' : 'none'} />{session.favorite ? t('取消收藏') : t('收藏')}
       </button>
       <div role="separator" />
       <button role="menuitem" disabled={!mutable || pending || !onRename} onClick={() => beginDialog('rename')}>
@@ -168,7 +172,7 @@ export function SessionActions({
       {error && <span className={styles.error} role="alert">{error}</span>}
     </div>, document.body)}
     <GlobalConfirmDialog open={Boolean(dialog)}
-      title={t(dialog === 'rename' ? '重命名对话' : '确认删除这条历史对话？')}
+      title={dialog === 'rename' ? t('重命名对话') : t('确认删除这条历史对话？')}
       detail={name}
       description={dialog === 'rename' ? <label className={styles.rename}>
         <span>{t('对话名称')}</span>
@@ -181,7 +185,7 @@ export function SessionActions({
       </label> : t('该对话及其完整历史将被永久删除，此操作无法撤销。')}
       icon={dialog === 'rename' ? <Pencil size={21} /> : <Trash2 size={21} />}
       tone={dialog === 'rename' ? 'warning' : 'danger'} error={error}
-      cancelLabel={t('取消')} confirmLabel={t(dialog === 'rename' ? '保存名称' : '确认删除')}
+      cancelLabel={t('取消')} confirmLabel={dialog === 'rename' ? t('保存名称') : t('确认删除')}
       confirmDisabled={dialog === 'rename' && !title.trim()}
       pending={pending} pendingLabel={t('正在保存…')}
       onCancel={() => { if (!pending) { setDialog(''); restoreFocus() } }}

@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { createPortal } from 'react-dom'
 import { Archive, LoaderCircle, X } from 'lucide-react'
@@ -14,15 +15,15 @@ function sourceLabel(session: SessionSummary) {
   if (source === 'web') return '网页版'
   if (source === 'app') return 'APP版'
   if (source === 'cli') return 'CLI'
-  if (source.startsWith('background:cron:')) return '定时任务'
-  if (source.startsWith('message:')) return session.bound_platform || source.slice(8) || '外部消息'
+  if (source.startsWith('background:cron:')) return tr('定时任务')
+  if (source.startsWith('message:')) return session.bound_platform || source.slice(8) || tr('外部消息')
   return source
 }
 
 function roleLabel(role: string) {
-  if (role === 'user') return '用户'
+  if (role === 'user') return tr('用户')
   if (role === 'assistant') return '智能体'
-  if (role === 'tool') return '工具'
+  if (role === 'tool') return tr('工具')
   if (role === 'system') return '系统'
   return role || '消息'
 }
@@ -53,6 +54,7 @@ function ReadOnlySessionHistoryDialogContent({
   session: SessionSummary
   onClose: () => void
 }) {
+  useLanguage()
   const source = session.source || 'web'
   const history = useInfiniteQuery({
     queryKey: ['readonly-history', user, source, session.session_id],
@@ -77,8 +79,8 @@ function ReadOnlySessionHistoryDialogContent({
   // successful retry.  It must not be presented as a current failure once
   // the cursor has caught up with the target.
   const hasCurrentMemoryFailure = memoryStatus === 'failed'
-  const processed = Math.max(0, session.memory_processed_round || 0)
-  const target = Math.max(0, session.memory_target_round || session.rounds || 0)
+  const processed = Math.max(0, session.memory_processed_seq || 0)
+  const target = Math.max(0, session.memory_target_seq || session.last_seq || 0)
   const isCronSource = source.startsWith('background:cron:')
   const historyErrorMessage = history.error instanceof ApiError && history.error.status === 404
     ? isCronSource
@@ -95,17 +97,17 @@ function ReadOnlySessionHistoryDialogContent({
           <span className={styles.icon}><Archive size={19} /></span>
           <span className={styles.heading}>
             <strong>{sessionDisplayName(session)}</strong>
-            <small>{sourceLabel(session)} · {session.rounds} 轮 · {formatDateTime(session.updated_at)}</small>
+            <small>{sourceLabel(session)} · {session.integration_count || 0} 次整合 · {session.last_seq || 0} 张卡片 · {formatDateTime(session.updated_at)}</small>
           </span>
           <button type="button" onClick={onClose} aria-label="关闭历史归档"><X size={18} /></button>
         </header>
         <div className={styles.statusGrid}>
-          <span><small>来源</small><strong>{sourceLabel(session)}</strong></span>
-          <span><small>会话状态</small><strong>{session.state === 'closed' ? '已归档' : session.run_state === 'running' ? '渠道使用中' : '已保存'}</strong></span>
+          <span><small>{tr("来源")}</small><strong>{sourceLabel(session)}</strong></span>
+          <span><small>会话状态</small><strong>{session.state === 'closed' ? '已归档' : session.run_state === 'running' ? '渠道使用中' : tr('已保存')}</strong></span>
           <span><small>记忆状态</small><strong>{memoryStatus}</strong></span>
           <span><small>记忆进度</small><strong>{processed}/{target}</strong></span>
         </div>
-        {session.summary?.trim() && <div className={styles.summary}><small>历史摘要</small><p>{session.summary}</p></div>}
+        {session.summary?.trim() && <div className={styles.summary}><small>{tr("历史摘要")}</small><p>{session.summary}</p></div>}
         {hasCurrentMemoryFailure && session.memory_last_error?.message && <div className={styles.error}>记忆整理失败：{session.memory_last_error.message}</div>}
         <div className={styles.messages}>
           {history.isLoading && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={20} />正在读取归档…</div>}
@@ -117,7 +119,7 @@ function ReadOnlySessionHistoryDialogContent({
             onClick={() => { void history.fetchNextPage() }}
           >
             {history.isFetchingNextPage && <LoaderCircle className={styles.spinning} size={14} />}
-            {history.isFetchingNextPage ? '读取中…' : '读取更早记录'}
+            {history.isFetchingNextPage ? tr('读取中…') : '读取更早记录'}
           </button>}
           {!history.isLoading && !history.isError && messages.map((message, index) => <article
             key={messageKey(message, index)}

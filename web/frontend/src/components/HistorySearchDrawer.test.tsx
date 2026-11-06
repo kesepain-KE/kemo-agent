@@ -1,3 +1,4 @@
+import { cardHistory } from '../test/cardHistory'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
@@ -6,8 +7,8 @@ import { HistorySearchDrawer } from './HistorySearchDrawer'
 import { formatDateTime } from './ModuleUi'
 
 const sessions = [
-  { session_id: 's1', window: 'w1', title: '当前工作', state: 'open', rounds: 3, updated_at: '2026-07-22T08:00:00+00:00' },
-  { session_id: 's2', window: 'w2', title: '项目复盘', state: 'closed', rounds: 8, updated_at: '2026-07-21T08:00:00+00:00' },
+  { session_id: 's1', window: 'w1', title: '当前工作', title_source: 'manual', state: 'open', integration_count: 3, updated_at: '2026-07-22T08:00:00+00:00' },
+  { session_id: 's2', window: 'w2', title: '项目复盘', title_source: 'manual', state: 'closed', integration_count: 8, updated_at: '2026-07-21T08:00:00+00:00' },
 ]
 
 describe('HistorySearchDrawer', () => {
@@ -121,8 +122,8 @@ describe('HistorySearchDrawer', () => {
     render(<HistorySearchDrawer
       open
       sessions={[
-        { session_id: 'older', window: 'older-window', title: '较早对话', state: 'closed', rounds: 1, updated_at: '2026-09-24T08:00:00+00:00' },
-        { session_id: 'newer', window: 'newer-window', title: '较新对话', state: 'closed', rounds: 1, updated_at: '2026-09-25T08:00:00+00:00' },
+        { session_id: 'older', window: 'older-window', title: '较早对话', title_source: 'manual', state: 'closed', integration_count: 1, updated_at: '2026-09-24T08:00:00+00:00' },
+        { session_id: 'newer', window: 'newer-window', title: '较新对话', title_source: 'manual', state: 'closed', integration_count: 1, updated_at: '2026-09-25T08:00:00+00:00' },
       ]}
       activeSessionId=""
       onClose={() => undefined}
@@ -330,24 +331,24 @@ describe('HistorySearchDrawer', () => {
       {
         session_id: 'conv_summary_123', window: 'w3', title: '会话隔离改造',
         summary: '实现多标签页租约和后台会话切换。', summary_status: 'completed',
-        state: 'closed', rounds: 12, updated_at: '2026-07-23T08:00:00+00:00',
+        state: 'closed', integration_count: 12, updated_at: '2026-07-23T08:00:00+00:00',
       },
       {
         session_id: 'conv_pending_456', window: 'w4', title: '', summary: '',
-        summary_status: 'processing', summary_checkpoint_next_chunk: 1,
-        summary_checkpoint_total_chunks: 3, state: 'closed', rounds: 2,
+        summary_status: 'processing', state: 'closed', integration_count: 2,
         updated_at: '2026-07-23T09:00:00+00:00',
       },
       {
         session_id: 'conv_failed_789', window: 'w5', title: '', summary: '',
         summary_status: 'retry_wait', summary_attempt_count: 2, summary_max_attempts: 5,
-        summary_retry_at: '2026-07-23T09:05:00+00:00', state: 'closed', rounds: 4,
+        summary_retry_at: '2026-07-23T09:05:00+00:00', state: 'closed', integration_count: 4,
         updated_at: '2026-07-23T09:01:00+00:00',
       },
       {
         session_id: 'conv_exhausted_999', window: 'w6', title: '', summary: '',
-        summary_status: 'exhausted', summary_attempt_count: 5, summary_max_attempts: 5,
-        state: 'closed', rounds: 5, updated_at: '2026-07-23T09:02:00+00:00',
+        summary_status: 'failed', summary_attempt_count: 5, summary_max_attempts: 5,
+        summary_retry_at: '2026-07-23T09:06:00+00:00',
+        state: 'closed', integration_count: 5, updated_at: '2026-07-23T09:02:00+00:00',
       },
     ]
     const onRetrySummary = vi.fn()
@@ -367,21 +368,22 @@ describe('HistorySearchDrawer', () => {
     expect(screen.getByRole('tooltip')).toHaveTextContent('实现多标签页租约和后台会话切换。')
     fireEvent.blur(summarizedSession)
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
-    expect(screen.getByText('正在生成摘要 · 1/3…')).toBeInTheDocument()
+    expect(screen.getByText('正在生成摘要…')).toBeInTheDocument()
     expect(screen.getByText(/摘要生成失败 · 第 2\/5 次/)).toBeInTheDocument()
-    expect(screen.getByText('摘要生成失败 · 已停止自动重试')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /重新生成摘要 conv_exhausted_999/ }))
+    const exhaustedCard = screen.getByText('摘要生成失败 · 已停止自动重试').closest('article')
+    expect(exhaustedCard).not.toBeNull()
+    fireEvent.click(within(exhaustedCard!).getByRole('button', { name: '重新生成摘要 历史对话' }))
     expect(onRetrySummary).toHaveBeenCalledWith('conv_exhausted_999')
     fireEvent.change(screen.getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: '租约' } })
     expect(screen.getByText('会话隔离改造')).toBeInTheDocument()
-    expect(screen.queryByText('正在生成摘要 · 1/3…')).not.toBeInTheDocument()
+    expect(screen.queryByText('正在生成摘要…')).not.toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: 'conv_pending_456' } })
-    expect(screen.getByText('正在生成摘要 · 1/3…')).toBeInTheDocument()
+    expect(screen.getByText('正在生成摘要…')).toBeInTheDocument()
   })
 
   it('APP 会话显示 APP版并以只读方式打开', async () => {
     const onSelectSession = vi.fn()
-    const history = vi.spyOn(api, 'getHistory').mockResolvedValue({
+    const history = vi.spyOn(api, 'getHistory').mockResolvedValue(cardHistory({
       user: 'alice',
       source: 'app',
       session_id: 'app-session',
@@ -389,17 +391,17 @@ describe('HistorySearchDrawer', () => {
         { role: 'user', content: '来自 APP 的问题' },
         { role: 'assistant', content: '来自智能体的回答' },
       ],
-      round_metrics: [],
-      round_traces: [],
+      integrations: [],
+      integration_traces: [],
       pagination: {
         limit: 40,
-        total_rounds: 1,
-        first_round: 1,
-        last_round: 1,
+        integration_count: 1,
+        first_integration_number: 1,
+        last_integration_number: 1,
         has_more_before: false,
         next_before: null,
       },
-    })
+    }))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(<QueryClientProvider client={queryClient}><HistorySearchDrawer
       user="alice"
@@ -407,9 +409,9 @@ describe('HistorySearchDrawer', () => {
       sessions={[
         {
           source: 'app', session_id: 'app-session', window: 'app-window',
-          title: '手机端对话', state: 'open', chain: 'interactive',
-          memory_status: 'completed', memory_processed_round: 2,
-          memory_target_round: 2, rounds: 2,
+          title: '手机端对话', title_source: 'manual', state: 'open', chain: 'interactive',
+          memory_status: 'completed', memory_processed_seq: 2,
+          memory_target_seq: 2, integration_count: 2,
           updated_at: '2026-08-11T12:00:00+08:00',
         },
       ]}
@@ -422,7 +424,7 @@ describe('HistorySearchDrawer', () => {
     /></QueryClientProvider>)
 
     expect(screen.getByText(/1 条 APP/)).toBeInTheDocument()
-    expect(screen.getByText(/APP版 · 2 轮/)).toBeInTheDocument()
+    expect(screen.getByText(/APP版 · 2 次整合/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '删除对话 手机端对话' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '只读查看对话 手机端对话' }))
     expect(await screen.findByText('来自 APP 的问题')).toBeInTheDocument()
@@ -434,7 +436,7 @@ describe('HistorySearchDrawer', () => {
   it('外部消息和 CLI 归档按来源展示，并以只读方式打开完整历史和记忆状态', async () => {
     const onSelectSession = vi.fn()
     const updatedAt = '2026-08-08T00:00:00+08:00'
-    const history = vi.spyOn(api, 'getHistory').mockResolvedValue({
+    const history = vi.spyOn(api, 'getHistory').mockResolvedValue(cardHistory({
       user: 'alice',
       source: 'message:telegram',
       session_id: 'tg-1',
@@ -442,17 +444,17 @@ describe('HistorySearchDrawer', () => {
         { role: 'user', content: '来自 Telegram 的问题' },
         { role: 'assistant', content: '来自智能体的回答' },
       ],
-      round_metrics: [],
-      round_traces: [],
+      integrations: [],
+      integration_traces: [],
       pagination: {
         limit: 40,
-        total_rounds: 1,
-        first_round: 1,
-        last_round: 1,
+        integration_count: 1,
+        first_integration_number: 1,
+        last_integration_number: 1,
         has_more_before: false,
         next_before: null,
       },
-    })
+    }))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(<QueryClientProvider client={queryClient}><HistorySearchDrawer
       user="alice"
@@ -460,9 +462,9 @@ describe('HistorySearchDrawer', () => {
       sessions={[
         {
           source: 'message:telegram', bound_platform: 'telegram', session_id: 'tg-1',
-          window: 'tg-window', title: 'Telegram 对话', state: 'closed', chain: 'message',
-          memory_status: 'queued', memory_processed_round: 2, memory_target_round: 4,
-          rounds: 4, updated_at: updatedAt,
+          window: 'tg-window', title: 'Telegram 对话', title_source: 'manual', state: 'closed', chain: 'message',
+          memory_status: 'queued', memory_processed_seq: 2, memory_target_seq: 4,
+          integration_count: 4, updated_at: updatedAt,
         },
       ]}
       activeSessionId=""
@@ -473,8 +475,8 @@ describe('HistorySearchDrawer', () => {
       onRetrySummary={() => undefined}
     /></QueryClientProvider>)
 
-    expect(screen.getByText(`telegram · 4 轮 · ${formatDateTime(updatedAt)}`)).toBeInTheDocument()
-    expect(screen.getByText('记忆 queued · 2/4')).toBeInTheDocument()
+    expect(screen.getByText(`telegram · 4 次整合 · 0 张卡片 · ${formatDateTime(updatedAt)}`)).toBeInTheDocument()
+    expect(screen.getByText('记忆 queued · RAW seq 2/4')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '删除对话 Telegram 对话' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '只读查看对话 Telegram 对话' }))
 
@@ -487,25 +489,25 @@ describe('HistorySearchDrawer', () => {
   })
 
   it('定时任务归档使用可读名称和来源，并通过只读历史接口打开', async () => {
-    const history = vi.spyOn(api, 'getHistory').mockResolvedValue({
+    const history = vi.spyOn(api, 'getHistory').mockResolvedValue(cardHistory({
       user: 'alice', source: 'background:cron:cron_1234abcd', session_id: 'cron-session',
       messages: [{ role: 'user', content: '定时任务输入' }, { role: 'assistant', content: '定时任务结果' }],
-      round_metrics: [], round_traces: [],
-      pagination: { limit: 40, total_rounds: 1, first_round: 1, last_round: 1, has_more_before: false, next_before: null },
-    })
+      integrations: [], integration_traces: [],
+      pagination: { limit: 40, integration_count: 1, first_integration_number: 1, last_integration_number: 1, has_more_before: false, next_before: null },
+    }))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(<QueryClientProvider client={queryClient}><HistorySearchDrawer
       user="alice" open activeSessionId="" onClose={() => undefined} onSelectSession={() => undefined}
       onDeleteSession={() => undefined} onDeleteAllSessions={() => undefined} onRetrySummary={() => undefined}
       sessions={[{
         source: 'background:cron:cron_1234abcd', session_id: 'cron-session', window: 'cron-window',
-        title: '', state: 'closed', memory_status: 'completed', memory_processed_round: 1,
-        memory_target_round: 1, rounds: 1, updated_at: '2026-09-25T05:00:00+00:00',
+        title: '', state: 'closed', memory_status: 'completed', memory_processed_seq: 1,
+        memory_target_seq: 1, integration_count: 1, updated_at: '2026-09-25T05:00:00+00:00',
       }]}
     /></QueryClientProvider>)
 
     expect(screen.getByText('定时任务 · cron_1234abcd')).toBeInTheDocument()
-    expect(screen.getByText(/定时任务 · 1 轮/)).toBeInTheDocument()
+    expect(screen.getByText(/定时任务 · 1 次整合/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '只读查看对话 定时任务 · cron_1234abcd' }))
     expect(await screen.findByText('定时任务结果')).toBeInTheDocument()
     expect(api.getHistory).toHaveBeenCalledWith('alice', 'cron-session', expect.objectContaining({ source: 'background:cron:cron_1234abcd' }))

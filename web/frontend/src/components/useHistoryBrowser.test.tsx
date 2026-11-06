@@ -47,7 +47,7 @@ describe('server-backed history filters', () => {
     let pending!: Promise<void>
     act(() => { pending = hook.result.current.loadMore() })
     act(() => hook.result.current.setFavoritesOnly(true))
-    await act(async () => { resolvePage({ ...page, sessions: [{ session_id: 'stale', window: '', title: '', rounds: 0, updated_at: '' }] }); await pending })
+    await act(async () => { resolvePage({ ...page, sessions: [{ session_id: 'stale', window: '', title: '', integration_count: 0, updated_at: '' }] }); await pending })
     await waitFor(() => expect(hook.result.current.query.data?.sessions).toEqual([]))
     expect(hook.client.getQueryData<SessionsResponse>(['sessions', 'alice'])?.next_cursor).toBe('old-cursor')
     act(() => hook.result.current.setFavoritesOnly(false))
@@ -70,7 +70,7 @@ describe('server-backed history filters', () => {
     act(() => hook.result.current.setFavoritesOnly(true))
     act(() => hook.result.current.setFavoritesOnly(false))
     await act(async () => {
-      resolvePage({ ...page, sessions: [{ session_id: 'stale', window: '', title: '', rounds: 0, updated_at: '' }] })
+      resolvePage({ ...page, sessions: [{ session_id: 'stale', window: '', title: '', integration_count: 0, updated_at: '' }] })
       await pending
     })
     expect(hook.result.current.query.data?.sessions).toEqual([])

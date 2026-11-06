@@ -376,11 +376,11 @@ export function HistorySearchDrawer({
   }
 
   return <>
-    <aside ref={drawerRef} className={`drawer ${styles.drawer} ${open ? 'show' : ''}`} inert={!open} role="dialog" aria-modal="true" aria-label="历史对话" aria-hidden={!open}>
+    <aside ref={drawerRef} className={`drawer ${styles.drawer} ${open ? 'show' : ''}`} inert={!open} role="dialog" aria-modal="true" aria-label={t("历史对话")} aria-hidden={!open}>
       {open && <>
       <div className="drawer-head">
         <div className="context-drawer-heading">
-          <strong>历史对话</strong>
+          <strong>{t("历史对话")}</strong>
           <span>{sessions.length} 条跨渠道对话 · Web 可切换，定时任务与其他渠道只读查看</span>
         </div>
         <button className="icon-btn" type="button" onClick={closeDrawer} aria-label="关闭历史对话"><X size={17} /></button>
@@ -443,7 +443,7 @@ export function HistorySearchDrawer({
             }}
           >
             <Trash2 size={14} />
-            <span>全部删除</span>
+            <span>{t("全部删除")}</span>
           </button>
         </div>
 
@@ -454,7 +454,7 @@ export function HistorySearchDrawer({
 
         <div className={styles.results} onScroll={() => setSummaryPreview(null)}>
           {loading && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={22} /><strong>正在加载历史对话</strong></div>}
-          {error && !loading && <div className={styles.empty}><History size={22} /><strong>历史对话加载失败</strong><span>关闭后重新打开即可再次加载。</span></div>}
+          {error && !loading && <div className={styles.empty}><History size={22} /><strong>历史对话加载失败</strong><span>{t("关闭后重新打开即可再次加载。")}</span></div>}
           {!loading && !error && filteredSessions.map((session) => {
             const source = session.source || 'web'
             const mutable = source === 'web'
@@ -462,11 +462,11 @@ export function HistorySearchDrawer({
             const switching = session.session_id === switchingSessionId
             const displayName = sessionDisplayName(session)
             const summaryStatus = session.summary_status || ''
-            const canRetrySummary = ['failed', 'retry_wait', 'exhausted'].includes(summaryStatus)
-            const attempt = Math.max(0, session.summary_attempt_count || session.summary_retry_count || 0)
+            const attempt = Math.max(0, session.summary_attempt_count || 0)
             const maxAttempts = Math.max(1, session.summary_max_attempts || 5)
-            const completedChunks = Math.max(0, session.summary_checkpoint_next_chunk || 0)
-            const totalChunks = Math.max(0, session.summary_checkpoint_total_chunks || 0)
+            const summaryExhausted = summaryStatus === 'exhausted'
+              || (['failed', 'retry_wait'].includes(summaryStatus) && attempt >= maxAttempts)
+            const canRetrySummary = ['failed', 'retry_wait', 'exhausted'].includes(summaryStatus)
             const retryAt = session.summary_retry_at ? formatDateTime(session.summary_retry_at) : ''
             const sourceLabel = source === 'web'
               ? '网页版'
@@ -475,13 +475,13 @@ export function HistorySearchDrawer({
                   : source === 'cli'
                     ? 'CLI'
                     : source.startsWith('background:cron:')
-                      ? '定时任务'
+                      ? t('定时任务')
                     : source.startsWith('message:')
-                    ? session.bound_platform || source.slice(8) || '外部消息'
+                    ? session.bound_platform || source.slice(8) || t('外部消息')
                     : source
             const memoryStatus = session.memory_status || 'unknown'
-            const memoryProcessed = Math.max(0, session.memory_processed_round || 0)
-            const memoryTarget = Math.max(0, session.memory_target_round || session.rounds || 0)
+            const memoryProcessed = Math.max(0, session.memory_processed_seq || 0)
+            const memoryTarget = Math.max(0, session.memory_target_seq || session.last_seq || 0)
             return <SessionActions key={`${source}:${session.session_id}`} session={session}
               onMark={onMarkSession} onRename={onRenameSession} onDelete={onDeleteSession}
               onOpen={() => { setSummaryPreview(null); if (!mutable) setReadOnlySession(session); else if (!active) setPendingSessionId(session.session_id); else onSelectSession(session.session_id) }}
@@ -494,7 +494,7 @@ export function HistorySearchDrawer({
                 type="button"
                 className={styles.sessionSelect}
                 disabled={mutable && (chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction))}
-                aria-label={`${mutable ? '打开' : '只读查看'}对话 ${displayName}`}
+                aria-label={`${mutable ? t('打开') : '只读查看'}对话 ${displayName}`}
                 onFocus={(event) => {
                   if (session.summary?.trim()) showSummaryPreview(session.summary, event.currentTarget)
                 }}
@@ -509,8 +509,8 @@ export function HistorySearchDrawer({
                 <span className={styles.cardCopy}>
                   <strong><b>{displayName}</b>{session.pinned && <Pin size={13} aria-label={t('已置顶')} />}{session.favorite && <Star size={13} fill="currentColor" aria-label={t('已收藏')} />}</strong>
                   {['queued', 'processing'].includes(summaryStatus)
-                    ? <span>正在生成摘要{totalChunks > 1 ? ` · ${Math.min(completedChunks, totalChunks)}/${totalChunks}` : ''}…</span>
-                    : summaryStatus === 'exhausted'
+                    ? <span>{t("正在生成摘要…")}</span>
+                    : summaryExhausted
                       ? <span className={styles.summaryFailed}>摘要生成失败 · 已停止自动重试</span>
                       : ['failed', 'retry_wait'].includes(summaryStatus)
                         ? <span className={styles.summaryFailed}>摘要生成失败 · 第 {attempt}/{maxAttempts} 次{retryAt ? ` · ${retryAt} 自动重试` : ' · 等待自动重试'}</span>
@@ -521,11 +521,11 @@ export function HistorySearchDrawer({
                               onMouseLeave={() => setSummaryPreview(null)}
                             >{session.summary}</span>
                           : null}
-                  <small>{sourceLabel} · {session.rounds} 轮 · {formatDateTime(session.updated_at)}</small>
-                  <small className={memoryStatus === 'failed' ? styles.memoryFailed : styles.memoryState}>记忆 {memoryStatus} · {memoryProcessed}/{memoryTarget}</small>
+                  <small>{sourceLabel} · {session.integration_count || 0} 次整合 · {session.last_seq || 0} 张卡片 · {formatDateTime(session.updated_at)}</small>
+                  <small className={memoryStatus === 'failed' ? styles.memoryFailed : styles.memoryState}>{t("记忆")}{memoryStatus} · RAW seq {memoryProcessed}/{memoryTarget}</small>
                 </span>
                 <span className={`${styles.stateBadge} ${active ? styles.activeBadge : ''}`}>
-                  {active ? '当前对话' : !mutable ? (session.run_state === 'running' ? '渠道使用中' : '只读') : session.state === 'closed' ? '已保存' : '历史对话'}
+                  {active ? t('当前对话') : !mutable ? (session.run_state === 'running' ? '渠道使用中' : t('只读')) : session.state === 'closed' ? t('已保存') : t('历史对话')}
                 </span>
               </button>
               <span className={styles.cardActions}>
@@ -563,11 +563,11 @@ export function HistorySearchDrawer({
             onClick={() => { void onLoadMore() }}
           >
             {loadingMore && <LoaderCircle className={styles.spinning} size={15} />}
-            {loadingMore ? '正在加载更早对话…' : '加载更早对话'}
+            {loadingMore ? t('正在加载更早对话…') : t('加载更早对话')}
           </button>}
           {!loading && !error && filteredSessions.length === 0 && <div className={styles.empty}>
             <Search size={22} />
-            <strong>{sessions.length === 0 ? (favoritesOnly ? t('暂无收藏的对话') : selectedDate ? '该日期没有历史对话' : '暂无历史对话') : '没有匹配的对话'}</strong>
+            <strong>{sessions.length === 0 ? (favoritesOnly ? t('暂无收藏的对话') : selectedDate ? '该日期没有历史对话' : t('暂无历史对话')) : t('没有匹配的对话')}</strong>
             <span>{sessions.length === 0 ? (selectedDate ? '请选择其他日期，或清除日期筛选查看全部归档。' : 'Web、CLI、定时任务或外部消息完成对话后会在这里生成历史记录。') : '请尝试输入其他对话名称或渠道。'}</span>
           </div>}
         </div>
@@ -602,7 +602,7 @@ export function HistorySearchDrawer({
           })}
         </div>
         <footer className={styles.calendarFooter}>
-          <button type="button" onClick={clearArchiveDate}>清除</button>
+          <button type="button" onClick={clearArchiveDate}>{t("清除")}</button>
           <button type="button" onClick={() => chooseArchiveDate(todayDate)}>今天</button>
         </footer>
       </div>,
@@ -614,7 +614,7 @@ export function HistorySearchDrawer({
         role="tooltip"
         style={{ top: summaryPreview.top, left: summaryPreview.left, width: summaryPreview.width }}
       >
-        <small>历史摘要</small>
+        <small>{t("历史摘要")}</small>
         <strong>{summaryPreview.text}</strong>
       </span>,
       document.body,
@@ -632,14 +632,14 @@ export function HistorySearchDrawer({
     />
     <GlobalConfirmDialog
       open={Boolean(deleteTarget)}
-      title="确认删除这条历史对话？"
+      title={t("确认删除这条历史对话？")}
       detail={deleteTarget ? sessionDisplayName(deleteTarget) : ''}
-      description="该对话及其完整历史将被永久删除，此操作无法撤销。"
+      description={t("该对话及其完整历史将被永久删除，此操作无法撤销。")}
       error={mutationError}
       icon={<Trash2 size={21} />}
       tone="danger"
-      confirmLabel="确认删除"
-      pendingLabel="正在删除…"
+      confirmLabel={t("确认删除")}
+      pendingLabel={t("正在删除…")}
       pending={pendingAction === 'delete'}
       onCancel={() => { setDeleteSessionId(''); setMutationError('') }}
       onConfirm={() => { void confirmDelete() }}
@@ -647,7 +647,7 @@ export function HistorySearchDrawer({
     <GlobalConfirmDialog
       open={deleteAllOpen}
       title="确认删除全部历史对话？"
-      detail="全部渠道 · 包含只读对话"
+      detail={t("全部渠道 · 包含只读对话")}
       description="Web、APP、CLI、定时任务及外部消息的完整历史（含未加载记录）将永久删除，包括已置顶和收藏的对话，不受搜索、日期或收藏筛选限制，且无法撤销。不删除已提取的记忆、附件文件或定时任务本身。"
       error={mutationError}
       icon={<Trash2 size={21} />}
