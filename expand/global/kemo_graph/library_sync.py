@@ -55,16 +55,16 @@ from scan_safety import (
 
 
 def _load_state() -> dict[str, Any]:
-    if not SYNC_STATE_PATH.is_file():
-        return {"schema_version": 2, "libraries": {}}
     try:
         value = json.loads(SYNC_STATE_PATH.read_text("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {"schema_version": 2, "libraries": {}}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise GraphExpandError("无法读取图谱同步游标；已保留原文件并停止扫描和同步") from exc
     if not isinstance(value, dict) or value.get("schema_version") != 2:
-        return {"schema_version": 2, "libraries": {}}
-    libraries = value.get("libraries")
-    value["libraries"] = libraries if isinstance(libraries, dict) else {}
+        raise GraphExpandError("图谱同步游标版本无效或不受支持；已保留原文件")
+    if not isinstance(value.get("libraries"), dict):
+        raise GraphExpandError("图谱同步游标缺少有效 libraries；已保留原文件")
     return value
 
 

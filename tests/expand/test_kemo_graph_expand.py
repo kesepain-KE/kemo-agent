@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_ROOT = ROOT / "global_expand" / "kemo_graph"
+MODULE_ROOT = ROOT / "expand" / "global" / "kemo_graph"
 sys.path.insert(0, str(MODULE_ROOT))
 
 import graph_core as graph  # noqa: E402
@@ -38,7 +38,7 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.module = self.root / "global_expand" / "kemo_graph"
+        self.module = self.root / "expand" / "global" / "kemo_graph"
         self.module.mkdir(parents=True)
         self.store = self.root / "stores" / "project"
         self.source = self.root / "documents" / "project"
@@ -547,6 +547,42 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertEqual(result["libraries"][0]["imported"], 0)
         self.assertIn("未确认", result["libraries"][0]["failures"][0]["error"])
         self.assertEqual(self.paths["SYNC_STATE_PATH"].read_bytes(), previous_state)
+
+    def test_invalid_sync_state_stops_before_remote_requests_and_preserves_file(self) -> None:
+        config = graph.config_from_mapping(self.portable_mapping())
+        path = self.paths["SYNC_STATE_PATH"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for payload in (
+            b"{", b"\xff",
+            b'{"schema_version":3,"libraries":{"other":{"files":{}}}}',
+            b'{"schema_version":2,"libraries":[]}',
+            b'{"schema_version":2}',
+        ):
+            for operation in (sync.scan_libraries, sync.sync_libraries):
+                with self.subTest(payload=payload, operation=operation.__name__):
+                    path.write_bytes(payload)
+                    with (
+                        patch.object(sync, "api_request") as request,
+                        self.assertRaises(graph.GraphExpandError),
+                    ):
+                        operation(config, {})
+                    request.assert_not_called()
+                    self.assertEqual(path.read_bytes(), payload)
+
+    def test_unreadable_sync_state_is_not_treated_as_missing(self) -> None:
+        config = graph.config_from_mapping(self.portable_mapping())
+        path = self.paths["SYNC_STATE_PATH"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = b'{"schema_version":2,"libraries":{"other":{"files":{}}}}'
+        path.write_bytes(payload)
+        with (
+            patch.object(Path, "read_text", side_effect=PermissionError("cursor unavailable")),
+            patch.object(sync, "api_request") as request,
+            self.assertRaises(graph.GraphExpandError),
+        ):
+            sync.sync_libraries(config, {})
+        request.assert_not_called()
+        self.assertEqual(path.read_bytes(), payload)
 
     def test_import_without_source_id_does_not_advance_cursor(self) -> None:
         source_file = self.source / "tracked.md"
@@ -1312,7 +1348,7 @@ class KemoGraphExpandTests(unittest.TestCase):
                 context=context,
             )
         manifest = parse_plugin_manifest(
-            ROOT / "plugins" / "kemo_graph" / "SKILL.md",
+            ROOT / "plugins" / "kemo_graph_write" / "SKILL.md",
             root=ROOT,
         )
         paths_schema = manifest.tool["input_schema"]["properties"]["paths"]
