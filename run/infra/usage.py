@@ -23,7 +23,7 @@ def usage_from_dict(value: dict[str, Any] | None) -> Usage:
     mode = str(measurement.get("mode") or "")
     estimated = bool(
         raw.get("estimated", False)
-        or mode in {"estimated", "mixed", "unknown"}
+        or mode == "estimated"
         or (measurement and not measurement.get("exact", False))
     )
     known = {
@@ -100,17 +100,19 @@ def merge_usage(total: dict[str, Any], usage: Usage) -> None:
         previous = total.get("measurement")
         if not isinstance(previous, dict) or previous.get("mode") == "unknown":
             total["measurement"] = copy.deepcopy(measurement)
-        elif previous.get("mode") != measurement.get("mode"):
+        else:
+            estimated_fields = set(previous.get("estimated_fields", [])) | set(
+                measurement.get("estimated_fields", []))
+            exact_fields = set(previous.get("exact_fields", [])) & set(
+                measurement.get("exact_fields", []))
+            mode = previous.get("mode")
+            if mode != measurement.get("mode"):
+                mode = "mixed"
             total["measurement"] = {
-                "mode": "mixed",
-                "exact": False,
-                "exact_fields": [],
-                "estimated_fields": sorted(
-                    {
-                        *previous.get("estimated_fields", []),
-                        *measurement.get("estimated_fields", []),
-                    }
-                ),
+                "mode": mode,
+                "exact": bool(previous.get("exact") and measurement.get("exact")),
+                "exact_fields": sorted(exact_fields - estimated_fields),
+                "estimated_fields": sorted(estimated_fields),
             }
     provider_raw = usage.extra.get("provider_raw")
     if isinstance(provider_raw, dict) and provider_raw:
