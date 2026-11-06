@@ -14,7 +14,7 @@
 .avatarControls button:disabled, .editorFoot button:disabled { opacity: .48; cursor: not-allowed; }
 .avatarControls small, .avatarControls > span { flex-basis: 100%; text-align: right; color: var(--muted); font-size: .625rem; overflow-wrap: anywhere; }
 .avatarControls > span { color: var(--brand); }
-.avatarControls .primaryButton, .editorFoot .primaryButton { border-color: var(--brand); background: var(--brand); color: #fff; }
+.avatarControls .primaryButton, .editorFoot .primaryButton { border-color: var(--brand); background: var(--brand); color: var(--accent-contrast, #fff); }
 
 .editorGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 12px; }
 .editorCard { min-width: 0; overflow: hidden; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }

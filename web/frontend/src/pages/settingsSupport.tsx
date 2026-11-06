@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Save } from 'lucide-react'
 import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
 import { normalizeKemoReasoningEffort, normalizeReasoningEffort, type ReasoningEffort } from '../reasoningEffort'
+import { useUiStore } from '../store/ui'
 
 export type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'version'
 export type ProviderType = 'chat' | 'kemo'
@@ -26,19 +27,19 @@ export interface UserConfigDraft {
   multimodal_routing: { vision: VisionRoutingMode }
   knowledge: { use_shared: boolean; use_global: boolean }
   skills: { shared_whitelist: string[] }
-  expand: { shared_whitelist: string[]; global_whitelist: string[]; prompt_injection: boolean; realtime_injection: boolean }
-  perception: { global_whitelist: string[]; prompt_injection: boolean; realtime_injection: boolean }
-  plugins: { whitelist: string[] }
+  expand: { shared_whitelist: string[]; global_whitelist: string[]; prompt_injection: boolean }
+  perception: { global_whitelist: string[]; prompt_injection: boolean }
+  plugins: { whitelist: string[]; permissions: string[] }
   task_plan: { auto_accept: boolean }
 }
 
 export interface GlobalConfigDraft {
-  agents: { enable_mid_context_compression: boolean; token_limit: number; token_compression_ratio: number; max_rounds: number; rounds_after_compression: number }
-  memory: { temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
-  tools: { timeout: number; max_iterations: number; consecutive_identical_call_limit: number; invalid_tool_arguments_retries: number }
+  agents: { token_limit: number; token_compression_ratio: number; output_reserve: number }
+  memory: { prompt_injection: boolean; temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
+  tools: { timeout: number; consecutive_identical_call_limit: number; invalid_tool_arguments_retries: number }
   history: { consecutive_tool_fail_limit: number }
   task_plan: { max_steps: number }
-  provider_runtime: { max_concurrent_requests: number; request_semaphore_timeout: number }
+  provider_runtime: { max_concurrent_requests: number; request_semaphore_timeout: number; max_retries: number }
   web: { max_concurrent_chats: number; max_pending_chats: number; pending_chat_timeout: number }
   message: { max_workers: number; max_queued_messages: number }
   cron: { poll_interval: number; history_retention_days: number; session_idle_close_seconds: number; avoid_congestion: boolean; congestion_threshold_ratio: number }
@@ -82,7 +83,7 @@ export const multimodalFields: Array<{ key: MultimodalKey; label: string; descri
 
 export const agentModelFields: Array<{ key: AgentModelProfile; label: string; description: string }> = [
   { key: 'default', label: '默认子智能体模型', description: '普通用户子智能体和未指定档位的后台代理；留空时继承主对话模型' },
-  { key: 'cheap', label: '轻量子智能体模型', description: '历史摘要、上下文压缩和临时记忆整理等高频轻量任务；留空时继承主对话模型' },
+  { key: 'cheap', label: '轻量子智能体模型', description: '历史标题和记忆提取等轻量后台任务；留空时继承主对话模型' },
   { key: 'reasoning', label: '推理子智能体模型', description: '任务计划、自我改进和需要较深分析的后台任务；留空时继承主对话模型' },
 ]
 
@@ -108,13 +109,13 @@ function booleanValue(value: unknown, fallback: boolean) {
 
 export function versionLabel(value: string) {
   const normalized = String(value || '').trim().replace(/^v/i, '')
-  return normalized ? `v${normalized}` : '未声明'
+  return normalized ? `v${normalized}` : tr('未声明')
 }
 
 export function versionCheckTime(value: string) {
   const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) return value || '未知'
-  return parsed.toLocaleString('zh-CN', { hour12: false })
+  if (Number.isNaN(parsed.getTime())) return value || tr('未知')
+  return parsed.toLocaleString(useUiStore.getState().language, { hour12: false })
 }
 
 export function reasoningPolicyDescription(response: KemoModelCapabilitiesResponse | undefined) {
@@ -193,14 +194,17 @@ export function buildUserDraft(config: Record<string, unknown>): UserConfigDraft
       shared_whitelist: stringList(expand.shared_whitelist),
       global_whitelist: stringList(expand.global_whitelist),
       prompt_injection: booleanValue(expand.prompt_injection, true),
-      realtime_injection: booleanValue(expand.realtime_injection, false),
     },
     perception: {
       global_whitelist: stringList(perception.global_whitelist),
       prompt_injection: booleanValue(perception.prompt_injection, true),
-      realtime_injection: booleanValue(perception.realtime_injection, false),
     },
-    plugins: { whitelist: stringList(plugins.whitelist) },
+    plugins: {
+      whitelist: stringList(plugins.whitelist),
+      permissions: Array.isArray(plugins.permissions)
+        ? stringList(plugins.permissions)
+        : ['read', 'write', 'delete', 'external'],
+    },
     task_plan: { auto_accept: booleanValue(taskPlan.auto_accept, false) },
   }
 }
@@ -219,20 +223,20 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
   const agentRuntime = record(config.agent_runtime)
   return {
     agents: {
-      enable_mid_context_compression: booleanValue(agents.enable_mid_context_compression, true),
       token_limit: numberValue(agents.token_limit, 1_000_000),
       token_compression_ratio: numberValue(agents.token_compression_ratio, 0.3),
-      max_rounds: numberValue(agents.max_rounds, 80),
-      rounds_after_compression: numberValue(agents.rounds_after_compression, 20),
+      output_reserve: numberValue(agents.output_reserve, 8192),
     },
-    memory: { temporary_injection_limits: {
-      seven_days: numberValue(memoryLimits.seven_days, 100),
-      one_month: numberValue(memoryLimits.one_month, 200),
-      half_year: numberValue(memoryLimits.half_year, 300),
-    } },
+    memory: {
+      prompt_injection: booleanValue(memory.prompt_injection, true),
+      temporary_injection_limits: {
+        seven_days: numberValue(memoryLimits.seven_days, 100),
+        one_month: numberValue(memoryLimits.one_month, 200),
+        half_year: numberValue(memoryLimits.half_year, 300),
+      },
+    },
     tools: {
       timeout: numberValue(tools.timeout, 240),
-      max_iterations: numberValue(tools.max_iterations, 80),
       consecutive_identical_call_limit: numberValue(tools.consecutive_identical_call_limit, 8),
       invalid_tool_arguments_retries: numberValue(tools.invalid_tool_arguments_retries, 2),
     },
@@ -241,6 +245,7 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
     provider_runtime: {
       max_concurrent_requests: numberValue(providerRuntime.max_concurrent_requests, 10),
       request_semaphore_timeout: numberValue(providerRuntime.request_semaphore_timeout, 300),
+      max_retries: numberValue(providerRuntime.max_retries, 3),
     },
     web: {
       max_concurrent_chats: numberValue(web.max_concurrent_chats, 3),
@@ -267,13 +272,13 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
 
 export function SettingRow({ title, description, control, source }: { title: string; description: string; control: ReactNode; source?: 'user' | 'global' }) {
   useLanguage()
-  return <div className="setting-row"><span className="setting-copy"><strong>{title}{source ? <i className={`config-source ${source}`}>{source === 'user' ? tr('用户') : tr('全局')}</i> : null}</strong><span>{description}</span></span><span className="setting-control">{control}</span></div>
+  return <div className="setting-row"><span className="setting-copy"><strong>{tr(title)}{source ? <i className={`config-source ${source}`}>{source === 'user' ? tr('用户') : tr('全局')}</i> : null}</strong><span>{tr(description)}</span></span><span className="setting-control">{control}</span></div>
 }
 
 export function Toggle({ checked, label, disabled = false, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (value: boolean) => void }) {
   useLanguage()
-  return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} className={`switch ${checked ? 'is-on' : ''}`} onClick={() => onChange(!checked)}>
-    <span className="sr-only">{checked ? '已开启' : '已关闭'}</span>
+  return <button type="button" role="switch" aria-label={tr(label)} aria-checked={checked} disabled={disabled} className={`switch ${checked ? 'is-on' : ''}`} onClick={() => onChange(!checked)}>
+    <span className="sr-only">{checked ? tr('已开启') : tr('已关闭')}</span>
   </button>
 }
 
@@ -433,5 +438,7 @@ export function TagInput({ label, value, onChange }: { label: string; value: str
 
 export function ConfigSaveBar({ label, description, pending, saved, onSave }: { label: string; description: string; pending: boolean; saved: boolean; onSave: () => void }) {
   useLanguage()
-  return <div className="settings-savebar"><span><strong>{saved ? `${label.replace(/^保存/, '')} 已保存` : label}</strong><small>{description}</small></span><button className="module-btn primary" disabled={pending} onClick={onSave}><Save size={14} />{pending ? tr('保存中…') : label}</button></div>
+  const localizedLabel = tr(label)
+  const savedLabel = label.replace(/^保存/, '') + ' 已保存'
+  return <div className="settings-savebar"><span><strong>{saved ? tr(savedLabel) : localizedLabel}</strong><small>{tr(description)}</small></span><button className="module-btn primary" disabled={pending} onClick={onSave}><Save size={14} />{pending ? tr('保存中…') : localizedLabel}</button></div>
 }

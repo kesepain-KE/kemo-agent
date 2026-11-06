@@ -1,5 +1,5 @@
 import { t as tr, useLanguage } from '../i18n'
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { BrainCircuit, Download, File as FileIcon, FileX2, Image as ImageIcon, ListChecks, Music2, PanelRight, Trash2, UserRound, Video, X } from 'lucide-react'
 import { getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl } from '../api/client'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
@@ -15,7 +15,7 @@ export function UserMessageAvatar({ avatarUrl, user }: { avatarUrl?: string; use
   useEffect(() => setAvatarFailed(false), [avatarUrl])
 
   return (
-    <div className="msg-avatar user-message-avatar" role="img" aria-label={`${user || '用户'}头像`} title={user || tr('用户')}>
+    <div className="msg-avatar user-message-avatar" role="img" aria-label={`${user || tr('用户')}头像`} title={user || tr('用户')}>
       {avatarUrl && !avatarFailed
         ? <img src={avatarUrl} alt="" onError={() => setAvatarFailed(true)} />
         : <UserRound size={26} />}
@@ -29,7 +29,7 @@ export function mediaArtifactUrl(user: string, artifact: MediaArtifact) {
     : getUserFileDownloadUrl(user, 'download', artifact.path)
 }
 
-export function MediaArtifactCard({ user, artifact }: { user: string; artifact: MediaArtifact }) {
+export const MediaArtifactCard = memo(function MediaArtifactCard({ user, artifact }: { user: string; artifact: MediaArtifact }) {
   useLanguage()
   const url = mediaArtifactUrl(user, artifact)
   return (
@@ -44,9 +44,19 @@ export function MediaArtifactCard({ user, artifact }: { user: string; artifact: 
       </div>
     </article>
   )
+})
+
+function sameAttachment(left: InputAttachment, right: InputAttachment) {
+  return left === right || (
+    left.asset_id === right.asset_id && left.name === right.name
+    && left.media_kind === right.media_kind && left.mime_type === right.mime_type
+    && left.size === right.size && left.checksum_sha256 === right.checksum_sha256
+    && left.scope === right.scope && left.relative_path === right.relative_path
+    && left.available === right.available
+  )
 }
 
-export function UserAttachmentCard({ user, attachment }: { user: string; attachment: InputAttachment }) {
+export const UserAttachmentCard = memo(function UserAttachmentCard({ user, attachment }: { user: string; attachment: InputAttachment }) {
   useLanguage()
   const [unavailable, setUnavailable] = useState(!attachment.available)
   const [thumbnailFailed, setThumbnailFailed] = useState(false)
@@ -97,7 +107,7 @@ export function UserAttachmentCard({ user, attachment }: { user: string; attachm
           <img src={thumbnailUrl} alt={attachment.name} loading="lazy" onError={() => setThumbnailFailed(true)} />
         </span>
       ) : (
-        <span role="img" className={`user-attachment-icon ${attachment.media_kind}`} aria-label={`${attachment.media_kind === 'audio' ? '音频' : attachment.media_kind === 'video' ? '视频' : image ? '图片' : '文件'}缩略图`}>
+        <span role="img" className={`user-attachment-icon ${attachment.media_kind}`} aria-label={`${attachment.media_kind === 'audio' ? '音频' : attachment.media_kind === 'video' ? '视频' : image ? '图片' : tr('文件')}缩略图`}>
           {unavailable && !image ? <FileX2 size={20} /> : typeIcon}
         </span>
       )}
@@ -109,7 +119,7 @@ export function UserAttachmentCard({ user, attachment }: { user: string; attachm
       {downloadable ? <button type="button" onClick={() => openWorkspacePath(user, 'file_upload', attachment.relative_path, attachment.name, attachment.size)} aria-label={`${tr('在工作面板打开')} ${attachment.name}`}><PanelRight size={14} />{tr('预览')}</button> : null}
     </article>
   )
-}
+}, (previous, next) => previous.user === next.user && sameAttachment(previous.attachment, next.attachment))
 
 export function PendingAttachmentCard({
   user,
@@ -149,7 +159,7 @@ export function PendingAttachmentCard({
           </a>
         </span>
       ) : (
-        <span role="img" className={`pending-attachment-file-icon ${mediaKind}`} aria-label={`${mediaKind === 'audio' ? '音频' : mediaKind === 'video' ? '视频' : image ? '图片' : '文件'}缩略图`}>
+        <span role="img" className={`pending-attachment-file-icon ${mediaKind}`} aria-label={`${mediaKind === 'audio' ? '音频' : mediaKind === 'video' ? '视频' : image ? '图片' : tr('文件')}缩略图`}>
           {typeIcon}
         </span>
       )}
@@ -193,21 +203,21 @@ export function greetingLabel() {
   return tr('晚上好')
 }
 
-export function TaskPlanRecord({ plan, docked, onOpen }: { plan: PlanSummary; docked: boolean; onOpen: () => void }) {
+export const TaskPlanRecord = memo(function TaskPlanRecord({ plan, docked, onOpen }: { plan: PlanSummary; docked: boolean; onOpen: (plan: PlanSummary) => void }) {
   useLanguage()
   return (
     <article className="task-plan-record" aria-label={`已创建任务计划：${plan.title}`}>
       <span className="task-plan-record-icon"><ListChecks size={17} /></span>
       <span className="task-plan-record-copy">
-        <small>已创建任务计划</small>
+        <small>{tr("已创建任务计划")}</small>
         <strong>{plan.title}</strong>
       </span>
       <span className={`task-plan-record-status status-${plan.status}`}>{statusLabel(plan.status)}</span>
       <span className="task-plan-record-progress">{plan.progress.completed}/{plan.progress.total}</span>
-      <button type="button" onClick={onOpen}>{docked ? '查看当前计划' : tr('任务中枢')}</button>
+      <button type="button" onClick={() => onOpen(plan)}>{docked ? tr('查看当前计划') : tr('任务中枢')}</button>
     </article>
   )
-}
+})
 
 function cronScheduleLabel(task: CronTaskSummary) {
   if (task.type === 'daily') return `每天 ${task.time || '—'}`
@@ -216,7 +226,7 @@ function cronScheduleLabel(task: CronTaskSummary) {
     const seconds = Number(task.interval_seconds || 0)
     return seconds >= 3600 ? `每 ${Math.round(seconds / 3600)} 小时` : `每 ${Math.max(1, Math.round(seconds / 60))} 分钟`
   }
-  return '未配置调度'
+  return tr('未配置调度')
 }
 
 function senseIconFor(source: SenseSourceSummary): SenseDataItem['icon'] {
@@ -239,40 +249,40 @@ export type GuidanceDisplayItem = GuidanceItem | {
 
 export function guidanceTitleLabel(item: GuidanceDisplayItem) {
   return item.status === 'queued'
-    ? '引导中'
+    ? tr('引导中')
     : item.status === 'next_turn'
-      ? '已排队到下一轮'
+      ? tr('已排队到下一轮')
       : item.status === 'next_turn_error'
-        ? '自动发送失败'
+        ? tr('自动发送失败')
         : item.status === 'not_applied'
-          ? '本轮未生效'
+          ? tr('本轮未生效')
           : item.status === 'error'
-            ? '引导失败'
-            : '引导成功'
+            ? tr('引导失败')
+            : tr('引导成功')
 }
 
 export function guidanceDetailLabel(item: GuidanceDisplayItem) {
   return item.status === 'queued'
-    ? '等待智能体到达下一个安全边界'
+    ? tr('等待智能体到达下一个安全边界')
     : item.status === 'next_turn'
-      ? '本轮结束后将自动作为新的用户消息发送'
+      ? tr('本轮结束后将自动作为新的用户消息发送')
       : item.status === 'next_turn_error'
-        ? '消息仍已保留，可以重新发送'
+        ? tr('消息仍已保留，可以重新发送')
         : item.status === 'accepted'
-          ? '智能体已读取该引导并继续运行'
+          ? tr('智能体已读取该引导并继续运行')
           : item.status === 'completed'
-            ? '本轮运行已采用此引导'
+            ? tr('本轮运行已采用此引导')
             : item.status === 'not_applied'
-              ? '本轮结束前未进入下一次模型请求'
-              : '引导未能提交到当前运行'
+              ? tr('本轮结束前未进入下一次模型请求')
+              : tr('引导未能提交到当前运行')
 }
 
-export function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { user: string; item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
+export const GuidanceMessage = memo(function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { user: string; item: GuidanceDisplayItem; placement: 'current' | 'completed'; onRetry?: () => void; onCancel?: () => void }) {
   useLanguage()
   const title = guidanceTitleLabel(item)
   const detail = guidanceDetailLabel(item)
   return <article className={`guidance-message guidance-${placement} ${item.status}`} data-guidance-status={item.status}>
-    {placement === 'current' ? <span className="sr-only">{item.status === 'queued' ? '正在引导' : title}</span> : null}
+    {placement === 'current' ? <span className="sr-only">{item.status === 'queued' ? tr('正在引导') : title}</span> : null}
     {placement === 'completed' ? <div className="guidance-meta">
       <small>{detail}</small>
       <span className="guidance-title"><i aria-hidden="true" />{title}</span>
@@ -285,25 +295,35 @@ export function GuidanceMessage({ user, item, placement, onRetry, onCancel }: { 
     </div> : null}
     {onRetry || onCancel ? <div className="guidance-actions">
       {onCancel ? <button type="button" className="guidance-cancel" onClick={onCancel}>{tr("取消")}</button> : null}
-      {onRetry ? <button type="button" className="guidance-retry" onClick={onRetry}>重新发送</button> : null}
+      {onRetry ? <button type="button" className="guidance-retry" onClick={onRetry}>{tr("重新发送")}</button> : null}
     </div> : null}
   </article>
-}
+}, (previous, next) => {
+  if (previous.user !== next.user || previous.placement !== next.placement
+    || previous.onRetry !== next.onRetry || previous.onCancel !== next.onCancel) return false
+  const left = previous.item
+  const right = next.item
+  if (left === right) return true
+  const leftAttachments = left.attachments || []
+  const rightAttachments = right.attachments || []
+  return left.id === right.id && left.content === right.content
+    && left.status === right.status && left.guidanceId === right.guidanceId
+    && leftAttachments.length === rightAttachments.length
+    && leftAttachments.every((attachment, index) => sameAttachment(attachment, rightAttachments[index]))
+})
 
 export function ContextCompressionBubble({ item }: { item: Extract<ChatItem, { kind: 'context_compression' }> }) {
+  useLanguage()
   const failed = item.status === 'failed'
   const ready = item.status === 'ready'
-  const title = failed ? '对话压缩失败' : ready ? '对话上下文已压缩' : '正在压缩对话上下文'
-  const rounds = item.roundsRemoved > 0
-    ? `${item.roundsBefore} 轮 → 保留 ${item.roundsRemaining} 轮，裁剪 ${item.roundsRemoved} 轮`
-    : '正在整理较早的完整对话轮次'
-  const memory = ready && item.memoryStatus === 'queued_after_commit'
-    ? '；裁剪内容将在本轮提交后进入后台记忆整理'
-    : ''
+  const title = failed ? tr('对话压缩失败') : ready ? tr('对话上下文已压缩') : tr('正在压缩对话上下文')
+  const detail = item.absorbedCards > 0
+    ? `已整理 ${item.absorbedCards} 张历史卡片，历史 Token ${item.historyTokensBefore} → ${item.historyTokensAfter}`
+    : tr('正在生成历史摘要')
   return (
     <article className={`context-compression-bubble ${item.status}`} role="status" aria-live="polite">
       <span className="context-compression-icon"><BrainCircuit size={16} /></span>
-      <span><strong>{title}</strong><small>{rounds}{memory}</small></span>
+      <span><strong>{title}</strong><small>{detail}</small></span>
       <i aria-hidden="true" />
     </article>
   )

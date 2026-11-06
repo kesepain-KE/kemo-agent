@@ -203,7 +203,7 @@ function SoulEditor({
       <span className="profile-editor-meta"><FilePenLine size={13} />{draft.length.toLocaleString()} / {MAX_SOUL_CHARS.toLocaleString()} 字符 · {updatedAt ? `更新于 ${formatDateTime(updatedAt)}` : '尚无文件'}</span>
       <div className="profile-editor-actions">
       <button className="btn btn-ghost btn-sm" type="button" aria-label={`下载${title}`} onClick={download}><Download size={14} />下载草稿</button>
-      {editable && <button type="button" className="btn btn-primary btn-sm" disabled={!changed || invalid || saving} onClick={onSave}><Save size={14} />{saving ? '正在保存…' : missing ? '创建人格文件' : '保存用户人格'}</button>}
+      {editable && <button type="button" className="btn btn-primary btn-sm" disabled={!changed || invalid || saving} onClick={onSave}><Save size={14} />{saving ? tr('正在保存…') : missing ? '创建人格文件' : '保存用户人格'}</button>}
       </div>
     </div>
   </article>

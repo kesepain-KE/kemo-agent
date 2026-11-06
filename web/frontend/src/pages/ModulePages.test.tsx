@@ -44,19 +44,16 @@ describe('current settings and profile pages', () => {
     expect(document.documentElement.dataset.theme).toBe('light')
   })
 
-  it('记忆与上下文页读取并保存中途上下文压缩开关', async () => {
-    let enabled = true
+  it('记忆与上下文页读取并保存 CardStream Token 预算', async () => {
     let savedChanges: Record<string, unknown> | undefined
     server.use(
       http.get('/api/global-config', () => HttpResponse.json({
         scope: 'global',
         config: {
           agents: {
-            enable_mid_context_compression: enabled,
             token_limit: 1000000,
             token_compression_ratio: 0.3,
-            max_rounds: 80,
-            rounds_after_compression: 20,
+            output_reserve: 8192,
           },
           memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
         },
@@ -65,17 +62,13 @@ describe('current settings and profile pages', () => {
       http.patch('/api/global-config', async ({ request }) => {
         const body = await request.json() as { changes: Record<string, unknown> }
         savedChanges = body.changes
-        const agents = body.changes.agents as { enable_mid_context_compression?: boolean }
-        enabled = agents.enable_mid_context_compression ?? enabled
         return HttpResponse.json({
           scope: 'global',
           config: {
             agents: {
-              enable_mid_context_compression: enabled,
               token_limit: 1000000,
               token_compression_ratio: 0.3,
-              max_rounds: 80,
-              rounds_after_compression: 20,
+              output_reserve: 8192,
             },
             memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
           },
@@ -86,16 +79,19 @@ describe('current settings and profile pages', () => {
     )
     renderPage('settings')
     fireEvent.click(await screen.findByRole('button', { name: '记忆与上下文' }))
-    const toggle = await screen.findByRole('switch', { name: '中途上下文压缩' })
-    expect(toggle).toHaveAttribute('aria-checked', 'true')
-    fireEvent.click(toggle)
-    expect(toggle).toHaveAttribute('aria-checked', 'false')
+    const ratio = await screen.findByRole('slider', { name: '历史压缩比例' })
+    expect(ratio).toHaveValue('0.3')
+    fireEvent.change(ratio, { target: { value: '0.4' } })
     fireEvent.click(screen.getByRole('button', { name: '保存记忆与上下文' }))
     await waitFor(() => expect(savedChanges).toMatchObject({
-      agents: expect.objectContaining({ enable_mid_context_compression: false }),
+      agents: expect.objectContaining({
+        token_limit: 1000000,
+        token_compression_ratio: 0.4,
+        output_reserve: 8192,
+      }),
     }))
     expect(await screen.findByText('记忆与上下文 已保存')).toBeInTheDocument()
-    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'))
+    expect(ratio).toHaveValue('0.4')
   })
 
   it('结束音效设置只在 Windows 桌面端显示且支持上传和清除', async () => {
@@ -219,7 +215,7 @@ describe('current settings and profile pages', () => {
     expect(screen.getByLabelText('轻量子智能体模型')).toHaveValue('summary-model')
     expect(screen.getByLabelText('推理子智能体模型')).toHaveValue('agent-reasoning')
     expect(screen.getByText('普通用户子智能体和未指定档位的后台代理；留空时继承主对话模型')).toBeInTheDocument()
-    expect(screen.getByText('历史摘要、上下文压缩和临时记忆整理等高频轻量任务；留空时继承主对话模型')).toBeInTheDocument()
+    expect(screen.getByText('历史标题和记忆提取等轻量后台任务；留空时继承主对话模型')).toBeInTheDocument()
     expect(screen.getByText('任务计划、自我改进和需要较深分析的后台任务；留空时继承主对话模型')).toBeInTheDocument()
     expect(screen.getByLabelText('图片识别')).toHaveValue('vision-model')
     fireEvent.click(screen.getByRole('combobox', { name: '思考强度' }))
@@ -259,14 +255,18 @@ describe('current settings and profile pages', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '记忆与上下文' }))
     expect(await screen.findByLabelText('Token 上限')).toHaveValue(1000000)
-    expect(screen.getByLabelText('Token 压缩比例')).toHaveValue('0.3')
+    expect(screen.getByLabelText('历史压缩比例')).toHaveValue('0.3')
     expect(screen.getByLabelText('周记忆上限')).toHaveValue(100)
 
     fireEvent.click(screen.getByRole('button', { name: '权限边界' }))
     expect(await screen.findByRole('switch', { name: '使用共享知识库' })).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByRole('switch', { name: '拓展数据实时注入' })).not.toBeChecked()
-    expect(screen.getByRole('switch', { name: '感知数据实时注入' })).not.toBeChecked()
+    expect(screen.queryByRole('switch', { name: '拓展数据实时注入' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: '感知数据实时注入' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('插件白名单输入')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '读取' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: '写入' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: '删除' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: '外部操作' })).toBeChecked()
 
     fireEvent.click(screen.getByRole('button', { name: '版本查看' }))
     expect(await screen.findByText('当前版本')).toBeInTheDocument()
@@ -278,7 +278,7 @@ describe('current settings and profile pages', () => {
     expect(screen.getByText('只读')).toBeInTheDocument()
     expect(screen.getByText('配置 Schema 版本')).toBeInTheDocument()
     expect(screen.getByLabelText('配置结构 Schema 版本')).toHaveTextContent('1')
-    expect(screen.getByLabelText('历史结构 Schema 版本')).toHaveTextContent('1')
+    expect(screen.getByLabelText('卡片结构 Schema 版本')).toHaveTextContent('1')
     expect(screen.getByLabelText('记忆存储 Schema 版本')).toHaveTextContent('1')
     expect(await screen.findByText('发现新版本 v0.3.0')).toBeInTheDocument()
     expect(screen.getByText('python update.py --module all')).toBeInTheDocument()
@@ -287,7 +287,7 @@ describe('current settings and profile pages', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '运行限制' }))
     expect(await screen.findByLabelText('工具调用超时')).toHaveValue(240)
-    expect(screen.getByLabelText('单轮最大工具调用数')).toHaveValue(80)
+    expect(screen.queryByLabelText('单轮最大工具调用数')).not.toBeInTheDocument()
     expect(screen.getByLabelText('单个工具最大连续使用上限')).toHaveValue(8)
     expect(screen.getByLabelText('工具参数异常重试次数')).toHaveValue(2)
     expect(screen.getByRole('switch', { name: '自动接受任务计划' })).toHaveAttribute('aria-checked', 'false')

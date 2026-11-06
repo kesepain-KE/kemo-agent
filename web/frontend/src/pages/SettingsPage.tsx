@@ -467,12 +467,11 @@ export function SettingsPage() {
     if (!globalDraft) return
     const { agents } = globalDraft
     const memoryLimits = globalDraft.memory.temporary_injection_limits
-    const integers = [agents.token_limit, agents.max_rounds, agents.rounds_after_compression, memoryLimits.seven_days, memoryLimits.one_month, memoryLimits.half_year]
-    let validation = integers.every(Number.isInteger) ? '' : 'Token、轮次和记忆上限必须为整数。'
+    const integers = [agents.token_limit, agents.output_reserve, memoryLimits.seven_days, memoryLimits.one_month, memoryLimits.half_year]
+    let validation = integers.every(Number.isInteger) ? '' : 'Token、输出预留和记忆上限必须为整数。'
     if (!validation && agents.token_limit <= 0) validation = 'Token 上限必须大于 0。'
-    if (!validation && (agents.token_compression_ratio <= 0 || agents.token_compression_ratio > 1)) validation = 'Token 压缩比例必须大于 0 且不超过 1。'
-    if (!validation && agents.max_rounds <= 0) validation = '最大对话轮次必须大于 0。'
-    if (!validation && (agents.rounds_after_compression < 0 || agents.rounds_after_compression > agents.max_rounds)) validation = '压缩后保留轮次必须介于 0 与最大对话轮次之间。'
+    if (!validation && (agents.token_compression_ratio <= 0 || agents.token_compression_ratio >= 1)) validation = '历史压缩比例必须大于 0 且小于 1。'
+    if (!validation && (agents.output_reserve <= 0 || agents.output_reserve >= agents.token_limit)) validation = '输出预留必须大于 0 且小于总 Token 上限。'
     if (!validation && Object.values(memoryLimits).some((value) => value < 0)) validation = '记忆注入上限不能小于 0。'
     submit({ label: '保存记忆与上下文', globalChanges: { agents, memory: globalDraft.memory } }, validation)
   }
@@ -493,9 +492,10 @@ export function SettingsPage() {
 
   const saveRuntime = () => {
     if (!userDraft || !globalDraft) return
-    const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.max_iterations, globalDraft.tools.consecutive_identical_call_limit, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.cron.session_idle_close_seconds, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
+    const positiveIntegers = [globalDraft.tools.timeout, globalDraft.tools.consecutive_identical_call_limit, globalDraft.history.consecutive_tool_fail_limit, globalDraft.task_plan.max_steps, globalDraft.cron.poll_interval, globalDraft.cron.session_idle_close_seconds, globalDraft.agent_runtime.default_timeout, globalDraft.provider_runtime.max_concurrent_requests, globalDraft.provider_runtime.request_semaphore_timeout, globalDraft.web.max_concurrent_chats, globalDraft.web.pending_chat_timeout]
     const nonnegativeIntegers = [globalDraft.tools.invalid_tool_arguments_retries, globalDraft.web.max_pending_chats, globalDraft.message.max_queued_messages, globalDraft.agent_runtime.queue_maxsize]
     let validation = positiveIntegers.every((value) => Number.isInteger(value) && value > 0) ? '' : '超时、轮询和并发上限必须为大于 0 的整数。'
+    if (!validation && (!Number.isInteger(globalDraft.provider_runtime.max_retries) || globalDraft.provider_runtime.max_retries < 0 || globalDraft.provider_runtime.max_retries > 5)) validation = 'Provider 重试次数必须为 0 到 5 的整数。'
     if (!validation && !nonnegativeIntegers.every((value) => Number.isInteger(value) && value >= 0)) validation = '队列与等待槽上限必须为大于等于 0 的整数。'
     if (!validation && (globalDraft.cron.congestion_threshold_ratio <= 0 || globalDraft.cron.congestion_threshold_ratio > 1)) validation = 'Cron 退避阈值必须大于 0 且不超过 1。'
     if (!validation && (!Number.isInteger(globalDraft.cron.history_retention_days) || globalDraft.cron.history_retention_days < 0 || globalDraft.cron.history_retention_days > 3650)) validation = '定时任务历史保留天数必须是 0 到 3650 的整数；0 表示永久保留。'
@@ -701,7 +701,7 @@ export function SettingsPage() {
             />} />
             {userDraft.provider.type === 'kemo' && providerDiscovery.status !== 'idle' ? <SettingRow title="Kemo 模型目录" description={providerDiscovery.message} control={<StatusChip status={providerDiscovery.status === 'valid' ? 'configured' : 'error'}>{providerDiscovery.status === 'valid' ? 'API 有效' : '未拉取'}</StatusChip>} /> : null}
             <SettingRow title="Base URL" description="chat 模式自动补全 /v1；kemo 模式使用协议根地址" source="user" control={<input className="config-field" aria-label="Base URL" value={userDraft.provider.base_url} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, base_url: event.target.value } })} />} />
-            <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder="未配置" value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
+            <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder={tr("未配置")} value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
             <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
             <SettingRow
               title="思考强度"
@@ -715,7 +715,7 @@ export function SettingsPage() {
                     ariaLabel="思考强度"
                     value={userDraft.provider.reasoning_effort}
                     options={[]}
-                    emptyLabel={providerCapabilitiesQuery.isPending && providerCapabilitiesEnabled ? '读取能力中…' : '推理不可用'}
+                    emptyLabel={providerCapabilitiesQuery.isPending && providerCapabilitiesEnabled ? tr('读取能力中…') : tr('推理不可用')}
                     disabled
                     onChange={() => undefined}
                   />}
@@ -728,7 +728,7 @@ export function SettingsPage() {
             </> : null}
           </article>
           <details className="setting-section settings-disclosure" open>
-            <summary><span><strong>子智能体模型</strong><small>按任务档位指定专用模型；留空时使用主对话模型。</small></span><ChevronDown size={16} /></summary>
+            <summary><span><strong>{tr("子智能体模型")}</strong><small>按任务档位指定专用模型；留空时使用主对话模型。</small></span><ChevronDown size={16} /></summary>
             <div>{agentModelFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<ModelSelectField
               label={field.label}
               value={userDraft.agent_models[field.key]}
@@ -739,7 +739,7 @@ export function SettingsPage() {
             />} />)}</div>
           </details>
           <details className="setting-section settings-disclosure" open>
-            <summary><span><strong>多模态模型</strong><small>为不同能力指定专用模型；留空表示不指定专用模型。</small></span><ChevronDown size={16} /></summary>
+            <summary><span><strong>{tr("多模态模型")}</strong><small>为不同能力指定专用模型；留空表示不指定专用模型。</small></span><ChevronDown size={16} /></summary>
             <div>
               <SettingRow title="图片路由" description="自动模式优先主模型，不支持图片时改用专用视觉模型" source="user" control={<VisionRoutingSelect value={userDraft.multimodal_routing.vision} onChange={(vision) => setUserDraft({ ...userDraft, multimodal_routing: { vision } })} />} />
               {multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<ModelSelectField
@@ -757,7 +757,7 @@ export function SettingsPage() {
         {tab === 'users' ? <>
           <article className="setting-section current-user-section">
             <div className="setting-section-head"><strong>当前用户</strong><span>每个 Web 窗口只激活一个 users/&lt;user_id&gt; 目录。</span></div>
-            <div className="current-user-card"><span className="user-card-avatar">{user.slice(0, 1).toUpperCase()}</span><span><strong>{user}</strong><small>users/{user} · 当前配置、历史、知识与记忆空间</small></span><StatusChip status="enabled">已载入</StatusChip></div>
+            <div className="current-user-card"><span className="user-card-avatar">{user.slice(0, 1).toUpperCase()}</span><span><strong>{user}</strong><small>users/{user} · 当前配置、历史、知识与记忆空间</small></span><StatusChip status="enabled">{tr("已载入")}</StatusChip></div>
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>可切换用户</strong><span>逐行选择目标用户；切换后会清空当前会话选择，并重新读取目标用户的运行配置。</span></div>
@@ -773,7 +773,7 @@ export function SettingsPage() {
               >
                 <span className="user-card-avatar">{name.slice(0, 1).toUpperCase()}</span>
                 <span><strong>{name}</strong><small>users/{name} · 点击切换到此用户空间</small></span>
-                <span className="settings-user-action">{chatRunning ? '已锁定' : '切换'}</span>
+                <span className="settings-user-action">{chatRunning ? tr('已锁定') : tr('切换')}</span>
               </button>)}
               {!settingsQuery.data?.users.some((name) => name !== user) && <div className="settings-user-empty">当前没有其他可切换用户。</div>}
             </div>
@@ -781,20 +781,19 @@ export function SettingsPage() {
         </> : null}
 
         {tab === 'memory' && globalDraft ? <>
-          <ConfigSaveBar label="保存记忆与上下文" description="这些参数是全局默认值，将影响所有未覆盖对应字段的用户。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
+          <ConfigSaveBar label="保存记忆与上下文" description="记忆注入开关对所有用户生效；其余参数为全局默认值。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
           <article className="setting-section">
-            <div className="setting-section-head"><strong>{tr("上下文窗口")}</strong><span>控制 Token 预算、轮次上限和压缩后保留量。</span></div>
-            <SettingRow title="中途上下文压缩" description="超过保留轮数后，将较早一轮的工具调用与思考压缩为摘要；只影响命中率优化，不改变普通轮数或 Token 压缩。" source="global" control={<Toggle checked={globalDraft.agents.enable_mid_context_compression} label="中途上下文压缩" onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, enable_mid_context_compression: value } })} />} />
-            <SettingRow title="Token 上限" description="估算总量越过该值或 Provider 报超限时触发压缩" source="global" control={<NumberInput label="Token 上限" value={globalDraft.agents.token_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_limit: value } })} />} />
-            <SettingRow title="Token 压缩比例" description={`输入预算为 Token 上限的 ${Math.round(globalDraft.agents.token_compression_ratio * 100)}%`} source="global" control={<div className="config-range"><input type="range" aria-label="Token 压缩比例" min="0.05" max="1" step="0.05" value={globalDraft.agents.token_compression_ratio} onChange={(event) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_compression_ratio: Number(event.target.value) } })} /><b>{Math.round(globalDraft.agents.token_compression_ratio * 100)}%</b></div>} />
-            <SettingRow title="最大对话轮次" description="限制 Provider 临时工作区，不限制用户可见完整归档" source="global" control={<NumberInput label="最大对话轮次" value={globalDraft.agents.max_rounds} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, max_rounds: value } })} />} />
-            <SettingRow title="压缩后保留轮次" description="压缩时保留最新的完整轮次" source="global" control={<NumberInput label="压缩后保留轮次" value={globalDraft.agents.rounds_after_compression} max={globalDraft.agents.max_rounds} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, rounds_after_compression: value } })} />} />
+            <div className="setting-section-head"><strong>CardStream 上下文</strong><span>每次主请求前检查容量；超过有效输入上限的 80% 时压缩历史，RAW 始终保留。</span></div>
+            <SettingRow title="Token 上限" description="总容量约束；还会受模型声明的输入窗口限制，并扣除必要输出预留" source="global" control={<NumberInput label="Token 上限" value={globalDraft.agents.token_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_limit: value } })} />} />
+            <SettingRow title="历史压缩比例" description={`有效历史尽量压至原历史的 ${Math.round(globalDraft.agents.token_compression_ratio * 100)}%；这是软目标，容量允许时保留必要上下文`} source="global" control={<div className="config-range"><input type="range" aria-label="历史压缩比例" min="0.05" max="0.95" step="0.05" value={globalDraft.agents.token_compression_ratio} onChange={(event) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_compression_ratio: Number(event.target.value) } })} /><b>{Math.round(globalDraft.agents.token_compression_ratio * 100)}%</b></div>} />
+            <SettingRow title="输出预留" description="为主模型生成预留的 Token；独立输入上限不会被重复扣减" source="global" control={<NumberInput label="输出预留" value={globalDraft.agents.output_reserve} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, output_reserve: value } })} />} />
           </article>
           <article className="setting-section">
-            <div className="setting-section-head"><strong>记忆注入上限</strong><span>按文件数量截断单次 Prompt，不限制磁盘中的记忆库存。</span></div>
-            <SettingRow title="周记忆上限" description="seven_days 层单次最多注入的文件数量" source="global" control={<NumberInput label="周记忆上限" value={globalDraft.memory.temporary_injection_limits.seven_days} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, seven_days: value } } })} />} />
-            <SettingRow title="月记忆上限" description="one_month 层单次最多注入的文件数量" source="global" control={<NumberInput label="月记忆上限" value={globalDraft.memory.temporary_injection_limits.one_month} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, one_month: value } } })} />} />
-            <SettingRow title="半年记忆上限" description="half_year 层单次最多注入的文件数量" source="global" control={<NumberInput label="半年记忆上限" value={globalDraft.memory.temporary_injection_limits.half_year} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, half_year: value } } })} />} />
+            <div className="setting-section-head"><strong>{tr('记忆注入')}</strong><span>按文件数量截断单次 Prompt，不限制磁盘中的记忆库存。</span></div>
+            <SettingRow title="自动注入记忆" description="控制永久记忆、热画像和临时记忆的自动注入；关闭后仍可通过工具检索，不影响记忆存储和后台整理。" source="global" control={<Toggle checked={globalDraft.memory.prompt_injection} label="自动注入记忆" onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, prompt_injection: value } })} />} />
+            <SettingRow title="周记忆上限" description="seven_days 层单次最多注入的文件数量" source="global" control={<NumberInput label="周记忆上限" value={globalDraft.memory.temporary_injection_limits.seven_days} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, seven_days: value } } })} />} />
+            <SettingRow title="月记忆上限" description="one_month 层单次最多注入的文件数量" source="global" control={<NumberInput label="月记忆上限" value={globalDraft.memory.temporary_injection_limits.one_month} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, one_month: value } } })} />} />
+            <SettingRow title="半年记忆上限" description="half_year 层单次最多注入的文件数量" source="global" control={<NumberInput label="半年记忆上限" value={globalDraft.memory.temporary_injection_limits.half_year} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, half_year: value } } })} />} />
           </article>
         </> : null}
 
@@ -802,20 +801,33 @@ export function SettingsPage() {
           <ConfigSaveBar label="保存权限边界" description="知识范围与模块白名单写入当前用户配置；知识图谱外挂由普通拓展和插件权限控制。" pending={saveMutation.isPending} saved={savedLabel === '保存权限边界'} onSave={savePermissions} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>知识库开关</strong><span>用户知识库始终有效；以下开关控制额外知识层。</span></div>
-            <SettingRow title="使用共享知识库" description="将 shared_knowledge 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_shared} label="使用共享知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_shared: value } })} />} />
-            <SettingRow title="使用全局知识库" description="将 global_knowledge 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_global} label="使用全局知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_global: value } })} />} />
+            <SettingRow title="使用共享知识库" description="将 knowledge/share 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_shared} label="使用共享知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_shared: value } })} />} />
+            <SettingRow title="使用全局知识库" description="将 knowledge/global 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_global} label="使用全局知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_global: value } })} />} />
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>来源白名单</strong><span>输入资源 ID 后按 Enter 或逗号添加；空白名单表示全部允许。</span></div>
             <SettingRow title="拓展数据注入" description="控制全部拓展数据是否进入系统提示词；关闭后仍可运行和主动调用拓展" source="user" control={<Toggle checked={userDraft.expand.prompt_injection} label="拓展数据注入" onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, prompt_injection: value } })} />} />
-            <SettingRow title="拓展数据实时注入" description={userDraft.expand.prompt_injection ? '开启后每次逻辑 Provider 请求都读取最新拓展快照；关闭时每轮对话只读取一次' : '拓展数据当前不进入系统提示词'} source="user" control={<Toggle checked={userDraft.expand.realtime_injection} disabled={!userDraft.expand.prompt_injection} label="拓展数据实时注入" onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, realtime_injection: value } })} />} />
             <SettingRow title="感知数据注入" description="控制全部感知数据是否进入系统提示词；关闭后后台采集仍可继续" source="user" control={<Toggle checked={userDraft.perception.prompt_injection} label="感知数据注入" onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, prompt_injection: value } })} />} />
-            <SettingRow title="感知数据实时注入" description={userDraft.perception.prompt_injection ? '开启后每次逻辑 Provider 请求都读取最新感知快照；关闭时每轮对话只读取一次' : '感知数据当前不进入系统提示词'} source="user" control={<Toggle checked={userDraft.perception.realtime_injection} disabled={!userDraft.perception.prompt_injection} label="感知数据实时注入" onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, realtime_injection: value } })} />} />
-            <SettingRow title="共享技能白名单" description="shared_skills 中允许进入主智能体 Prompt 的技能" source="user" control={<TagInput label="共享技能白名单" value={userDraft.skills.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, skills: { shared_whitelist: value } })} />} />
-            <SettingRow title="共享拓展白名单" description="shared_expand 中允许加载的模块" source="user" control={<TagInput label="共享拓展白名单" value={userDraft.expand.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, shared_whitelist: value } })} />} />
-            <SettingRow title="全局拓展白名单" description="global_expand 中允许加载的模块" source="user" control={<TagInput label="全局拓展白名单" value={userDraft.expand.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, global_whitelist: value } })} />} />
-            <SettingRow title="全局感知白名单" description="global_sense 中允许注入的模块" source="user" control={<TagInput label="全局感知白名单" value={userDraft.perception.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, global_whitelist: value } })} />} />
-            <SettingRow title="插件白名单" description="控制 Provider 工具 Schema 与插件 Prompt 清单" source="user" control={<TagInput label="插件白名单" value={userDraft.plugins.whitelist} onChange={(value) => setUserDraft({ ...userDraft, plugins: { whitelist: value } })} />} />
+            <SettingRow title="共享技能白名单" description="skills 中允许进入主智能体 Prompt 的共享技能" source="user" control={<TagInput label="共享技能白名单" value={userDraft.skills.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, skills: { shared_whitelist: value } })} />} />
+            <SettingRow title="共享拓展白名单" description="expand/share 中允许加载的模块" source="user" control={<TagInput label="共享拓展白名单" value={userDraft.expand.shared_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, shared_whitelist: value } })} />} />
+            <SettingRow title="全局拓展白名单" description="expand/global 中允许加载的模块" source="user" control={<TagInput label="全局拓展白名单" value={userDraft.expand.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, global_whitelist: value } })} />} />
+            <SettingRow title="全局感知白名单" description="sense 中允许注入的模块" source="user" control={<TagInput label="全局感知白名单" value={userDraft.perception.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, global_whitelist: value } })} />} />
+            <SettingRow title="插件白名单" description="控制 Provider 工具 Schema 与插件 Prompt 清单" source="user" control={<TagInput label="插件白名单" value={userDraft.plugins.whitelist} onChange={(value) => setUserDraft({ ...userDraft, plugins: { ...userDraft.plugins, whitelist: value } })} />} />
+            <SettingRow title="插件权限级别" description="只向智能体开放选中的工具类别；新配置默认全部开放" source="user" control={<div className="setting-checkboxes">{([
+              ['read', '读取'],
+              ['write', '写入'],
+              ['delete', tr('删除')],
+              ['external', '外部操作'],
+            ] as const).map(([permission, label]) => <label key={permission}><input
+              type="checkbox"
+              checked={userDraft.plugins.permissions.includes(permission)}
+              onChange={(event) => {
+                const permissions = event.target.checked
+                  ? [...userDraft.plugins.permissions, permission]
+                  : userDraft.plugins.permissions.filter((item) => item !== permission)
+                setUserDraft({ ...userDraft, plugins: { ...userDraft.plugins, permissions } })
+              }}
+            />{label}</label>)}</div>} />
           </article>
         </> : null}
 
@@ -824,9 +836,8 @@ export function SettingsPage() {
           <article className="setting-section">
             <div className="setting-section-head"><strong>工具执行</strong><span>分别约束工具等待时间、单轮调用总数以及连续重复或失败行为。</span></div>
             <SettingRow title="工具调用超时（秒）" description="单个工具执行的最长等待时间" source="global" control={<NumberInput label="工具调用超时" value={globalDraft.tools.timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, timeout: value } })} />} />
-            <SettingRow title="单轮最大工具调用数" description="一轮用户对话内允许处理的工具调用总数；同一响应中的并行调用分别计数" source="global" control={<NumberInput label="单轮最大工具调用数" value={globalDraft.tools.max_iterations} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, max_iterations: value } })} />} />
             <SettingRow title="单个工具最大连续使用上限" description="仅当工具名称和完整参数连续完全相同时累计；参数变化后重新计数" source="global" control={<NumberInput label="单个工具最大连续使用上限" value={globalDraft.tools.consecutive_identical_call_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, consecutive_identical_call_limit: value } })} />} />
-            <SettingRow title="工具参数异常重试次数" description="Provider 生成的工具参数不是完整 JSON 对象、且尚未发布可见输出或执行工具时，自动重新请求模型的次数" source="global" control={<NumberInput label="工具参数异常重试次数" value={globalDraft.tools.invalid_tool_arguments_retries} min={0} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, invalid_tool_arguments_retries: value } })} />} />
+            <SettingRow title="工具参数异常重试次数" description="无效批次整批不执行，记录未执行事实后让模型修正参数；最多 5 次，不重跑已有副作用。" source="global" control={<NumberInput label="工具参数异常重试次数" value={globalDraft.tools.invalid_tool_arguments_retries} min={0} max={5} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, invalid_tool_arguments_retries: value } })} />} />
             <SettingRow title="连续工具失败上限" description="达到上限后，本轮临时移除该工具" source="global" control={<NumberInput label="连续工具失败上限" value={globalDraft.history.consecutive_tool_fail_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, history: { consecutive_tool_fail_limit: value } })} />} />
           </article>
           <article className="setting-section">
@@ -836,13 +847,14 @@ export function SettingsPage() {
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>调度与超时</strong><span>控制 Cron 扫描频率和子代理默认执行期限。</span></div>
-            <SettingRow title="定时任务历史保留天数" description="默认保留 7 天；填 0 则永久保留。仅清理定时任务历史，缩短天数会删除过期记录且无法恢复。" source="global" control={<NumberInput label="定时任务历史保留天数" value={globalDraft.cron.history_retention_days} min={0} max={3650} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, history_retention_days: value } })} />} />
+            <SettingRow title="定时任务历史保留天数" description="默认 7 天；填 0 则持续可见。过期终态会话从目录隐藏，RAW 原文和旧用户文件不被删除。" source="global" control={<NumberInput label="定时任务历史保留天数" value={globalDraft.cron.history_retention_days} min={0} max={3650} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, history_retention_days: value } })} />} />
             <SettingRow title="闲置会话兜底阈值（秒）" description="默认 90 分钟；超过阈值的离线会话进入记忆队列并关闭，最小 3600 秒。" source="global" control={<NumberInput label="闲置会话兜底阈值" value={globalDraft.cron.session_idle_close_seconds} min={3600} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, session_idle_close_seconds: value } })} />} />
             <SettingRow title="Cron 轮询间隔（秒）" description="统一后台调度器检查到期任务的频率" source="global" control={<NumberInput label="Cron 轮询间隔" value={globalDraft.cron.poll_interval} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, cron: { ...globalDraft.cron, poll_interval: value } })} />} />
             <SettingRow title="代理默认超时（秒）" description="未单独声明超时时，子代理使用的默认期限" source="global" control={<NumberInput label="代理默认超时" value={globalDraft.agent_runtime.default_timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agent_runtime: { ...globalDraft.agent_runtime, default_timeout: value } })} />} />
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>Provider 并发控制</strong><span>所有来源共享 Provider 总闸，工具执行期间不会占用槽位。</span></div>
+            <SettingRow title="Provider 最大重试次数" description="默认 3 次额外重试，硬上限 5；仅在尚未产生可见输出且错误可安全重试时生效，不重跑工具。" source="global" control={<NumberInput label="Provider 最大重试次数" value={globalDraft.provider_runtime.max_retries} min={0} max={5} onChange={(value) => setGlobalDraft({ ...globalDraft, provider_runtime: { ...globalDraft.provider_runtime, max_retries: value } })} />} />
             <SettingRow title="最大并发请求数" description="同时访问 LLM API 的请求上限；超出后等待空闲槽位" source="global" control={<NumberInput label="最大并发请求数" value={globalDraft.provider_runtime.max_concurrent_requests} min={1} max={50} onChange={(value) => setGlobalDraft({ ...globalDraft, provider_runtime: { ...globalDraft.provider_runtime, max_concurrent_requests: value } })} />} />
             <SettingRow title="信号量等待超时（秒）" description="等待 Provider 空闲的最长时间；超时后明确返回拥塞错误" source="global" control={<NumberInput label="信号量等待超时" value={globalDraft.provider_runtime.request_semaphore_timeout} min={1} max={600} onChange={(value) => setGlobalDraft({ ...globalDraft, provider_runtime: { ...globalDraft.provider_runtime, request_semaphore_timeout: value } })} />} />
           </article>
@@ -895,13 +907,13 @@ export function SettingsPage() {
             <SettingRow title="项目" description="当前运行的智能体框架" control={<span className="settings-version-name">{versionQuery.data.name}</span>} />
             <SettingRow title="正式版本" description="来自项目根目录 version.json" control={<span className="settings-version-value primary">{versionLabel(versionQuery.data.version)}</span>} />
             {versionQuery.data.compatibility?.['kemo-adapter-api'] ? <SettingRow title="配套 Kemo 网关" description="已确认匹配当前 Kemo 2.0 线路协议" control={<span className="settings-version-value">v{versionQuery.data.compatibility['kemo-adapter-api']}</span>} /> : null}
-            <SettingRow title="版本结构" description="version.json 使用的结构版本" control={<span className="settings-version-value">Schema {versionQuery.data.schema_version || '未声明'}</span>} />
+            <SettingRow title="版本结构" description="version.json 使用的结构版本" control={<span className="settings-version-value">Schema {versionQuery.data.schema_version || tr('未声明')}</span>} />
             <SettingRow title="页面能力" description="此栏目只能查看版本信息" control={<span className="settings-version-readonly">{tr("只读")}</span>} />
           </article>
           {settingsQuery.data?.schema_versions ? <article className="setting-section">
             <div className="setting-section-head"><strong>配置 Schema 版本</strong><span>仅供更新校验参考；历史与记忆运行时仍以数据库内部 Schema 为准。</span></div>
-            <SettingRow title="配置结构版本" description="config/global_config.json → schema_version" control={<span className="settings-version-value" aria-label="配置结构 Schema 版本">{settingsQuery.data.schema_versions.config_schema}</span>} />
-            <SettingRow title="历史结构版本" description="history.schema_version" control={<span className="settings-version-value" aria-label="历史结构 Schema 版本">{settingsQuery.data.schema_versions.history_schema}</span>} />
+            <SettingRow title="配置结构版本" description="config/global_config.yaml → schema_version" control={<span className="settings-version-value" aria-label="配置结构 Schema 版本">{settingsQuery.data.schema_versions.config_schema}</span>} />
+            <SettingRow title="卡片结构版本" description="cards.sqlite3" control={<span className="settings-version-value" aria-label="卡片结构 Schema 版本">{settingsQuery.data.schema_versions.card_schema}</span>} />
             <SettingRow title="记忆存储版本" description="memory.storage_schema_version" control={<span className="settings-version-value" aria-label="记忆存储 Schema 版本">{settingsQuery.data.schema_versions.memory_storage_schema}</span>} />
           </article> : null}
           <article className="setting-section">
@@ -964,7 +976,7 @@ export function SettingsPage() {
                 <span><small>推荐：完整更新</small><code>{versionCheck.commands.recommended}</code></span>
                 <button type="button" className="module-btn" onClick={() => void copyVersionUpdateCommand()} aria-label="复制更新命令">
                   {versionCopyState === 'copied' ? <Check size={14} /> : <Copy size={14} />}
-                  {versionCopyState === 'copied' ? '已复制' : '复制命令'}
+                  {versionCopyState === 'copied' ? tr('已复制') : '复制命令'}
                 </button>
                 {versionCopyState === 'failed' ? <small className="settings-version-copy-error">复制失败，请手动选择命令。</small> : null}
               </div> : null}

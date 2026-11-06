@@ -32,25 +32,25 @@ export function BackgroundSetting({ user }: { user: string }) {
     },
     onSuccess: settings => {
       client.setQueryData<BackgroundStatus>(['background', user], previous => previous ? { ...previous, settings } : previous)
-      setFeedback('背景设置已保存')
+      setFeedback(t('背景设置已保存'))
     },
-    onError: () => { setDraft({ ...defaultBackground, ...data?.settings }); setFeedback('背景设置保存失败，已恢复原设置') },
+    onError: () => { setDraft({ ...defaultBackground, ...data?.settings }); setFeedback(t('背景设置保存失败，已恢复原设置')) },
   })
   const upload = useMutation({
     mutationFn: (file: File) => uploadBackground(user, file),
     onSuccess: result => {
       client.setQueryData(['background', user], result)
       setPreviewError('')
-      setFeedback('背景已上传，可开启背景')
+      setFeedback(t('背景已上传，可开启背景'))
     },
-    onError: () => setFeedback('背景上传失败，原背景保持不变'),
+    onError: () => setFeedback(t('背景上传失败，原背景保持不变')),
   })
   const clear = useMutation({
     mutationFn: () => deleteBackground(user),
     onSuccess: result => {
       client.setQueryData(['background', user], result)
       setConfirm(false)
-      setFeedback('背景已清除')
+      setFeedback(t('背景已清除'))
     },
   })
   const pending = save.isPending || upload.isPending || clear.isPending
@@ -103,7 +103,7 @@ export function BackgroundSetting({ user }: { user: string }) {
           <button className="btn btn-primary" disabled={disabled || !changed}
             onClick={() => save.mutate(draft)}>{t('应用背景设置')}</button>
           <button className="btn" disabled={disabled} onClick={() => input.current?.click()}>
-            <Upload size={14} />{t(data?.available ? '更换背景' : '上传背景')}</button>
+            <Upload size={14} />{data?.available ? t('更换背景') : t('上传背景')}</button>
           <button className="btn" disabled={disabled || (!data?.available && !data?.error)}
             onClick={() => setConfirm(true)}><Trash2 size={14} />{t('清除背景')}</button>
           <button className="btn" disabled={pending || query.isFetching}
@@ -117,7 +117,7 @@ export function BackgroundSetting({ user }: { user: string }) {
             if (!file) return
             const image = file.type.startsWith('image/') || /\.(jpe?g|png|webp)$/i.test(file.name)
             if (file.size > backgroundVideoMaxBytes || (image && file.size > backgroundImageMaxBytes)) {
-              setFeedback('文件过大：图片上限 100 MB，视频上限 400 MB')
+              setFeedback(t('文件过大：图片上限 100 MB，视频上限 400 MB'))
               return
             }
             setFeedback('')
@@ -134,7 +134,7 @@ export function BackgroundSetting({ user }: { user: string }) {
               : <video src={source} controls muted playsInline preload="metadata" style={{ filter: `blur(${draft.blur}px)` }}
                 onError={() => setPreviewError(source)} />}
             <span className="background-preview-shade" style={{ opacity: draft.overlay_opacity }} />
-            <span className="background-preview-label">{t(data?.media_kind === 'video' ? '动态背景' : '静态背景')}</span>
+            <span className="background-preview-label">{data?.media_kind === 'video' ? t('动态背景') : t('静态背景')}</span>
           </> : <div className="background-empty"><Image size={28} /><span>{t('未设置可用背景')}</span></div>}
         </div>
         {data?.available && <small className="background-file"><span>{data.filename}</span><span>{formatBytes(data.size)}</span></small>}
@@ -143,7 +143,7 @@ export function BackgroundSetting({ user }: { user: string }) {
     {query.isError && <div className="settings-inline-feedback" role="alert">{t('背景读取失败，请重试')}</div>}
     {(failed || data?.error) && <div className="settings-inline-feedback" role="alert">{t('背景无法加载或播放，已回退原主题')}</div>}
     {(feedback || pending) && <div className="settings-inline-feedback" role={save.isError || upload.isError ? 'alert' : 'status'}>
-      {t(pending ? '保存中…' : feedback)}</div>}
+      {pending ? t('保存中…') : feedback}</div>}
     <GlobalConfirmDialog open={confirm} title={t('清除背景')} icon={<Trash2 size={20} />}
       description={t('确定删除当前用户的背景文件？此操作不会修改其他用户或主题设置。')}
       confirmLabel={t('确认清除')} cancelLabel={t('取消')} pendingLabel={t('清除中…')} pending={clear.isPending}

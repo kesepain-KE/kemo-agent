@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown, Search } from 'lucide-react'
@@ -18,6 +19,7 @@ export function ModelSelectField({
   enabled: boolean
   onChange: (value: string) => void
 }) {
+  useLanguage()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
@@ -29,7 +31,7 @@ export function ModelSelectField({
     width: 360, maxHeight: 430,
   })
   const listboxId = useId()
-  const pickerLabel = label === '模型' ? '主模型' : label
+  const pickerLabel = label === '模型' ? tr('主模型') : label
   const availableModels = models
   const normalizedQuery = query.trim().toLowerCase()
   const filteredModels = availableModels.filter((item) => {
@@ -133,12 +135,12 @@ export function ModelSelectField({
     {open ? createPortal(<div ref={popoverRef} className="model-select-popover config-select-popover"
       style={{ ...position, position: 'fixed', zIndex: 85 }} role="dialog" aria-label={`${pickerLabel}模型选择`}>
       <div className="model-select-popover-head">
-        <span><strong>{pickerLabel}选择</strong><small>{models[0]?.source === 'chat' ? 'Chat · Provider 模型 API' : 'KEMO · 内置模型目录'}</small></span>
+        <span><strong>{pickerLabel}选择</strong><small>{models[0]?.source === 'chat' ? 'Chat · Provider 模型 API' : tr('KEMO · 内置模型目录')}</small></span>
         <em>{filteredModels.length} 个可用</em>
       </div>
       <div className="model-select-search">
         <Search size={15} aria-hidden="true" />
-        <input ref={searchRef} aria-label={`${pickerLabel}筛选`} value={query} placeholder="搜索模型…"
+        <input ref={searchRef} aria-label={`${pickerLabel}筛选`} value={query} placeholder={tr("搜索模型…")}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'ArrowDown') {
