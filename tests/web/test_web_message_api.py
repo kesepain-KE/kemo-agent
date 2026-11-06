@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from unittest.mock import Mock
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ import httpx
 
 from web.app import create_app
 from web.service import WebRunService
+from web.errors import WebServiceError
 from run.infra import LogStore
 
 
@@ -158,6 +160,19 @@ class WebMessageApiTests(unittest.TestCase):
         assert state is not None
         self.assertEqual(state["health"], "healthy")
         self.assertIsNone(state["error"])
+
+    def test_runtime_health_error_does_not_run_an_offline_check(self) -> None:
+        self.create_module("runtime_denied", "alice", healthy=False)
+        store = LogStore(self.root)
+        before = store.read_message_route_state("machine_runtime_denied")
+        checker = Mock(side_effect=PermissionError("bound user mismatch"))
+        service = WebRunService(self.root, message_health_checker=checker)
+
+        with self.assertRaisesRegex(WebServiceError, "bound user mismatch"):
+            service.check_message_module("alice", "runtime_denied")
+
+        checker.assert_called_once_with("runtime_denied", "alice")
+        self.assertEqual(store.read_message_route_state("machine_runtime_denied"), before)
 
     def test_delete_rechecks_bound_user_and_removes_only_current_users_module(self) -> None:
         alice = self.create_module("alice_delete", "alice")

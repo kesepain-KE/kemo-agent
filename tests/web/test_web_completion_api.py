@@ -27,7 +27,7 @@ class WebCompletionApiTests(unittest.TestCase):
             root / "tmp",
         ):
             path.mkdir(parents=True, exist_ok=True)
-        (root / "config" / "global_config.json").write_text("{}", "utf-8")
+        (root / "config" / "global_config.yaml").write_text("{}", "utf-8")
         return temporary, root
 
     def request(self, app, method: str, url: str, **kwargs):
@@ -345,7 +345,7 @@ class WebCompletionApiTests(unittest.TestCase):
                 "output_schema": {"type": "object"},
             },
         )
-        global_expand = root / "global_expand" / "weather"
+        global_expand = root / "expand" / "global" / "weather"
         global_expand.mkdir(parents=True)
         (global_expand / "expand.json").write_text("{}", "utf-8")
         (global_expand / "nested").mkdir()

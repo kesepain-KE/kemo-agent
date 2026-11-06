@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from run.agents.queue import AgentTask
-from run.agents.task_ledger import TaskCoordinator, TaskLedger
+from run.agents import TaskCoordinator, TaskLedger
 from web.app import create_app
 from web.auth import WebAuthConfig
 from web.service import WebRunService
@@ -17,10 +17,10 @@ from web.errors import InvalidRequestError, NotFoundError
 @pytest.fixture
 def backend(tmp_path):
     (tmp_path / 'config').mkdir()
-    (tmp_path / 'config/global_config.json').write_text('{}', 'utf-8')
+    (tmp_path / 'config/global_config.yaml').write_text('{}', 'utf-8')
     for name in ('alice', 'bob'):
         (tmp_path / 'users' / name).mkdir(parents=True)
-        (tmp_path / 'users' / name / 'user_config.json').write_text('{}', 'utf-8')
+        (tmp_path / 'users' / name / 'user_config.yaml').write_text('{}', 'utf-8')
     return WebRunService(tmp_path)
 
 def register(backend, index=1, source='web', session='scope'):
@@ -58,7 +58,7 @@ def test_artifacts_are_only_existing_user_files(backend):
     (directory / 'result.md').write_text('public', 'utf-8')
     coordinator.ledger.update(child.id, status='completed', result={'artifacts': [
         {'scope': 'download', 'relative_path': 'result.md'},
-        {'scope': 'download', 'relative_path': '../../../config/global_config.json'},
+        {'scope': 'download', 'relative_path': '../../../config/global_config.yaml'},
         {'scope': 'tmp', 'relative_path': 'secret'},
         {'scope': 'download', 'relative_path': 'missing.md'},
     ]})
@@ -151,3 +151,164 @@ def test_http_retains_budget_stop_fields_and_hides_pending_guidance(backend):
             assert record["usage"]["provider_request_count"] == 8
             assert "private-not-yet-delivered" not in response.text
     asyncio.run(exercise())
+
+
+def test_closed_parent_controls_are_scoped_and_never_expose_guidance_text(backend, monkeypatch):
+    import web.services.workspace_agents as controls
+
+    coordinator, child = register(backend)
+    coordinator.ledger.update(
+        coordinator.id, status="partial", response_closed=True, execution_live=True,
+        finished_at="2026-11-01T00:00:00+00:00",
+    )
+    coordinator.ledger.update(
+        child.id, status="running", execution_live=True,
+        _guidance=["private-guidance"], guidance_delivered_count=2,
+    )
+
+    class Scheduler:
+        cancelled = []
+
+        def has_local_task(self, task_id, *, source, session_id):
+            return task_id == child.id and source == "web" and session_id == "scope"
+
+        def cancel(self, task_id, *, source, session_id):
+            self.cancelled.append((task_id, source, session_id))
+            return True
+
+    scheduler = Scheduler()
+    monkeypatch.setattr(controls, "find_agent_scheduler", lambda *_: scheduler)
+    queued = []
+
+    def enqueue(*args, **kwargs):
+        queued.append((args, kwargs))
+        return {
+            "ok": True, "task_id": child.id, "status": "guidance_queued",
+            "pending": 2, "message": "queued for the next safe point",
+        }
+
+    monkeypatch.setattr(controls, "enqueue_guidance", enqueue)
+    app = create_app(service=backend, auth_config=WebAuthConfig())
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            detail_url = f"/api/users/alice/workspace/agents/{child.id}?source=web&session_id=scope"
+            detail = await client.get(detail_url)
+            assert detail.status_code == 200, detail.text
+            record = detail.json()["task"]
+            assert record["controls"] == {"guide": True, "cancel": True}
+            assert record["guidance_pending"] == 1
+            assert record["guidance_delivered"] == 2
+            assert "private-guidance" not in detail.text
+
+            query = "?source=web&session_id=scope"
+            guide_response = await client.post(
+                f"/api/users/alice/workspace/agents/{child.id}/guide{query}",
+                json={"guidance": "continue with existing evidence"},
+            )
+            assert guide_response.status_code == 200, guide_response.text
+            assert guide_response.json()["status"] == "guidance_queued"
+
+            denied = await client.post(
+                f"/api/users/alice/workspace/agents/{child.id}/guide?source=web&session_id=other",
+                json={"guidance": "must not cross session"},
+            )
+            assert denied.status_code == 404
+
+            cancel_response = await client.post(
+                f"/api/users/alice/workspace/agents/{child.id}/cancel{query}",
+            )
+            assert cancel_response.status_code == 200, cancel_response.text
+            assert cancel_response.json()["status"] == "cancelling"
+
+    asyncio.run(exercise())
+    assert queued and queued[0][1]["allow_closed_parent"] is True
+    assert scheduler.cancelled == [(child.id, "web", "scope")]
+
+
+@pytest.mark.parametrize(
+    ("parent_live", "has_local_task"),
+    [(False, True), (True, False)],
+)
+def test_controls_require_live_parent_protection_and_current_process_handle(
+    backend, monkeypatch, parent_live, has_local_task,
+):
+    import web.services.workspace_agents as controls
+
+    coordinator, child = register(backend)
+    coordinator.ledger.update(
+        coordinator.id, status="partial", response_closed=True,
+        execution_live=parent_live,
+    )
+    coordinator.ledger.update(child.id, status="running", execution_live=True)
+
+    class Scheduler:
+        def has_local_task(self, task_id, *, source, session_id):
+            return (
+                has_local_task and task_id == child.id
+                and source == "web" and session_id == "scope"
+            )
+
+    monkeypatch.setattr(controls, "find_agent_scheduler", lambda *_: Scheduler())
+    detail = task(backend, "alice", child.id, source="web", session_id="scope")["task"]
+    assert detail["controls"] == {"guide": False, "cancel": False}
+
+    with pytest.raises(controls.ConflictError):
+        controls.guide(
+            backend, "alice", child.id, source="web", session_id="scope",
+            guidance="must not be queued",
+        )
+
+
+def test_main_task_never_advertises_child_controls(backend, monkeypatch):
+    import web.services.workspace_agents as controls
+
+    coordinator, _ = register(backend)
+    coordinator.ledger.update(
+        coordinator.id, status="partial", response_closed=True,
+        execution_live=True,
+    )
+
+    class Scheduler:
+        def has_local_task(self, task_id, *, source, session_id):
+            return True
+
+    monkeypatch.setattr(controls, "find_agent_scheduler", lambda *_: Scheduler())
+    detail = task(
+        backend, "alice", coordinator.id, source="web", session_id="scope",
+    )["task"]
+    assert detail["controls"] == {"guide": False, "cancel": False}
+
+
+def test_cancel_reports_fresh_state_when_child_finishes_before_request(backend, monkeypatch):
+    import web.services.workspace_agents as controls
+
+    coordinator, child = register(backend)
+    coordinator.ledger.update(
+        coordinator.id, status="partial", response_closed=True, execution_live=True,
+    )
+    coordinator.ledger.update(child.id, status="running", execution_live=True)
+
+    class Scheduler:
+        def has_local_task(self, task_id, *, source, session_id):
+            return task_id == child.id
+
+        def cancel(self, task_id, *, source, session_id):
+            coordinator.ledger.update(
+                task_id, status="completed", execution_live=False,
+            )
+            return False
+
+    monkeypatch.setattr(controls, "find_agent_scheduler", lambda *_: Scheduler())
+    result = controls.cancel(
+        backend, "alice", child.id, source="web", session_id="scope",
+    )
+    assert result == {
+        "ok": True,
+        "task_id": child.id,
+        "status": "completed",
+        "cancel_requested": False,
+        "process_terminated": False,
+    }

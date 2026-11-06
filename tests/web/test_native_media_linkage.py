@@ -14,8 +14,7 @@ from events import RunEvent
 from provider.schema import ChatResponse, ToolCall
 from run.engine import iter_request_events
 from run.extensions.media_input_metadata import public_media_assets
-from run.history import commit_window, empty_window
-from tests.media_input_support import PNG, MediaProvider, make_root, make_host, enqueue
+from tests.media_input_support import PNG, MediaProvider, make_root
 from web.app import create_app
 from web.service import WebRunService
 from web.services.native_media import media_inputs
@@ -42,33 +41,11 @@ def test_native_media_stream_and_history_preserve_status_and_managed_location(tm
     done = next(event for event in events if event.type == "done")
     assert done.metadata["media_inputs"][0]["status"] == "included"
     history = WebRunService(tmp_path).history("alice", "native-link")
-    history_tool = history["round_traces"][0]["tools"][0]
+    history_tool = history["integration_traces"][0]["tools"][0]
     returned = history_tool["media_inputs"][0]
     assert returned["status"] == "included" and returned["tool_call_id"] == history_tool["call_id"]
     assert returned["scope"] == "download" and returned["available"] is True
     assert str(tmp_path) not in json.dumps(returned)
-
-
-def test_legacy_success_receipt_links_own_files_without_copying_or_promoting_status(tmp_path):
-    config, image = make_root(tmp_path)
-    host = make_host(tmp_path, config)
-    receipt = enqueue(host, {"paths": [str(image)]}, call_id="old-call")
-    # Simulate the previous version's public descriptor, which hid local download paths.
-    receipt["assets"][0].update(scope="external", relative_path="")
-    window = empty_window("alice", "web", "old-session")
-    window["text"]["messages"] = [{"role": "user", "content": "inspect"}, {"role": "assistant", "content": "done"}]
-    window["tool"]["rounds"] = [{"round": 1, "calls": [{
-        "id": "old-call", "name": "attach_media", "arguments": {"paths": [str(image)]},
-        "result": {"ok": True, "result": receipt}, "status": "completed",
-    }]}]
-    window["data"]["rounds"] = 1
-    commit_window(tmp_path / "users/alice/history/window-old", window)
-    before = sorted(str(path) for path in (tmp_path / "users/alice/download").rglob("*"))
-    result = WebRunService(tmp_path).history("alice", "old-session")
-    media = result["round_traces"][0]["tools"][0]["media_inputs"][0]
-    assert media["relative_path"] == "screen.png" and media["available"] is True
-    assert media["status"] == "unconfirmed", "a legacy receipt proves neither delivery nor non-delivery"
-    assert sorted(str(path) for path in (tmp_path / "users/alice/download").rglob("*")) == before
 
 
 def test_projection_never_grants_private_foreign_or_traversing_paths(tmp_path):
@@ -80,7 +57,7 @@ def test_projection_never_grants_private_foreign_or_traversing_paths(tmp_path):
         public = public_media_assets([{**base, "path": str(path)}], root=tmp_path, user="alice")[0]
         assert public["scope"] == "external" and public["available"] is False
         assert public["relative_path"] == "" and "path" not in public
-    invalid = public_media_assets([{**base, "scope": "download", "relative_path": "../user_config.json"}], root=tmp_path, user="alice")[0]
+    invalid = public_media_assets([{**base, "scope": "download", "relative_path": "../user_config.yaml"}], root=tmp_path, user="alice")[0]
     assert invalid["scope"] == "external"
     missing = media_inputs(tmp_path, "alice", [{**base, "path": str(image.with_name("missing.png")), "status": "failed"}])[0]
     assert missing["available"] is False and missing["status"] == "failed"
@@ -135,13 +112,14 @@ def test_cancelled_run_retains_queued_audit_but_does_not_claim_delivery(tmp_path
         root=tmp_path, provider_factory=lambda _: provider, cancel_event=cancel,
     ):
         events.append(event)
-        if event.type == "tool_call_result":
+        if (event.type == "tool_call_result"
+                and (event.result or {}).get("result", {}).get("status") == "queued"):
             cancel.set()
     assert len(provider.requests) == 1
     done = next(event for event in events if event.type == "done")
     assert done.metadata["media_inputs"][0]["status"] == "queued"
     history = WebRunService(tmp_path).history("alice", "cancel-native")
-    assert history["round_traces"][0]["tools"][0]["media_inputs"][0]["status"] == "not_sent"
+    assert history["integration_traces"][0]["tools"][0]["media_inputs"][0]["status"] == "not_sent"
 
 
 def test_linked_download_directory_is_not_projected_or_used_for_thumbnails(tmp_path):
@@ -174,10 +152,11 @@ def test_changed_media_publishes_failed_terminal_audit_without_sending(tmp_path)
         root=tmp_path, provider_factory=lambda _: provider,
     ):
         events.append(event)
-        if event.type == "tool_call_result":
+        if (event.type == "tool_call_result"
+                and (event.result or {}).get("result", {}).get("status") == "queued"):
             image.write_bytes(b"invalid media after queue")
     assert len(provider.requests) == 1
     terminal = next(event for event in events if event.type == "error" and event.metadata.get("committed") is True)
     assert terminal.metadata["media_inputs"][0]["status"] == "failed"
     returned = WebRunService(tmp_path).history("alice", "changed-native")
-    assert returned["round_traces"][0]["tools"][0]["media_inputs"][0]["status"] == "failed"
+    assert returned["integration_traces"][0]["tools"][0]["media_inputs"][0]["status"] == "failed"

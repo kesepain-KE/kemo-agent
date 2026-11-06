@@ -25,18 +25,18 @@ class KnowledgeClassificationTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         (self.root / "config").mkdir()
-        (self.root / "config" / "global_config.json").write_text(
+        (self.root / "config" / "global_config.yaml").write_text(
             json.dumps({"schema_version": 1}),
             "utf-8",
         )
         user_dir = self.root / "users" / "alice"
         (user_dir / "knowledge").mkdir(parents=True)
-        (user_dir / "user_config.json").write_text(
+        (user_dir / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1, "knowledge": {}}),
             "utf-8",
         )
-        (self.root / "shared_knowledge").mkdir()
-        (self.root / "global_knowledge").mkdir()
+        (self.root / "knowledge" / "share").mkdir(parents=True)
+        (self.root / "knowledge" / "global").mkdir()
         self.app = create_app(service=WebRunService(self.root))
 
     def request(self, method: str, url: str, **kwargs):

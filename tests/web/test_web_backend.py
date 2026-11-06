@@ -8,6 +8,7 @@ import asyncio
 import copy
 import hashlib
 import io
+import yaml
 import json
 import os
 import sqlite3
@@ -32,14 +33,9 @@ from run.extensions import history_attachment_descriptors
 from run.conversation import GuidanceInput
 from run.scheduler import CronStore, normalize_task
 from run.config import load_config
-from run.history import (
-    commit_window,
-    empty_window,
-    load_runtime_window,
-    load_window,
-    runtime_window_path,
-    synthesize_items,
-)
+from run.cards import CardStore, IntegrationStore, compact
+from tests.card_history_support import seed_history, session_history
+from run.history import find_record, mutate_registry_record
 from run.history import (
     claim_pending_summary,
     close_session,
@@ -47,7 +43,6 @@ from run.history import (
     queue_summary,
     reserve_session,
 )
-from run.history import window_exists
 from run.infra import LogStore
 from run.memory import MemoryStore
 from tests.support.memory_db import update_fragment_metadata
@@ -60,6 +55,24 @@ from web.errors import NotFoundError, WebServiceError
 from web.service import ActiveRun, WebRunService, _usage_cache_tokens
 from web.services import _paths as path_helpers
 from web.services.artifact_resolver import DownloadArtifactResolver
+
+
+
+def card_seed(root, session="s1", texts=("question", "answer"), *, user="alice", source="web", metadata=None, usage=None):
+    (root / "config").mkdir(exist_ok=True)
+    config = root / "config/global_config.yaml"
+    if not config.exists():
+        config.write_text('{}', encoding='utf-8')
+    return seed_history(root, user, source, session, [
+        {"role": "user" if n % 2 == 0 else "assistant", "content": text}
+        for n, text in enumerate(texts)], metadata=metadata, usage=usage)
+
+
+def card_compressor(request, *, root):
+    result = compact(CardStore(root, request["user"]), request["source"], request["session_id"],
+        summarize=lambda batch: {"current_work": {"objective": "保留原目标"},
+            "success_cases": [], "failure_cases": [], "background": []})
+    return {"compressed": True, "context": {"absorbed_cards": result.absorbed_count}}
 
 
 class FakeService:
@@ -222,8 +235,10 @@ class WebBackendTests(unittest.TestCase):
     def test_chat_model_discovery_keeps_saved_credentials_server_side(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(json.dumps({"schema_version": 1}), "utf-8")
-        config_path = root / "users" / "alice" / "user_config.json"
+        (root / "config" / "global_config.yaml").write_text(json.dumps({
+            "schema_version": 1, "provider_security": {"allowed_hosts": ["chat.test"]},
+        }), "utf-8")
+        config_path = root / "users" / "alice" / "user_config.yaml"
         config_path.write_text(json.dumps({
             "schema_version": 1,
             "provider": {
@@ -259,8 +274,8 @@ class WebBackendTests(unittest.TestCase):
     def test_chat_model_discovery_rejects_kemo_without_network_request(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(json.dumps({"schema_version": 1}), "utf-8")
-        (root / "users" / "alice" / "user_config.json").write_text(json.dumps({
+        (root / "config" / "global_config.yaml").write_text(json.dumps({"schema_version": 1}), "utf-8")
+        (root / "users" / "alice" / "user_config.yaml").write_text(json.dumps({
             "schema_version": 1,
             "provider": {"type": "kemo", "model": "kemo-model", "api_key": "kemo-secret"},
         }), "utf-8")
@@ -274,8 +289,10 @@ class WebBackendTests(unittest.TestCase):
 
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(json.dumps({"schema_version": 1}), "utf-8")
-        (root / "users" / "alice" / "user_config.json").write_text(json.dumps({
+        (root / "config" / "global_config.yaml").write_text(json.dumps({
+            "schema_version": 1, "provider_security": {"allowed_hosts": ["chat.test"]},
+        }), "utf-8")
+        (root / "users" / "alice" / "user_config.yaml").write_text(json.dumps({
             "schema_version": 1,
             "provider": {"type": "chat", "base_url": "https://chat.test/v1", "model": "current", "api_key": "private-secret"},
         }), "utf-8")
@@ -297,10 +314,10 @@ class WebBackendTests(unittest.TestCase):
     def test_kemo_model_discovery_uses_only_saved_private_protocol_config(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"schema_version": 1}), "utf-8"
+        (root / "config" / "global_config.yaml").write_text(
+            json.dumps({"schema_version": 1, "provider_security": {"allowed_hosts": ["chat.test", "gateway.test"]}}), "utf-8"
         )
-        config_path = root / "users" / "alice" / "user_config.json"
+        config_path = root / "users" / "alice" / "user_config.yaml"
         config_path.write_text(
             json.dumps(
                 {
@@ -370,10 +387,10 @@ class WebBackendTests(unittest.TestCase):
         clear_model_capability_cache()
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"schema_version": 1}), "utf-8"
+        (root / "config" / "global_config.yaml").write_text(
+            json.dumps({"schema_version": 1, "provider_security": {"allowed_hosts": ["capabilities-gateway.test"]}}), "utf-8"
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -789,20 +806,18 @@ class WebBackendTests(unittest.TestCase):
     def test_disabled_prompt_sections_are_reported_as_disabled(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"schema_version": 1}), "utf-8"
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
                     "expand": {
                         "prompt_injection": False,
-                        "realtime_injection": True,
                     },
                     "perception": {
                         "prompt_injection": False,
-                        "realtime_injection": True,
                     },
                 }
             ),
@@ -815,8 +830,9 @@ class WebBackendTests(unittest.TestCase):
         prompt_states = {
             item["name"]: item["status"] for item in prompt.json()["sections"]
         }
-        self.assertEqual(prompt_states["expand_data"], "disabled")
-        self.assertEqual(prompt_states["perception"], "disabled")
+        self.assertNotIn("expand_data", prompt_states)
+        self.assertEqual(prompt.json()["source_policy"]["expand"]["injection_mode"], "disabled")
+        self.assertNotIn("perception", prompt_states)
 
         runtime = self.request(
             app,
@@ -828,18 +844,20 @@ class WebBackendTests(unittest.TestCase):
             item["id"]: item["state"]
             for item in runtime.json()["prompt"]["components"]
         }
-        self.assertEqual(runtime_states["expand_data"], "disabled")
-        self.assertEqual(runtime_states["perception"], "disabled")
+        self.assertNotIn("expand_data", runtime_states)
+        self.assertEqual(runtime.json()["prompt"]["dynamic_tail"], {})
+        self.assertNotIn("perception", runtime_states)
         self.assertNotIn("[expand_data]", runtime.json()["prompt"]["content"])
         self.assertNotIn("[perception]", runtime.json()["prompt"]["content"])
 
     def test_runtime_and_overview_prompt_state_isolated_by_source_and_session(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
+                    "provider_security": {"allowed_hosts": ["example.test"]},
                     "history": {"schema_version": 3},
                     "memory": {"storage_schema_version": 4},
                     "agents": {"max_rounds": 30, "token_limit": 100000},
@@ -848,7 +866,7 @@ class WebBackendTests(unittest.TestCase):
             ),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -863,13 +881,6 @@ class WebBackendTests(unittest.TestCase):
         )
         reserve_session(root, "alice", "web", "scope-a")
         reserve_session(root, "alice", "web", "scope-b")
-        for session_id in ("scope-a", "scope-b"):
-            window = empty_window("alice", "web", session_id)
-            commit_window(
-                root / "users" / "alice" / "history" / f"{session_id}-window",
-                window,
-            )
-
         store = PlanStore(root, "alice")
         for session_id, title in (
             ("scope-a", "A-only plan"),
@@ -898,7 +909,7 @@ class WebBackendTests(unittest.TestCase):
 
         service = WebRunService(root)
         with patch(
-            "web.services.runtime_status.build_prompt_bundle",
+            "web.services.runtime_status_aggregate.build_prompt_bundle",
             wraps=build_prompt_bundle,
         ) as build_bundle:
             scoped = service.runtime_status(
@@ -915,7 +926,8 @@ class WebBackendTests(unittest.TestCase):
                 )
             )
 
-        prompt_text = scoped["prompt"]["content"]
+        self.assertNotIn("A-only plan", scoped["prompt"]["content"])
+        prompt_text = json.dumps(scoped["prompt"]["dynamic_tail"], ensure_ascii=False)
         self.assertIn("A-only plan", prompt_text)
         self.assertNotIn("B-must-not-appear", prompt_text)
         self.assertNotIn("scope-b", prompt_text)
@@ -1203,6 +1215,43 @@ class WebBackendTests(unittest.TestCase):
                 archive.writestr(path, content)
         return buffer.getvalue()
 
+    def test_memory_prompt_injection_is_global_and_settings_reports_effective_value(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config" / "global_config.yaml").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "memory_temporary_important.md").write_text("HOT", "utf-8")
+        service = WebRunService(root)
+        app = create_app(service=service)
+        self.assertTrue(service.settings("alice")["features"]["memory_injection"])
+        response = self.request(app, "PATCH", "/api/global-config", json={
+            "changes": {"memory": {"prompt_injection": False}},
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(load_config("alice", root)["memory"]["prompt_injection"])
+        self.assertFalse(service.settings("alice")["features"]["memory_injection"])
+        self.assertFalse(service.important_memory("alice")["lifecycle"]["prompt_eligible"])
+        self.assertEqual(service.settings("alice")["provenance"]["memory.prompt_injection"], "global")
+
+        path = root / "config" / "global_config.yaml"
+        before = path.read_bytes()
+        for invalid in ("false", 0, [], {}):
+            response = self.request(app, "PATCH", "/api/global-config", json={
+                "changes": {"memory": {"prompt_injection": invalid}},
+            })
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(path.read_bytes(), before)
+        response = self.request(app, "PATCH", "/api/users/alice/config", json={
+            "changes": {"memory": {"prompt_injection": True}},
+        })
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("仅支持全局配置", response.json()["error"]["message"])
+        response = self.request(app, "PATCH", "/api/global-config", json={
+            "changes": {"memory": {"prompt_injection": True}},
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(service.settings("alice")["features"]["memory_injection"])
+
     def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -1475,13 +1524,13 @@ class WebBackendTests(unittest.TestCase):
     ) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {"schema_version": 1, "tools": {"enabled": True, "timeout": 30}}
             ),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -1511,7 +1560,7 @@ class WebBackendTests(unittest.TestCase):
             "def run(*, context):\n    return {'ok': True}\n", "utf-8"
         )
 
-        shared_root = root / "shared_skills"
+        shared_root = root / "skills"
         shared_root.mkdir()
         (shared_root / "register.py").write_text(
             "from pathlib import Path\n\ndef register(registry):\n    registry.add_skills('shared', Path(__file__).resolve().parent)\n",
@@ -1584,8 +1633,8 @@ class WebBackendTests(unittest.TestCase):
             json={"enabled": False},
         )
         self.assertEqual(disabled.status_code, 200, disabled.text)
-        stored = json.loads(
-            (root / "users" / "alice" / "user_config.json").read_text("utf-8")
+        stored = yaml.safe_load(
+            (root / "users" / "alice" / "user_config.yaml").read_text("utf-8")
         )
         self.assertEqual(stored["plugins"]["whitelist"], ["__kemo_none__"])
         refreshed = self.request(app, "GET", "/api/users/alice/skills").json()
@@ -1622,10 +1671,10 @@ class WebBackendTests(unittest.TestCase):
     ) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"schema_version": 1}), "utf-8"
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1}), "utf-8"
         )
         app = create_app(service=WebRunService(root))
@@ -2044,7 +2093,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_user_config_api_is_redacted_and_read_only(self) -> None:
         _, root = self.make_root()
-        user_config_path = root / "users" / "alice" / "user_config.json"
+        user_config_path = root / "users" / "alice" / "user_config.yaml"
         user_config_path.write_text(
             json.dumps(
                 {
@@ -2190,142 +2239,59 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "ui_not_built")
 
-    def test_users_sessions_and_history_use_real_service(self) -> None:
+    def test_users_sessions_and_history_use_real_service(self):
         _, root = self.make_root()
-        upload = root / "users" / "alice" / "file_upload" / "history-note.txt"
+        upload = root / "users/alice/file_upload/history-note.txt"
         upload.parent.mkdir(parents=True, exist_ok=True)
         upload.write_bytes(b"history attachment")
         service = WebRunService(root)
-        attachment = history_attachment_descriptors(
-            service.require_uploaded_files("alice", ["history-note.txt"])
-        )[0]
-        window = empty_window("alice", "web", "s1")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "hello", "attachments": [attachment]},
-            {"role": "assistant", "content": "world"},
-        ]
-        window["think"]["rounds"] = [{"round": 1, "content": "inspect first"}]
-        window["tool"]["rounds"] = [
-            {
-                "round": 1,
-                "calls": [
-                    {
-                        "id": "call-1",
-                        "name": "clock",
-                        "arguments": {"zone": "local"},
-                        "result": "x" * 5200,
-                        "status": "completed",
-                        "elapsed_ms": 12,
-                    }
-                ],
-            }
-        ]
-        window["data"]["rounds"] = 1
-        commit_window(root / "users" / "alice" / "history" / "window-1", window)
-        app = create_app(service=WebRunService(root))
-
-        users = self.request(app, "GET", "/api/users")
-        self.assertEqual(
-            [item["name"] for item in users.json()["users"]], ["alice", "bob"]
-        )
-        sessions = self.request(app, "GET", "/api/users/alice/sessions")
-        self.assertEqual(sessions.json()["sessions"][0]["session_id"], "s1")
-        history = self.request(app, "GET", "/api/users/alice/sessions/s1/history")
-        self.assertEqual(len(history.json()["messages"]), 2)
-        returned_attachment = history.json()["messages"][0]["attachments"][0]
-        self.assertEqual(returned_attachment["name"], "history-note.txt")
-        self.assertEqual(returned_attachment["relative_path"], "history-note.txt")
-        self.assertTrue(returned_attachment["available"])
-        self.assertNotIn("path", returned_attachment)
-        trace = history.json()["round_traces"][0]
+        attachment = history_attachment_descriptors(service.require_uploaded_files("alice", ["history-note.txt"]))[0]
+        (root / "config").mkdir()
+        (root / "config/global_config.yaml").write_text('{}')
+        store = CardStore(root, "alice")
+        reserve_session(root, "alice", "web", "s1")
+        integration = IntegrationStore(store, "web", "s1", "history_test")
+        integration.start()
+        store.append("web", "s1", integration.id, "user_text", {"text": "hello", "attachments": [attachment]}, level="initial")
+        execution, _ = integration.register_tool("call-1", {"name": "clock", "arguments": {"zone": "local"}})
+        integration.tool_result(execution["execution_id"], {"ok": True, "result": "x" * 5200}, status="completed", duration_ms=12)
+        integration.request_started()
+        integration.request_finished(accepted_seq=store.snapshot("web", "s1").last_seq)
+        integration.finish("completed", final_payload={"text": "world", "reasoning": "inspect first"})
+        app = create_app(service=service)
+        self.assertEqual([u["name"] for u in self.request(app, "GET", "/api/users").json()["users"]], ["alice", "bob"])
+        self.assertEqual(self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"][0]["session_id"], "s1")
+        history = self.request(app, "GET", "/api/users/alice/sessions/s1/history").json()
+        self.assertEqual(history["engine"], "cardstream")
+        self.assertEqual(len(history["messages"]), 2)
+        self.assertTrue(history["messages"][0]["attachments"][0]["available"])
+        self.assertNotIn("path", history["messages"][0]["attachments"][0])
+        trace = history["integration_traces"][0]
         self.assertEqual(trace["reasoning"], "inspect first")
         self.assertEqual(trace["tools"][0]["call_id"], "call-1")
         self.assertEqual(trace["tools"][0]["status"], "success")
-        self.assertEqual(len(trace["tools"][0]["result_text"]), 5200)
+        self.assertIn("x" * 5200, trace["tools"][0]["result_text"])
         self.assertFalse(trace["tools"][0]["result_truncated"])
-
         upload.unlink()
-        missing_history = self.request(
-            app, "GET", "/api/users/alice/sessions/s1/history"
-        ).json()
-        self.assertFalse(missing_history["messages"][0]["attachments"][0]["available"])
+        self.assertFalse(service.history("alice", "s1")["messages"][0]["attachments"][0]["available"])
 
-    def test_history_paginates_complete_rounds_from_newest_to_oldest(self) -> None:
+    def test_history_paginates_raw_sequences_from_newest_to_oldest(self):
         _, root = self.make_root()
-        window = empty_window("alice", "web", "s1")
-        for round_number in range(1, 46):
-            window["text"]["messages"].extend(
-                [
-                    {"role": "user", "content": f"question {round_number}"},
-                    {"role": "assistant", "content": f"answer {round_number}"},
-                ]
-            )
-            window["think"]["rounds"].append(
-                {"round": round_number, "content": f"reasoning {round_number}"}
-            )
-            window["data"]["round_metrics"].append(
-                {
-                    "round": round_number,
-                    "usage": {"total_tokens": round_number},
-                    "elapsed_ms": round_number,
-                    "tool_calls": 0,
-                    "guidance": [],
-                }
-            )
-        window["data"]["rounds"] = 45
-        commit_window(root / "users" / "alice" / "history" / "window-1", window)
-        app = create_app(service=WebRunService(root))
-
-        latest = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions/s1/history?limit=20",
-        ).json()
-        self.assertEqual(len(latest["messages"]), 40)
-        self.assertEqual(latest["messages"][0]["content"], "question 26")
-        self.assertEqual(latest["messages"][-1]["content"], "answer 45")
-        self.assertEqual(
-            latest["pagination"],
-            {
-                "limit": 20,
-                "total_rounds": 45,
-                "first_round": 26,
-                "last_round": 45,
-                "has_more_before": True,
-                "next_before": 26,
-            },
-        )
-        self.assertEqual(
-            [item["round"] for item in latest["round_metrics"]],
-            list(range(26, 46)),
-        )
-        self.assertEqual(
-            [item["round"] for item in latest["round_traces"]],
-            list(range(26, 46)),
-        )
-
-        earlier = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions/s1/history?limit=20&before=26",
-        ).json()
-        self.assertEqual(earlier["messages"][0]["content"], "question 6")
-        self.assertEqual(earlier["messages"][-1]["content"], "answer 25")
-        self.assertEqual(earlier["pagination"]["next_before"], 6)
-        self.assertTrue(earlier["pagination"]["has_more_before"])
-
-        oldest = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions/s1/history?limit=20&before=6",
-        ).json()
-        self.assertEqual(oldest["messages"][0]["content"], "question 1")
-        self.assertEqual(oldest["messages"][-1]["content"], "answer 5")
-        self.assertFalse(oldest["pagination"]["has_more_before"])
-        self.assertIsNone(oldest["pagination"]["next_before"])
-
-        full = self.request(app, "GET", "/api/users/alice/sessions/s1/history").json()
-        self.assertEqual(len(full["messages"]), 90)
+        texts = [text for n in range(1, 46) for text in (f"question {n}", f"answer {n}")]
+        card_seed(root, texts=texts)
+        service, seen, before = WebRunService(root), [], None
+        while True:
+            page = service.history("alice", "s1", limit=20, before=before)
+            self.assertLessEqual(len(page["cards"]), 20)
+            seen = page["messages"] + seen
+            pagination = page["pagination"]
+            self.assertEqual(pagination["cursor_unit"], "raw_seq")
+            self.assertEqual(pagination["total_cards"], 90)
+            if not pagination["has_more_before"]:
+                break
+            before = pagination["next_before"]
+        self.assertEqual([m["content"] for m in seen], texts)
+        self.assertEqual(len({m["card_id"] for m in seen}), 90)
 
     def test_active_create_and_close_session_api_uses_durable_reservations(
         self,
@@ -2364,7 +2330,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(closed.status_code, 200)
         self.assertEqual(closed.json()["session"]["state"], "closed")
-        self.assertEqual(closed.json()["memory"]["reason"], "no_archive")
+        self.assertEqual(closed.json()["memory"]["reason"], "already_processed")
 
         replacement = self.request(app, "GET", "/api/users/alice/sessions/active")
         replacement_id = replacement.json()["session"]["session_id"]
@@ -2524,8 +2490,8 @@ class WebBackendTests(unittest.TestCase):
         from run.history.store import connection
         with connection(root, "alice", write=True) as database:
             database.execute(
-                "UPDATE history_web_leases SET expires_at=0 WHERE session_id=? AND client_id=?",
-                (session_id, client_b),
+                "UPDATE card_leases SET expires_at=0 WHERE session_key=? AND client_id=?",
+                (__import__("run.cards", fromlist=["session_key"]).session_key("web", session_id), client_b),
             )
         deleted = self.request(
             app,
@@ -2609,442 +2575,130 @@ class WebBackendTests(unittest.TestCase):
         sessions = self.request(app, "GET", "/api/users/alice/sessions")
         self.assertEqual(sessions.json()["sessions"], [])
 
-    def test_session_rename_is_persisted_without_changing_sort_time(self) -> None:
+    def test_session_rename_is_persisted_without_changing_sort_time(self):
         _, root = self.make_root()
-        window_dir = root / "users" / "alice" / "history" / "window-1"
-        commit_window(window_dir, empty_window("alice", "web", "s1"))
+        history = card_seed(root)
+        before = find_record(root, "alice", "web", "s1")
         app = create_app(service=WebRunService(root))
-        before = self.request(app, "GET", "/api/users/alice/sessions").json()[
-            "sessions"
-        ][0]
-        stale_window = load_window(window_dir)
-
-        response = self.request(
-            app,
-            "PATCH",
-            "/api/users/alice/sessions/s1",
-            json={"title": "  我的重要对话  "},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["session"]["title"], "我的重要对话")
-        after = self.request(app, "GET", "/api/users/alice/sessions").json()[
-            "sessions"
-        ][0]
+        response = self.request(app, "PATCH", "/api/users/alice/sessions/s1", json={"title": "  我的重要对话  "})
+        self.assertEqual(response.status_code, 200, response.text)
+        after = find_record(root, "alice", "web", "s1")
         self.assertEqual(after["title"], "我的重要对话")
         self.assertEqual(after["updated_at"], before["updated_at"])
-        stored = load_window(window_dir)["data"]
-        self.assertEqual(stored["title"], "我的重要对话")
-        commit_window(window_dir, stale_window)
-        stored_after_stale_commit = load_window(window_dir)["data"]
-        self.assertEqual(stored_after_stale_commit["title"], "我的重要对话")
+        raw = history.cards
+        history.store.append("web", "s1", "new", "user_text", {"text": "new input"}, level="initial")
+        self.assertEqual(find_record(root, "alice", "web", "s1")["title"], "我的重要对话")
+        self.assertEqual(history.cards[:-1], raw)
 
-    def test_session_list_uses_cursor_pagination_and_table_body_search(self) -> None:
+    def test_session_list_uses_cursor_pagination_and_raw_body_search(self):
         _, root = self.make_root()
-        for index in range(12):
-            window = empty_window("alice", "web", f"page-{index:02d}")
-            window["text"]["messages"] = [
-                {"role": "user", "content": f"普通消息 {index}"},
-                {
-                    "role": "assistant",
-                    "content": "只有第七条包含检索暗号" if index == 7 else "普通回答",
-                },
-            ]
-            window["data"]["rounds"] = 1
-            commit_window(
-                root / "users" / "alice" / "history" / f"window-{index:02d}",
-                window,
-            )
-        app = create_app(service=WebRunService(root))
-
-        first = self.request(app, "GET", "/api/users/alice/sessions?limit=5").json()
+        for n in range(12):
+            card_seed(root, f"page-{n:02d}", (f"普通消息 {n}", "检索暗号" if n == 7 else "普通回答"))
+        service = WebRunService(root)
+        first = service.sessions("alice", limit=5)
+        second = service.sessions("alice", limit=5, before=first["next_cursor"])
         self.assertEqual(len(first["sessions"]), 5)
-        self.assertTrue(first["has_more"])
-        self.assertTrue(first["next_cursor"])
-        second = self.request(
-            app,
-            "GET",
-            f"/api/users/alice/sessions?limit=5&before={first['next_cursor'].replace('+', '%2B')}",
-        ).json()
         self.assertEqual(len(second["sessions"]), 5)
-        self.assertTrue(
-            {item["session_id"] for item in first["sessions"]}.isdisjoint(
-                {item["session_id"] for item in second["sessions"]}
-            )
-        )
+        self.assertTrue({s["session_id"] for s in first["sessions"]}.isdisjoint({s["session_id"] for s in second["sessions"]}))
+        self.assertEqual([s["session_id"] for s in service.sessions("alice", query="检索暗号")["sessions"]], ["page-07"])
 
-        searched = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions?query=%E6%A3%80%E7%B4%A2%E6%9A%97%E5%8F%B7",
-        ).json()
-        self.assertEqual(
-            [item["session_id"] for item in searched["sessions"]],
-            ["page-07"],
-        )
-
-    def test_session_list_filters_by_shanghai_archive_date(self) -> None:
-        from run.history.store import read_registry_record, upsert_registry_record
-
+    def test_session_list_filters_by_shanghai_metadata_date(self):
         _, root = self.make_root()
-        timestamps = {
-            "previous-day": "2026-09-25T15:59:00+00:00",
-            "selected-older": "2026-09-25T16:30:00+00:00",
-            "selected-newer": "2026-09-25T17:30:00+00:00",
-        }
-        for session_id, updated_at in timestamps.items():
-            window = empty_window("alice", "web", session_id)
-            window["data"]["title"] = session_id
-            commit_window(root / "users" / "alice" / "history" / session_id, window)
-            record = read_registry_record(root, "alice", "web", session_id)
-            self.assertIsNotNone(record)
-            assert record is not None
-            record["updated_at"] = updated_at
-            upsert_registry_record(
-                root,
-                "alice",
-                record,
-                updated_at=updated_at,
-            )
-        app = create_app(service=WebRunService(root))
-
-        first = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions?source=all&date=2026-09-26&limit=1",
-        )
-        self.assertEqual(first.status_code, 200)
-        first_payload = first.json()
-        self.assertEqual(first_payload["date"], "2026-09-26")
-        self.assertEqual(
-            [item["session_id"] for item in first_payload["sessions"]],
-            ["selected-newer"],
-        )
-        self.assertTrue(first_payload["has_more"])
-
-        second = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions?source=all&date=2026-09-26&limit=1"
-            f"&before={first_payload['next_cursor'].replace('+', '%2B')}",
-        )
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(
-            [item["session_id"] for item in second.json()["sessions"]],
-            ["selected-older"],
-        )
-        self.assertFalse(second.json()["has_more"])
-
-        previous = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions?date=2026-09-25",
-        )
-        self.assertEqual(
-            [item["session_id"] for item in previous.json()["sessions"]],
-            ["previous-day"],
-        )
-
-        invalid = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions?date=2026-02-30",
-        )
+        for sid, stamp in {"previous-day": "2026-09-25T15:59:00+00:00", "selected-older": "2026-09-25T16:30:00+00:00", "selected-newer": "2026-09-25T17:30:00+00:00"}.items():
+            card_seed(root, sid)
+            mutate_registry_record(root, "alice", "web", sid, lambda r: r, updated_at=stamp)
+        service = WebRunService(root)
+        first = service.sessions("alice", source="all", archive_date="2026-09-26", limit=1)
+        self.assertEqual(first["sessions"][0]["session_id"], "selected-newer")
+        second = service.sessions("alice", source="all", archive_date="2026-09-26", limit=1, before=first["next_cursor"])
+        self.assertEqual(second["sessions"][0]["session_id"], "selected-older")
+        self.assertFalse(second["has_more"])
+        invalid = self.request(create_app(service=service), "GET", "/api/users/alice/sessions?date=2026-02-30")
         self.assertEqual(invalid.status_code, 400)
-        self.assertEqual(invalid.json()["error"]["code"], "invalid_request")
 
-    def test_session_rename_validates_title(self) -> None:
+    def test_session_rename_validates_title(self):
         _, root = self.make_root()
-        commit_window(
-            root / "users" / "alice" / "history" / "window-1",
-            empty_window("alice", "web", "s1"),
-        )
+        card_seed(root)
         app = create_app(service=WebRunService(root))
         for title in ("", "   ", "bad\nname", "x" * 81):
-            with self.subTest(title=repr(title)):
-                response = self.request(
-                    app,
-                    "PATCH",
-                    "/api/users/alice/sessions/s1",
-                    json={"title": title},
-                )
-                self.assertEqual(response.status_code, 400)
-                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+            with self.subTest(title=title):
+                self.assertEqual(self.request(app, "PATCH", "/api/users/alice/sessions/s1", json={"title": title}).status_code, 400)
 
-    def test_session_delete_removes_all_matching_windows_and_preserves_other_users(
-        self,
-    ) -> None:
+    def test_session_delete_hides_identity_and_preserves_raw_and_other_users(self):
         _, root = self.make_root()
-        for name in ("window-1", "window-2"):
-            commit_window(
-                root / "users" / "alice" / "history" / name,
-                empty_window("alice", "web", "s1"),
-            )
-        bob_window = root / "users" / "bob" / "history" / "window-1"
-        commit_window(bob_window, empty_window("bob", "web", "s1"))
+        history = card_seed(root)
+        bob = card_seed(root, user="bob")
+        before = history.cards
         app = create_app(service=WebRunService(root))
-
         response = self.request(app, "DELETE", "/api/users/alice/sessions/s1")
-
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(response.json()["deleted"])
-        self.assertEqual(
-            self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"],
-            [],
-        )
-        self.assertEqual(
-            self.request(
-                app, "GET", "/api/users/alice/sessions/s1/history"
-            ).status_code,
-            404,
-        )
-        self.assertTrue(window_exists(bob_window))
-        self.assertEqual(
-            self.request(app, "DELETE", "/api/users/alice/sessions/s1").status_code,
-            404,
-        )
+        self.assertEqual(history.cards, before)
+        self.assertEqual(len(bob.cards), 2)
+        self.assertEqual(self.request(app, "GET", "/api/users/alice/sessions/s1/history").status_code, 404)
+        self.assertEqual(self.request(app, "DELETE", "/api/users/alice/sessions/s1").status_code, 404)
 
-    def test_session_manual_compression_uses_runtime_compressor(self) -> None:
+    def test_session_manual_compression_commits_verified_view_and_preserves_raw(self):
         _, root = self.make_root()
-        commit_window(
-            root / "users" / "alice" / "history" / "window-1",
-            empty_window("alice", "web", "s1"),
-        )
-        observed: dict[str, Any] = {}
+        history = card_seed(root, texts=("用户原文" * 2000, "回复原文" * 2000))
+        before = history.cards
+        service = WebRunService(root, context_compressor=card_compressor)
+        result = service.compress_session("alice", "s1")
+        self.assertTrue(result["compressed"] and result["compression_verified"])
+        self.assertEqual(result["absorbed_cards"], 2)
+        self.assertEqual([c.raw_payload_json for c in history.cards], [c.raw_payload_json for c in before])
+        self.assertEqual(result["memory"]["target_seq"], 2)
+        self.assertEqual(find_record(root, "alice", "web", "s1")["memory_processed_seq"], 0)
 
-        def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
-            observed.update({"request": request, "root": root})
-            return {
-                "context": {"rounds_removed": 3},
-                "summary_cache": "history.sqlite3#history_context_summaries",
-                "compressed": True,
-                "compression_verified": True,
-            }
-
-        app = create_app(service=WebRunService(root, context_compressor=compressor))
-        response = self.request(
-            app,
-            "POST",
-            "/api/users/alice/sessions/s1/compress",
-        )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertTrue(response.json()["compressed"])
-        self.assertEqual(response.json()["rounds_removed"], 3)
-        self.assertEqual(response.json()["memory"]["status"], "skipped")
-        self.assertEqual(response.json()["memory"]["reason"], "already_processed")
-        self.assertFalse(response.json()["memory"]["retry_pending"])
-        self.assertEqual(
-            observed["request"],
-            {
-                "user": "alice",
-                "source": "web",
-                "session_id": "s1",
-                "memory_extraction_policy": "queue",
-            },
-        )
-        self.assertEqual(observed["root"], root.resolve())
-
-    def test_session_manual_compression_extracts_pending_memory(self) -> None:
+    def test_session_manual_compression_queues_memory_without_synchronous_extraction(self):
         _, root = self.make_root()
-        (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text("{}", "utf-8")
-        window = empty_window("alice", "web", "s1")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "remember this"},
-            {"role": "assistant", "content": "saved answer"},
-        ]
-        window["think"]["rounds"] = [{"round": 1, "content": "reasoning"}]
-        window["tool"]["rounds"] = [{"round": 1, "calls": []}]
-        window["data"]["rounds"] = 1
-        window["data"]["memory_processed_round"] = 0
-        archive = root / "users" / "alice" / "history" / "window-1"
-        commit_window(archive, window)
+        card_seed(root, texts=("用户事实" * 2000, "回答" * 2000))
+        wakes = []
+        service = WebRunService(root, context_compressor=card_compressor, memory_waker=lambda: wakes.append(True))
+        with patch("web.services.run_control.extract_card_memory") as extract:
+            result = service.compress_session("alice", "s1")
+        self.assertEqual(result["memory"]["status"], "queued")
+        self.assertEqual(wakes, [True])
+        extract.assert_not_called()
 
-        def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
-            return {
-                "context": {"rounds_removed": 1},
-                "summary_cache": "history.sqlite3#history_context_summaries",
-                "compressed": True,
-                "compression_verified": True,
-            }
-
-        with (
-            patch("web.service.AgentRunner", return_value=object()),
-            patch(
-                "run.conversation.runtime._extract_round_memory",
-                return_value={
-                    "status": "completed",
-                    "candidate_count": 1,
-                    "error": None,
-                },
-            ) as extracted,
-        ):
-            response = self.request(
-                create_app(service=WebRunService(root, context_compressor=compressor)),
-                "POST",
-                "/api/users/alice/sessions/s1/compress",
-            )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertTrue(payload["compressed"])
-        self.assertEqual(payload["memory"]["status"], "queued")
-        self.assertEqual(payload["memory"]["pending_rounds"], 1)
-        self.assertEqual(payload["memory"]["target_round"], 1)
-        self.assertFalse(payload["memory"]["retry_pending"])
-        extracted.assert_not_called()
-        stored = load_window(archive)
-        self.assertEqual(stored["data"]["memory_processed_round"], 0)
-        self.assertEqual(stored["data"]["memory_status"], "queued")
-        self.assertEqual(stored["data"]["memory_target_round"], 1)
-
-    def test_session_manual_compression_fails_when_memory_queue_registration_fails(
-        self,
-    ) -> None:
+    def test_session_manual_compression_reports_queue_failure_after_view_commit(self):
         _, root = self.make_root()
-        commit_window(
-            root / "users" / "alice" / "history" / "window-1",
-            empty_window("alice", "web", "s1"),
-        )
+        history = card_seed(root, texts=("用户事实" * 2000, "回答" * 2000))
+        before = [c.raw_payload_json for c in history.cards]
+        service = WebRunService(root, context_compressor=card_compressor)
+        with patch("web.service.queue_memory_extraction", side_effect=RuntimeError("queue unavailable")):
+            response = self.request(create_app(service=service), "POST", "/api/users/alice/sessions/s1/compress")
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("压缩已提交", response.json()["error"]["message"])
+        self.assertEqual([c.raw_payload_json for c in history.cards], before)
+        self.assertEqual(history.store.snapshot("web", "s1").view_epoch, 1)
 
-        def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
-            return {
-                "context": {"rounds_removed": 2},
-                "summary_cache": "history.sqlite3#history_context_summaries",
-                "compressed": True,
-                "compression_verified": True,
-            }
-
-        service = WebRunService(root, context_compressor=compressor)
-        with patch(
-            "web.service.queue_memory_extraction",
-            side_effect=RuntimeError("memory queue unavailable"),
-        ):
-            response = self.request(
-                create_app(service=service),
-                "POST",
-                "/api/users/alice/sessions/s1/compress",
-            )
-
-        self.assertEqual(response.status_code, 500, response.text)
-        self.assertEqual(
-            response.json()["error"]["message"],
-            "上下文压缩成功，但后台记忆任务登记失败",
-        )
-
-    def test_session_manual_compression_reports_summary_failure_without_queueing(
-        self,
-    ) -> None:
+    def test_session_manual_compression_rejects_uncommitted_success_and_does_not_queue(self):
         _, root = self.make_root()
-        commit_window(
-            root / "users" / "alice" / "history" / "window-1",
-            empty_window("alice", "web", "s1"),
-        )
-
-        def compressor(request: dict[str, Any], *, root: Path) -> dict[str, Any]:
-            return {
-                "context": {
-                    "rounds_removed": 2,
-                    "summary": {
-                        "failed": True,
-                        "error": "摘要响应格式无效",
-                    },
-                },
-                "memory": {
-                    "status": "failed",
-                    "reason": "context_summary_failed",
-                },
-            }
-
+        history = card_seed(root)
+        before = history.store.snapshot("web", "s1")
+        service = WebRunService(root, context_compressor=lambda request, **kwargs: {"compressed": True})
         with patch("web.service.queue_memory_extraction") as queued:
-            response = self.request(
-                create_app(service=WebRunService(root, context_compressor=compressor)),
-                "POST",
-                "/api/users/alice/sessions/s1/compress",
-            )
-
-        self.assertEqual(response.status_code, 500, response.text)
-        self.assertEqual(
-            response.json()["error"]["message"],
-            "手动上下文压缩失败：摘要响应格式无效",
-        )
+            response = self.request(create_app(service=service), "POST", "/api/users/alice/sessions/s1/compress")
+        self.assertEqual(response.status_code, 500)
         queued.assert_not_called()
+        self.assertEqual(history.store.snapshot("web", "s1"), before)
 
-    def test_session_memory_extraction_uses_latest_complete_round(self) -> None:
+    def test_session_memory_extraction_processes_uncovered_raw_seq_once(self):
         _, root = self.make_root()
-        (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text("{}", "utf-8")
-        window = empty_window("alice", "web", "s1")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "first"},
-            {"role": "assistant", "content": "answer one"},
-            {"role": "user", "content": "remember latest"},
-            {"role": "assistant", "content": "answer two"},
-        ]
-        window["think"]["rounds"] = [
-            {"round": 1, "content": "think one"},
-            {"round": 2, "content": "think two"},
-        ]
-        window["tool"]["rounds"] = [
-            {"round": 1, "calls": []},
-            {"round": 2, "calls": [{"name": "lookup", "status": "completed"}]},
-        ]
-        window["data"]["rounds"] = 2
-        commit_window(root / "users" / "alice" / "history" / "window-1", window)
-        observed: dict[str, Any] = {}
-
-        def extract(**kwargs):
-            observed.update(kwargs)
-            return {
-                "status": "completed",
-                "candidate_count": 2,
-                "candidates": [],
-                "source": {"source": "round_commit"},
-                "error": None,
-            }
-
-        def persist(**kwargs):
-            return {
-                "status": "completed",
-                "candidate_count": kwargs["analysis"]["candidate_count"],
-                "error": None,
-            }
-
-        with (
-            patch("web.service.AgentRunner", return_value=object()),
-            patch(
-                "run.memory.analysis.analyze_memory_batch", side_effect=extract
-            ) as extracted,
-            patch(
-                "run.memory.analysis.persist_round_memory_analysis", side_effect=persist
-            ),
-        ):
-            app = create_app(service=WebRunService(root))
-            response = self.request(
-                app,
-                "POST",
-                "/api/users/alice/sessions/s1/extract-memory",
-            )
-            repeated = self.request(
-                app,
-                "POST",
-                "/api/users/alice/sessions/s1/extract-memory",
-            )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["candidates"], 2)
-        self.assertEqual(len(observed["rounds"]), 1)
-        extracted_round = observed["rounds"][0]
-        self.assertEqual(extracted_round["round"], 2)
-        self.assertEqual(extracted_round["messages"][0]["content"], "remember latest")
-        self.assertEqual(extracted_round["messages"][1]["content"], "answer two")
-        self.assertEqual(extracted_round["think"]["content"], "think two")
-        self.assertEqual(extracted_round["tools"][0]["name"], "lookup")
-        self.assertEqual(extracted.call_count, 1)
-        self.assertEqual(repeated.json()["reason"], "already_processed")
-        stored = load_window(root / "users" / "alice" / "history" / "window-1")
-        self.assertEqual(stored["data"]["memory_processed_round"], 2)
+        card_seed(root, texts=("first", "answer one", "remember latest", "answer two"))
+        seen = []
+        def analyze(**kwargs):
+            seen.extend(kwargs["rounds"])
+            return {"status": "completed", "candidate_count": 0, "candidates": [], "source": kwargs.get("source", {})}
+        with patch("run.memory.analysis.analyze_memory_batch_resilient", side_effect=analyze):
+            service = WebRunService(root)
+            first = service.extract_session_memory("alice", "s1")
+            repeated = service.extract_session_memory("alice", "s1")
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual([r["seq"] for r in seen], [1, 2, 3, 4])
+        self.assertEqual(repeated["status"], "skipped")
+        self.assertEqual(find_record(root, "alice", "web", "s1")["memory_processed_seq"], 4)
 
     def test_extract_memory_route_forwards_to_service(self) -> None:
         fake = FakeService()
@@ -3060,211 +2714,67 @@ class WebBackendTests(unittest.TestCase):
             {"user": "alice", "session_id": "s1", "source": "web"},
         )
 
-    def test_session_undo_last_round_updates_archive_and_runtime(self) -> None:
+    def test_session_withdrawal_only_deactivates_view_and_retains_raw(self):
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                _, root = self.make_root()
+                history = card_seed(root, texts=("first " * 1000, "answer " * 1000))
+                app = create_app(service=WebRunService(root, context_compressor=card_compressor))
+                if compressed:
+                    response = self.request(app, "POST", "/api/users/alice/sessions/s1/compress")
+                    self.assertEqual(response.status_code, 200, response.text)
+                prefix = history.store.snapshot("web", "s1")
+                card_seed(root, texts=("retry me", "partial answer"))
+                before = [c.raw_payload_json for c in history.cards]
+
+                response = self.request(app, "POST", "/api/users/alice/sessions/s1/withdraw-integration",
+                                        json={"expected_integration_count": 2, "prompt": "retry me"})
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()["withdrawn"] and response.json()["raw_preserved"])
+                self.assertEqual([c.raw_payload_json for c in history.cards], before)
+                after = history.store.snapshot("web", "s1")
+                self.assertEqual(after.cards, prefix.cards)
+                self.assertEqual(after.history_tokens, prefix.history_tokens)
+
+    def test_session_withdrawal_rejects_stale_or_active_requests(self):
         _, root = self.make_root()
-        window = empty_window("alice", "web", "s1")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "first question"},
-            {"role": "assistant", "content": "first answer"},
-            {"role": "user", "content": "retry me"},
-            {"role": "assistant", "content": "partial answer"},
-        ]
-        window["think"]["rounds"] = [
-            {"round": 1, "content": "think one"},
-            {"round": 2, "content": "think two"},
-        ]
-        window["tool"]["rounds"] = [
-            {"round": 1, "calls": []},
-            {"round": 2, "calls": [{"id": "call-2", "name": "demo"}]},
-        ]
-        window["data"]["rounds"] = 2
-        window["data"]["memory_processed_round"] = 2
-        window["data"]["memory_status"] = "completed"
-        window["data"]["round_metrics"] = [
-            {
-                "round": 1,
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 2,
-                    "total_tokens": 12,
-                    "estimated": False,
-                },
-            },
-            {
-                "round": 2,
-                "usage": {
-                    "prompt_tokens": 20,
-                    "completion_tokens": 4,
-                    "total_tokens": 24,
-                    "estimated": False,
-                },
-            },
-        ]
-        window["data"]["token_usage"] = {
-            "prompt_tokens": 30,
-            "completion_tokens": 6,
-            "total_tokens": 36,
-            "estimated": False,
-        }
-        window["items"] = synthesize_items(window)
-        archive_path = root / "users" / "alice" / "history" / "window-1"
-        commit_window(archive_path, window)
-        runtime_path = runtime_window_path(archive_path)
-        runtime_window = copy.deepcopy(window)
-        runtime_window["data"]["context"] = {
-            "round_offset": 0,
-            "workspace_rounds": 2,
-        }
-        commit_window(runtime_path, runtime_window)
-        app = create_app(service=WebRunService(root))
-
-        response = self.request(
-            app,
-            "POST",
-            "/api/users/alice/sessions/s1/undo-last-round",
-            json={"expected_round": 2, "prompt": "retry me"},
-        )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertTrue(response.json()["rolled_back"])
-        self.assertEqual(response.json()["remaining_rounds"], 1)
-        self.assertEqual(
-            response.json()["content"], [{"type": "text", "text": "retry me"}]
-        )
-        rolled_back_windows = [
-            load_window(archive_path),
-            load_runtime_window(archive_path, load_window(archive_path))[1],
-        ]
-        for rolled_back in rolled_back_windows:
-            self.assertEqual(rolled_back["data"]["rounds"], 1)
-            self.assertEqual(
-                rolled_back["text"]["messages"],
-                [
-                    {"role": "user", "content": "first question"},
-                    {"role": "assistant", "content": "first answer"},
-                ],
-            )
-            self.assertEqual(
-                [item["round"] for item in rolled_back["think"]["rounds"]], [1]
-            )
-            self.assertEqual(
-                [item["round"] for item in rolled_back["tool"]["rounds"]], [1]
-            )
-            self.assertTrue(
-                all(
-                    (item.get("metadata") or {}).get("round") == 1
-                    for item in rolled_back["items"]["items"]
-                )
-            )
-            self.assertEqual(rolled_back["data"]["token_usage"]["total_tokens"], 12)
-            self.assertEqual(rolled_back["data"]["memory_processed_round"], 1)
-            self.assertEqual(rolled_back["data"]["memory_status"], "completed")
-            self.assertNotIn("context", rolled_back["data"])
-
-        interrupted = self.request(
-            app,
-            "POST",
-            "/api/users/alice/sessions/s1/undo-last-round",
-            json={"expected_round": 2, "prompt": "retry me"},
-        )
-        self.assertEqual(interrupted.status_code, 200, interrupted.text)
-        self.assertFalse(interrupted.json()["rolled_back"])
-        self.assertEqual(load_window(archive_path)["data"]["rounds"], 1)
-
-    def test_session_undo_last_round_rejects_stale_or_active_requests(self) -> None:
-        _, root = self.make_root()
-        window = empty_window("alice", "web", "s1")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "question"},
-            {"role": "assistant", "content": "answer"},
-        ]
-        window["think"]["rounds"] = [{"round": 1, "content": "think"}]
-        window["tool"]["rounds"] = [{"round": 1, "calls": []}]
-        window["data"]["rounds"] = 1
-        window["items"] = synthesize_items(window)
-        archive_path = root / "users" / "alice" / "history" / "window-1"
-        commit_window(archive_path, window)
+        history = card_seed(root)
+        before = history.store.snapshot("web", "s1")
         service = WebRunService(root)
         app = create_app(service=service)
+        body = {"expected_integration_count": 1, "prompt": "different"}
+        self.assertEqual(self.request(app, "POST", "/api/users/alice/sessions/s1/withdraw-integration", json=body).status_code, 409)
+        service._active_runs["run_busy_undo"] = ActiveRun("run_busy_undo", "alice", "s1")
+        body["prompt"] = "question"
+        self.assertEqual(self.request(app, "POST", "/api/users/alice/sessions/s1/withdraw-integration", json=body).status_code, 409)
+        self.assertEqual(history.store.snapshot("web", "s1"), before)
 
-        stale = self.request(
-            app,
-            "POST",
-            "/api/users/alice/sessions/s1/undo-last-round",
-            json={"expected_round": 1, "prompt": "different"},
-        )
-        self.assertEqual(stale.status_code, 409)
-        self.assertEqual(load_window(archive_path)["data"]["rounds"], 1)
-
-        service._active_runs["run_busy_undo"] = ActiveRun(
-            "run_busy_undo", "alice", "s1"
-        )
-        active = self.request(
-            app,
-            "POST",
-            "/api/users/alice/sessions/s1/undo-last-round",
-            json={"expected_round": 1, "prompt": "question"},
-        )
-        self.assertEqual(active.status_code, 409)
-        self.assertEqual(load_window(archive_path)["data"]["rounds"], 1)
-
-    def test_delete_all_sessions_is_scoped_and_reports_counts(self) -> None:
+    def test_delete_all_sessions_is_scoped_and_preserves_raw(self):
         _, root = self.make_root()
-        for directory, session_id in (
-            ("window-1", "s1"),
-            ("window-2", "s1"),
-            ("window-3", "s2"),
-        ):
-            commit_window(
-                root / "users" / "alice" / "history" / directory,
-                empty_window("alice", "web", session_id),
-            )
-        bob_window = root / "users" / "bob" / "history" / "window-1"
-        commit_window(bob_window, empty_window("bob", "web", "s1"))
+        histories = [card_seed(root, sid) for sid in ("s1", "s2")]
+        card_seed(root, user="bob")
         app = create_app(service=WebRunService(root))
-
         response = self.request(app, "DELETE", "/api/users/alice/sessions")
-
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["deleted_sessions"], 2)
-        self.assertEqual(response.json()["deleted_windows"], 3)
-        self.assertEqual(
-            self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"],
-            [],
-        )
-        self.assertTrue(window_exists(bob_window))
+        self.assertEqual(self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"], [])
+        self.assertTrue(all(len(h.cards) == 2 for h in histories))
+        self.assertIsNotNone(find_record(root, "bob", "web", "s1"))
 
-    def test_active_session_cannot_be_deleted(self) -> None:
+    def test_active_session_cannot_be_deleted(self):
         _, root = self.make_root()
-        window_dir = root / "users" / "alice" / "history" / "window-1"
-        commit_window(window_dir, empty_window("alice", "web", "busy"))
+        history = card_seed(root, "busy")
         service = WebRunService(root)
-        service._active_runs["run_busy_123"] = ActiveRun(
-            "run_busy_123", "alice", "busy"
-        )
+        service._active_runs["run_busy_123"] = ActiveRun("run_busy_123", "alice", "busy")
         app = create_app(service=service)
-
-        response = self.request(app, "DELETE", "/api/users/alice/sessions/busy")
-
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["error"]["code"], "conflict")
-        self.assertTrue(window_exists(window_dir))
-
-        bulk_response = self.request(app, "DELETE", "/api/users/alice/sessions")
-        self.assertEqual(bulk_response.status_code, 409)
-        self.assertEqual(bulk_response.json()["error"]["code"], "conflict")
-        self.assertTrue(window_exists(window_dir))
+        self.assertEqual(self.request(app, "DELETE", "/api/users/alice/sessions/busy").status_code, 409)
+        self.assertEqual(self.request(app, "DELETE", "/api/users/alice/sessions").status_code, 409)
+        self.assertEqual(len(history.cards), 2)
 
     def test_history_summary_manual_retry_api_requeues_and_wakes_worker(self) -> None:
         _, root = self.make_root()
-        archive = root / "users" / "alice" / "history" / "summary-window"
-        window = empty_window("alice", "web", "summary-retry")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "请总结"},
-            {"role": "assistant", "content": "稍后生成摘要"},
-        ]
-        window["data"]["rounds"] = 1
-        commit_window(archive, window)
+        card_seed(root, "summary-retry", ("请总结", "稍后生成摘要"))
         close_session(root, "alice", "web", "summary-retry")
         queue_summary(root, "alice", "web", "summary-retry")
         claim = claim_pending_summary(root, "alice")
@@ -3297,13 +2807,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(missing.status_code, 404)
 
-        open_window = empty_window("alice", "web", "open-summary")
-        open_window["text"]["messages"] = [{"role": "user", "content": "尚未关闭"}]
-        open_window["data"]["rounds"] = 1
-        commit_window(
-            root / "users" / "alice" / "history" / "open-summary-window",
-            open_window,
-        )
+        card_seed(root, "open-summary", ("尚未关闭",))
         conflict = self.request(
             app,
             "POST",
@@ -3313,9 +2817,7 @@ class WebBackendTests(unittest.TestCase):
 
     def test_not_found_invalid_source_and_cross_user_session(self) -> None:
         _, root = self.make_root()
-        window = empty_window("alice", "web", "private")
-        window["text"]["messages"] = [{"role": "user", "content": "secret"}]
-        commit_window(root / "users" / "alice" / "history" / "window-1", window)
+        card_seed(root, "private", ("secret",))
         app = create_app(service=WebRunService(root))
 
         missing_user = self.request(app, "GET", "/api/users/mallory/sessions")
@@ -3338,24 +2840,10 @@ class WebBackendTests(unittest.TestCase):
             ("message:telegram", "telegram-session", "telegram content"),
             ("background:cron:cron_1234abcd", "cron-session", "cron content"),
         ):
-            window = empty_window("alice", source, session_id)
-            window["text"]["messages"] = [
-                {"role": "user", "content": content},
-                {"role": "assistant", "content": f"reply {content}"},
-            ]
-            window["data"].update(
-                {
-                    "rounds": 1,
-                    "memory_status": "queued" if source.startswith("message:") else "completed",
-                    "memory_processed_round": 0 if source.startswith("message:") else 1,
-                    "memory_target_round": 1,
-                    "memory_queue_reason": "session_closed",
-                }
-            )
-            commit_window(
-                root / "users" / "alice" / "history" / f"window-{session_id}",
-                window,
-            )
+            card_seed(root, session_id, (content, f"reply {content}"), source=source, metadata={
+                "memory_status": "queued" if source.startswith("message:") else "completed",
+                "memory_target_seq": 2, "memory_queue_reason": "session_closed",
+                "bound_platform": source.removeprefix("message:") if source.startswith("message:") else ""})
             if source != "web":
                 close_session(root, "alice", source, session_id)
 
@@ -3382,8 +2870,8 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(telegram["chain"], "message")
         self.assertEqual(telegram["bound_platform"], "telegram")
         self.assertEqual(telegram["memory_status"], "queued")
-        self.assertEqual(telegram["memory_processed_round"], 0)
-        self.assertEqual(telegram["memory_target_round"], 1)
+        self.assertEqual(telegram["memory_processed_seq"], 0)
+        self.assertEqual(telegram["memory_target_seq"], 2)
         self.assertEqual(telegram["memory_queue_reason"], "session_closed")
 
         cli_history = self.request(
@@ -3549,7 +3037,7 @@ class WebBackendTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertIsNotNone(active)
-            self.assertTrue(require_present(active).cancel_event.is_set())
+            self.assertFalse(require_present(active).cancel_event.is_set())
 
             stopping = service.cancel_run(
                 "alice",
@@ -3572,6 +3060,40 @@ class WebBackendTests(unittest.TestCase):
             time.sleep(0.01)
         with service._active_runs_lock:
             self.assertNotIn("run_slow_disconnect_123", service._active_runs)
+
+    def test_closing_stream_consumer_does_not_stop_source_iteration(self) -> None:
+        _, root = self.make_root()
+        session_id = "consumer-disconnect-drain"
+        source_finished = threading.Event()
+
+        def source(*_args, **_kwargs):
+            try:
+                yield RunEvent(type="text_delta", content="first")
+                yield RunEvent(type="text_delta", content="after-disconnect")
+                yield RunEvent(type="done")
+            finally:
+                source_finished.set()
+
+        service = WebRunService(root, event_source=source)
+        iterator = service.stream_chat(
+            "alice",
+            session_id,
+            "start",
+            cancel_event=threading.Event(),
+            run_id="run_disconnect_drain",
+        )
+        self.assertEqual(next(iterator).type, "text_delta")
+        iterator.close()
+
+        self.assertTrue(source_finished.wait(timeout=2))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with service._active_runs_lock:
+                if "run_disconnect_drain" not in service._active_runs:
+                    break
+            time.sleep(0.01)
+        with service._active_runs_lock:
+            self.assertNotIn("run_disconnect_drain", service._active_runs)
 
     def test_web_guidance_queue_is_user_scoped_and_removed_after_run(self) -> None:
         _, root = self.make_root()
@@ -3621,7 +3143,7 @@ class WebBackendTests(unittest.TestCase):
                 session_id="guided-session",
             )
 
-    def test_web_guidance_after_final_boundary_is_queued_for_next_turn(self) -> None:
+    def test_web_guidance_after_final_boundary_reports_undelivered(self) -> None:
         _, root = self.make_root()
         service = WebRunService(root)
         active = ActiveRun("run_guidance_closed", "alice", "guided-session")
@@ -3636,7 +3158,9 @@ class WebBackendTests(unittest.TestCase):
             session_id="guided-session",
         )
 
-        self.assertEqual(response["status"], "queued_next_turn")
+        self.assertIs(response["ok"], False)
+        self.assertEqual(response["status"], "not_applied")
+        self.assertEqual(response["error"]["code"], "guidance_closed")
         self.assertEqual(response["queued"], 0)
         self.assertEqual(active.guidance.qsize(), 0)
 
@@ -3852,6 +3376,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "stopping")
         self.assertTrue(active.cancel_event.is_set())
+        self.assertFalse(active.cancel_subagents_event.is_set())
 
         active.cancel_event.clear()
         denied = self.request(
@@ -3863,132 +3388,21 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 404, denied.text)
         self.assertFalse(active.cancel_event.is_set())
 
-    def test_long_task_session_api_is_isolated_and_cancels_matching_run(self) -> None:
-        _, root = self.make_root()
-        reserve_session(root, "alice", "web", "long-a")
-        reserve_session(root, "alice", "web", "long-b")
-        reserve_session(root, "alice", "app", "long-a")
-        service = WebRunService(root)
-        app = create_app(service=service)
-
-        initial = self.request(
-            app,
-            "GET",
-            "/api/users/alice/sessions/long-a/long-task?source=web",
-        )
-        self.assertEqual(initial.status_code, 200, initial.text)
-        self.assertFalse(initial.json()["long_task"]["enabled"])
-
-        enabled = self.request(
-            app,
-            "PUT",
-            "/api/users/alice/sessions/long-a/long-task?source=web",
-            json={"enabled": True},
-        )
-        self.assertEqual(enabled.status_code, 200, enabled.text)
-        self.assertTrue(enabled.json()["long_task"]["enabled"])
-        self.assertFalse(
-            self.request(
-                app,
-                "GET",
-                "/api/users/alice/sessions/long-b/long-task?source=web",
-            ).json()["long_task"]["enabled"]
-        )
-        self.assertFalse(
-            self.request(
-                app,
-                "GET",
-                "/api/users/alice/sessions/long-a/long-task?source=app",
-            ).json()["long_task"]["enabled"]
-        )
-
-        from run.long_task import activate_long_task
-
-        activate_long_task(root, "alice", "web", "long-a", original_prompt="执行长任务")
-        active = ActiveRun("run_long_api", "alice", "long-a", source="web")
-        other = ActiveRun("run_other_api", "alice", "long-b", source="web")
-        service._active_runs[active.run_id] = active
-        service._active_runs[other.run_id] = other
-
-        cancelled = self.request(
-            app,
+        cascade = self.request(
+            create_app(service=service),
             "POST",
-            "/api/users/alice/sessions/long-a/long-task/cancel?source=web",
+            "/api/runs/run_cancel_123/cancel",
+            json={
+                "user": "alice", "source": "web", "session_id": "cancel-session",
+                "cancel_subagents": True,
+            },
         )
-        self.assertEqual(cancelled.status_code, 200, cancelled.text)
-        self.assertEqual(cancelled.json()["long_task"]["status"], "cancelling")
+        self.assertEqual(cascade.status_code, 200, cascade.text)
         self.assertTrue(active.cancel_event.is_set())
-        self.assertFalse(other.cancel_event.is_set())
+        self.assertTrue(active.cancel_subagents_event.is_set())
 
-        missing = self.request(
-            app,
-            "PUT",
-            "/api/users/alice/sessions/missing/long-task?source=web",
-            json={"enabled": True},
-        )
-        self.assertEqual(missing.status_code, 404, missing.text)
 
-        invalid = self.request(
-            app,
-            "PUT",
-            "/api/users/alice/sessions/long-a/long-task?source=web",
-            json={"enabled": "yes"},
-        )
-        self.assertEqual(invalid.status_code, 400, invalid.text)
 
-    def test_long_task_state_reconciles_stale_orphan_after_restart(self) -> None:
-        _, root = self.make_root()
-        reserve_session(root, "alice", "web", "long-orphaned")
-        from run.long_task import activate_long_task, set_long_task_enabled
-
-        with patch("run.long_task._now", return_value="2020-01-01T00:00:00+00:00"):
-            set_long_task_enabled(root, "alice", "web", "long-orphaned", True)
-            activate_long_task(
-                root,
-                "alice",
-                "web",
-                "long-orphaned",
-                original_prompt="跨进程长任务",
-            )
-
-        service = WebRunService(root)
-        response = self.request(
-            create_app(service=service),
-            "GET",
-            "/api/users/alice/sessions/long-orphaned/long-task?source=web",
-        )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        state = response.json()["long_task"]
-        self.assertEqual(state["status"], "interrupted")
-        self.assertEqual(state["last_stop_reason"], "orphaned_run")
-        self.assertEqual(state["last_error"]["code"], "orphaned_long_task")
-
-    def test_long_task_cancel_finishes_orphan_instead_of_sticking_cancelling(self) -> None:
-        _, root = self.make_root()
-        reserve_session(root, "alice", "web", "long-orphan-cancel")
-        from run.long_task import activate_long_task, set_long_task_enabled
-
-        set_long_task_enabled(root, "alice", "web", "long-orphan-cancel", True)
-        activate_long_task(
-            root,
-            "alice",
-            "web",
-            "long-orphan-cancel",
-            original_prompt="等待用户终止",
-        )
-        service = WebRunService(root)
-        response = self.request(
-            create_app(service=service),
-            "POST",
-            "/api/users/alice/sessions/long-orphan-cancel/long-task/cancel?source=web",
-        )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        state = response.json()["long_task"]
-        self.assertEqual(state["status"], "cancelled")
-        self.assertEqual(state["last_stop_reason"], "orphaned_user_cancel")
-        self.assertIsNone(state["last_error"])
 
     def test_explicit_cancel_keeps_terminal_done_visible_to_stream_consumer(
         self,
@@ -4064,7 +3478,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(parsed[2][1]["arguments"], {"x": 1})
         self.assertEqual(parsed[3][1]["result"], {"ok": True})
         self.assertEqual(fake.seen["session_id"], "s1")
-        self.assertTrue(require_present(fake.cancel_event).is_set())
+        self.assertFalse(require_present(fake.cancel_event).is_set())
 
     def test_chat_route_accepts_uploaded_files_without_text(self) -> None:
         fake = FakeService(events=[RunEvent(type="done")])
@@ -4409,7 +3823,7 @@ class WebBackendTests(unittest.TestCase):
     def test_plan_edit_and_retry_endpoints_use_revision_and_preserve_completed(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
             "utf-8",
         )
@@ -4495,6 +3909,7 @@ class WebBackendTests(unittest.TestCase):
             json={"revision": plan["revision"], "description": "陈旧修改"},
         )
         self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["error"]["code"], "plan_revision_conflict")
 
         protected = self.request(
             app,
@@ -4526,11 +3941,11 @@ class WebBackendTests(unittest.TestCase):
     def test_plan_fix_auto_activation_wakes_only_after_approved_transition(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
             "utf-8",
         )
@@ -4792,7 +4207,7 @@ class WebBackendTests(unittest.TestCase):
             f"/api/users/alice/tasks/plans/{plan_id}?session_id=session-a",
             json={},
         )
-        self.assertEqual(update.status_code, 404, update.text)
+        self.assertEqual(update.status_code, 405, update.text)
 
         pause = self.request(
             app,
@@ -4811,18 +4226,18 @@ class WebBackendTests(unittest.TestCase):
     def test_knowledge_api_hides_and_protects_kemo_graph_storage(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"schema_version": 1}),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1, "knowledge": {}}),
             "utf-8",
         )
         scope_roots = {
             "user": root / "users" / "alice" / "knowledge",
-            "shared": root / "shared_knowledge",
-            "global": root / "global_knowledge",
+            "shared": root / "knowledge" / "share",
+            "global": root / "knowledge" / "global",
         }
         for scope, base in scope_roots.items():
             base.mkdir(parents=True)
@@ -4901,7 +4316,7 @@ class WebBackendTests(unittest.TestCase):
     def test_important_memory_lifecycle_read_and_write_preserve_invalidity(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config/global_config.json").write_text('{"schema_version": 1}', "utf-8")
+        (root / "config/global_config.yaml").write_text('{"schema_version": 1}', "utf-8")
         service = WebRunService(root)
         app = create_app(service=service)
         store = MemoryStore(root, "alice", {})
@@ -4926,7 +4341,7 @@ class WebBackendTests(unittest.TestCase):
     def test_important_memory_lifecycle_distinguishes_empty_legacy_and_disabled(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config/global_config.json").write_text('{"schema_version": 1}', "utf-8")
+        (root / "config/global_config.yaml").write_text('{"schema_version": 1}', "utf-8")
         service = WebRunService(root)
         legacy = service.update_important_memory("alice", "legacy profile")
         self.assertEqual(legacy["lifecycle"]["status"], "untracked")
@@ -4940,7 +4355,7 @@ class WebBackendTests(unittest.TestCase):
     def test_important_memory_write_uses_output_limit_not_prompt_budget(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -4952,7 +4367,7 @@ class WebBackendTests(unittest.TestCase):
             ),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1}),
             "utf-8",
         )
@@ -5033,10 +4448,11 @@ class WebBackendTests(unittest.TestCase):
     def test_editable_web_resource_apis_are_scoped_and_validated(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"schema_version": 1, "tools": {"enabled": True}}), "utf-8"
+        (root / "config" / "global_config.yaml").write_text(
+            json.dumps({"schema_version": 1, "tools": {"enabled": True},
+                        "provider_security": {"allowed_hosts": ["example.test"]}}), "utf-8"
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -5060,6 +4476,7 @@ class WebBackendTests(unittest.TestCase):
             json={
                 "title": "Web plan",
                 "description": "created by web",
+                "status": "approved",
                 "steps": [
                     {
                         "step_id": "step_1",
@@ -5074,10 +4491,10 @@ class WebBackendTests(unittest.TestCase):
         plan_id = plan.json()["plan"]["plan_id"]
         paused = self.request(
             app,
-            "PUT",
-            f"/api/users/alice/tasks/plans/{plan_id}?source=web&session_id=web",
-            json={"revision": 1, "status": "paused"},
+            "POST",
+            f"/api/users/alice/tasks/plans/{plan_id}/actions/pause?source=web&session_id=web",
         )
+        self.assertEqual(paused.status_code, 200, paused.text)
         self.assertEqual(paused.json()["plan"]["status"], "paused")
 
         cron = self.request(
@@ -5306,8 +4723,8 @@ class WebBackendTests(unittest.TestCase):
             },
         )
         self.assertEqual(patched.status_code, 200, patched.text)
-        stored_config = json.loads(
-            (root / "users" / "alice" / "user_config.json").read_text("utf-8")
+        stored_config = yaml.safe_load(
+            (root / "users" / "alice" / "user_config.yaml").read_text("utf-8")
         )
         self.assertEqual(stored_config["provider"]["api_key"], "keep-secret")
         self.assertFalse(stored_config["tools"]["enabled"])
@@ -5576,7 +4993,7 @@ class WebBackendTests(unittest.TestCase):
     def test_startup_options_without_provider(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {"web": {"host": "127.0.0.1", "port": 1478, "log_level": "info"}}
             ),
@@ -5680,10 +5097,11 @@ class WebBackendTests(unittest.TestCase):
     def test_observer_endpoints_return_real_sanitized_state(self) -> None:
         _, root = self.make_root()
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
+                    "provider_security": {"allowed_hosts": ["example.test"]},
                     "tools": {"enabled": True, "max_iterations": 4, "timeout": 10},
                     "history": {"schema_version": 3},
                     "memory": {
@@ -5698,7 +5116,7 @@ class WebBackendTests(unittest.TestCase):
             ),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 9,
@@ -5736,14 +5154,14 @@ class WebBackendTests(unittest.TestCase):
         (root / "users" / "alice" / "knowledge" / "notes.md").write_text(
             "# Alice Notes\nprivate index", "utf-8"
         )
-        (root / "shared_knowledge").mkdir()
-        (root / "shared_knowledge" / "team.md").write_text("# Team Shared", "utf-8")
-        (root / "global_knowledge").mkdir()
-        (root / "global_knowledge" / "shared.md").write_text("# Shared", "utf-8")
-        (root / "global_sense").mkdir()
-        (root / "global_sense" / "README.md").write_text("observer core", "utf-8")
+        (root / "knowledge" / "share").mkdir(parents=True)
+        (root / "knowledge" / "share" / "team.md").write_text("# Team Shared", "utf-8")
+        (root / "knowledge" / "global").mkdir()
+        (root / "knowledge" / "global" / "shared.md").write_text("# Shared", "utf-8")
+        (root / "sense").mkdir()
+        (root / "sense" / "README.md").write_text("observer core", "utf-8")
         for module_name in ("runtime", "network"):
-            module = root / "global_sense" / module_name
+            module = root / "sense" / module_name
             module.mkdir()
             (module / "sense.md").write_text(module_name, "utf-8")
             (module / "data_update.py").write_text(
@@ -5764,16 +5182,16 @@ class WebBackendTests(unittest.TestCase):
                 ),
                 "utf-8",
             )
-        broken_module = root / "global_sense" / "broken"
+        broken_module = root / "sense" / "broken"
         broken_module.mkdir()
         (broken_module / "legacy.md").write_text("must not be injected", "utf-8")
-        (root / "global_sense" / "register.py").write_text(
+        (root / "sense" / "register.py").write_text(
             "from pathlib import Path\n\n"
             "def register(registry):\n"
             "    registry.add_perception(Path(__file__).resolve().parent)\n",
             "utf-8",
         )
-        shared_skills = root / "shared_skills"
+        shared_skills = root / "skills"
         shared_skills.mkdir()
         (shared_skills / "register.py").write_text(
             "from pathlib import Path\n\n"
@@ -5788,8 +5206,8 @@ class WebBackendTests(unittest.TestCase):
                 f"# {skill_name}\n{skill_name} description", "utf-8"
             )
         expand_roots = {
-            "global": root / "global_expand",
-            "shared": root / "shared_expand",
+            "global": root / "expand" / "global",
+            "shared": root / "expand" / "share",
             "user": root / "users" / "alice" / "expand",
         }
         for scope, expand_root in expand_roots.items():
@@ -5881,78 +5299,12 @@ class WebBackendTests(unittest.TestCase):
                 next_run_at="2026-07-20T09:00:00+08:00",
             )
         )
-        window = empty_window("alice", "web", "observer-session")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "observer prompt"},
-            {"role": "assistant", "content": "observer response"},
-        ]
-        window["data"]["rounds"] = 1
-        window["data"]["token_usage"] = {
-            "prompt_tokens": 1200,
-            "completion_tokens": 300,
-            "total_tokens": 1500,
-            "estimated": False,
-            "cached_prompt_tokens": 800,
-            "cache_miss_tokens": 200,
-            "cache_hit_rate": 0.8,
-        }
-        commit_window(root / "users" / "alice" / "history" / "observer-window", window)
-        app_window = empty_window("alice", "app", "observer-app-session")
-        app_window["text"]["messages"] = [
-            {"role": "user", "content": "app observer prompt"},
-            {"role": "assistant", "content": "app observer response"},
-        ]
-        app_window["data"]["rounds"] = 1
-        app_window["data"]["token_usage"] = {}
-        commit_window(
-            root / "users" / "alice" / "history" / "observer-app-window",
-            app_window,
-        )
-        other_window = empty_window("alice", "web", "other-session")
-        other_window["text"]["messages"] = [
-            {"role": "user", "content": "old prompt"},
-            {"role": "assistant", "content": "old response"},
-        ]
-        other_window["data"]["rounds"] = 1
-        other_window["data"]["token_usage"] = {}
-        other_window["data"]["updated_at"] = "2020-01-01T00:00:00+00:00"
-        other_window["data"]["round_metrics"] = [
-            {
-                "round": 1,
-                "usage": {},
-                "tool_calls": 7,
-                "provider_responses": [
-                    {
-                        "created_at": "2020-01-01T00:00:00+00:00",
-                        "usage": {
-                            "input_tokens": 10,
-                            "output_tokens": 1,
-                            "total_tokens": 11,
-                        },
-                    }
-                ],
-            }
-        ]
-        commit_window(
-            root / "users" / "alice" / "history" / "other-window",
-            other_window,
-        )
-        runtime_path = runtime_window_path(
-            root / "users" / "alice" / "history" / "observer-window"
-        )
-        commit_window(
-            runtime_path,
-            window,
-            summary_cache={
-                "schema_version": 3,
-                "source_hash": "hash",
-                "covered_rounds": [1],
-                "covered_through_round": 1,
-                "created_at": "2026-07-18T00:00:00+00:00",
-                "summary": {"narrative": "must not be exposed"},
-                "memory_extractions": [],
-            },
-        )
+        card_seed(root, "observer-session", ("observer prompt", "observer response"), usage={
+            "prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500,
+            "estimated": False, "cached_prompt_tokens": 800, "cache_miss_tokens": 200,
+            "cache_hit_rate": 0.8, "provider_request_count": 1})
+        card_seed(root, "observer-app-session", ("app observer prompt", "app observer response"), source="app")
+        card_seed(root, "other-session", ("old prompt", "old response"))
         memory_store = MemoryStore(root, "alice", load_config("alice", root))
         memory_store.create_fragment(
             "seven_days", "safe-memory.md", "safe memory preview"
@@ -5994,11 +5346,11 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(overview.json()["counts"]["enabled_tools"], 1)
         self.assertEqual(overview.json()["context"]["usage"]["total_tokens"], 1500)
         self.assertEqual(overview.json()["context"]["usage"]["cache_hit_rate"], 0.8)
-        self.assertEqual(overview.json()["context"]["rounds"], 1)
-        self.assertEqual(overview.json()["context"]["round_limit"], 30)
+        self.assertEqual(overview.json()["context"]["integration_count"], 1)
+        self.assertEqual(overview.json()["context"]["last_seq"], 2)
         self.assertEqual(overview.json()["agents"][0]["name"], "observer_agent")
         self.assertEqual(overview.json()["agents"][0]["source"], "user")
-        self.assertEqual(overview.json()["summary_cache"]["covered_rounds"], [1])
+        self.assertFalse(overview.json()["summary_cache"]["exists"])
         self.assertNotIn("must not be exposed", overview.text)
         self.assertEqual(overview.json()["runtime_host"]["state"], "running")
         context_window = overview.json()["context_window"]
@@ -6009,10 +5361,10 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             context_window["tokens"]["capacity_tokens"],
-            overview.json()["context"]["limit"],
+            overview.json()["context"]["limit"] - 8192,
         )
-        self.assertEqual(context_window["conversation"]["foreground_rounds"], 1)
-        self.assertEqual(context_window["conversation"]["archived_rounds"], 0)
+        self.assertEqual(context_window["conversation"]["cards_active"], 2)
+        self.assertEqual(context_window["conversation"]["last_seq"], 2)
         self.assertEqual(context_window["conversation"]["total_tool_calls"], 0)
         self.assertEqual(context_window["knowledge"]["enabled"], 2)
         self.assertNotIn("graph_enabled", context_window["knowledge"])
@@ -6021,7 +5373,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertIn("senses", context_window["integrations"])
         self.assertEqual(
             context_window["injection_policy"],
-            {"expand": "round", "perception": "round"},
+            {"expand": "dynamic", "perception": "dynamic"},
         )
 
         unbound_overview = self.request(app, "GET", "/api/users/alice/overview")
@@ -6036,7 +5388,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(app_overview.status_code, 200, app_overview.text)
         self.assertEqual(app_overview.json()["session_id"], "observer-app-session")
         self.assertIsNone(app_overview.json()["context"]["usage"]["cache_hit_rate"])
-        self.assertEqual(app_overview.json()["context_window"]["conversation"]["foreground_rounds"], 1)
+        self.assertEqual(app_overview.json()["context_window"]["conversation"]["cards_active"], 2)
         self.assertTrue(app_overview.json()["context_snapshot"]["available"])
 
         runtime_status = self.request(
@@ -6047,7 +5399,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(runtime_status.status_code, 200, runtime_status.text)
         runtime_payload = runtime_status.json()
         self.assertEqual(runtime_payload["user"], "alice")
-        self.assertEqual(runtime_payload["context"]["rounds"], 1)
+        self.assertEqual(runtime_payload["context"]["integration_count"], 1)
         self.assertEqual(runtime_payload["tokens"]["total_tokens"], 1500)
         self.assertEqual(runtime_payload["tokens"]["request_count"], 1)
         self.assertTrue(runtime_payload["prompt"]["content"])
@@ -6058,7 +5410,7 @@ class WebBackendTests(unittest.TestCase):
             "/api/users/alice/runtime/status?source=app&session_id=observer-app-session",
         )
         self.assertEqual(app_runtime_status.status_code, 200, app_runtime_status.text)
-        self.assertEqual(app_runtime_status.json()["context"]["rounds"], 1)
+        self.assertEqual(app_runtime_status.json()["context"]["integration_count"], 1)
         self.assertTrue(app_runtime_status.json()["context"]["context_snapshot"]["available"])
         self.assertEqual(
             [item["id"] for item in runtime_payload["prompt"]["components"]],
@@ -6102,7 +5454,7 @@ class WebBackendTests(unittest.TestCase):
             {"summary", "prompt"},
         )
         self.assertTrue(prompt_payload["prompt"]["content"])
-        self.assertEqual(prompt_payload["context"]["rounds"], 1)
+        self.assertEqual(prompt_payload["context"]["integration_count"], 1)
         self.assertEqual(prompt_payload["tokens"]["total_tokens"], 0)
         self.assertEqual(prompt_payload["components"], {"sense": [], "expand": []})
         self.assertEqual(prompt_payload["system_cron"]["tracking"], "not_requested")
@@ -6123,11 +5475,12 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(token_payload["prompt"]["content"], "")
         self.assertEqual(token_payload["runtime_host"]["state"], "not_requested")
 
-        other_window["data"]["token_usage"] = {
-            "cached_prompt_tokens": 99,
-            "cache_miss_tokens": 1,
-        }
-        commit_window(root / "users" / "alice" / "history" / "other-window", other_window)
+        store = CardStore(root, "alice")
+        with store.db(write=True) as db:
+            row = db.execute("SELECT integration_id,record_json FROM card_integrations WHERE session_key=?", ('["web","other-session"]',)).fetchone()
+            saved = json.loads(row["record_json"])
+            saved["usage"] = {"cached_prompt_tokens": 99, "cache_miss_tokens": 1}
+            db.execute("UPDATE card_integrations SET record_json=? WHERE integration_id=?", (json.dumps(saved), row["integration_id"]))
         other_overview = self.request(
             app, "GET", "/api/users/alice/overview?session_id=other-session"
         )
@@ -6337,7 +5690,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertGreater(sense.json()["injection"]["estimated_tokens"], 0)
         self.assertEqual(
             sense.json()["injection"]["source_files"],
-            ["global_sense/runtime/sense.md"],
+            ["sense/runtime/sense.md"],
         )
         self.assertEqual(
             {item["id"]: item["status"] for item in sense.json()["sources"]},
@@ -6369,7 +5722,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertNotIn('"project"', sense.text)
         injection_content = sense.json()["injection"]["content"]
         self.assertTrue(injection_content.startswith("[runtime]\n"))
-        self.assertIn("global_sense/runtime/sense.md", injection_content)
+        self.assertIn("sense/runtime/sense.md", injection_content)
         self.assertIn("runtime", injection_content)
 
         # 感知预览同样必须逐块对齐；多块场景由 test_prompt_pipeline 覆盖，
@@ -6399,7 +5752,7 @@ class WebBackendTests(unittest.TestCase):
             refreshed.json()["source"]["collected_markdown"], "runtime refreshed"
         )
 
-        runtime_dotenv = root / "global_sense" / "runtime" / ".env"
+        runtime_dotenv = root / "sense" / "runtime" / ".env"
         runtime_dotenv.write_text("not-an-assignment\n", "utf-8")
         with patch("web.services.sense.subprocess.run") as sense_process:
             invalid_environment = self.request(
@@ -6458,7 +5811,7 @@ class WebBackendTests(unittest.TestCase):
         deleted_network = self.request(app, "DELETE", "/api/users/alice/sense/network")
         self.assertEqual(deleted_network.status_code, 200)
         self.assertTrue(deleted_network.json()["deleted"])
-        self.assertFalse((root / "global_sense" / "network").exists())
+        self.assertFalse((root / "sense" / "network").exists())
 
         prompt = self.request(app, "GET", "/api/users/alice/prompt/sections")
         self.assertEqual(len(prompt.json()["sections"]), len(PROMPT_SECTION_ORDER))
@@ -6478,7 +5831,7 @@ class WebBackendTests(unittest.TestCase):
             settings.json()["schema_versions"],
             {
                 "config_schema": 1,
-                "history_schema": 3,
+                "card_schema": 4,
                 "memory_storage_schema": 4,
             },
         )
@@ -6487,11 +5840,11 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(settings.json()["features"]["perception_prompt_injection"])
         self.assertEqual(
             settings.json()["source_policy"]["expand"]["injection_mode"],
-            "round",
+            "dynamic",
         )
         self.assertEqual(
             settings.json()["source_policy"]["perception"]["injection_mode"],
-            "round",
+            "dynamic",
         )
         self.assertNotIn("kemo_graph", settings.json()["source_policy"])
         self.assertNotIn("super-secret", settings.text)

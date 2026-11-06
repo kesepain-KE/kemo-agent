@@ -318,7 +318,7 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(result['entries'][0]['source'], 'snapshot')
 
     def test_tool_result_and_exception_preserved_without_output_leak(self):
-        tool = ToolDefinition(name='shell', description='', input_schema={'type': 'object'}, version='1',
+        tool = ToolDefinition(name='test_tool', description='', input_schema={'type': 'object'}, version='1',
                               enabled=True, entrypoint='', source='test', directory=self.root)
         context = {'root': self.root, 'user': 'alice'}
         for returned, status in (({'ok': True, 'output': 'private-output', 'exit_code': 0}, 'success'),

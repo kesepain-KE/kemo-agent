@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import yaml
 import json
 from pathlib import Path
 import tempfile
@@ -16,7 +17,7 @@ class CronHistorySettingsApiTests(unittest.TestCase):
     def test_global_api_defaults_validates_and_persists_retention(self) -> None:
         async def exercise(root: Path) -> None:
             (root / 'config').mkdir()
-            config_path = root / 'config/global_config.json'
+            config_path = root / 'config/global_config.yaml'
             config_path.write_text('{}\n', encoding='utf-8')
             (root / 'users/alice').mkdir(parents=True)
             app = create_app(service=WebRunService(root))
@@ -32,47 +33,28 @@ class CronHistorySettingsApiTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()['config']['cron']['history_retention_days'], 14)
-                self.assertEqual(json.loads(config_path.read_text('utf-8'))['cron']['history_retention_days'], 14)
+                self.assertEqual(yaml.safe_load(config_path.read_text('utf-8'))['cron']['history_retention_days'], 14)
 
                 response = await client.patch(
                     '/api/global-config',
-                    json={'changes': {'agents': {'enable_mid_context_compression': False}}},
+                    json={'changes': {'agents': {'token_compression_ratio': 0.4}}},
                 )
-                self.assertEqual(response.status_code, 200)
-                self.assertFalse(
-                    response.json()['config']['agents']['enable_mid_context_compression']
-                )
-                self.assertFalse(
-                    json.loads(config_path.read_text('utf-8'))['agents'][
-                        'enable_mid_context_compression'
-                    ]
-                )
-                settings = await client.get('/api/users/alice/settings')
-                self.assertEqual(settings.status_code, 200)
-                self.assertFalse(settings.json()['limits']['mid_context_compression_enabled'])
-                self.assertEqual(
-                    settings.json()['provenance']['agents.enable_mid_context_compression'],
-                    'global',
-                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()['config']['agents']['token_compression_ratio'], 0.4)
 
                 for invalid in (-1, 3651, 1.5, True, '7'):
                     response = await client.patch(
                         '/api/global-config', json={'changes': {'cron': {'history_retention_days': invalid}}}
                     )
                     self.assertEqual(response.status_code, 400, invalid)
-                self.assertEqual(json.loads(config_path.read_text('utf-8'))['cron']['history_retention_days'], 14)
+                self.assertEqual(yaml.safe_load(config_path.read_text('utf-8'))['cron']['history_retention_days'], 14)
 
-                for invalid in (1, 0, 'false'):
+                for invalid in (0, 1, 'false', True):
                     response = await client.patch(
-                        '/api/global-config',
-                        json={'changes': {'agents': {'enable_mid_context_compression': invalid}}},
+                        '/api/global-config', json={'changes': {'agents': {'token_compression_ratio': invalid}}}
                     )
                     self.assertEqual(response.status_code, 400, invalid)
-                self.assertFalse(
-                    json.loads(config_path.read_text('utf-8'))['agents'][
-                        'enable_mid_context_compression'
-                    ]
-                )
+                self.assertEqual(yaml.safe_load(config_path.read_text('utf-8'))['agents']['token_compression_ratio'], 0.4)
 
                 response = await client.patch(
                     '/api/global-config', json={'changes': {'cron': {'history_retention_days': None}}}
@@ -86,7 +68,7 @@ class CronHistorySettingsApiTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 400)
                 self.assertIn('仅支持全局配置', response.json()['error']['message'])
-                self.assertFalse((root / 'users/alice/user_config.json').exists())
+                self.assertFalse((root / 'users/alice/user_config.yaml').exists())
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(exercise(Path(directory)))

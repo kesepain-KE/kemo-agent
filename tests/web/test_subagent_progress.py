@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from events import RunEvent
-from run.conversation.tool_batch import _subagent_callback
 from web.service import WebRunService
 
 
@@ -24,7 +23,9 @@ class SubagentProgressTests(unittest.TestCase):
 
             def source(request, **_kwargs):
                 yield RunEvent(type="tool_call_start", tool_name="subagent_dispatch", tool_call_id="call-a")
-                publish = _subagent_callback(request, "call-a")
+                def publish(event):
+                    event.tool_call_id = "call-a"
+                    request["_subagent_event_callback"](event)
                 callback.append(publish)
                 require_present(publish)(RunEvent(type="subagent_progress", content="private reasoning", arguments={"secret": "private"}, metadata={
                     "phase": "subagent", "agent": "task_plan", "task_id": "task-a",

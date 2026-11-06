@@ -12,14 +12,15 @@ from web.api_contracts import RuntimeResponse
 from web.app import create_app
 from web.service import WebRunService
 from web.auth import WebAuthConfig, local_unauthenticated_request
+from run.scheduler import CronStore, normalize_task
 
 
 @pytest.fixture
 def backend(tmp_path):
     (tmp_path / "config").mkdir()
-    (tmp_path / "config/global_config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "config/global_config.yaml").write_text("{}", encoding="utf-8")
     (tmp_path / "users/alice").mkdir(parents=True)
-    (tmp_path / "users/alice/user_config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "users/alice/user_config.yaml").write_text("{}", encoding="utf-8")
     return WebRunService(tmp_path)
 
 
@@ -44,6 +45,30 @@ def test_invalid_bodies_are_rejected_before_side_effects(backend, monkeypatch, m
     target.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("PUT", "/tasks/plans/plan_missing/edit"),
+        ("PATCH", "/tasks/plans/plan_missing"),
+        ("PUT", "/tasks/plans/plan_missing"),
+    ],
+)
+def test_retired_plan_mutation_methods_remain_unavailable(backend, method, path):
+    async def request():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(service=backend)),
+            base_url="http://test",
+        ) as client:
+            response = await client.request(
+                method,
+                "/api/users/alice" + path,
+                json={"revision": 1},
+            )
+        assert response.status_code == 405, response.text
+
+    asyncio.run(request())
+
+
 @pytest.mark.parametrize("sections", ["prompt", "tokens", "api", "external", "maintenance", "congestion", "summary", ""])
 def test_every_lazy_runtime_section_preserves_response_contract(backend, sections):
     result = RuntimeResponse.model_validate(backend.runtime_status("alice", sections=sections))
@@ -51,12 +76,34 @@ def test_every_lazy_runtime_section_preserves_response_contract(backend, section
     assert not any(key.startswith("_status_") for key in result.tokens.model_dump())
 
 
+def test_maintenance_exposes_interrupted_system_task_count(backend):
+    store = CronStore(backend.root, "__system__", system=True)
+    task = normalize_task(
+        task_id="memory_promotion",
+        title="记忆碎片到期晋升检查",
+        prompt="",
+        user="",
+        type="recurring",
+        interval_seconds=30,
+        next_run_at="",
+        exec_mode="system",
+        action="memory_promotion",
+        status="paused",
+    )
+    task["last_stop_reason"] = "interrupted_pending_confirmation"
+    store.create(task)
+
+    result = backend.runtime_status("alice", sections="maintenance")
+
+    assert result["system_cron"]["pending_confirmation_count"] == 1
+
+
 def test_congestion_http_snapshots_follow_shared_slots_without_building_prompts(backend, monkeypatch):
     import provider.factory as factory
     import web.services.runtime_status as status_module
 
     config = {"provider_runtime": {"max_concurrent_requests": 2}}
-    (backend.root / "config/global_config.json").write_text(json.dumps(config), encoding="utf-8")
+    (backend.root / "config/global_config.yaml").write_text(json.dumps(config), encoding="utf-8")
     monkeypatch.setattr(factory, "_provider_semaphore", None)
     monkeypatch.setattr(factory, "_provider_semaphore_limit", 0)
     prompt = Mock(side_effect=AssertionError("congestion-only polling must not build prompts"))

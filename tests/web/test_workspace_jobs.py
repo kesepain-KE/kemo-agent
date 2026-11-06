@@ -18,11 +18,11 @@ from web.services.workspace_jobs import LOG_TAIL_BYTES, job_detail, list_jobs
 @pytest.fixture
 def backend(tmp_path):
     (tmp_path / "config").mkdir()
-    (tmp_path / "config/global_config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "config/global_config.yaml").write_text("{}", encoding="utf-8")
     for user in ("alice", "bob"):
         directory = tmp_path / "users" / user
         directory.mkdir(parents=True)
-        (directory / "user_config.json").write_text("{}", encoding="utf-8")
+        (directory / "user_config.yaml").write_text("{}", encoding="utf-8")
     return WebRunService(tmp_path)
 
 

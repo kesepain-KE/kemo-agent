@@ -128,7 +128,7 @@ class HeartbeatConfigTests(unittest.TestCase):
         stream.close()
         stream.close()
         self.assertEqual(list(stream), [])
-        self.assertTrue(cancelled.is_set())
+        self.assertFalse(cancelled.is_set())
         self.assertEqual(released, [True])
 
 
@@ -141,7 +141,7 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temporary.name)
         (self.root / "users" / "alice" / "history").mkdir(parents=True)
         (self.root / "config").mkdir()
-        (self.root / "config" / "global_config.json").write_text(json.dumps({
+        (self.root / "config" / "global_config.yaml").write_text(json.dumps({
             "web": {"max_concurrent_chats": 1, "max_pending_chats": 2,
                     "pending_chat_timeout": 2, "sse_heartbeat_seconds": 1},
             "memory": {"extraction_mode": "disabled"},
@@ -286,7 +286,7 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
                 self.assertFalse(release.is_set())
                 self.assertIn("run_heartbeat", service._active_runs)
-                self.assertTrue(service._active_runs["run_heartbeat"].cancel_event.is_set())
+                self.assertFalse(service._active_runs["run_heartbeat"].cancel_event.is_set())
                 stopping = service.cancel_run(
                     "alice", "run_heartbeat", session_id="heartbeat",
                 )
@@ -295,23 +295,43 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: not service._active_runs)
 
     async def test_repeated_disconnects_release_slots_and_finish_cooperative_workers(self):
-        def source(_request, *, cancel_event, **_kwargs):
-            cancel_event.wait(3)
-            yield RunEvent(type="done", metadata={"cancelled": True})
+        release = threading.Event()
+        self.releases.append(release)
+
+        def source(_request, **_kwargs):
+            yield RunEvent(type="text_delta", content="working")
+            release.wait(3)
+            yield RunEvent(type="done", metadata={"cancelled": False})
 
         service = self.service(source)
         app = self.app(service)
-        for _ in range(5):
+        run_ids = []
+        for index in range(5):
+            run_id = f"run_heartbeat_{index}"
+            run_ids.append(run_id)
             disconnected = asyncio.Event()
 
             async def send(message):
                 if message.get("body") == HEARTBEAT_FRAME:
                     disconnected.set()
 
-            await invoke_chat(app, send, disconnected=disconnected)
-            await wait_until(lambda: not service._active_runs)
+            await invoke_chat(
+                app,
+                send,
+                disconnected=disconnected,
+                payload={
+                    "user": "alice",
+                    "session_id": "heartbeat",
+                    "prompt": "hello",
+                    "run_id": run_id,
+                },
+            )
             self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+            self.assertIn(run_id, service._active_runs)
+            self.assertFalse(service._active_runs[run_id].cancel_event.is_set())
             await wait_until(lambda: not app.state.web_stream_cleanup.tasks)
+        release.set()
+        await wait_until(lambda: not service._active_runs)
 
     async def test_explicit_user_cancel_keeps_terminal_event_visible_over_sse(self):
         def source(_request, *, cancel_event, **_kwargs):
@@ -403,7 +423,7 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
             gate.release()
 
     async def test_gate_congestion_keeps_http_503_instead_of_early_200(self):
-        config_path = self.root / "config" / "global_config.json"
+        config_path = self.root / "config" / "global_config.yaml"
         config = json.loads(config_path.read_text("utf-8"))
         config["web"]["max_pending_chats"] = 0
         config_path.write_text(json.dumps(config), encoding="utf-8")

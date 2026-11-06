@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import httpx
 import pytest
 
+from run.cards import CardSessionClosedError, CardStore, session_key
 from run.history import reserve_session
 from run.history.registry_store import mutate_registry_record
-from run.history.store_core import connection
 from web.app import create_app
 from web.service import WebRunService
 
@@ -24,13 +23,10 @@ def service(tmp_path: Path) -> WebRunService:
 
 def seed(service, source="web", session_id="shared", user="alice", timestamp="2026-10-20T10:00:00+00:00"):
     reserve_session(service.root, user, source, session_id)
-    with connection(service.root, user, write=True) as db:
-        row = db.execute("SELECT record_json FROM history_sessions WHERE source=? AND session_id=?",
-                         (source, session_id)).fetchone()
-        record = json.loads(row[0])
-        record["updated_at"] = timestamp
-        db.execute("UPDATE history_sessions SET updated_at=?, record_json=? WHERE source=? AND session_id=?",
-                   (timestamp, json.dumps(record), source, session_id))
+    store = CardStore(service.root, user)
+    with store.db(write=True) as db:
+        db.execute("UPDATE card_sessions SET updated_at=? WHERE session_key=?",
+                   (timestamp, session_key(source, session_id)))
 
 
 def request(service, body, source="web", session_id="shared"):
@@ -49,7 +45,6 @@ def test_marks_survive_run_upserts_and_do_not_change_lifecycle_or_time(service):
     assert marked["pinned"] and marked["favorite"]
     assert marked["updated_at"] == before["updated_at"]
     assert marked["state"] == before["state"]
-    assert marked["summary_status"] == before["summary_status"]
     assert service.mark_session("alice", "shared", pinned=True)["session"]["pinned_at"] == marked["pinned_at"]
     mutate_registry_record(service.root, "alice", source="web", session_id="shared",
                            updated_at=before["updated_at"], mutator=lambda record: {**record, "title": "normal write"})
@@ -99,9 +94,9 @@ def test_marks_allow_readonly_sources_but_are_scoped_and_cascade_deleted(service
     service.delete_all_sessions("alice", source="all")
     assert request(service, {"favorite": True}, source).status_code == 404
     assert service.sessions("alice", source="all")["favorites_count"] == 0
-    with connection(service.root, "alice") as db:
-        assert db.execute("SELECT COUNT(*) FROM history_session_marks").fetchone()[0] == 0
-    seed(service, source)
+    with pytest.raises(CardSessionClosedError, match="已经删除"):
+        reserve_session(service.root, "alice", source, "shared")
+    seed(service, source, session_id="fresh")
     assert not service.sessions("alice", source="all")["sessions"][0]["pinned"]
 
 

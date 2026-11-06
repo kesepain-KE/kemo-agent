@@ -18,7 +18,7 @@ class MemoryApiContractTests(unittest.TestCase):
     def test_four_tiers_read_update_delete_and_user_isolation(self) -> None:
         async def exercise(root: Path) -> None:
             (root / "config").mkdir()
-            (root / "config/global_config.json").write_text('{"schema_version": 1}', "utf-8")
+            (root / "config/global_config.yaml").write_text('{"schema_version": 1}', "utf-8")
             for user in ("alice", "bob"):
                 (root / "users" / user).mkdir(parents=True)
             store = MemoryStore(root, "alice", {})

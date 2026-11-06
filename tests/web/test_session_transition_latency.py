@@ -1,9 +1,6 @@
-from __future__ import annotations
-
-from tests.type_assertions import require_present
-
+"""Session transitions use metadata-only writes and do not block unrelated page work."""
+from contextlib import contextmanager
 import asyncio
-import copy
 import json
 import threading
 import time
@@ -12,12 +9,11 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
-from run.history import (
-    close_session, commit_window, empty_window, find_record, load_window,
-    queue_summary, reserve_session,
-)
-from run.history import registry_store, store_core
-from run.history.store import mutate_registry_record, read_active_binding, write_registry
+from run.cards import CardStore
+from run.history import (close_session, delete_session, find_record, queue_summary, reserve_session)
+from run.history import registry_store
+from run.history.store import mutate_registry_record, read_active_binding
+from tests.card_history_support import seed_history
 from web.app import create_app
 from web.service import WebRunService
 
@@ -25,156 +21,99 @@ from web.service import WebRunService
 @pytest.fixture
 def root(tmp_path):
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "global_config.json").write_text(
-        json.dumps({"memory": {"extraction_mode": "compression_only"}}), encoding="utf-8")
+    (tmp_path / "config/global_config.yaml").write_text('{"memory":{"extraction_mode":"compression_only"}}')
     for user in ("alice", "bob"):
-        (tmp_path / "users" / user).mkdir(parents=True)
-        (tmp_path / "users" / user / "user_config.json").write_text("{}", encoding="utf-8")
+        (tmp_path / f"users/{user}").mkdir(parents=True)
+        (tmp_path / f"users/{user}/user_config.yaml").write_text('{}')
     return tmp_path
 
 
-def archive(root, session="old"):
-    window = empty_window("alice", "web", session)
-    for n in range(12):
-        window["text"]["messages"].extend([
-            {"role": "user", "content": f"Fixture {n} " + "x" * 20_000},
-            {"role": "assistant", "content": "Fixture response " + "y" * 20_000},
-        ])
-    window["data"].update(rounds=12, memory_status="deferred", memory_processed_round=0)
-    path = root / "users" / "alice" / "history" / f"conv_{session}"
-    commit_window(path, window)
-    return path
+def archive(root):
+    return seed_history(root, "alice", "web", "old", [message for n in range(12) for message in (
+        {"role": "user", "content": f"Fixture {n} " + "x" * 20000},
+        {"role": "assistant", "content": "Fixture response " + "y" * 20000})])
 
 
-def test_close_and_summary_only_touch_the_target_registry_row(root):
-    base = reserve_session(root, "alice", "web", "old", active_key="interactive:alice:page")
-    records = {f"web:fixture_{i}": {**copy.deepcopy(base), "session_id": f"fixture_{i}",
-               "conversation_id": f"fixture_{i}", "future_marker": f"keep-{i}"}
-               for i in range(250)}
-    records["web:old"] = base
-    write_registry(root, "alice", records, {
-        "interactive:alice:page": {"source": "web", "session_id": "old"},
-        "interactive:alice:other": {"source": "web", "session_id": "fixture_1"},
-    }, updated_at=base["updated_at"])
+def test_close_and_summary_only_touch_target_metadata(root):
+    for n in range(30):
+        reserve_session(root, "alice", "web", f"fixture_{n}", future_marker=f"keep-{n}")
+    reserve_session(root, "alice", "web", "old", active_key="interactive:alice:page")
     reserve_session(root, "alice", "app", "old", active_key="app:alice:device")
-    reserve_session(root, "bob", "web", "old", active_key="interactive:bob")
-    with patch("run.history.session_ops._load_index_unlocked",
-               side_effect=AssertionError("Full registry scan is forbidden")):
-        record = close_session(root, "alice", "web", "old")
-        assert record["lifecycle"] == "closed"
-        assert queue_summary(root, "alice", "web", "old")["reason"] == "no_archive_rounds"
+    reserve_session(root, "bob", "web", "old")
+    assert close_session(root, "alice", "web", "old")["lifecycle"] == "closed"
+    assert queue_summary(root, "alice", "web", "old")["status"] == "none"
     assert read_active_binding(root, "alice", "interactive:alice:page") is None
-    assert require_present(read_active_binding(root, "alice", "interactive:alice:other"))["session_id"] == "fixture_1"
-    assert require_present(read_active_binding(root, "alice", "app:alice:device"))["session_id"] == "old"
+    assert read_active_binding(root, "alice", "app:alice:device")["session_id"] == "old"
     assert find_record(root, "alice", "web", "fixture_1")["future_marker"] == "keep-1"
     assert find_record(root, "alice", "app", "old")["lifecycle"] == "open"
     assert find_record(root, "bob", "web", "old")["lifecycle"] == "open"
 
 
-def test_save_queues_memory_without_reading_archive_transcripts(root):
-    path = archive(root)
-    statements = []
-    configure = store_core._configure
-
-    def trace(database, **kwargs):
-        configure(database, **kwargs)
-        database.set_trace_callback(statements.append)
-
+def test_save_queues_memory_without_reading_raw_transcripts(root):
+    history, statements = archive(root), []
+    before = history.cards
+    original = CardStore.db
+    @contextmanager
+    def trace(store, *, write=False):
+        with original(store, write=write) as db:
+            db.set_trace_callback(statements.append)
+            yield db
     summary_waker, memory_waker = Mock(), Mock()
     service = WebRunService(root, summary_waker=summary_waker, memory_waker=memory_waker)
-    with (
-        patch.object(store_core, "_configure", trace),
-        patch("run.history.session_api.load_window", side_effect=AssertionError("No full archive load")),
-        patch("run.history.commit_ops.load_stored_window", side_effect=AssertionError("No transcript reload")),
-        patch("run.history.session_ops._load_index_unlocked", side_effect=AssertionError("No registry scan")),
-        patch("web.services.run_control.extract_memory_backlog") as extract,
-    ):
+    with patch.object(CardStore, "db", trace):
         result = service.close_session("alice", "old")
-    assert result["closed"] is True
-    assert result["memory"]["status"] == "queued"
-    assert result["memory"]["target_round"] == 12
+    assert result["closed"] and result["memory"]["status"] == "queued"
+    assert result["memory"]["target_seq"] == 24
     assert result["summary"]["status"] == "queued"
-    assert result["session"]["summary_status"] == "queued"
-    extract.assert_not_called()
+    assert not any("from context_cards" in sql.casefold() for sql in statements)
+    assert history.cards == before and find_record(root, "alice", "web", "old")["memory_processed_seq"] == 0
     summary_waker.assert_called_once()
     memory_waker.assert_called_once()
-    selects = [sql.lower() for sql in statements if sql.lstrip().lower().startswith("select")]
-    assert not any("from history_messages" in sql or "from history_rounds" in sql for sql in selects)
-    assert not any("text_json" in sql or "items_json" in sql for sql in selects)
-    saved = load_window(path)
-    assert len(saved["text"]["messages"]) == 24
-    assert saved["text"]["messages"][0]["content"].endswith("x" * 20_000)
-    assert saved["data"]["memory_status"] == "queued"
-    assert saved["data"]["memory_target_round"] == 12
-    assert saved["data"]["memory_processed_round"] == 0
 
 
-def test_save_deferred_by_another_process_does_not_queue_or_wake(root):
+def test_other_process_presence_defers_save_and_does_not_wake(root):
     archive(root)
-    other_page = WebRunService(root)
-    other_page.session_lease("alice", "old", "web_other_page")
+    WebRunService(root).session_lease("alice", "old", "other_page")
     summary_waker, memory_waker = Mock(), Mock()
     service = WebRunService(root, summary_waker=summary_waker, memory_waker=memory_waker)
-    result = service.close_session("alice", "old", client_id="web_saving_page")
-    assert result["closed"] is False
-    assert result["deferred"] is True
-    assert result["active_clients"] == 1
-    assert result["memory"]["reason"] == "session_in_use_by_other_clients"
-    record = find_record(root, "alice", "web", "old")
-    assert record["lifecycle"] == "open"
-    assert record["memory_status"] == "deferred"
+    result = service.close_session("alice", "old", client_id="saving_page")
+    assert not result["closed"] and result["deferred"] and result["active_clients"] == 1
     summary_waker.assert_not_called()
     memory_waker.assert_not_called()
-
-    other_page.release_session_lease("alice", "old", "web_other_page")
-    # Unload is deliberately not authoritative: a late pagehide must not erase
-    # a newer heartbeat. The durable lease expires naturally after 90 seconds.
-    assert service.close_session("alice", "old", client_id="web_saving_page")["deferred"]
     with patch("run.history.web_lifecycle.time.time", return_value=time.time() + 91):
-        retried = service.close_session("alice", "old", client_id="web_saving_page")
-    assert retried["closed"] is True
-    assert retried["memory"]["status"] == "queued"
+        assert service.close_session("alice", "old", client_id="saving_page")["closed"]
     summary_waker.assert_called_once()
     memory_waker.assert_called_once()
 
 
-def test_save_without_pending_memory_does_not_wake_memory_worker(root):
+def test_empty_save_does_not_wake_workers(root):
     reserve_session(root, "alice", "web", "empty")
     summary_waker, memory_waker = Mock(), Mock()
-    service = WebRunService(root, summary_waker=summary_waker, memory_waker=memory_waker)
-    result = service.close_session("alice", "empty")
-    assert result["closed"] is True
-    assert result["memory"]["status"] == "skipped"
-    memory_waker.assert_not_called()
+    result = WebRunService(root, summary_waker=summary_waker, memory_waker=memory_waker).close_session("alice", "empty")
+    assert result["closed"] and result["memory"]["status"] == "skipped"
     summary_waker.assert_not_called()
+    memory_waker.assert_not_called()
 
 
-def test_targeted_session_update_rolls_back_on_failure(root):
+def test_targeted_metadata_update_rolls_back_bindings_on_failure(root):
     reserve_session(root, "alice", "web", "old", active_key="interactive:alice")
-    original = registry_store._upsert_session_row
-
-    def fail_after_write(database, record):
-        original(database, record)
-        raise OSError("Fixture failure")
-
-    with patch.object(registry_store, "_upsert_session_row", fail_after_write):
-        with pytest.raises(OSError, match="Fixture failure"):
-            close_session(root, "alice", "web", "old")
+    original = registry_store.write_record
+    def fail(db, row, record, **kwargs):
+        original(db, row, record, **kwargs)
+        raise OSError("fixture failure")
+    with patch.object(registry_store, "write_record", side_effect=fail), pytest.raises(OSError):
+        close_session(root, "alice", "web", "old")
     assert find_record(root, "alice", "web", "old")["lifecycle"] == "open"
-    assert require_present(read_active_binding(root, "alice", "interactive:alice"))["session_id"] == "old"
+    assert read_active_binding(root, "alice", "interactive:alice")["session_id"] == "old"
 
 
-def test_targeted_update_cannot_change_identity_or_revive_deleted_session(root):
+def test_metadata_update_cannot_change_identity_or_revive_hidden_session(root):
     reserve_session(root, "alice", "web", "old")
-    with pytest.raises(ValueError, match="source/session_id"):
-        mutate_registry_record(root, "alice", "web", "old",
-                               lambda r: {**r, "session_id": "different"}, updated_at="")
-    assert find_record(root, "alice", "web", "old")["lifecycle"] == "open"
-    assert find_record(root, "alice", "web", "different") is None
-    from run.history import delete_session
+    with pytest.raises(ValueError):
+        mutate_registry_record(root, "alice", "web", "old", lambda r: {**r, "session_id": "different"})
     delete_session(root, "alice", "web", "old")
     assert close_session(root, "alice", "web", "old") is None
-    assert queue_summary(root, "alice", "web", "old")["reason"] == "session_not_found"
+    assert queue_summary(root, "alice", "web", "old") is None
 
 
 @pytest.mark.parametrize(("method", "path"), [

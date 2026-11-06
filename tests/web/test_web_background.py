@@ -57,11 +57,11 @@ def webm_bytes(*, video=True):
 @pytest.fixture
 def root(tmp_path):
     (tmp_path / "config").mkdir()
-    (tmp_path / "config/global_config.json").write_text("{}")
+    (tmp_path / "config/global_config.yaml").write_text("{}")
     for name in ("alice", "bob"):
         directory = tmp_path / "users" / name
         directory.mkdir(parents=True)
-        (directory / "user_config.json").write_text('{"knowledge":{"use_shared":false}}')
+        (directory / "user_config.yaml").write_text('{"knowledge":{"use_shared":false}}')
     return tmp_path
 
 
@@ -192,7 +192,7 @@ def test_background_api_lifecycle_and_range(root):
 
 def test_config_rejects_bad_values_without_overwriting_other_fields(root):
     service = WebRunService(root)
-    path = root / "users/alice/user_config.json"
+    path = root / "users/alice/user_config.yaml"
     original = path.read_bytes()
     for invalid in (
         {"blur": 99}, {"file": "../bob/background.png"}, None,
@@ -276,10 +276,10 @@ def test_background_rejects_hardlinked_media(root):
 def test_background_rejects_windows_directory_junction(root):
     outside = root / "outside-user"
     outside.mkdir()
-    (outside / "user_config.json").write_text("{}")
+    (outside / "user_config.yaml").write_text("{}")
     (outside / "background.png").write_bytes(image_bytes())
     directory = root / "users/alice"
-    (directory / "user_config.json").unlink()
+    (directory / "user_config.yaml").unlink()
     directory.rmdir()
     result = subprocess.run(
         ["cmd.exe", "/c", "mklink", "/J", str(directory), str(outside)],
@@ -291,7 +291,7 @@ def test_background_rejects_windows_directory_junction(root):
         backend.background_status("alice")
     with pytest.raises(InvalidRequestError):
         backend.patch_user_config("alice", {"web_ui": {"background": {"enabled": True}}})
-    assert (outside / "user_config.json").read_text() == "{}"
+    assert (outside / "user_config.yaml").read_text() == "{}"
 
 
 def test_oversized_manual_file_is_not_loaded(root):
@@ -318,17 +318,17 @@ def test_background_rejects_redirected_paths(root, tmp_path, location):
     backend = WebRunService(root)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "user_config.json").write_text("{}")
+    (outside / "user_config.yaml").write_text("{}")
     (outside / "background.png").write_bytes(image_bytes())
     directory = root / "users/alice"
     try:
         if location == "file":
             (directory / "background.png").symlink_to(outside / "background.png")
         elif location == "config":
-            (directory / "user_config.json").unlink()
-            (directory / "user_config.json").symlink_to(outside / "user_config.json")
+            (directory / "user_config.yaml").unlink()
+            (directory / "user_config.yaml").symlink_to(outside / "user_config.yaml")
         elif location == "user":
-            (directory / "user_config.json").unlink()
+            (directory / "user_config.yaml").unlink()
             directory.rmdir()
             directory.symlink_to(outside, target_is_directory=True)
         else:

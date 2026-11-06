@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import yaml
 import json
 from pathlib import Path
 
@@ -16,10 +17,10 @@ from web.service import WebRunService
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     (tmp_path / "config").mkdir()
-    (tmp_path / "config/global_config.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "config/global_config.yaml").write_text("{}\n", encoding="utf-8")
     for user in ("alice", "bob"):
         (tmp_path / "users" / user).mkdir(parents=True)
-        (tmp_path / "users" / user / "user_config.json").write_text(
+        (tmp_path / "users" / user / "user_config.yaml").write_text(
             '{"schema_version":1,"knowledge":{"use_shared":false}}\n', encoding="utf-8"
         )
     return tmp_path
@@ -34,7 +35,7 @@ def test_language_persists_and_users_are_isolated(root: Path, language: str) -> 
             assert before.json()["appearance"]["language"] == DEFAULT_WEB_LANGUAGE
             saved = await client.patch("/api/users/alice/config", json={"changes": {"web_ui": {"language": language}}})
             assert saved.status_code == 200, saved.text
-            document = json.loads((root / "users/alice/user_config.json").read_text("utf-8"))
+            document = yaml.safe_load((root / "users/alice/user_config.yaml").read_text("utf-8"))
             assert document["web_ui"]["language"] == language
             assert document["knowledge"] == {"use_shared": False}
             assert web_language(load_config("alice", root)) == language
@@ -56,7 +57,7 @@ def test_language_persists_and_users_are_isolated(root: Path, language: str) -> 
 @pytest.mark.parametrize("invalid", ["ar", "xx", "EN", "", None, True, 1, [], {}])
 def test_invalid_language_never_changes_config(root: Path, invalid: object) -> None:
     async def exercise() -> None:
-        path = root / "users/alice/user_config.json"
+        path = root / "users/alice/user_config.yaml"
         before = path.read_bytes()
         app = create_app(service=WebRunService(root))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -72,7 +73,7 @@ def test_language_only_belongs_to_user_config(root: Path) -> None:
     for invalid in (None, "en", []):
         with pytest.raises(ValueError):
             web_language({"web_ui": invalid}, strict=True)
-    path = root / "users/alice/user_config.json"
+    path = root / "users/alice/user_config.yaml"
     path.write_text('{"web_ui":{"language":"xx"}}', encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config("alice", root)
@@ -90,7 +91,7 @@ def test_language_only_belongs_to_user_config(root: Path) -> None:
 
 def test_template_and_frontend_supported_languages_match() -> None:
     source = Path(__file__).resolve().parents[2]
-    template = json.loads((source / "template/user/user_config.json").read_text("utf-8"))
+    template = yaml.safe_load((source / "template/user/user_config.yaml").read_text("utf-8"))
     assert template["web_ui"]["language"] == "zh-CN"
     import re
     locales = (source / "web/frontend/src/i18n/locales.ts").read_text("utf-8")
@@ -99,7 +100,7 @@ def test_template_and_frontend_supported_languages_match() -> None:
 
 
 def test_retired_arabic_config_falls_back_without_breaking_other_saves(root: Path) -> None:
-    path = root / "users/alice/user_config.json"
+    path = root / "users/alice/user_config.yaml"
     document = {"web_ui": {"language": "ar"}, "knowledge": {"use_shared": False}}
     path.write_text(json.dumps(document), encoding="utf-8")
     before = path.read_bytes()
@@ -117,7 +118,7 @@ def test_retired_arabic_config_falls_back_without_breaking_other_saves(root: Pat
             assert path.read_bytes() == before
             saved = await client.patch("/api/users/alice/config", json={"changes": {"knowledge": {"use_shared": True}}})
             assert saved.status_code == 200, saved.text
-            current = json.loads(path.read_text("utf-8"))
+            current = yaml.safe_load(path.read_text("utf-8"))
             assert current["knowledge"]["use_shared"] is True
             assert current["web_ui"]["language"] == "ar"
             assert load_config("alice", root)["web_ui"]["language"] == "zh-CN"
@@ -128,6 +129,6 @@ def test_retired_arabic_config_falls_back_without_breaking_other_saves(root: Pat
             changed = await client.patch("/api/users/alice/config", json={"changes": {"web_ui": {"language": "en"}}})
             assert changed.status_code == 200, changed.text
             assert load_config("alice", root)["web_ui"]["language"] == "en"
-            assert json.loads(path.read_text("utf-8"))["knowledge"]["use_shared"] is True
+            assert yaml.safe_load(path.read_text("utf-8"))["knowledge"]["use_shared"] is True
 
     asyncio.run(exercise())

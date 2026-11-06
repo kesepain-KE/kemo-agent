@@ -17,7 +17,7 @@ from tests.web.test_audit_api_contracts import backend as backend
     }),
     ("DELETE", "/api/users/alice/sessions", "delete_all_sessions", {
         "user": "alice", "source": "all", "deleted": True,
-        "deleted_sessions": -1, "deleted_windows": 0,
+        "deleted_sessions": -1, "raw_preserved": True,
     }),
     ("DELETE", "/api/users/alice/sessions/s", "delete_session", {
         "user": "alice", "source": "web", "session_id": "s", "deleted": "yes",
@@ -69,6 +69,8 @@ def test_critical_route_registration_requires_field_level_models(backend):
         ("DELETE", "/api/users/{user}/sessions/{session_id}"),
         ("GET", "/api/users/{user}/workspace/agents"),
         ("GET", "/api/users/{user}/workspace/agents/{task_id}"),
+        ("POST", "/api/users/{user}/workspace/agents/{task_id}/guide"),
+        ("POST", "/api/users/{user}/workspace/agents/{task_id}/cancel"),
         ("GET", "/api/users/{user}/workspace/jobs"),
         ("GET", "/api/users/{user}/workspace/jobs/{job_id}"),
     }
