@@ -714,7 +714,6 @@ def _inactive_output(update_time: str) -> None:
     _atomic_text(
         INPUT_PATH,
         "# Kemo 网关运行状态\n\n"
-        f"> 最近检查：{update_time}\n\n"
         "当前未激活。只有用户明确要求激活并配置网关地址与独立 `STATUS_TOKEN` 后才会采集。\n",
     )
     _update_manifest(active=False, healthy=True, update_time=update_time)

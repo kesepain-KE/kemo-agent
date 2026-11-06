@@ -17,7 +17,7 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_ROOT = ROOT / "global_expand" / "kemo_gateway_status"
+MODULE_ROOT = ROOT / "expand" / "global" / "kemo_gateway_status"
 sys.path.insert(0, str(MODULE_ROOT))
 import gateway_status as gateway  # noqa: E402
 
@@ -161,6 +161,18 @@ class GatewayStatusExpandTests(unittest.TestCase):
         self.assertFalse(manifest["open_input"])
         self.assertEqual(manifest["input_health"], "正常")
         self.assertFalse((self.module / "data" / "gateway_status.json").exists())
+
+    def test_inactive_check_time_does_not_change_collected_business_data(self) -> None:
+        from cron.system_execution import module_data_signature
+
+        gateway._inactive_output("2026-10-31 19:00:00")
+        first = module_data_signature(self.module, "expand.json")
+        original = (self.module / "input_data.md").read_bytes()
+        gateway._inactive_output("2026-10-31 19:00:30")
+        self.assertEqual((self.module / "input_data.md").read_bytes(), original)
+        self.assertEqual(module_data_signature(self.module, "expand.json"), first)
+        manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
+        self.assertEqual(manifest["recent_update"], "2026-10-31 19:00:30")
 
     def test_activation_persists_only_token_config_and_secret_free_outputs(self) -> None:
         safe = gateway.sanitize_snapshot(status_payload())
