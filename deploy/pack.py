@@ -17,8 +17,8 @@ from core.policy import preserved_seed, protected
 from core.source import parse_archive
 
 ROOT = Path(__file__).resolve().parent.parent
-DIRECTORIES = {'run', 'provider', 'plugins', 'agents', 'config', 'cron', 'message', 'global_knowledge', 'global_expand', 'global_sense', 'shared_expand', 'shared_skills', 'template', 'tests', 'update', 'web', 'deploy'}
-ROOT_FILES = {'version.json', 'cli.py', 'events.py', 'setup.py', 'update.py', 'requirements.txt', 'requirements-dev.txt', 'agents.md', '.env.example', 'LICENSE', 'kemo-agent.ico', 'kemo-agent.jpg', 'kemo-web-UI.png', 'readme.md', 'README.md', 'README_EN.md', 'restart.py', 'start_web.py', 'user_create.py'}
+DIRECTORIES = {'run', 'provider', 'plugins', 'agents', 'config', 'cron', 'message', 'knowledge', 'expand', 'sense', 'skills', 'template', 'tests', 'update', 'web', 'deploy'}
+ROOT_FILES = {'version.json', 'cli.py', 'events.py', 'setup.py', 'update.py', 'requirements.txt', 'requirements-dev.txt', 'agents.md', 'kemo.yaml.example', 'LICENSE', 'kemo-agent.ico', 'kemo-agent.jpg', 'kemo-web-UI.png', 'readme.md', 'README.md', 'README_EN.md', 'restart.py', 'start_web.py', 'user_create.py'}
 
 
 def publishable(name: str) -> bool:
@@ -44,7 +44,7 @@ def publishable(name: str) -> bool:
 
 def clean_definition(name: str, data: bytes) -> bytes:
     # Tracked module manifests may contain local observations; do not ship these.
-    if name.startswith(('global_expand/', 'global_sense/')) and name.endswith(('/expand.json', '/sense.json')):
+    if name.startswith(('expand/global/', 'expand/share/', 'sense/')) and name.endswith(('/expand.json', '/sense.json')):
         doc = json.loads(data)
         for key in ('recent_update', 'input_health'):
             doc.pop(key, None)
@@ -116,6 +116,17 @@ def main(argv=None):
         missing = [name for name in ('deploy/deploy.py', 'deploy/core/cli.py') if name not in files]
         if missing:
             raise DeployError('Deployment files are not tracked yet. Commit first, or use --include-untracked for a local test')
+        from vendor_simple import ASSETS
+
+        native = 'run/infra/sqlite_simple/'
+        suffixes = {'windows': 'dll', 'linux': 'so', 'darwin': 'dylib'}
+        required_native = {native + target + '/libsimple.' + suffixes[target.split('-')[0]] for target in ASSETS}
+        required_native.update(native + 'dict/' + name + '.utf8'
+                               for name in ('jieba.dict', 'hmm_model', 'user.dict', 'idf', 'stop_words'))
+        required_native.update(native + name for name in ('LICENSE.simple', 'LICENSE.cppjieba', 'README.md'))
+        if missing := sorted(required_native - files.keys()):
+            raise DeployError('Missing simple dependency files in release: ' + ', '.join(missing)
+                              + '. Run python deploy/vendor_simple.py --all and include the files in Git.')
         out = args.out.resolve() / release_version
         no_links(out)
         if out.exists():

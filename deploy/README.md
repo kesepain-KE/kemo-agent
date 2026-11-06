@@ -2,10 +2,10 @@
 
 此目录包含部署器、测试、打包工具和四种渠道入口。**不导入主框架，不改动主框架文件；只有部署器本身零第三方依赖，应用运行依赖仍须安装。**
 
-> 当前主框架稳定版本 **1.5.2（2026-10-26 正式定档）**，配套网关为 **1.0.0**，知识图谱基线为 **1.6.0**。本页远程命令仅在
+> 当前主框架稳定版本 **2.0.0（2026-11-05 正式定档）**，配套网关为 **1.0.0**，知识图谱基线为 **1.6.0**。本页远程命令仅在
 > 安装脚本及对应 Release/npm/GHCR 产物发布后可用；Git push 不会自动发布这些资产。
 > 中英文快速开始分别见 `../readme.md`、`../README_EN.md`，日常命令与渠道选择见
-> `../global_knowledge/deployment-and-release.md`。已有 1.3.2 或 1.5.1 本地验收包不能改名充当 1.5.2，须重新构建打包。
+> `../knowledge/global/deployment-and-release.md`。1.3.2、1.5.1、1.5.2 或 1.5.3 本地验收包不能改名充当 2.0.0，须重新构建打包。
 
 ## 1. 发布合同：一个版本、一份应用包
 
@@ -59,6 +59,21 @@ python -B deploy/pack.py
 纳入 Git，可以显式传入 `--include-untracked` 做本地验收；正式发布应从经过
 审核、已提交的工作树打包。打包器读取工作树内容，**不保证它与 HEAD 一致**。
 
+### simple 原生全文检索依赖
+
+`run/infra/sqlite_simple/` 随源码和 Release 携带 simple v0.7.1 动态库、分词词典及许可证，
+运行时不联网下载。首次准备依赖或需要复现该目录时运行 `python -B deploy/vendor_simple.py --all`，
+脚本校验上游 ZIP 的固定 SHA-256；目录须整体纳入 Git。打包缺少任一平台库或词典时会明确失败。
+不需要改 requirements.txt，也不安装搜索服务或构建工具。
+
+Python SQLite 须支持 FTS5 和扩展加载。Windows 需对应架构的 Microsoft Visual C++ 2015–2022
+运行库；Linux 需 glibc 与 libstdc++6（非 Alpine/musl），x64 至少 GLIBC 2.32 / GLIBCXX 3.4.29，
+ARM64 至少 GLIBC 2.38 / GLIBCXX 3.4.32；随包 Dockerfile 安装 libstdc++6。
+macOS 需允许 SQLite 扩展加载的 Python 构建。目标平台尚须各自验收，不能把本机测试当成跨平台通过。
+Windows 词典路径按本地代码页及可用短路径传递；若路径无法表示且文件系统无可用短名称，会在进入原生分词器前明确报错，避免上游库直接终止进程。
+缺依赖明确报错，不静默改用其他分词器。升级后由正常存储初始化入口备份并迁移历史 schema v5、
+记忆 schema v4，一次性回填旧数据的全文索引；只读归档入口不自行升级库。
+
 默认输出均在本目录内：
 
 ```text
@@ -72,7 +87,7 @@ deploy/artifacts/<version>/
 若输出目录已存在，工具拒绝覆盖；使用 `--out <新的输出父目录>`。
 不会自动上传 Release、发布 npm、推送镜像或执行 Git 提交。
 
-打包清单按交付目录限制范围，并排除运行数据库、真实 `.env`、用户目录、APP
+打包清单按交付目录限制范围，并排除运行数据库、真实 `kemo.yaml`、用户目录、APP
 凭据/绑定、模块运行数据、缓存和本部署器测试产物。模板中的默认面板值仍会打包。
 模块清单中的本地健康/最近更新时间会移除，内置拓展默认不激活。
 **发布者仍须审核归档和配置，不应把过滤器当作完备的秘密扫描器。**
@@ -97,8 +112,8 @@ npm 命名空间、GHCR 权限、镜像标签和 Release 资产由发布者管�
 需要 Python 3.10+；Linux 发行版还须提供可用的 `venv`/`ensurepip`。
 
 ```powershell
-python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-1.5.2.zip" --install-root "D:\apps\kemo-agent" --yes
-python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-1.5.2.zip" --install-root "D:\apps\kemo-agent" --dry-run
+python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-2.0.0.zip" --install-root "D:\apps\kemo-agent" --yes
+python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-2.0.0.zip" --install-root "D:\apps\kemo-agent" --dry-run
 ```
 
 Windows 默认安装根为 `%USERPROFILE%\.kemo-agent`；Linux 和 npm 为
@@ -111,7 +126,7 @@ Windows 默认安装根为 `%USERPROFILE%\.kemo-agent`；Linux 和 npm 为
 python "D:\apps\kemo-agent\deploy\deploy.py" start windows --install-root "D:\apps\kemo-agent"
 ```
 
-首次 `start` 通过子进程调用现有 `setup.py --skip-deps --skip-web`，初始化 `.env`
+首次 `start` 通过子进程调用现有 `setup.py --skip-deps --skip-web`，初始化 `kemo.yaml`
 和用户；之后调用原有 `start_web.py`。加 `--yes` 使用原向导的默认用户设置，
 未加时走交互。`init` 可以仅完成初始化，不启动服务。
 使用安装树自身的部署入口时，会自动识别该树的安装根与渠道；自定义安装路径无需
@@ -228,16 +243,16 @@ Compose 默认只映射本机 `127.0.0.1:1357`；容器内固定监听 `0.0.0.0:
 
 用户指定的 preserve 只能**添加**保护，不能关闭内建保护。
 
-内建保护覆盖：用户目录、运行数据、`.env`、消息队列、图谱存储、APP 绑定与凭据、
+内建保护覆盖：用户目录、运行数据、`kemo.yaml`、模块私有 `.env`、消息队列、图谱存储、APP 绑定与凭据、
 模块配置/状态/面板值、数据库、锁、PID、日志、虚拟环境和部署器事务区。
 源码、面板定义、模板和预构建前端可更新；用户自行创建的模块默认不被同名文件接管。
 删除仅限上次安装清单中的旧官方文件，且删除前哈希必须与上次安装一致；本地修改
 过的旧文件保留并报告。不会清理安装树内未知文件。
 
-`config/global_config.json`、模块定义及系统定时任务 JSON 采用保守默认值合并：
+`config/global_config.yaml`、模块定义及系统定时任务 JSON 采用保守默认值合并：
 保留已有值、添加新键、拒绝 schema/type 冲突。部署配置也是按键路径合并，而不是
 比较键数量。列表、false、0、空字符串和 null 不会被错误当作“未配置”。
-内容未变时不重写；发生合并时写成合法 JSON（YAML 子集），原文件含注释的版本在
+内容未变时不重写；发生合并时写成合法 YAML，原文件含注释的版本在
 备份中。复杂配置迁移须人工处理，不声称与主框架更新器所有业务迁移完全等价。
 
 本版不提供 `--reset-config`、任意路径映射或目录迁移。固定映射为
@@ -275,12 +290,12 @@ requirements 存在版本范围，因此这不是依赖可复现锁定方案。
 
 ## 7. 验证
 
-1.5.2 源码定档的当前版本、四个组件、CLI、前端 package/lock 和文档需同时通过版本门禁。
+2.0.0 定档的当前版本、四个组件、CLI、前端 package/lock 和文档需同时通过版本门禁。
 `deploy/npm/package.json` 仍为无独立版本的 private 模板；实际 npm、Release 和 Docker 构建上下文
 由 `pack.py` 从根版本生成，不手工改模板号、不重命名旧包。
 
 ```sh
-python .github/scripts/check_versions.py --tag v1.5.2
+python .github/scripts/check_versions.py --tag v2.0.0
 python -m pytest tests/deploy -q
 # 兼容仅在 deploy 子系统中运行的旧入口：
 python -B -m unittest discover -s deploy/tests -v
@@ -294,7 +309,7 @@ dry-run、锁冲突、异常回滚、子进程强制退出后恢复、成功备�
 完整本机定档验收：
 
 ```powershell
-python "开发临时目录/release_check.py" --timeout 3600 --report "tmp/release-check-1.5.2.json"
+python "开发临时目录/release_check.py" --timeout 3600 --report "tmp/release-check-2.0.0.json"
 ```
 
 构建后分发验收除原有安装链路外，还检查通用子代理、

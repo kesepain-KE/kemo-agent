@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import yaml
 import json
 import os
 import shutil
@@ -26,9 +27,9 @@ sys.path.insert(0, str(DEPLOY))
 from core import cli, config, runtime, sync
 from core.common import DeployError, digest, json_bytes, target, version_key
 from core.locking import Lock
-from core.policy import protected
+from core.policy import local_module, protected
 from core.source import Bundle, obtain, parse_archive, release
-from core.yamllite import loads
+from core.yamllite import dumps, loads
 from pack import publishable, write_bundle
 
 
@@ -40,7 +41,7 @@ def fixture(ver='1.3.0', extra=None):
         'deploy/core/cli.py': b'# cli fixture\n', 'deploy/core/common.py': b'# common fixture\n',
         'deploy/deploy.yaml': (DEPLOY / 'deploy.yaml').read_bytes(),
         'web/frontend/dist/index.html': b'<html></html>',
-        'config/global_config.json': json_bytes({'schema_version': 1, 'local_value': False}),
+        'config/global_config.yaml': json_bytes({'schema_version': 1, 'local_value': False}),
         'run/example.py': b'VALUE = 1\n',
     }
     files.update(extra or {})
@@ -96,6 +97,23 @@ class DeploymentTests(unittest.TestCase):
 
     def test_yaml_quotes_comments_and_booleans(self):
         self.assertEqual(loads('a: "value # literal" # comment\nb:\n  - false\n  - 0\n'), {'a': 'value # literal', 'b': [False, 0]})
+
+    def test_repository_global_yaml_matches_deployer_parser_and_round_trips(self):
+        path = ROOT / "config" / "global_config.yaml"
+        original = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertEqual(loads(path.read_text(encoding="utf-8")), original)
+        merged = {
+            **original,
+            "yaml_roundtrip_probe": {
+                "enabled": False,
+                "count": 0,
+                "empty": "",
+                "missing": None,
+                "ratio": 1.25,
+                "items": [1, "two", False],
+            },
+        }
+        self.assertEqual(loads(dumps(merged)), merged)
 
     def test_yaml_rejects_unsupported_and_duplicate_keys(self):
         for text in ('a: 1\na: 2', 'a:\n   b: 2', 'a: &ref', 'a: |', 'a:\n\tb: 1', '{"a":1,"a":2}'):
@@ -172,7 +190,7 @@ class DeploymentTests(unittest.TestCase):
 
     def test_private_data_cannot_be_shipped(self):
         with self.assertRaises(DeployError):
-            self.archive(extra={'.env': b'SECRET=not-real'})
+            self.archive(extra={'kemo.yaml': b'SECRET=not-real'})
 
     def test_local_checksum_mismatch_rejected(self):
         with self.assertRaises(DeployError):
@@ -218,14 +236,14 @@ class DeploymentTests(unittest.TestCase):
 
     def test_private_data_and_config_survive_upgrade(self):
         old = self.install()
-        secrets = {'.env': b'LOCAL=1', 'users/u/memory.json': b'local memory', 'global_expand/kemo_app/credential_registry.json': b'local registry', 'global_expand/kemo_graph/module/panel.values.json': b'local panel', 'message/out/q.json': b'queue'}
+        secrets = {'kemo.yaml': b'LOCAL=1', 'users/u/memory.json': b'local memory', 'expand/global/kemo_app/credential_registry.json': b'local registry', 'expand/global/kemo_graph/module/panel.values.json': b'local panel', 'message/out/q.json': b'queue'}
         for name, data in secrets.items():
             p = target(self.root, name)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(data)
-        changed = self.bundle('1.3.1', {'config/global_config.json': json_bytes({'schema_version': 1, 'local_value': True, 'new': 4})})
+        changed = self.bundle('1.3.1', {'config/global_config.yaml': json_bytes({'schema_version': 1, 'local_value': True, 'new': 4})})
         self.install(changed)
-        self.assertEqual(json.loads((self.root / 'config/global_config.json').read_bytes()), {'schema_version': 1, 'local_value': False, 'new': 4})
+        self.assertEqual(yaml.safe_load((self.root / 'config/global_config.yaml').read_bytes()), {'schema_version': 1, 'local_value': False, 'new': 4})
         for name, data in secrets.items():
             self.assertEqual((self.root / name).read_bytes(), data)
 
@@ -239,20 +257,20 @@ class DeploymentTests(unittest.TestCase):
                     'cron': {'session_idle_close_seconds': 86400},
                 }
                 self.install(self.bundle('1.3.1', {
-                    'config/global_config.json': json_bytes(old_config),
+                    'config/global_config.yaml': json_bytes(old_config),
                 }))
-                local_config = json.loads((self.root / 'config/global_config.json').read_bytes())
+                local_config = yaml.safe_load((self.root / 'config/global_config.yaml').read_bytes())
                 local_config['cron']['session_idle_close_seconds'] = local_value
-                (self.root / 'config/global_config.json').write_bytes(json_bytes(local_config))
+                (self.root / 'config/global_config.yaml').write_bytes(json_bytes(local_config))
 
                 new_config = {
                     'schema_version': 1,
                     'cron': {'session_idle_close_seconds': 5400},
                 }
                 self.install(self.bundle('1.3.2', {
-                    'config/global_config.json': json_bytes(new_config),
+                    'config/global_config.yaml': json_bytes(new_config),
                 }))
-                stored = json.loads((self.root / 'config/global_config.json').read_bytes())
+                stored = yaml.safe_load((self.root / 'config/global_config.yaml').read_bytes())
 
                 self.assertEqual(stored['cron']['session_idle_close_seconds'], expected)
 
@@ -294,12 +312,12 @@ class DeploymentTests(unittest.TestCase):
         old = self.install()
         old['install_kind'] = 'docker'
         (self.root / '.kemo-install.json').write_bytes(json_bytes(old))
-        (self.root / '.env').write_bytes(b'LOCAL=preserved')
+        (self.root / 'kemo.yaml').write_bytes(b'LOCAL=preserved')
         archive = self.archive('1.3.1', {'run/example.py': b'VALUE = 2\n'})
         with mock.patch.dict(os.environ, {'KEMO_DEPLOY_CONTAINER': '1'}), mock.patch('core.runtime.prepare', return_value=sys.executable):
             self.assertEqual(self.invoke('install', 'docker', '--install-root', str(self.root), '--source', str(archive), '--runtime-python', sys.executable, '--yes'), 0)
         self.assertEqual(read_version(self.root), '1.3.1')
-        self.assertEqual((self.root / '.env').read_bytes(), b'LOCAL=preserved')
+        self.assertEqual((self.root / 'kemo.yaml').read_bytes(), b'LOCAL=preserved')
 
     def test_failure_restores_existing_and_removes_new_files(self):
         old = self.install()
@@ -401,7 +419,7 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
 
     def test_config_schema_change_stops_before_writes(self):
         old = self.install()
-        changed = self.bundle('1.3.1', {'config/global_config.json': json_bytes({'schema_version': 2})})
+        changed = self.bundle('1.3.1', {'config/global_config.yaml': json_bytes({'schema_version': 2})})
         with self.assertRaisesRegex(DeployError, 'schema changed'):
             sync.plan(self.root, changed, self.doc, old)
         self.assertEqual(read_version(self.root), '1.3.0')
@@ -414,10 +432,17 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
         self.assertEqual(sync.installed(self.root)['version'], '1.3.0')
 
     def test_pack_excludes_runtime_and_includes_templates(self):
-        for name in ('.env', 'users/a/data.txt', 'global_expand/kemo_app/users.json', 'deploy/artifacts/release.zip', 'web/frontend/node_modules/a.js'):
+        for name in ('kemo.yaml', 'users/a/data.txt', 'expand/global/kemo_app/users.json', 'deploy/artifacts/release.zip', 'web/frontend/node_modules/a.js'):
             self.assertFalse(publishable(name), name)
         self.assertTrue(publishable('template/expand/module/panel.values.json'))
         self.assertTrue(publishable('web/frontend/dist/index.html'))
+        self.assertTrue(publishable('provider/assets/deepseek_v4_tokenizer.zip'))
+
+    def test_shared_skills_use_the_new_runtime_root(self):
+        self.assertTrue(local_module('skills/example'))
+        self.assertTrue(protected('skills/example/config.json'))
+        self.assertTrue(protected('skills/example/data/state.json'))
+        self.assertFalse(protected('skills/example/SKILL.md'))
 
     def test_all_check_is_read_only_and_reports_shared_roots(self):
         doc = json.loads(json_bytes(self.doc))
@@ -437,43 +462,43 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
         self.assertIn('installed=1.3.0', out.getvalue())
 
     def test_default_classification_tables_are_publishable_but_other_runtime_data_is_not(self):
-        self.assertTrue(publishable('global_knowledge/classify.sqlite3'))
-        self.assertTrue(publishable('shared_knowledge/classify.sqlite3'))
+        self.assertTrue(publishable('knowledge/global/classify.sqlite3'))
+        self.assertTrue(publishable('knowledge/share/classify.sqlite3'))
         for name in ('users/alice/improve/memory.sqlite3',
                      'runtime/logs.sqlite3',
-                     'shared_knowledge/other.sqlite3',
-                     'global_knowledge/classify.sql'):
+                     'knowledge/share/other.sqlite3',
+                     'knowledge/global/classify.sql'):
             self.assertFalse(publishable(name), name)
 
     def test_release_archive_accepts_default_classification_tables(self):
-        extra = {'global_knowledge/classify.sqlite3': b'SQLite format 3\x00seed',
-                 'shared_knowledge/classify.sqlite3': b'SQLite format 3\x00seed'}
+        extra = {'knowledge/global/classify.sqlite3': b'SQLite format 3\x00seed',
+                 'knowledge/share/classify.sqlite3': b'SQLite format 3\x00seed'}
         bundle = parse_archive(self.archive(extra=extra).read_bytes(), '1.3.0')
-        self.assertIn('global_knowledge/classify.sqlite3', bundle.files)
-        self.assertIn('shared_knowledge/classify.sqlite3', bundle.files)
+        self.assertIn('knowledge/global/classify.sqlite3', bundle.files)
+        self.assertIn('knowledge/share/classify.sqlite3', bundle.files)
 
     def test_default_classification_tables_are_seeded_once_and_never_overwritten(self):
-        seed = {'global_knowledge/classify.sqlite3': b'SQLite format 3\x00seed',
-                'shared_knowledge/classify.sqlite3': b'SQLite format 3\x00seed'}
+        seed = {'knowledge/global/classify.sqlite3': b'SQLite format 3\x00seed',
+                'knowledge/share/classify.sqlite3': b'SQLite format 3\x00seed'}
         self.install(self.bundle(extra=seed))
-        global_table = self.root / 'global_knowledge/classify.sqlite3'
-        self.assertEqual(global_table.read_bytes(), seed['global_knowledge/classify.sqlite3'])
+        global_table = self.root / 'knowledge/global/classify.sqlite3'
+        self.assertEqual(global_table.read_bytes(), seed['knowledge/global/classify.sqlite3'])
 
         # 本机维护的分类数据必须原样保留，也不能被登记成托管文件。
         global_table.write_bytes(b'SQLite format 3\x00local')
         old = sync.installed(self.root)
         changes, files = sync.plan(self.root, self.bundle('1.3.1', extra=seed), self.doc, old)
         self.assertEqual([c for c in changes if 'classify.sqlite3' in c.name], [])
-        self.assertNotIn('global_knowledge/classify.sqlite3', files)
+        self.assertNotIn('knowledge/global/classify.sqlite3', files)
         self.assertEqual(global_table.read_bytes(), b'SQLite format 3\x00local')
 
     def test_obsolete_classification_table_is_not_deleted_on_update(self):
-        seed = {'global_knowledge/classify.sqlite3': b'SQLite format 3\x00seed'}
+        seed = {'knowledge/global/classify.sqlite3': b'SQLite format 3\x00seed'}
         self.install(self.bundle(extra=seed))
         old = sync.installed(self.root)
         changes, _ = sync.plan(self.root, self.bundle('1.3.1'), self.doc, old)
         self.assertEqual([c for c in changes if 'classify.sqlite3' in c.name], [])
-        self.assertTrue((self.root / 'global_knowledge/classify.sqlite3').is_file())
+        self.assertTrue((self.root / 'knowledge/global/classify.sqlite3').is_file())
 
 
 def read_version(root):

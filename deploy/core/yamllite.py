@@ -1,7 +1,7 @@
 """Strict mapping/list YAML subset. No implicit dates, tags, anchors or objects.
 
-JSON (a YAML subset) is used when writing merged configuration. Comments are
-preserved when unchanged; a changed original is retained in the transaction.
+Comments are preserved when unchanged; a changed original is retained in the
+transaction. Merged configuration is written as a block YAML mapping.
 """
 from __future__ import annotations
 
@@ -69,11 +69,20 @@ def loads(text: str) -> dict:
             return {'true': True, 'false': False, 'null': None}[value]
         if re.fullmatch(r'-?(0|[1-9]\d*)', value):
             return int(value)
+        if re.fullmatch(r'-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?', value):
+            return float(value)
+        if value in ('[]', '{}'):
+            return json.loads(value)
+        if value.startswith(('[', '{')):
+            try:
+                return json.loads(value)
+            except ValueError as exc:
+                raise DeployError(f"YAML line {number}: invalid flow collection") from exc
         if not value or value[0] in '&*!|>{[' or ': ' in value:
             raise DeployError(f"YAML line {number}: unsupported scalar {value!r}")
         return value
 
-    def block(index, indent):
+    def block(index, indent, *, indentless=False):
         is_list = lines[index][1].startswith('- ')
         result = [] if is_list else {}
         while index < len(lines) and lines[index][0] >= indent:
@@ -83,6 +92,8 @@ def loads(text: str) -> dict:
             if is_list:
                 assert isinstance(result, list)
                 if not value.startswith('- '):
+                    if indentless:
+                        break
                     raise DeployError(f"YAML line {number}: mixed mapping/list")
                 result.append(scalar(value[2:].strip(), number))
                 index += 1
@@ -99,6 +110,8 @@ def loads(text: str) -> dict:
                 result[key] = scalar(match[2], number)
             elif index < len(lines) and lines[index][0] == indent + 2:
                 result[key], index = block(index, indent + 2)
+            elif index < len(lines) and lines[index][0] == indent and lines[index][1].startswith('- '):
+                result[key], index = block(index, indent, indentless=True)
             else:
                 raise DeployError(f"YAML line {number}: missing nested value")
         return result, index
@@ -109,4 +122,19 @@ def loads(text: str) -> dict:
     if not isinstance(result, dict):
         raise DeployError('Configuration must be a mapping')
     return result
+
+
+def dumps(value: dict) -> str:
+    """Write the deploy mapping subset without a third-party dependency."""
+    def mapping(current, indent):
+        lines = []
+        for key, item in current.items():
+            prefix = ' ' * indent + json.dumps(str(key), ensure_ascii=False) + ':'
+            if isinstance(item, dict) and item:
+                lines.append(prefix)
+                lines.extend(mapping(item, indent + 2))
+            else:
+                lines.append(prefix + ' ' + json.dumps(item, ensure_ascii=False, allow_nan=False))
+        return lines
+    return '\n'.join(mapping(value, 0)) + '\n'
 

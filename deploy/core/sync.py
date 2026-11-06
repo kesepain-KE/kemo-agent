@@ -14,7 +14,7 @@ from .common import DeployError, atomic, digest, json_bytes, read_json, target, 
 from .config import merge_defaults
 from .policy import local_module, merge_file, preserved_seed, protected
 from .source import Bundle
-from .yamllite import loads
+from .yamllite import dumps, loads
 
 
 @dataclass
@@ -98,7 +98,11 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
                 data = before if merged == local else json_bytes(merged)
             elif merge_file(name):
                 try:
-                    defaults, local = json.loads(data), json.loads(before)
+                    yaml_config = name == 'config/global_config.yaml'
+                    defaults, local = (
+                        (loads(data.decode('utf-8-sig')), loads(before.decode('utf-8-sig')))
+                        if yaml_config else (json.loads(data), json.loads(before))
+                    )
                     if not isinstance(defaults, dict) or not isinstance(local, dict):
                         raise DeployError(f'Expected object in {name}')
                     if defaults.get('schema_version') != local.get('schema_version'):
@@ -106,7 +110,7 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
                     merged = merge_defaults(defaults, local)
                     if not isinstance(merged, dict):
                         raise DeployError("Merged configuration must be a mapping")
-                    if name == 'config/global_config.json':
+                    if name == 'config/global_config.yaml':
                         merged = _migrate_global_config_defaults(
                             merged,
                             defaults,
@@ -114,9 +118,11 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
                             installed_version=str(old.get('version') or ''),
                             bundle_version=bundle.version,
                         )
-                    data = before if merged == local else json_bytes(merged)
+                    data = before if merged == local else (
+                        dumps(merged).encode('utf-8') if yaml_config else json_bytes(merged)
+                    )
                 except ValueError as exc:
-                    raise DeployError(f'Cannot merge invalid JSON: {name}') from exc
+                    raise DeployError(f'Cannot merge invalid configuration: {name}') from exc
             elif name not in previous and local_module(name):
                 print(f'KEEP locally owned module file: {name}')
                 continue

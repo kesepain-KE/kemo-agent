@@ -19,7 +19,7 @@ BOOTSTRAP_DEFAULTS = {
         'npm': {'install_root': '~/.kemo-agent'},
         'docker': {'install_root': '/data'},
     },
-    'mapping': {'tree/': '{install_root}/', 'preserve': ['users/', 'runtime/', 'tmp/', '.env'], 'interactive': ['deploy/deploy.yaml']},
+    'mapping': {'tree/': '{install_root}/', 'preserve': ['users/', 'runtime/', 'tmp/', 'kemo.yaml'], 'interactive': ['deploy/deploy.yaml']},
 }
 
 

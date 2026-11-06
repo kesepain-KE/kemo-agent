@@ -21,6 +21,6 @@ mapping:
     - "users/"
     - "runtime/"
     - "tmp/"
-    - ".env"
+    - "kemo.yaml"
   interactive:
     - "deploy/deploy.yaml"
