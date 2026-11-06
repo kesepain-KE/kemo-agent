@@ -89,6 +89,9 @@ export interface AgentTask {
   children_total?: number
   phase?: string
   active_tool?: string
+  guidance_pending?: number
+  guidance_delivered?: number
+  controls?: { guide: boolean; cancel: boolean }
   artifacts?: { scope: 'file_upload' | 'download'; relative_path: string; name: string; size: number }[]
 }
 export function getAgentTasks(user: string, sessionId: string, page: number) {
@@ -98,4 +101,18 @@ export function getAgentTasks(user: string, sessionId: string, page: number) {
 export function getAgentTask(user: string, id: string, source: string, sessionId: string) {
   const query = new URLSearchParams({ source, session_id: sessionId })
   return requestJson<{ task: AgentTask }>(`/api/users/${encodeURIComponent(user)}/workspace/agents/${encodeURIComponent(id)}?${query}`)
+}
+export function guideAgentTask(user: string, id: string, source: string, sessionId: string, guidance: string) {
+  const query = new URLSearchParams({ source, session_id: sessionId })
+  return requestJson<{ ok: boolean; task_id: string; status: string; pending: number }>(
+    `/api/users/${encodeURIComponent(user)}/workspace/agents/${encodeURIComponent(id)}/guide?${query}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ guidance }) },
+  )
+}
+export function cancelAgentTask(user: string, id: string, source: string, sessionId: string) {
+  const query = new URLSearchParams({ source, session_id: sessionId })
+  return requestJson<{ ok: boolean; task_id: string; status: string; cancel_requested: boolean; process_terminated: boolean }>(
+    `/api/users/${encodeURIComponent(user)}/workspace/agents/${encodeURIComponent(id)}/cancel?${query}`,
+    { method: 'POST' },
+  )
 }

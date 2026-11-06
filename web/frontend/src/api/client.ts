@@ -26,7 +26,6 @@ import type {
   KnowledgeResponse,
   KemoModelCapabilitiesResponse,
   KemoProviderModelsResponse,
-  LongTaskResponse,
   MemoryItemResponse,
   MemorySummaryResponse,
   MessageCheckResponse,
@@ -51,7 +50,7 @@ import type {
   SessionCloseResponse,
   SessionReopenResponse,
   SessionMemoryExtractionResponse,
-  SessionUndoLastRoundResponse,
+  SessionWithdrawIntegrationResponse,
   SessionRenameResponse,
   SessionSummary,
   SessionsResponse,
@@ -205,44 +204,6 @@ export async function getHistory(user: string,
   )
 }
 
-export async function getSessionLongTask(user: string,
-  sessionId: string,
-  source = 'web', signal?: AbortSignal
-): Promise<LongTaskResponse> {
-  const query = new URLSearchParams({ source })
-  return requestJson(`/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task?${query.toString()}`, { signal }
-  )
-}
-
-export async function setSessionLongTask(
-  user: string,
-  sessionId: string,
-  enabled: boolean,
-  source = 'web',
-): Promise<LongTaskResponse> {
-  const query = new URLSearchParams({ source })
-  return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task?${query.toString()}`,
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    },
-  )
-}
-
-export async function cancelSessionLongTask(
-  user: string,
-  sessionId: string,
-  source = 'web',
-): Promise<LongTaskResponse> {
-  const query = new URLSearchParams({ source })
-  return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/long-task/cancel?${query.toString()}`,
-    { method: 'POST' },
-  )
-}
-
 export async function deleteSession(
   user: string,
   sessionId: string,
@@ -265,18 +226,18 @@ export async function compressSession(
   )
 }
 
-export async function undoLastRound(
+export async function withdrawIntegration(
   user: string,
   sessionId: string,
-  expectedRound: number,
+  expectedIntegrationCount: number,
   prompt: string,
-): Promise<SessionUndoLastRoundResponse> {
+): Promise<SessionWithdrawIntegrationResponse> {
   return requestJson(
-    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/undo-last-round`,
+    `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/withdraw-integration`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expected_round: expectedRound, prompt }),
+      body: JSON.stringify({ expected_integration_count: expectedIntegrationCount, prompt }),
     },
   )
 }

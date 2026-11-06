@@ -29,8 +29,12 @@ export interface RuntimeStatusResponse {
     used_tokens: number
     max_tokens: number
     percent: number
-    rounds: number
-    round_limit: number
+    engine: 'cardstream'
+    cards_active: number
+    last_seq: number
+    integration_count: number
+    active_integrations: number
+    view_epoch: number
     compression_threshold: number
     source: string
   }
@@ -109,6 +113,7 @@ export interface RuntimeStatusResponse {
   }
   system_cron: {
     tracking: 'execution_log' | 'task_state' | string
+    pending_confirmation_count?: number
     tasks: CronTaskSummary[]
     executions: Array<{
       id: string

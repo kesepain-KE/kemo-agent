@@ -65,7 +65,6 @@ export const runEventSchema = z
       'media_input_update',
       'guidance_applied',
       'context_compression',
-      'long_task_update',
       'subagent_progress',
       'background_job_progress',
       'usage',
@@ -83,6 +82,12 @@ export const runEventSchema = z
     metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough()
+
+export function isUnknownRunEvent(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const type = (value as { type?: unknown }).type
+  return typeof type === 'string' && !runEventSchema.shape.type.safeParse(type).success
+}
 
 export function isProvisionalRunError(event: RunEvent) {
   return event.type === 'error'

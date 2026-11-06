@@ -43,7 +43,7 @@ export async function restoreWebSession(user: string, clientId: string): Promise
         user, client_id: clientId, active_key: '', created: false,
         session: {
           session_id: remembered, source: 'web', state: 'open',
-          window: '', title: '', rounds: 0, updated_at: '',
+          window: '', title: '', integration_count: 0, updated_at: '',
         },
       }
     } catch (error) {

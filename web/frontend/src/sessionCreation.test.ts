@@ -7,7 +7,7 @@ const result: ActiveSessionResponse = {
   user: 'alice', active_key: 'interactive:alice:web_fixture', created: true,
   client_id: 'web_fixture', active_clients: 1,
   session: { session_id: 'new', source: 'web', state: 'open', window: '',
-    title: '', rounds: 0, updated_at: '2026-10-15T10:00:00Z' },
+    title: '', integration_count: 0, updated_at: '2026-10-15T10:00:00Z' },
 }
 
 describe('新会话确认结果复用', () => {

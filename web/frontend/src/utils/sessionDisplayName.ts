@@ -1,12 +1,23 @@
+import { t as tr } from '../i18n'
 import type { SessionSummary } from '../types/api'
 
 /** Shared by the real history drawer and read-only archive dialog. */
-export function sessionDisplayName(session: Pick<SessionSummary, 'title' | 'source' | 'session_id'>) {
-  const title = session.title?.trim()
+export function sessionDisplayName(
+  session: Pick<SessionSummary, 'title' | 'source' | 'session_id'>
+    & Partial<Pick<SessionSummary, 'title_source' | 'summary_status'>>,
+) {
+  const source = session.source || ''
+  const trustedTitle = session.title_source === 'manual'
+    || session.title_source === 'summary'
+    || session.summary_status === 'completed'
+    || source.startsWith('background:cron:')
+  const title = trustedTitle ? session.title?.trim() : ''
   if (title) return title
-  if (session.source?.startsWith('background:cron:')) {
-    return `定时任务 · ${session.source.slice('background:cron:'.length)}`
+  if (source.startsWith('background:cron:')) {
+    return `定时任务 · ${source.slice('background:cron:'.length)}`
   }
-  const id = session.session_id
-  return id.startsWith('web_') && id.length > 16 ? `Web 会话 · ${id.slice(4, 12)}` : id
+  if (source === 'web' || source === 'app' || source === 'cli') {
+    return tr('未命名对话')
+  }
+  return tr('历史对话')
 }

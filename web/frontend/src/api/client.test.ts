@@ -4,6 +4,7 @@ import { server } from '../test/server'
 import {
   AVATAR_UPDATED_EVENT,
   commandPlan,
+  cancelRun,
   deleteAllSessions,
   editPlan,
   getExpandModulePanel,
@@ -29,6 +30,22 @@ import {
 } from './client'
 
 describe('ordered document presence', () => {
+  it('marks run cancellation as cascading only on explicit request', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+      return new Response(JSON.stringify({ user: 'alice', source: 'web', session_id: 's1', status: 'stopping' }),
+        { headers: { 'Content-Type': 'application/json' } })
+    }))
+    try {
+      await cancelRun('alice', 'run_cancellation', 's1', 'web', true)
+      expect(calls[0].url).toBe('/api/runs/run_cancellation/cancel')
+      expect(JSON.parse(String(calls[0].init?.body))).toMatchObject({ cancel_subagents: true })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('sequences heartbeat, keepalive release and BFCache resume at invocation time', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -76,7 +93,7 @@ describe('history marks client', () => {
       return HttpResponse.json({ session: {} })
     }))
     await patchSessionMarks('qa-user', {
-      source: 'message:telegram', session_id: 's1', window: '', title: '', rounds: 1, updated_at: '',
+      source: 'message:telegram', session_id: 's1', window: '', title: '', integration_count: 1, updated_at: '',
     }, { favorite: false })
     await renameSession('qa-user', 's2', '保留用户标题')
     expect(calls).toEqual([
@@ -91,7 +108,7 @@ describe('deleteAllSessions', () => {
     let requestedUrl = ''
     server.use(http.delete('/api/users/qa-user/sessions', ({ request }) => {
       requestedUrl = request.url
-      return HttpResponse.json({ user: 'qa-user', source: 'all', deleted: true, deleted_sessions: 29, deleted_windows: 30 })
+      return HttpResponse.json({ user: 'qa-user', source: 'all', deleted: true, deleted_sessions: 29, raw_preserved: true })
     }))
     const result = await deleteAllSessions('qa-user', 'page + / 1')
     const url = new URL(requestedUrl)
@@ -99,6 +116,7 @@ describe('deleteAllSessions', () => {
     expect(url.searchParams.get('client_id')).toBe('page + / 1')
     expect([...url.searchParams.keys()].sort()).toEqual(['client_id', 'source'])
     expect(result.deleted_sessions).toBe(29)
+    expect(result.raw_preserved).toBe(true)
   })
 })
 
@@ -245,6 +263,16 @@ describe('parseSseFrames', () => {
       guidance_id: 'guidance_123',
       uploaded_files: ['clip.mp4', 'voice.mp3'],
     })
+  })
+
+  it('引导投递失败的业务回执不能当作成功移除原消息', async () => {
+    server.use(http.post('/api/runs/:runId/guidance', () => HttpResponse.json({
+      ok: false, status: 'not_applied', queued: 0,
+      error: { code: 'guidance_closed', message: '运行已结束，未排队，请重新发送' },
+    })))
+    await expect(submitGuidance('kesepain', 'run_closed', 'keep me', {
+      sessionId: 'scope',
+    })).rejects.toMatchObject({ code: 'guidance_closed', status: 409 })
   })
 
   it('计划执行请求携带 plan_id 且不需要伪造用户 prompt', async () => {

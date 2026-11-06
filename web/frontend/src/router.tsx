@@ -2,8 +2,14 @@ import { Navigate, createBrowserRouter, useLocation } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { AuthGate } from './components/AuthGate'
 import { RouteErrorPage } from './components/RouteErrorPage'
+import { t, useLanguage } from './i18n'
 
-const routeFallback = <div className="route-loading">正在加载模块…</div>
+function RouteLoading() {
+  useLanguage()
+  return <div className="route-loading">{t('正在加载模块…')}</div>
+}
+
+const routeFallback = <RouteLoading />
 
 function ChatRedirect() {
   const { search, hash } = useLocation()

@@ -62,9 +62,9 @@ export default defineConfig(({ mode }) => {
       // ceiling while avoiding false failures caused by temporary CPU load.
       testTimeout: 15_000,
       hookTimeout: 10_000,
-      // Multiple jsdom workers are memory and CPU intensive. Two workers keep
-      // CI deterministic without serialising the complete frontend suite.
-      maxWorkers: process.env.CI ? 2 : undefined,
+      // Keep the same resource budget locally and in CI. Unbounded jsdom
+      // workers contend with the 50ms render measurement and inflate wall time.
+      maxWorkers: 2,
     },
   }
 })

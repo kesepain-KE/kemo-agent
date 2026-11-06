@@ -3,6 +3,7 @@ import {
   ApiError,
   apiBase,
   isProvisionalRunError,
+  isUnknownRunEvent,
   requestJson,
   runEventSchema,
 } from './transport'
@@ -31,7 +32,14 @@ export async function submitGuidance(
   queued: number
   guidance_id?: string
 }> {
-  return requestJson(`/api/runs/${encodeURIComponent(runId)}/guidance`, {
+  const result = await requestJson<{
+    ok?: boolean
+    run_id: string
+    status: 'accepted_current_run' | 'queued_next_turn' | 'not_applied'
+    queued: number
+    guidance_id?: string
+    error?: { code?: string; message?: string }
+  }>(`/api/runs/${encodeURIComponent(runId)}/guidance`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -43,6 +51,10 @@ export async function submitGuidance(
       uploaded_files: options.uploadedFiles || [],
     }),
   })
+  if (result.ok === false || result.status === 'not_applied') {
+    throw new ApiError(result.error?.message || '引导未投递，也未排入下一轮', 409, result.error?.code || 'guidance_closed')
+  }
+  return { ...result, status: result.status }
 }
 
 export async function cancelRun(
@@ -50,11 +62,12 @@ export async function cancelRun(
   runId: string,
   sessionId: string,
   source: 'web' | 'app' = 'web',
+  cancelSubagents = false,
 ): Promise<{ run_id: string; user: string; session_id: string; status: 'stopping' }> {
   return requestJson(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user, source, session_id: sessionId }),
+    body: JSON.stringify({ user, source, session_id: sessionId, cancel_subagents: cancelSubagents }),
   })
 }
 
@@ -110,28 +123,43 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
   const decoder = new TextDecoder()
   let buffer = ''
   let terminal = false
-  while (true) {
-    const { done, value } = await reader.read()
-    buffer += decoder.decode(value, { stream: !done })
-    const parsed = parseSseFrames(buffer)
-    buffer = parsed.rest
-    for (const frame of parsed.frames) {
-      const event = runEventSchema.parse(JSON.parse(frame.data)) as RunEvent
-      if (frame.event && frame.event !== event.type) {
-        throw new ApiError('SSE 事件名称与数据类型不一致', 0, 'invalid_sse')
-      }
-      options.onEvent(event)
-      if ((event.type === 'error' && !isProvisionalRunError(event)) || event.type === 'done') terminal = true
+  let exhausted = false
+  let unknownEvents = 0
+  const dispatch = (frame: SseFrame) => {
+    const value: unknown = JSON.parse(frame.data)
+    if (isUnknownRunEvent(value)) {
+      unknownEvents++
+      return
     }
-    if (done) break
+    const event = runEventSchema.parse(value) as RunEvent
+    if (frame.event && frame.event !== event.type) {
+      throw new ApiError('SSE 事件名称与数据类型不一致', 0, 'invalid_sse')
+    }
+    options.onEvent(event)
+    if ((event.type === 'error' && !isProvisionalRunError(event)) || event.type === 'done') terminal = true
   }
-  if (buffer.trim()) {
-    const parsed = parseSseFrames(`${buffer}\n\n`)
-    for (const frame of parsed.frames) {
-      const event = runEventSchema.parse(JSON.parse(frame.data)) as RunEvent
-      options.onEvent(event)
-      if ((event.type === 'error' && !isProvisionalRunError(event)) || event.type === 'done') terminal = true
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      exhausted = done
+      buffer += decoder.decode(value, { stream: !done })
+      const parsed = parseSseFrames(buffer)
+      buffer = parsed.rest
+      for (const frame of parsed.frames) dispatch(frame)
+      if (done) break
+    }
+    if (buffer.trim()) {
+      for (const frame of parseSseFrames(`${buffer}\n\n`).frames) dispatch(frame)
+    }
+    if (!terminal) throw new ApiError('聊天流在终态事件前结束', 0, 'missing_terminal')
+  } finally {
+    try {
+      if (!exhausted) await reader.cancel()
+    } catch {
+      // Preserve the original stream or callback error.
+    } finally {
+      reader.releaseLock()
+      if (unknownEvents) console.warn('[kemo] ignored unknown SSE events', { count: unknownEvents })
     }
   }
-  if (!terminal) throw new ApiError('聊天流在终态事件前结束', 0, 'missing_terminal')
 }

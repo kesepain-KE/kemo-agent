@@ -34,7 +34,6 @@ export type RunEventType =
   | 'media_input_update'
   | 'guidance_applied'
   | 'context_compression'
-  | 'long_task_update'
   | 'subagent_progress'
   | 'background_job_progress'
   | 'usage'
@@ -72,6 +71,10 @@ export interface UserSummary {
 }
 
 export interface SessionSummary {
+  engine?: 'cardstream'
+  last_seq?: number
+  integration_count?: number
+  active_tokens?: number
   pinned?: boolean
   pinned_at?: string
   favorite?: boolean
@@ -79,32 +82,26 @@ export interface SessionSummary {
   bound_platform?: string
   session_id: string
   conversation_id?: string
-  window: string
+  window?: string
   title: string
+  title_source?: 'manual' | 'summary' | string
   summary?: string
   summary_status?: 'none' | 'queued' | 'processing' | 'retry_wait' | 'completed' | 'failed' | 'exhausted' | string
-  summary_target_round?: number
-  summary_completed_round?: number
+  summary_target_seq?: number
+  summary_completed_seq?: number
   summary_retry_at?: string
-  summary_retry_count?: number
   summary_attempt_count?: number
-  summary_consecutive_failures?: number
   summary_max_attempts?: number
-  summary_last_attempt_at?: string
-  summary_recovered_at?: string
   summary_last_error?: { message?: string; exception_type?: string; [key: string]: unknown } | null
-  summary_checkpoint_next_chunk?: number
-  summary_checkpoint_total_chunks?: number
   state?: 'open' | 'closed' | string
   run_state?: 'idle' | 'running' | 'failed' | string
   chain?: 'interactive' | 'message' | 'background' | string
   memory_status?: 'unknown' | 'disabled' | 'deferred' | 'pending' | 'queued' | 'processing' | 'completed' | 'failed' | string
-  memory_processed_round?: number
-  memory_target_round?: number
+  memory_processed_seq?: number
+  memory_target_seq?: number
   memory_queue_reason?: string
   memory_queued_at?: string
   memory_last_error?: { message?: string; exception_type?: string; [key: string]: unknown } | null
-  rounds: number
   updated_at: string
 }
 
@@ -141,14 +138,14 @@ export interface SessionCloseResponse {
   summary?: {
     status: string
     reason: string
-    rounds: number
+    target_seq: number
   }
   memory: {
     status: 'queued' | 'skipped'
     reason: string
-    rounds: number
-    processed_round: number
-    pending_rounds?: number
+    target_seq: number
+    processed_seq: number
+    pending_cards?: number
   }
   session: SessionSummary
 }
@@ -164,50 +161,17 @@ export interface SessionReopenResponse {
 }
 
 export interface HistoryMessage {
+  seq?: number
+  card_id?: string
+  integration_id?: string
+  integration_number?: number
+  level?: 'initial' | 'guidance' | 'interim' | 'final'
+  guidance_id?: string
+  reasoning?: string
   role: 'user' | 'assistant' | 'system' | 'tool' | string
   content: string
   attachments?: InputAttachment[]
   metadata?: Record<string, unknown>
-}
-
-export type LongTaskStatus =
-  | 'disabled'
-  | 'enabled'
-  | 'running'
-  | 'pausing'
-  | 'paused'
-  | 'cancelling'
-  | 'cancelled'
-  | 'completed'
-  | 'failed'
-  | 'interrupted'
-  | string
-
-export interface LongTaskState {
-  enabled: boolean
-  status: LongTaskStatus
-  task_id: string
-  original_prompt: string
-  started_at: string
-  updated_at: string
-  finished_at: string
-  run_count: number
-  continuation_count: number
-  total_tool_calls: number
-  total_provider_requests: number
-  active_elapsed_ms: number
-  usage: Record<string, unknown>
-  current_run_id: string
-  last_stop_reason: string
-  cancel_requested: boolean
-  last_error: Record<string, unknown> | null
-}
-
-export interface LongTaskResponse {
-  user: string
-  source: string
-  session_id: string
-  long_task: LongTaskState
 }
 
 export interface InputAttachment {
@@ -285,8 +249,8 @@ export interface SessionCompressResponse {
   session_id: string
   requested: boolean
   compressed: boolean
-  rounds_removed: number
-  summary_cache_exists: boolean
+  absorbed_cards: number
+  summary_exists: boolean
   context: Record<string, unknown>
   memory: SessionMemoryExtractionResponse
 }
@@ -296,11 +260,11 @@ export interface SessionMemoryExtractionResponse {
   user: string
   source: 'web'
   session_id: string
-  round: number
+  target_seq: number
   candidates: number
-  processed_round?: number
-  target_round?: number
-  pending_rounds?: number
+  processed_seq?: number
+  end_seq?: number
+  pending_cards?: number
   reason?: string
   extraction: Record<string, unknown> | null
   extractions?: Array<Record<string, unknown>>
@@ -311,16 +275,16 @@ export interface SessionMemoryExtractionResponse {
   }
 }
 
-export interface SessionUndoLastRoundResponse {
+export interface SessionWithdrawIntegrationResponse {
   user: string
-  source: 'web'
+  source: string
   session_id: string
-  found: boolean
-  rolled_back: boolean
-  round: number
-  remaining_rounds: number
+  withdrawn: boolean
+  integration_id: string
+  integration_count: number
+  raw_preserved: true
   prompt: string
-  content: Array<Record<string, unknown>>
+  content?: Array<Record<string, unknown>>
 }
 
 export interface SessionDeleteAllResponse {
@@ -328,55 +292,91 @@ export interface SessionDeleteAllResponse {
   source: 'web'
   deleted: boolean
   deleted_sessions: number
-  deleted_windows: number
+  raw_preserved: boolean
+}
+
+export interface HistoryTool {
+  call_id: string
+  execution_id: string
+  seq: number
+  name: string
+  status: 'running' | 'success' | 'error' | 'timed_out_running' | string
+  elapsed_ms: number
+  arguments_text: string
+  arguments_truncated: boolean
+  result_text: string
+  result_truncated: boolean
+  original_call?: { name: string; arguments: Record<string, unknown> }
+  artifacts?: MediaArtifact[]
+  media_inputs?: NativeMediaInput[]
+}
+
+export interface HistoryIntegration {
+  integration_number: number
+  integration_id: string
+  response_closed: boolean
+  last_seq: number
+  acknowledged_seq: number
+  withdrawn?: boolean
+  usage: Record<string, unknown>
+  elapsed_ms: number
+  tool_calls: number
+  guidance: string[]
+  guidance_details?: Array<{
+    id?: string
+    text?: string
+    display_text?: string
+    uploaded_files?: InputAttachment[]
+    ok?: boolean
+    status?: 'applied' | 'not_applied'
+    reason?: string
+    note?: string
+  }>
+  status?: string
+  cancelled?: boolean
+  cancel_reason?: string
+  artifacts?: MediaArtifact[]
+  media_inputs?: NativeMediaInput[]
+  initial_card?: HistoryCard
+}
+
+export interface HistoryCard {
+  card_id: string
+  integration_id: string
+  seq: number
+  raw_kind: 'user_text' | 'agent_text' | 'tool_call' | 'tool_result'
+  raw_level?: 'initial' | 'guidance' | 'interim' | 'final' | null
+  created_at: string
+  message?: HistoryMessage
+  tool?: HistoryTool
 }
 
 export interface HistoryResponse {
   user: string
   source: string
   session_id: string
-  messages: HistoryMessage[]
-  round_metrics: Array<{
-    round: number
-    usage: Record<string, unknown>
-    elapsed_ms: number
-    tool_calls: number
-    guidance: string[]
-    guidance_details?: Array<{
-      id?: string
-      text?: string
-      display_text?: string
-      uploaded_files?: InputAttachment[]
-    }>
-    status?: 'completed' | 'cancelled' | string
-    cancelled?: boolean
-    cancel_reason?: string
-    artifacts?: MediaArtifact[]
-    media_inputs?: NativeMediaInput[]
-  }>
-  round_traces: Array<{
-    round: number
+  engine: 'cardstream'
+  cards: HistoryCard[]
+  integrations: HistoryIntegration[]
+  integration_traces: Array<{
+    integration_number: number
+    integration_id: string
     reasoning: string
-    tools: Array<{
-      call_id: string
-      name: string
-      status: 'running' | 'success' | 'error' | string
-      elapsed_ms: number
-      arguments_text: string
-      arguments_truncated: boolean
-      result_text: string
-      result_truncated: boolean
-      artifacts?: MediaArtifact[]
-      media_inputs?: NativeMediaInput[]
-    }>
+    tools: HistoryTool[]
   }>
+  messages: HistoryMessage[]
+  user_messages?: Array<HistoryMessage & { card_id: string; seq: number; integration_number: number }>
   pagination?: {
     limit: number | null
-    total_rounds: number
-    first_round: number
-    last_round: number
+    total_cards: number
+    first_seq: number
+    last_seq: number
+    integration_count: number
+    first_integration_number: number
+    last_integration_number: number
     has_more_before: boolean
     next_before: number | null
+    cursor_unit: 'raw_seq'
   }
 }
 
@@ -673,7 +673,7 @@ export interface SettingsResponse {
   schema_version: number
   schema_versions: {
     config_schema: number
-    history_schema: number
+    card_schema: number
     memory_storage_schema: number
   }
   provider: ProviderSummary
@@ -685,18 +685,15 @@ export interface SettingsResponse {
     task_plan_auto_accept: boolean
     cron: boolean
     background_scheduler: boolean
-    perception_realtime_injection: boolean
     perception_prompt_injection?: boolean
-    expand_realtime_injection: boolean
     expand_prompt_injection?: boolean
   }
   limits: {
-    context_rounds: number
+    context_engine?: 'cardstream'
+    output_reserve?: number
     context_tokens: number
     compression_ratio: number
-    mid_context_compression_enabled?: boolean
     task_plan_steps: number
-    tool_iterations: number
     tool_timeout: number
     tool_argument_retries: number
     memory_items: number
@@ -872,10 +869,11 @@ export interface OverviewResponse {
     }
     limit: number
     percent: number
-    rounds: number
-    session_total_rounds: number
-    archived_rounds: number
-    round_limit: number
+    engine: 'cardstream'
+    cards_active: number
+    last_seq: number
+    integration_count: number
+    active_integrations: number
   }
   provider: ProviderSummary
   counts: {
@@ -901,10 +899,11 @@ export interface OverviewResponse {
       captured_at: string
     }
     conversation: {
-      foreground_rounds: number
-      archived_rounds: number
+      cards_active: number
+      last_seq: number
+      active_integrations: number
       total_tool_calls: number
-      session_total_rounds: number
+      integration_count: number
       session_tool_calls: number
     }
     tasks: {
@@ -926,8 +925,8 @@ export interface OverviewResponse {
       senses: number
     }
     injection_policy?: {
-      expand: 'round' | 'realtime' | 'disabled'
-      perception: 'round' | 'realtime' | 'disabled'
+      expand: 'dynamic' | 'disabled'
+      perception: 'dynamic' | 'disabled'
     }
   }
   context_snapshot: {
@@ -943,13 +942,14 @@ export interface OverviewResponse {
     total_tokens: number
     capacity_tokens: number
     percent: number
-    foreground_rounds: number
+    cards_active: number
   }
   session_context_stats: {
     selected: boolean
-    foreground_rounds: number
-    background_archived_rounds: number
-    session_total_rounds: number
+    cards_active: number
+    last_seq: number
+    active_integrations: number
+    integration_count: number
     session_tool_calls: number
   }
   agents: Array<{
@@ -961,7 +961,7 @@ export interface OverviewResponse {
     model_profile: string
     exposure: string
   }>
-  summary_cache: { exists: boolean; covered_rounds: number[]; created_at: string; window: string; invalid?: boolean }
+  summary_cache: { exists: boolean; engine: 'cardstream'; card_id: string | null; host_seq: number | null; compression_stage: number; view_epoch: number }
   runtime_host: {
     state: string
     components: Record<string, { name?: string; kind?: string; state?: string; last_error?: unknown }>
@@ -982,10 +982,9 @@ export interface ApiErrorPayload {
 
 export type ChatItem =
   | { id: string; kind: 'subagent_progress'; callId: string; agent: string; status: string; iteration: number; toolName: string; toolCount: number; nextAttempt: number }
-  | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; attachments?: InputAttachment[]; streaming?: boolean; edited?: boolean; originalContent?: string }
+  | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; level?: 'initial' | 'guidance' | 'interim' | 'final'; providerItemId?: string; providerResponseId?: string; integrationNumber?: number; attachments?: InputAttachment[]; streaming?: boolean; edited?: boolean; originalContent?: string }
   | { id: string; kind: 'execution_marker'; planId: string }
-  | { id: string; kind: 'context_compression'; runId: string; status: 'started' | 'ready' | 'failed'; trigger: string; roundsBefore: number; roundsRemoved: number; roundsRemaining: number; memoryMode: string; memoryStatus: string; content: string }
-  | { id: string; kind: 'long_task_boundary'; taskId: string; continuation: number }
+  | { id: string; kind: 'context_compression'; runId: string; status: 'started' | 'ready' | 'failed'; trigger: string; historyTokensBefore: number; historyTokensAfter: number; absorbedCards: number; content: string }
   | { id: string; kind: 'retry_boundary'; attempt: number; phase: 'snapshot' | 'active' }
   | { id: string; kind: 'media'; artifact: MediaArtifact }
   | { id: string; kind: 'reasoning'; content: string; streaming?: boolean }
@@ -1000,7 +999,7 @@ export type ChatItem =
       result?: unknown
       resultText?: string
       resultTruncated?: boolean
-      status: 'running' | 'success' | 'error'
+      status: 'running' | 'still_running' | 'success' | 'error'
       elapsedMs?: number
       mediaInputs?: NativeMediaInput[]
     }
