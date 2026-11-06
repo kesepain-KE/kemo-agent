@@ -132,13 +132,16 @@ def test_skills_paths_user_isolation_and_knowledge_policy(workspace):
     assert "users/alice/user_skills/private/SKILL.md" in bundle.text
     assert "skills/allowed/SKILL.md" in bundle.text
     assert set(bundle.diagnostics["knowledge_scopes"]) == {"global", "shared", "user"}
+    assert "GLOBAL_KNOWLEDGE" not in bundle.text
+    assert "SHARED_KNOWLEDGE" not in bundle.text
+    assert "USER_KNOWLEDGE" not in bundle.text
     config["knowledge"] = {"use_global": False, "use_shared": False}
     restricted = build_agent_prompt_bundle(root, "alice", definition, config)
     assert restricted.diagnostics["knowledge_scopes"] == ["user"]
     assert effective_knowledge_scopes(definition, config) == ("user",)
     assert "GLOBAL_KNOWLEDGE" not in restricted.text
     assert "SHARED_KNOWLEDGE" not in restricted.text
-    assert "USER_KNOWLEDGE" in restricted.text
+    assert "USER_KNOWLEDGE" not in restricted.text
 
 
 def test_no_expand_or_perception_injection_even_when_main_enables_it(workspace, monkeypatch):

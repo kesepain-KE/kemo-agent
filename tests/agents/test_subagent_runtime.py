@@ -184,7 +184,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             "tools": {"plugins": {"allow": []}, "max_iterations": 80},
             "prompt_sources": {"skills": {"shared": [], "user": []},
                                "expand": {"global": [], "shared": [], "user": []}},
-            "knowledge": {"scopes": [], "index_enabled": False},
+            "knowledge": {"scopes": []},
             "context": {"inherit_main_history": False, "inherit_current_request": False},
         }), "utf-8")
         self.config = {

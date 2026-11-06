@@ -126,10 +126,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
                 "skills": {"shared": [], "user": user_skills or []},
                 "expand": {"global": [], "shared": [], "user": []},
             },
-            "knowledge": {
-                "scopes": [],
-                "index_enabled": False,
-            },
+            "knowledge": {"scopes": []},
             "context": {
                 "inherit_main_history": False,
                 "inherit_current_request": False,
@@ -499,16 +496,12 @@ class SubAgentHotPlugTests(unittest.TestCase):
         (root / "knowledge" / "global" / "index.md").write_text(
             "# Child Knowledge\nCHILD_KNOWLEDGE", "utf-8"
         )
-
         directory = self.write_agent(root, "alice", "isolated_policy")
         agent_config_path = directory / "agent-config.json"
         agent_config = json.loads(agent_config_path.read_text("utf-8"))
         agent_config["prompt_sources"]["skills"]["shared"] = ["child_skill"]
         agent_config["prompt_sources"]["expand"]["global"] = ["child_expand"]
-        agent_config["knowledge"] = {
-            "scopes": ["global"],
-            "index_enabled": True,
-        }
+        agent_config["knowledge"] = {"scopes": ["global"]}
         agent_config_path.write_text(json.dumps(agent_config), "utf-8")
 
         provider = ScriptedProvider(

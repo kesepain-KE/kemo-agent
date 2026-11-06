@@ -6,6 +6,8 @@ import threading
 import pytest
 
 from plugins.subagent_dispatch.tool import run as dispatch
+from provider.protocol.enums import IncompleteReason, ResponseStatus
+from provider.protocol.models import KemoResponse, Usage
 from run.agents import AgentRunner, AgentScheduler, AgentQueueError, AgentProviderError
 from run.agents.budgets import effective_limit
 from run.agents.continuation import CheckpointStore, restore_items
@@ -119,7 +121,7 @@ def test_execution_error_keeps_usage_but_does_not_gain_resume_authority(workspac
     root, config = workspace
     write_plugin(root)
     monkeypatch.setattr("run.agents.runner._MAX_AGENT_RETRY_ATTEMPTS", 1)
-    scheduler, parent, _, task_id = start(root, config, Provider([[call(value="a")],
+    scheduler, parent, ownership, task_id = start(root, config, Provider([[call(value="a")],
         AgentProviderError("bad", category="invalid_request", retryable=False)]))
     try:
         with pytest.raises(AgentQueueError):
@@ -130,6 +132,60 @@ def test_execution_error_keeps_usage_but_does_not_gain_resume_authority(workspac
         assert record["usage"]["provider_attempt_count"] == 2
         assert record["result"]["status"] == "partial"
         assert record["stop_reason"] == "execution_error"
+        with pytest.raises(AgentQueueError):
+            scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership)
+    finally:
+        scheduler.close(wait=True, cancel_pending=True)
+
+
+def test_output_truncation_can_resume_from_checkpoint_without_replaying_tools(workspace):
+    root, config = workspace
+    write_plugin(root)
+
+    class TruncatedProvider(Provider):
+        def create(self, request):
+            if len(self.requests) == 1:
+                self.requests.append(request)
+                return KemoResponse(
+                    request_id=request.request_id,
+                    model=request.model,
+                    status=ResponseStatus.INCOMPLETE,
+                    incomplete_details={
+                        "reason": IncompleteReason.OUTPUT_TRUNCATED,
+                        "details": {"finish_reason": "length"},
+                    },
+                    usage=Usage(input_tokens=2, output_tokens=0, total_tokens=2),
+                )
+            return super().create(request)
+
+    provider = TruncatedProvider([[call(value="once")], OUTPUT])
+    scheduler, parent, ownership, task_id = start(root, config, provider)
+    try:
+        with pytest.raises(AgentQueueError, match="output_truncated"):
+            scheduler.wait(task_id, 5, source="web", session_id="scope")
+
+        record = parent.ledger.get(task_id, "web", "scope")
+        assert record["status"] == "failed" and record["resumable"]
+        assert record["error"]["code"] == "output_truncated"
+        assert record["error"]["process_terminated"] is True
+        assert record["result"]["status"] == "partial"
+        saved = CheckpointStore(root, "alice", task_id).load(
+            source="web", session_id="scope",
+        )
+        items = restore_items(saved)
+        completed_results = [
+            item for item in items
+            if isinstance(item, ToolResultItem) and item.name == "write"
+        ]
+        assert len(completed_results) == 1 and not completed_results[0].is_error
+
+        legacy_error = dict(record["error"])
+        legacy_error.pop("process_terminated")
+        parent.ledger.update(task_id, resumable=False, error=legacy_error)
+        scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership)
+        assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == OUTPUT
+        assert (root / "effects.txt").read_text().splitlines() == ["once"]
+        assert len(provider.requests) == 3
     finally:
         scheduler.close(wait=True, cancel_pending=True)
 
