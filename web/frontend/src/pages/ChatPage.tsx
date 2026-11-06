@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, Suspense, lazy, type MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
@@ -12,16 +12,14 @@ import {
   Music2,
   Pencil,
   RotateCcw,
-  Save,
   Trash2,
   UserRound,
   Video,
   Workflow,
   X,
-  Zap,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, cancelSessionLongTask, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getRuntimeStatus, getSessionLongTask, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, setSessionLongTask, streamChat, submitGuidance, undoLastRound, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getRuntimeStatus, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, streamChat, submitGuidance, withdrawIntegration, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { GlobalConfirmDialog } from '../components/GlobalConfirmDialog'
 import { buildCapabilityReferenceItems, capabilityReferenceLine, capabilityReferenceMarker } from '../components/capabilityReferences'
@@ -29,19 +27,20 @@ import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type Con
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
 import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../components/CapabilityReferenceDrawer'
 import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer'
-import { LongTaskBubble } from '../components/LongTaskBubble'
 import { formatBytes, formatDateTime, statusLabel } from '../components/ModuleUi'
 import type { ScheduledTaskItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
-import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, LongTaskResponse, LongTaskState, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
+import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { randomUUID } from '../randomId'
-import { t } from '../i18n'
+import { t , useLanguage } from '../i18n'
 import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
+import { useCompressionStatus } from '../store/compressionStatus'
 import { useScratchSender } from '../store/scratchNotes'
+import { shouldPrefetchEarlierHistory } from './chatHistory'
 import {
   archiveTerminalPlansInConversation,
   buildHistoryItems,
@@ -96,15 +95,13 @@ import {
   isSuccessfulRunCompletion,
   pendingInputAttachment,
   removeSubmittedUploads,
-  shouldShowLongTaskBubble,
   type RunErrorNotice,
   type RunRetryNotice,
 } from './chatRunSupport'
-export { isFailedRunCompletion, isSuccessfulRunCompletion, removeSubmittedUploads, shouldShowLongTaskBubble } from './chatRunSupport'
+export { isFailedRunCompletion, isSuccessfulRunCompletion, removeSubmittedUploads } from './chatRunSupport'
 import {
   buildScheduledTaskItems,
   buildSenseDataItems,
-  ContextCompressionBubble,
   greetingLabel,
   GuidanceMessage,
   MediaArtifactCard,
@@ -115,7 +112,7 @@ import {
   type GuidanceDisplayItem,
   type GuidanceItem,
 } from './chatPresentation'
-export { buildScheduledTaskItems, buildSenseDataItems, ContextCompressionBubble, formatSenseUpdateInterval, mediaArtifactUrl } from './chatPresentation'
+export { buildScheduledTaskItems, buildSenseDataItems, formatSenseUpdateInterval, mediaArtifactUrl } from './chatPresentation'
 import { createPlanWorkflow, createSendHandler } from './chatWorkflows'
 import { ChatPageView } from './ChatPageView'
 
@@ -124,8 +121,9 @@ const MarkdownMessage = lazy(async () => ({
 }))
 
 export function ChatPage() {
+  useLanguage()
   const { reasoningControl, sessionReady } = useOutletContext<ShellOutletContext>()
-  const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, chatStopping: stopping, setChatRunning: setRunning, setChatStopping: setStopping, chatRunId: activeRunId, chatRunSessionId, chatRunToken, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview, openCommandPanel } = useOutletContext<ShellOutletContext>()
+  const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, chatStopping: stopping, setChatRunning: setRunning, setChatStopping: setStopping, chatRunId: activeRunId, chatRunSessionId, chatRunToken, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview } = useOutletContext<ShellOutletContext>()
   // AppShell resolves controls for the displayed conversation.  Keep the
   // session check as a defensive guard for an in-flight route transition.
   const running = Boolean(
@@ -153,13 +151,13 @@ export function ChatPage() {
     content: string
     sessionId: string
     remainingRounds: number
+    previousDraft: string
   } | null>(null)
   const [editedSources, setEditedSources] = useState<Set<string>>(() => new Set())
   const [copiedItem, setCopiedItem] = useState('')
-  const [conversationMenuOpen, setConversationMenuOpen] = useState(false)
   const [knowledgeDrawerOpen, setKnowledgeDrawerOpen] = useState(false)
   const [capabilityDrawerOpen, setCapabilityDrawerOpen] = useState(false)
-  const [conversationBusy, setConversationBusy] = useState<'save' | 'clear' | 'compress' | 'retry' | 'edit' | ''>('')
+  const [conversationBusy, setConversationBusy] = useState<ConversationCommandAction | 'edit' | ''>('')
   const [conversationFeedback, setConversationFeedback] = useState<{
     tone: 'success' | 'error'; text: string; retryScope?: string
   } | null>(null)
@@ -168,9 +166,9 @@ export function ChatPage() {
   const [clearError, setClearError] = useState('')
   const clearExecutingRef = useRef(false)
   const saveExecutingRef = useRef(false)
+  const newExecutingRef = useRef(false)
   const tasksHistoryScopeRef = useRef('')
   const clearRemovedRef = useRef(false)
-  const [longTaskBusy, setLongTaskBusy] = useState(false)
   const [activeTaskOpen, setActiveTaskOpen] = useState(false)
   const [collapsedPlans, setCollapsedPlans] = useState<Set<string>>(() => new Set())
   const [planOverrides, setPlanOverrides] = useState<Record<string, PlanSummary>>({})
@@ -179,10 +177,16 @@ export function ChatPage() {
   const [runRetryNotice, setRunRetryNotice] = useState<RunRetryNotice | null>(null)
   const [runErrorNotice, setRunErrorNotice] = useState<RunErrorNotice | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const composerPlanDockRef = useRef<HTMLDivElement | null>(null)
+  const taskPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
   const loadingEarlierRef = useRef(false)
-  const prependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+  const [navigationTarget, setNavigationTarget] = useState<{ id: string; scope: string } | null>(null)
+  const navigationTargetRef = useRef(navigationTarget)
+  navigationTargetRef.current = navigationTarget
+  const prependSnapshotRef = useRef<{
+    scrollHeight: number; scrollTop: number; anchor: HTMLElement | null; anchorTop: number
+  } | null>(null)
   const submittedUploadsRef = useRef(new Map<string, PendingUploadedFile[]>())
   const completionSoundRunIdsRef = useRef(new Set<string>())
   const failureSoundRunIdsRef = useRef(new Set<string>())
@@ -234,9 +238,6 @@ export function ChatPage() {
     played.add(failedRunId)
     void playUserFailureSound(user)
   }
-  const activeCompression = [...liveItems].reverse().find(
-    (item): item is Extract<ChatItem, { kind: 'context_compression' }> => item.kind === 'context_compression' && (!item.runId || item.runId === effectiveRunId),
-  )
   const setLiveItems = (updater: ChatItemsUpdater) => {
     if (liveSessionId) updateChatRunItems(user, liveSessionId, updater)
   }
@@ -247,26 +248,17 @@ export function ChatPage() {
   }, [sessionId, sessionReady, sessions])
   const historyQuery = useInfiniteQuery({
     queryKey: ['history', user, sessionId],
-    queryFn: ({ pageParam }) => getHistory(user, sessionId, {
-      limit: HISTORY_PAGE_SIZE,
+    queryFn: ({ pageParam, signal }) => getHistory(user, sessionId, {
+      limit: pageParam !== undefined && navigationTargetRef.current?.scope === `${user}\u0000${sessionId}`
+        ? 100 : HISTORY_PAGE_SIZE,
       before: pageParam,
-    }),
+    }, signal),
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (lastPage) => lastPage.pagination?.has_more_before
       ? lastPage.pagination.next_before ?? undefined
       : undefined,
     enabled: Boolean(user && sessionId && (hasCommitted || sessionReady)),
     retry: false,
-  })
-  const longTaskQuery = useQuery({
-    queryKey: ['long-task', user, sessionId],
-    queryFn: ({ signal }) => getSessionLongTask(user, sessionId, undefined, signal),
-    enabled: Boolean(user && sessionId && (hasCommitted || sessionReady)),
-    retry: false,
-    refetchInterval: (query) => {
-      const status = query.state.data?.long_task.status
-      return ['running', 'pausing', 'cancelling'].includes(String(status || '')) ? 1000 : false
-    },
   })
   const tasksQuery = useQuery({
     queryKey: ['tasks', user, sessionId],
@@ -316,20 +308,23 @@ export function ChatPage() {
     [historyQuery.data?.pages],
   )
   const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyData), [historyData])
-  const persistedUserMessages = historyData?.pagination?.total_rounds
+  const persistedUserMessages = historyData?.pagination?.integration_count
     ?? historyData?.messages.filter((message) => message.role === 'user').length
     ?? 0
   const handoffReady = liveRun?.phase === 'awaiting_history' && persistedUserMessages > liveRun.historyUserMessages
-  const visibleLiveItems = handoffReady ? [] : liveItems
-  const items = [...historyItems, ...visibleLiveItems]
+  const visibleLiveItems = handoffReady ? EMPTY_CHAT_ITEMS : liveItems
+  const items = useMemo(() => [...historyItems, ...visibleLiveItems], [historyItems, visibleLiveItems])
   useEffect(() => {
     const conversationKey = `${user}\u0000${sessionId}`
     if (conversationKeyRef.current === conversationKey) return
     conversationKeyRef.current = conversationKey
     if (!running) lastAttemptSessionRef.current = sessionId
     followOutputRef.current = true
+    lastScrollTopRef.current = 0
     loadingEarlierRef.current = false
     prependSnapshotRef.current = null
+    navigationTargetRef.current = null
+    setNavigationTarget(null)
     setShowFollowOutput(false)
     setEditingSource(null)
     undoneRoundBaselineRef.current = null
@@ -345,7 +340,6 @@ export function ChatPage() {
       current.retryScope === conversationKey
       || (!sessionId && current.retryScope.startsWith(`${user}\u0000`))
     ) ? current : null)
-    setLongTaskBusy(false)
     setPlanOverrides({})
     setPlanMutationNotices({})
     setRunRetryNotice(null)
@@ -375,7 +369,7 @@ export function ChatPage() {
   useEffect(() => {
     const element = scrollRef.current
     if (!element || !followOutputRef.current || prependSnapshotRef.current) return
-    if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: running ? 'auto' : 'smooth' })
+    if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: 'instant' })
     else element.scrollTop = element.scrollHeight
   }, [items.length, liveItems, running])
 
@@ -383,7 +377,13 @@ export function ChatPage() {
     const snapshot = prependSnapshotRef.current
     const element = scrollRef.current
     if (!snapshot || !element) return
-    element.scrollTop = snapshot.scrollTop + (element.scrollHeight - snapshot.scrollHeight)
+    // Keep the item being read in place, including when earlier RAW cards are
+    // inserted inside an already expanded process rather than above the turn.
+    const delta = snapshot.anchor?.isConnected
+      ? snapshot.anchor.getBoundingClientRect().top - snapshot.anchorTop
+      : element.scrollHeight - snapshot.scrollHeight
+    element.scrollTop = snapshot.scrollTop + delta
+    lastScrollTopRef.current = element.scrollTop
     prependSnapshotRef.current = null
     loadingEarlierRef.current = false
   }, [historyQuery.data?.pages.length])
@@ -393,8 +393,8 @@ export function ChatPage() {
     persistedUserMessages, editingSource, lastAttemptSessionRef, currentUserRef,
     currentLiveSessionRef, submittedUploadsRef, undoneRoundBaselineRef,
     followOutputRef, locallyCommittedSessionRef, queryClient, beginChatRun,
-    setRunRetryNoticeFor, setRunErrorNoticeFor, setDraft, setPendingUploads,
-    setRunning, setActiveRunId, setConversationMenuOpen, setShowFollowOutput,
+    setRunRetryNoticeFor, setRunErrorNoticeFor, setConversationBusy, setDraft, setPendingUploads,
+    setRunning, setActiveRunId, setShowFollowOutput,
     setEditedSources, updateChatRunItems, setEditingSource, setChatAbortController,
     playCompletionSoundOnce, playFailureSoundOnce, setDraftUploads,
     refreshSessions, isCurrentConversation, moveDraft, setSessionId,
@@ -422,7 +422,7 @@ export function ChatPage() {
 
   useEffect(() => {
     const pending = liveRun?.nextTurnQueue[0]
-    if (!pending || pending.status !== 'queued' || running || uploading || stopping || consumingNextTurnRef.current || !user || !liveSessionId) return
+    if (!pending || pending.status !== 'queued' || running || uploading || stopping || editingSource || consumingNextTurnRef.current || !user || !liveSessionId) return
     consumingNextTurnRef.current = true
     setNextTurnMessageStatus(user, liveSessionId, pending.id, 'sending')
     void send(pending.content, {
@@ -446,7 +446,7 @@ export function ChatPage() {
     }).finally(() => {
       consumingNextTurnRef.current = false
     })
-  }, [liveRun?.nextTurnQueue, liveSessionId, removeNextTurnMessage, running, setNextTurnMessageStatus, stopping, uploading, user])
+  }, [liveRun?.nextTurnQueue, liveSessionId, removeNextTurnMessage, running, setNextTurnMessageStatus, stopping, uploading, user, editingSource])
 
   const uploadFiles = async (files: File[]) => {
     if (!user || uploading || !files.length) return
@@ -511,7 +511,30 @@ export function ChatPage() {
     if (!created) throw new Error('新对话未创建，请重试。')
     clearDraft(previousDraftKey)
     if (liveSessionId) clearChatRun(user, liveSessionId)
-    setConversationMenuOpen(false)
+  }
+
+  const directlyNewConversation = async () => {
+    if (!user || running || stopping || conversationBusy || newExecutingRef.current) return
+    newExecutingRef.current = true
+    setConversationBusy('new')
+    setConversationFeedback(null)
+    const targetUser = user
+    const targetSession = liveSessionId
+    try {
+      // Create first; switching the URL releases only this page's old lease.
+      // Do not close, delete or cancel the old session used by other windows.
+      const created = await createNewSession()
+      if (!created) throw new Error('新对话未创建，请重试。')
+    } catch (error) {
+      if (isCurrentConversation(targetUser, targetSession)) {
+        setConversationFeedback({
+          tone: 'error', text: error instanceof Error ? error.message : t('直接新建对话失败，请重试。'),
+        })
+      }
+    } finally {
+      newExecutingRef.current = false
+      if (isCurrentConversation(targetUser, targetSession)) setConversationBusy('')
+    }
   }
 
   const saveAndNewConversation = async () => {
@@ -531,9 +554,9 @@ export function ChatPage() {
             throw new Error(t('另有 {count} 个页面或客户端仍在使用此对话，尚未关闭，也未启动后台提取。请关闭其他页面后重试；旧页面停止心跳后，租约预计最多 {seconds} 秒过期。',
               { count: result.active_clients ?? 1, seconds: Math.ceil(result.retry_after_seconds) }))
           }
-          throw new Error(t(result.deferred
-            ? '此对话仍被其他页面或客户端使用，尚未关闭，也未启动后台提取。请关闭其他页面后重试；异常断开的页面可能需要等待在线租约过期。'
-            : '当前对话尚未确认关闭，未创建新对话，请重试。'))
+          throw new Error(result.deferred
+            ? t('此对话仍被其他页面或客户端使用，尚未关闭，也未启动后台提取。请关闭其他页面后重试；异常断开的页面可能需要等待在线租约过期。')
+            : t('当前对话尚未确认关闭，未创建新对话，请重试。'))
         }
         previousSessionClosed = true
       }
@@ -594,7 +617,6 @@ export function ChatPage() {
       clearDraft(chatDraftKey(clearTarget.user, previousSessionId))
       if (previousSessionId) clearChatRun(clearTarget.user, previousSessionId)
       setClearTarget(null)
-      setConversationMenuOpen(false)
     } catch (error) {
       if (previousSessionId && !clearRemovedRef.current) setSessionId(previousSessionId)
       const message = error instanceof Error ? error.message : '清空当前对话失败'
@@ -616,19 +638,19 @@ export function ChatPage() {
     }
     setConversationBusy('compress')
     setConversationFeedback(null)
+    useCompressionStatus.getState().setStatus(user, sessionId, {
+      status: 'started', trigger: 'manual', historyTokensBefore: 0,
+      historyTokensAfter: 0, absorbedCards: 0, content: '',
+    })
     try {
       const result = await compressSession(user, sessionId)
-      const atMinimum = result.context.minimum_rounds_reached === true
-      const aboveTarget = result.context.target_reached === false
       const compressionText = result.compressed
-        ? `上下文压缩完成，已整理 ${result.rounds_removed} 轮历史。${atMinimum && aboveTarget ? '已保留最后一轮，仍高于目标 Token 比例。' : ''}`
-        : atMinimum && aboveTarget
-          ? '已到最后一轮，无法继续按完整轮次压缩；当前仍高于目标 Token 比例。'
-          : '当前上下文较短，暂时无需压缩。'
+        ? `上下文压缩完成，已整理 ${result.absorbed_cards} 张历史卡片。`
+        : '当前上下文暂时无需压缩。'
       const memory = result.memory
       const memoryText = memory.status === 'queued'
-        ? (Number(memory.pending_rounds || 0) > 0
-            ? `记忆提取已转入后台，共有 ${Number(memory.pending_rounds)} 轮待处理。`
+        ? (Number(memory.pending_cards || 0) > 0
+            ? `记忆提取已转入后台，共有 ${Number(memory.pending_cards)} 张卡片待处理。`
             : '记忆提取已转入后台。')
         : memory.status === 'completed'
           ? (memory.candidates > 0
@@ -639,7 +661,7 @@ export function ChatPage() {
               ? '记忆已是最新状态。'
               : memory.reason === 'memory_extraction_disabled'
                 ? '记忆提取已按配置关闭。'
-                : '当前没有可提取的完整对话轮次。')
+                : '当前没有可提取的历史卡片。')
           : memory.error?.message
             ? `记忆提取任务登记失败：${memory.error.message}`
             : '记忆提取未完成，已保留待后台重试。'
@@ -647,68 +669,53 @@ export function ChatPage() {
         tone: memory.status === 'failed' ? 'error' : 'success',
         text: `${compressionText}${memoryText}`,
       })
+      useCompressionStatus.getState().setStatus(user, sessionId, {
+        status: 'ready', trigger: 'manual',
+        historyTokensBefore: Number(result.context?.history_tokens_before || 0),
+        historyTokensAfter: Number(result.context?.history_tokens_after || 0),
+        absorbedCards: Number(result.absorbed_cards || 0), content: compressionText,
+      })
       refreshOverview()
     } catch (error) {
-      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '手动上下文压缩失败' })
+      const message = error instanceof Error ? error.message : '手动上下文压缩失败'
+      useCompressionStatus.getState().setStatus(user, sessionId, {
+        status: 'failed', trigger: 'manual',
+        historyTokensBefore: 0, historyTokensAfter: 0, absorbedCards: 0, content: message,
+      })
+      setConversationFeedback({ tone: 'error', text: message })
     } finally {
       setConversationBusy('')
     }
   }
 
-  const editAndResend = async (id: string, content: string) => {
+  const editAndResend = (id: string, content: string) => {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.id !== id) return
     const targetSession = sessionId || lastAttemptSessionRef.current
     const persistedRounds = persistedUserMessages
     const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
-    const expectedRound = persistedRounds + liveRounds
-    if (!targetSession || expectedRound < 1) return
-    setConversationBusy('edit')
+    const expectedIntegrationCount = persistedRounds + liveRounds
+    if (!targetSession || expectedIntegrationCount < 1) return
     setConversationFeedback(null)
-    try {
-      const undo = await undoLastRound(user, targetSession, expectedRound, content)
-      undoneRoundBaselineRef.current = {
-        sessionId: targetSession,
-        remainingRounds: Math.max(0, undo.remaining_rounds),
-      }
-      setLiveItems((current) => dropLastLiveRound(current))
-      if (sessionId) {
-        void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] }).catch(() => undefined)
-      }
-      const editableContent = undo.prompt || content
-      setDraft(editableContent)
-      setEditingSource({
-        id,
-        content,
-        sessionId: targetSession,
-        remainingRounds: Math.max(0, undo.remaining_rounds),
-      })
-      setConversationFeedback({ tone: 'success', text: '最新一轮已撤销，原问题已放回输入框，可修改后重新发送。' })
-      window.requestAnimationFrame(() => {
-        const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')
-        if (!input) return
-        input.focus()
-        input.setSelectionRange(input.value.length, input.value.length)
-      })
-    } catch (error) {
-      setConversationFeedback({
-        tone: 'error',
-        text: error instanceof Error ? error.message : '撤销最新一轮并进入编辑状态失败',
-      })
-    } finally {
-      setConversationBusy('')
-    }
+    setEditingSource({
+      id,
+      content,
+      sessionId: targetSession,
+      remainingRounds: expectedIntegrationCount,
+      previousDraft: editingSource?.previousDraft ?? draft,
+    })
+    setDraft(content)
+    window.requestAnimationFrame(() => {
+      const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')
+      if (!input) return
+      input.focus()
+      input.setSelectionRange(input.value.length, input.value.length)
+    })
   }
 
   const cancelEditAndResend = () => {
+    setDraft(editingSource?.previousDraft ?? '')
     setEditingSource(null)
-    setDraft('')
-    setConversationFeedback({
-      tone: 'success',
-      text: '已取消编辑；被撤销的轮次不会恢复，下一条消息将直接作为新一轮发送。',
-    })
-    if (sessionId) {
-      void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] }).catch(() => undefined)
-    }
+    setConversationFeedback(null)
   }
 
   const copyMessage = async (id: string, content: string) => {
@@ -826,18 +833,18 @@ export function ChatPage() {
     && !followUpQueue.some((message) => message.id === latestRunningGuidance.id && message.status !== 'guiding')
     ? latestRunningGuidance : undefined
   const regenerateLastResponse = async () => {
-    if (running || conversationBusy || !lastUserMessage || lastUserMessage.kind !== 'message') return
+    if (running || conversationBusy || editingSource || !lastUserMessage || lastUserMessage.kind !== 'message') return
     const prompt = lastUserMessage.content
     const targetSession = sessionId || lastAttemptSessionRef.current
     const persistedRounds = persistedUserMessages
     const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
-    const expectedRound = persistedRounds + liveRounds
-    if (expectedRound < 1) return
+    const expectedIntegrationCount = persistedRounds + liveRounds
+    if (expectedIntegrationCount < 1) return
     setConversationBusy('retry')
     setConversationFeedback(null)
     try {
       const undo = targetSession
-        ? await undoLastRound(user, targetSession, expectedRound, prompt)
+        ? await withdrawIntegration(user, targetSession, expectedIntegrationCount, prompt)
         : null
       setLiveItems((current) => dropLastLiveRound(current))
       if (sessionId) {
@@ -846,9 +853,7 @@ export function ChatPage() {
       await send(prompt, {
         sessionId: targetSession || undefined,
         content: undo?.content?.length ? undo.content : undefined,
-        // 重新生成会先撤销一轮再补回一轮，最终历史轮数不会增长。
-        // 接管基线必须使用撤销后的轮数，否则持久化历史与流式缓存会同时显示。
-        historyUserMessages: Math.max(0, expectedRound - 1),
+        historyUserMessages: undo?.integration_count ?? expectedIntegrationCount,
       })
     } catch (error) {
       setConversationFeedback({
@@ -862,14 +867,15 @@ export function ChatPage() {
   useEffect(() => {
     const handleConversationCommand = (event: Event) => {
       const action = (event as CustomEvent<ConversationCommandAction>).detail
-      if (action === 'save') void saveAndNewConversation()
+      if (action === 'new') void directlyNewConversation()
+      else if (action === 'save') void saveAndNewConversation()
       else if (action === 'clear') void clearConversation()
       else if (action === 'compress') void compressCurrentConversation()
       else if (action === 'retry') void regenerateLastResponse()
     }
     window.addEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand)
     return () => window.removeEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand)
-  }, [clearConversation, compressCurrentConversation, regenerateLastResponse, saveAndNewConversation])
+  }, [clearConversation, compressCurrentConversation, directlyNewConversation, regenerateLastResponse, saveAndNewConversation])
   const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
   const { commandPlanStatus, planActions } = createPlanWorkflow({
     user, running, sessionId, clientId, persistedUserMessages, planMutationNotices,
@@ -881,22 +887,34 @@ export function ChatPage() {
     refreshSessions, isCurrentConversation, setSessionId, refreshOverview,
     finishChatRun, setStopping, setCollapsedPlans, navigate,
   })
-  const persistedPlans = tasksQuery.data?.plans || []
-  const persistedPlanById = new Map(persistedPlans.map((plan) => [plan.plan_id, plan]))
-  const resolvePlan = (plan: PlanSummary) => {
+  const persistedPlans = useMemo(() => tasksQuery.data?.plans ?? [], [tasksQuery.data?.plans])
+  const persistedPlanById = useMemo(
+    () => new Map(persistedPlans.map((plan) => [plan.plan_id, plan])),
+    [persistedPlans],
+  )
+  const resolvePlan = useCallback((plan: PlanSummary) => {
     const candidates = [plan, persistedPlanById.get(plan.plan_id), planOverrides[plan.plan_id]].filter((value): value is PlanSummary => Boolean(value))
     return candidates.reduce((latest, candidate) => candidate.revision > latest.revision ? candidate : latest)
-  }
-  const renderedPlanIds = new Set(items.filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan').map((item) => item.plan.plan_id))
-  const persistedSessionPlans = persistedPlans.filter((plan) => plan.session_id === sessionId && !renderedPlanIds.has(plan.plan_id)).map(resolvePlan)
-  const renderedSessionPlans = items
-    .filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan')
-    .map((item) => resolvePlan(item.plan))
+  }, [persistedPlanById, planOverrides])
+  const renderedPlanIds = useMemo(
+    () => new Set(items.filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan').map((item) => item.plan.plan_id)),
+    [items],
+  )
+  const persistedSessionPlans = useMemo(
+    () => persistedPlans.filter((plan) => plan.session_id === sessionId && !renderedPlanIds.has(plan.plan_id)).map(resolvePlan),
+    [persistedPlans, renderedPlanIds, resolvePlan, sessionId],
+  )
+  const renderedSessionPlans = useMemo(
+    () => items
+      .filter((item): item is Extract<ChatItem, { kind: 'task_plan' }> => item.kind === 'task_plan')
+      .map((item) => resolvePlan(item.plan)),
+    [items, resolvePlan],
+  )
   const requestedPlan = persistedPlans.find(plan => plan.plan_id === searchParams.get('plan_id')
     && plan.session_id === sessionId && (plan.source || 'web') === 'web'
     && ['pending', 'approved', 'paused', 'failed'].includes(plan.status))
   const dockedPlan = requestedPlan ? resolvePlan(requestedPlan) : selectDockedPlan(renderedSessionPlans) ?? selectDockedPlan(persistedSessionPlans)
-  const stopCurrentRun = async () => {
+  const stopCurrentRun = async (cancelSubagents = false) => {
     if (dockedPlan?.status === 'running') {
       void commandPlanStatus(dockedPlan, 'pause')
     }
@@ -905,11 +923,8 @@ export function ChatPage() {
     const targetRunId = effectiveRunId
     if (!targetUser || !targetSession || !targetRunId || stopping) return
     setStopping(true, targetUser, targetSession, targetRunId, chatRunToken)
-    const longTaskActive = ['running', 'pausing', 'cancelling'].includes(String(longTaskQuery.data?.long_task.status || ''))
     const accepted = await executeStopRequest(
-      () => longTaskActive
-        ? cancelSessionLongTask(targetUser, targetSession)
-        : cancelRun(targetUser, targetRunId, targetSession),
+      () => cancelRun(targetUser, targetRunId, targetSession, 'web', cancelSubagents),
       (error) => {
         abortChatRun(targetUser, targetSession, targetRunId, chatRunToken)
         const message = error instanceof Error
@@ -928,36 +943,6 @@ export function ChatPage() {
     )
     if (!accepted) setStopping(false, targetUser, targetSession, targetRunId, chatRunToken)
   }
-  const toggleLongTask = async () => {
-    if (!user || !sessionId || longTaskBusy) return
-    setLongTaskBusy(true)
-    setConversationFeedback(null)
-    try {
-      const response = await setSessionLongTask(user, sessionId, !longTaskQuery.data?.long_task.enabled)
-      queryClient.setQueryData(['long-task', user, sessionId], response)
-    } catch (error) {
-      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '长任务开关更新失败' })
-    } finally {
-      setLongTaskBusy(false)
-    }
-  }
-  const stopLongTask = async () => {
-    if (!user || !sessionId || longTaskBusy) return
-    const targetUser = user
-    const targetSession = sessionId
-    const targetRunId = effectiveRunId
-    setLongTaskBusy(true)
-    if (running && targetRunId) setStopping(true, targetUser, targetSession, targetRunId, chatRunToken)
-    try {
-      const response = await cancelSessionLongTask(targetUser, targetSession)
-      queryClient.setQueryData(['long-task', targetUser, targetSession], response)
-    } catch (error) {
-      if (targetRunId) setStopping(false, targetUser, targetSession, targetRunId, chatRunToken)
-      setConversationFeedback({ tone: 'error', text: error instanceof Error ? error.message : '停止长任务失败' })
-    } finally {
-      setLongTaskBusy(false)
-    }
-  }
   const revealPlan = (plan: PlanSummary) => {
     if (plan.plan_id !== dockedPlan?.plan_id) {
       navigate(`/tasks?user=${encodeURIComponent(user)}`)
@@ -968,47 +953,80 @@ export function ChatPage() {
       next.delete(plan.plan_id)
       return next
     })
-    window.requestAnimationFrame(() => composerPlanDockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
+    window.requestAnimationFrame(() => taskPlanDockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
   }
-  const userRoundCount = items.filter((item) => item.kind === 'message' && item.role === 'user').length
-  const roundLimit = Math.max(1, Number(overview?.context.round_limit || 30))
-  const reportedContextRound = Number(overview?.context.rounds)
-  const currentRound = Math.max(
-    1,
-    Number.isFinite(reportedContextRound)
-      ? reportedContextRound + (running ? 1 : 0)
-      : Math.min(userRoundCount, roundLimit),
-  )
   const totalRounds = Math.max(
-    currentRound,
-    Number(overview?.context.session_total_rounds || 0) + (running ? 1 : 0),
+    persistedUserMessages,
+    Number(overview?.context.integration_count || 0),
   )
+  const captureHistoryScroll = (element: HTMLDivElement) => {
+    const bounds = element.getBoundingClientRect()
+    const anchor = Array.from(element.querySelectorAll<HTMLElement>(
+      '.msg.is-user, .assistant-response, .tool-call, .trace, .guidance-message',
+    )).find((candidate) => {
+      const rect = candidate.getBoundingClientRect()
+      return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom
+    }) ?? null
+    return {
+      scrollHeight: element.scrollHeight, scrollTop: element.scrollTop,
+      anchor, anchorTop: anchor?.getBoundingClientRect().top ?? 0,
+    }
+  }
   const loadEarlierHistory = async () => {
     const element = scrollRef.current
     if (!element || !historyQuery.hasNextPage || historyQuery.isFetchingNextPage || loadingEarlierRef.current) return
     loadingEarlierRef.current = true
     followOutputRef.current = false
     setShowFollowOutput(true)
-    prependSnapshotRef.current = {
-      scrollHeight: element.scrollHeight,
-      scrollTop: element.scrollTop,
-    }
+    prependSnapshotRef.current = captureHistoryScroll(element)
     const previousPageCount = historyQuery.data?.pages.length ?? 0
     try {
-      const result = await historyQuery.fetchNextPage()
+      const result = await historyQuery.fetchNextPage({ cancelRefetch: false, throwOnError: true })
+      if (!isCurrentConversation(user, sessionId)) return
       if ((result.data?.pages.length ?? 0) === previousPageCount) {
         prependSnapshotRef.current = null
         loadingEarlierRef.current = false
       }
-    } catch {
+    } catch (error) {
+      if (!isCurrentConversation(user, sessionId)) return
       prependSnapshotRef.current = null
       loadingEarlierRef.current = false
+      if (navigationTargetRef.current?.scope === `${user}\u0000${sessionId}`) {
+        navigationTargetRef.current = null
+        setNavigationTarget(null)
+        setConversationFeedback({
+          tone: 'error',
+          text: `消息定位失败：${error instanceof Error ? error.message : '历史读取失败'}。请重新选择轮次重试。`,
+        })
+      }
     }
   }
   const handleChatScroll = () => {
     const element = scrollRef.current
     if (!element) return
-    if (element.scrollTop <= 120 && historyQuery.hasNextPage) {
+    const movingUp = element.scrollTop < lastScrollTopRef.current
+    lastScrollTopRef.current = element.scrollTop
+    if (navigationTargetRef.current?.scope === `${user}\u0000${sessionId}`) return
+    if (prependSnapshotRef.current) {
+      // The reader may keep scrolling while the next page is in flight.
+      prependSnapshotRef.current = captureHistoryScroll(element)
+      return
+    }
+    const bounds = element.getBoundingClientRect()
+    const viewportCenter = bounds.top + element.clientHeight / 2
+    const visibleUserMessages = Array.from(element.querySelectorAll<HTMLElement>('[data-integration-number]'))
+    const activeRound = visibleUserMessages.reduce((closest, candidate) => {
+      const rect = candidate.getBoundingClientRect()
+      const distance = Math.abs(rect.top + rect.height / 2 - viewportCenter)
+      return distance < closest.distance
+        ? { round: Number(candidate.dataset.integrationNumber || 0), distance }
+        : closest
+    }, { round: 0, distance: Number.POSITIVE_INFINITY }).round
+    const firstLoadedRound = historyData?.pagination?.first_integration_number ?? 0
+    const nearLoadedHistoryEdge = shouldPrefetchEarlierHistory(
+      activeRound, firstLoadedRound, Boolean(historyQuery.hasNextPage), 2,
+    )
+    if ((movingUp && element.scrollTop <= 120) || nearLoadedHistoryEdge) {
       followOutputRef.current = false
       setShowFollowOutput(true)
       void loadEarlierHistory()
@@ -1018,24 +1036,51 @@ export function ChatPage() {
     followOutputRef.current = following
     setShowFollowOutput(!following)
   }
+  const handleChatContentClick = (event: MouseEvent<HTMLDivElement>) => {
+    const target = event.target as Element
+    if (!target.closest('.assistant-process-toggle, .tool-call-head, .trace-head')) return
+    followOutputRef.current = false
+    setShowFollowOutput(true)
+  }
   const jumpToUserMessage = (id: string) => {
+    followOutputRef.current = false
+    setShowFollowOutput(true)
+    setConversationFeedback(null)
+    const target = { id, scope: `${user}\u0000${sessionId}` }
+    navigationTargetRef.current = target
+    setNavigationTarget(target)
+  }
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.scope !== `${user}\u0000${sessionId}`) return
     const element = scrollRef.current
     if (!element) return
     const target = Array.from(element.querySelectorAll<HTMLElement>('[data-user-message-id]'))
-      .find((candidate) => candidate.dataset.userMessageId === id)
-    if (!target) return
-    followOutputRef.current = false
-    setShowFollowOutput(true)
+      .find((candidate) => candidate.dataset.userMessageId === navigationTarget.id)
+    if (!target) {
+      if (historyQuery.isFetching || loadingEarlierRef.current) return
+      if (historyQuery.hasNextPage) {
+        void loadEarlierHistory()
+      } else {
+        navigationTargetRef.current = null
+        setNavigationTarget(null)
+        setConversationFeedback({ tone: 'error', text: '消息定位失败：这条发言已不在当前对话中，请刷新后重试。' })
+      }
+      return
+    }
     const containerRect = element.getBoundingClientRect()
     const targetRect = target.getBoundingClientRect()
     const top = targetRect.top - containerRect.top + element.scrollTop
       - Math.max(24, (element.clientHeight - targetRect.height) / 2)
     if (typeof element.scrollTo === 'function') element.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
     else element.scrollTop = Math.max(0, top)
-  }
+    navigationTargetRef.current = null
+    setNavigationTarget(null)
+  })
   const resumeFollowingOutput = () => {
     const element = scrollRef.current
     if (!element) return
+    navigationTargetRef.current = null
+    setNavigationTarget(null)
     followOutputRef.current = true
     setShowFollowOutput(false)
     if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
@@ -1061,7 +1106,7 @@ export function ChatPage() {
     })
     setCapabilityDrawerOpen(false)
   }
-  const conversationItems = archiveTerminalPlansInConversation(
+  const conversationItems = useMemo(() => archiveTerminalPlansInConversation(
     items.filter((item) => item.kind !== 'context_compression' && item.kind !== 'subagent_progress'),
     [
       ...persistedPlans
@@ -1069,31 +1114,34 @@ export function ChatPage() {
         .map(resolvePlan),
       ...renderedSessionPlans,
     ],
+  ), [items, persistedPlans, renderedSessionPlans, resolvePlan, sessionId])
+  const conversationBlocks = useMemo(() => groupConversationItems(conversationItems), [conversationItems])
+  const userMessageMarkers = useMemo(
+    () => buildUserMessageMarkers(
+      conversationItems, historyData?.pagination?.first_integration_number ?? 1, historyData?.user_messages,
+    ),
+    [conversationItems, historyData?.pagination?.first_integration_number, historyData?.user_messages],
   )
-  const conversationBlocks = groupConversationItems(conversationItems)
-  const userMessageMarkers = buildUserMessageMarkers(conversationItems, historyData?.pagination?.first_round ?? 1)
   const showWelcome = items.length === 0 && !editingSource
 
   return <><ChatPageView {...{
-    showWelcome, conversationMenuOpen, scrollRef, handleChatScroll, sessionId, historyQuery,
+    showWelcome, scrollRef, handleChatScroll, handleChatContentClick, sessionId, historyQuery,
     user, overview, reasoningControl, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
     recentTasks,
     tokenTotal: runtimeTokensQuery.data?.tokens.total_tokens,
     tokenCacheRate: runtimeTokensQuery.data?.tokens.cache_rate,
     outputTokens: runtimeTokensQuery.data?.tokens.received_tokens,
     liveItems, items, historyData, conversationBlocks, userAvatarUrl,
-    editedSources, running, lastUserMessage, editAndResend, conversationBusy, copyMessage, copiedItem,
+    editedSources, running, lastUserMessage, editAndResend, conversationBusy, conversationFeedback, setConversationFeedback, copyMessage, copiedItem,
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
-    loadEarlierHistory, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
-    activeCompression, longTaskQuery, longTaskBusy, stopLongTask, composerPlanDockRef, collapsedPlans,
+    navigatingMessage: Boolean(navigationTarget), jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
+    taskPlanDockRef, collapsedPlans,
     planActions, guidancePreviewItem, followUpQueue, queueFollowUp, guideDraft, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
-    setNextTurnMessageStatus, setConversationMenuOpen, draft, stopping, currentRound, roundLimit, pendingUploads, uploading,
+    setNextTurnMessageStatus, draft, stopping, pendingUploads, uploading,
     uploadFeedback, setUploadFeedback, setPendingUploads, editingSource, cancelEditAndResend,
-    saveAndNewConversation, clearConversation, compressCurrentConversation, hasCommitted,
-    toggleLongTask, regenerateLastResponse,
-    conversationFeedback: conversationFeedback?.retryScope && conversationFeedback.retryScope !== `${user}\u0000${sessionId}` ? null : conversationFeedback,
+    regenerateLastResponse,
     uploadFiles, setCapabilityDrawerOpen,
-    setKnowledgeDrawerOpen, openCommandPanel, sendGuidance, send, stopCurrentRun, knowledgeDrawerOpen,
+    setKnowledgeDrawerOpen, sendGuidance, send, stopCurrentRun, knowledgeDrawerOpen,
     knowledgeQuery, referenceKnowledge, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
     referenceCapability,
   }} />

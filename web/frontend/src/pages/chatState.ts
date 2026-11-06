@@ -5,29 +5,12 @@ import { reduceSubagentProgress } from './subagentProgress'
 import { reduceNativeMediaInputs } from '../components/nativeMedia'
 import type { ChatItem, HistoryResponse, InputAttachment, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
 
-const HISTORY_PAGE_SIZE = 20
-const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
+import { extractPlanSummary } from './planSummary'
+export { extractPlanSummary } from './planSummary'
+export { buildHistoryItems, mergeHistoryPages } from './chatHistory'
 
 function eventId(prefix: string) {
   return `${prefix}_${randomUUID()}`
-}
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
-}
-
-export function extractPlanSummary(value: unknown): PlanSummary | null {
-  let payload = objectValue(value)
-  const wrapped = objectValue(payload?.result)
-  if (payload?.ok === true && wrapped) payload = wrapped
-  const raw = objectValue(payload?.plan) || (payload?.plan_id ? payload : null)
-  if (!raw || typeof raw.plan_id !== 'string' || typeof raw.title !== 'string' || !Array.isArray(raw.steps)) return null
-  const steps = raw.steps.map((value) => objectValue(value)).filter((step): step is Record<string, unknown> => Boolean(step)).map((step) => ({
-    step_id: String(step.step_id || ''), title: String(step.title || ''), description: String(step.description || ''), status: String(step.status || 'pending'),
-    depends_on: Array.isArray(step.depends_on) ? step.depends_on.map(String) : [], critical: Boolean(step.critical ?? true), tool_name: String(step.tool_name || ''), started_at: String(step.started_at || ''), finished_at: String(step.finished_at || ''),
-  }))
-  const completed = steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length
-  return { plan_id: raw.plan_id, title: raw.title, description: String(raw.description || ''), status: String(raw.status || 'pending'), auto_accept: Boolean(raw.auto_accept), reminder: String(raw.reminder || ''), source: String(raw.source || ''), session_id: String(raw.session_id || ''), current_step: String(raw.current_step || ''), revision: Number(raw.revision || 1), created_at: String(raw.created_at || ''), updated_at: String(raw.updated_at || ''), progress: { completed, total: steps.length, percent: steps.length ? Math.round(completed * 100 / steps.length) : 0 }, steps }
 }
 
 export function isNearScrollBottom(
@@ -66,25 +49,16 @@ export function groupConversationItems(items: ChatItem[]): ConversationBlock[] {
       activeAssistant.items.push(item)
       continue
     }
-    if (item.kind === 'long_task_boundary') {
-      flushAssistant()
-      currentUserId = item.id
-      assistantSequence += 1
-      activeAssistant = {
-        id: `assistant_turn_${currentUserId}_${assistantSequence}`,
-        kind: 'assistant',
-        items: [item],
-      }
-      continue
-    }
     if (item.kind === 'execution_marker') {
       flushAssistant()
       currentUserId = item.id
+      assistantSequence = 0
       continue
     }
     if (item.kind === 'message' && item.role === 'user') {
       flushAssistant()
       currentUserId = item.id
+      assistantSequence = 0
       blocks.push({ id: item.id, kind: 'user', item })
       continue
     }
@@ -102,31 +76,35 @@ export function groupConversationItems(items: ChatItem[]): ConversationBlock[] {
   return blocks
 }
 
-export function buildUserMessageMarkers(items: ChatItem[], firstRound = 1): UserMessageMarker[] {
-  const markers: UserMessageMarker[] = []
+export function buildUserMessageMarkers(
+  items: ChatItem[],
+  firstRound = 1,
+  indexedMessages: NonNullable<HistoryResponse['user_messages']> = [],
+): UserMessageMarker[] {
+  const markers = new Map<string, UserMessageMarker>()
+  const indexedItems: ChatItem[] = indexedMessages.map((message) => ({
+    id: `history_${message.card_id}_user`, kind: 'message', role: 'user',
+    integrationNumber: message.integration_number,
+    content: message.content, attachments: message.attachments,
+  }))
   let nextRound = Math.max(1, Math.floor(firstRound))
-  for (const item of items) {
+  for (const item of [...indexedItems, ...items]) {
     if (item.kind === 'execution_marker') {
       const executionRound = /^history_execution_(\d+)$/.exec(item.id)?.[1]
       if (executionRound) nextRound = Math.max(nextRound, Number(executionRound) + 1)
       continue
     }
-    if (item.kind === 'long_task_boundary') {
-      const continuationRound = /^history_long_task_(\d+)$/.exec(item.id)?.[1]
-      if (continuationRound) nextRound = Math.max(nextRound, Number(continuationRound) + 1)
-      continue
-    }
     if (item.kind !== 'message' || item.role !== 'user') continue
     const historicalRound = /^history_(\d+)_user$/.exec(item.id)?.[1]
-    const round = historicalRound ? Number(historicalRound) : nextRound
-    markers.push({
+    const round = item.integrationNumber ?? (historicalRound ? Number(historicalRound) : nextRound)
+    markers.set(item.id, {
       id: item.id,
       content: item.content || item.attachments?.map((attachment) => `[附件] ${attachment.name}`).join('；') || '附件消息',
-      round,
+      integration_number: round,
     })
     nextRound = Math.max(nextRound, round + 1)
   }
-  return markers
+  return [...markers.values()]
 }
 
 function currentRoundStartIndex(items: ChatItem[]) {
@@ -189,6 +167,22 @@ export function resetCurrentRoundItemsForRetry(
   ]
 }
 
+export function resetProviderResponseForRetry(items: ChatItem[], event: RunEvent) {
+  if (event.metadata?.partial_response !== true) return items
+  const failedAttempt = Math.max(1, Number(event.metadata.failed_attempt || 1))
+  const nextAttempt = Math.max(failedAttempt + 1, Number(event.metadata.next_attempt || failedAttempt + 1))
+  const key = String(event.metadata.failed_request_id || eventId('provider_retry')).replace(/[^A-Za-z0-9_-]/g, '_')
+  const start = currentRoundStartIndex(items)
+  const sealed = items.map((item, index) => index >= start
+    && (item.kind === 'reasoning' || item.kind === 'message' && item.role === 'assistant')
+    && item.streaming ? { ...item, streaming: false } : item)
+  return [
+    ...sealed,
+    { id: `retry_boundary_${key}_snapshot`, kind: 'retry_boundary' as const, attempt: failedAttempt, phase: 'snapshot' as const },
+    { id: `retry_boundary_${key}_active`, kind: 'retry_boundary' as const, attempt: nextAttempt, phase: 'active' as const },
+  ]
+}
+
 export function isProvisionalRunError(event: RunEvent) {
   return event.type === 'error'
     && event.metadata?.retryable === true
@@ -221,6 +215,7 @@ function findLastCurrentRoundItemIndex(
 export function finalizeCurrentRoundItems(
   items: ChatItem[],
   toolError: Record<string, unknown>,
+  guidanceDetails: Record<string, unknown>[] = [],
 ) {
   items = items.filter((item) => item.kind !== 'subagent_progress')
   const roundStart = currentRoundStartIndex(items)
@@ -236,13 +231,11 @@ export function finalizeCurrentRoundItems(
       return { ...item, status: 'error' as const, result: { ok: false, error: toolError } }
     }
     if (item.kind === 'guidance') {
+      const detail = item.guidanceId ? guidanceDetails.find(value => String(value.id || '') === item.guidanceId) : undefined
       return {
         ...item,
-        status: item.status === 'queued'
-          ? 'not_applied' as const
-          : item.status === 'accepted'
-            ? 'completed' as const
-            : item.status,
+        status: detail ? detail.ok === false || detail.status === 'not_applied' ? 'not_applied' as const : 'completed' as const
+          : item.status === 'queued' ? 'not_applied' as const : item.status === 'accepted' ? 'completed' as const : item.status,
         finalized: true,
       }
     }
@@ -294,11 +287,9 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       runId,
       status,
       trigger: String(event.metadata?.trigger || ''),
-      roundsBefore: Math.max(0, Number(event.metadata?.rounds_before || 0)),
-      roundsRemoved: Math.max(0, Number(event.metadata?.rounds_removed || 0)),
-      roundsRemaining: Math.max(0, Number(event.metadata?.rounds_remaining || 0)),
-      memoryMode: String(event.metadata?.memory_mode || ''),
-      memoryStatus: String(event.metadata?.memory_status || ''),
+      historyTokensBefore: Math.max(0, Number(event.metadata?.history_tokens_before || 0)),
+      historyTokensAfter: Math.max(0, Number(event.metadata?.history_tokens_after || 0)),
+      absorbedCards: Math.max(0, Number(event.metadata?.absorbed_cards || 0)),
       content: String(event.content || ''),
     }
     const index = items.findIndex((candidate) => candidate.kind === 'context_compression' && candidate.runId === runId)
@@ -307,16 +298,36 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       : items.map((candidate, position) => position === index ? item : candidate)
   }
   if (event.type === 'text_delta') {
+    if (event.content) {
+      items = items.map((item, index) => index >= currentRoundStartIndex(items)
+        && item.kind === 'reasoning'
+        && item.streaming ? { ...item, streaming: false } : item)
+    }
     const index = findLastCurrentRoundItemIndex(
       items,
-      (item) => item.kind === 'message' && item.role === 'assistant' && Boolean(item.streaming),
+      (item) => item.kind === 'message' && item.role === 'assistant' && Boolean(item.streaming)
+        && (!event.response_id || item.providerResponseId === event.response_id)
+        && (!event.item_id || item.providerItemId === event.item_id),
     )
     if (index >= 0) {
       return items.map((item, position) => position === index && item.kind === 'message' ? { ...item, content: item.content + (event.content || '') } : item)
     }
-    return [...items, { id: eventId('assistant'), kind: 'message', role: 'assistant', content: event.content || '', streaming: true }]
+    items = items.map((item, position) => position >= currentRoundStartIndex(items)
+      && item.kind === 'message' && item.role === 'assistant' && item.streaming
+      ? { ...item, streaming: false } : item)
+    return [...items, {
+      id: eventId('assistant'), kind: 'message', role: 'assistant', content: event.content || '',
+      providerItemId: event.item_id || undefined, providerResponseId: event.response_id || undefined,
+      streaming: true,
+    }]
   }
   if (event.type === 'reasoning_delta') {
+    if (event.content) {
+      items = items.map((item, index) => index >= currentRoundStartIndex(items)
+        && item.kind === 'message'
+        && item.role === 'assistant'
+        && item.streaming ? { ...item, streaming: false } : item)
+    }
     const index = findLastCurrentRoundItemIndex(
       items,
       (item) => item.kind === 'reasoning' && Boolean(item.streaming),
@@ -324,29 +335,27 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     if (index >= 0) {
       return items.map((item, position) => position === index && item.kind === 'reasoning' ? { ...item, content: item.content + (event.content || '') } : item)
     }
-    return insertCurrentRoundItem(
-      items,
-      { id: eventId('reasoning'), kind: 'reasoning', content: event.content || '', streaming: true },
-      (candidate) => candidate.kind !== 'reasoning',
-    )
+    return [...items, { id: eventId('reasoning'), kind: 'reasoning', content: event.content || '', streaming: true }]
   }
   if (event.type === 'tool_call_start') {
-    return insertCurrentRoundItem(
-      items,
+    return [
+      ...items.map((item, index) => index >= currentRoundStartIndex(items)
+        && item.kind === 'message' && item.role === 'assistant'
+        && item.streaming ? { ...item, streaming: false } : item),
       {
         id: eventId('tool'), kind: 'tool', callId: event.tool_call_id || eventId('call'),
         name: event.tool_name || '未知工具', arguments: event.arguments, status: 'running',
       },
-      (candidate) => candidate.kind === 'message' && candidate.role === 'assistant'
-        || candidate.kind === 'usage'
-        || candidate.kind === 'error',
-    )
+    ]
   }
   if (event.type === 'tool_call_result') {
     const result = event.result && typeof event.result === 'object' ? event.result as Record<string, unknown> : undefined
     const backendStatus = String(event.metadata?.status || '')
+    const resultError = result?.error && typeof result.error === 'object' ? result.error as Record<string, unknown> : undefined
+    const stillRunning = backendStatus === 'timed_out_running' || resultError?.still_running === true || event.error?.still_running === true
+    const executionLive = event.metadata?.execution_live === true
     const failed = Boolean(event.error) || backendStatus === 'failed' || result?.ok === false
-    const toolStatus: 'error' | 'success' = failed ? 'error' : 'success'
+    const toolStatus = stillRunning ? 'still_running' as const : executionLive ? 'running' as const : failed ? 'error' as const : 'success' as const
     const elapsedMs = event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms)
     const toolIndex = findLastCurrentRoundItemIndex(
       items,
@@ -394,7 +403,7 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     const details = Array.isArray(event.metadata?.guidance_details)
       ? event.metadata.guidance_details
         .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object')
-      : []
+      : event.metadata?.id ? [event.metadata] : []
     return items.map((item) => {
       if (item.kind !== 'guidance' || item.status !== 'queued') return item
       const detail = item.guidanceId
@@ -416,42 +425,29 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       return { ...item, status: 'accepted' as const }
     })
   }
-  if (event.type === 'long_task_update') {
-    const continuation = Math.max(1, Number(event.metadata?.continuation || 0) || Number(event.metadata?.long_task_state && typeof event.metadata.long_task_state === 'object'
-      ? (event.metadata.long_task_state as Record<string, unknown>).continuation_count
-      : 0))
-    const taskId = String(event.metadata?.long_task_state && typeof event.metadata.long_task_state === 'object'
-      ? (event.metadata.long_task_state as Record<string, unknown>).task_id || ''
-      : event.metadata?.long_task_id || '')
-    const completed = items.map((item) => {
-      if (item.kind === 'message' || item.kind === 'reasoning') return { ...item, streaming: false }
-      if (item.kind === 'tool' && item.status === 'running') {
-        return {
-          ...item,
-          status: 'error' as const,
-          result: { ok: false, error: { message: '工具调用因当前 Run 达到工具上限而未执行，将在下一 Run 继续', exception_type: 'LongTaskRunBoundary' } },
-        }
-      }
-      return item
-    })
-    const id = `long_task_boundary_${taskId || 'active'}_${continuation}`
-    if (completed.some((item) => item.id === id)) return completed
-    return [...completed, { id, kind: 'long_task_boundary', taskId, continuation }]
-  }
   if (event.type === 'error') {
     const message = String(event.error?.message || '聊天执行失败')
     const exceptionType = String(event.error?.exception_type || 'ProviderRunInterrupted')
+    const details = Array.isArray(event.metadata?.guidance_details) ? event.metadata.guidance_details.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object') : []
     return [
-      ...finalizeCurrentRoundItems(items, { message, exception_type: exceptionType }),
+      ...finalizeCurrentRoundItems(items, { message, exception_type: exceptionType }, details),
       { id: eventId('error'), kind: 'error', content: message },
     ]
   }
   if (event.type === 'done') {
     let guidanceRemaining = Number(event.metadata?.guidance_count || 0)
+    const guidanceDetails = Array.isArray(event.metadata?.guidance_details)
+      ? event.metadata.guidance_details.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object')
+      : []
     const terminalStatus = String(event.metadata?.status || '').toLowerCase()
     const cancelled = terminalStatus === 'cancelled' || event.metadata?.cancelled === true
     const limited = terminalStatus === 'limited'
     const controlledStop = cancelled || limited
+    const unfinished = Array.isArray(event.metadata?.unfinished_tasks)
+      ? event.metadata.unfinished_tasks.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object')
+      : []
+    const liveCallIds = new Set(unfinished.filter((value) => value.execution_live === true)
+      .map((value) => String(value.tool_call_id || '')))
     const stopReason = String(event.metadata?.stop_reason || '')
     const limitedToolError = stopReason === 'tool_context_limit'
       ? { message: '工具调用因本轮达到上下文保护上限而未执行', exception_type: 'ToolContextLimitExceeded' }
@@ -472,6 +468,9 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
         }
       }
       if (item.kind === 'reasoning') return { ...item, streaming: false }
+      if (item.kind === 'tool' && item.status === 'running' && liveCallIds.has(item.callId)) {
+        return { ...item, status: 'still_running' as const }
+      }
       if (controlledStop && item.kind === 'tool' && item.status === 'running') {
         return {
           ...item,
@@ -485,159 +484,60 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
         }
       }
       if (item.kind === 'guidance') {
-        if (item.status === 'accepted') {
-          if (guidanceRemaining > 0) guidanceRemaining -= 1
-          return { ...item, status: 'completed' as const, finalized: true }
-        }
-        if (item.status === 'queued') {
-          if (guidanceRemaining > 0) {
-            guidanceRemaining -= 1
-            return { ...item, status: 'completed' as const, finalized: true }
-          }
-          return { ...item, status: 'not_applied' as const, finalized: true }
+        const detail = item.guidanceId ? guidanceDetails.find(value => String(value.id || '') === item.guidanceId) : undefined
+        const applied = detail ? detail.ok !== false && detail.status !== 'not_applied'
+          : item.status === 'accepted' || item.status === 'queued' && guidanceRemaining > 0 && (!item.guidanceId || !guidanceDetails.length)
+        if (applied && guidanceRemaining > 0) guidanceRemaining -= 1
+        if (detail || item.status === 'accepted' || item.status === 'queued') {
+          return { ...item, status: applied ? 'completed' as const : 'not_applied' as const, finalized: true }
         }
         return { ...item, finalized: true }
       }
       return item
     })
-    const withTerminalText = controlledStop && !completed.some((item) => item.kind === 'message' && item.role === 'assistant')
+    let withTerminalText: ChatItem[] = controlledStop && !completed.some((item) => item.kind === 'message' && item.role === 'assistant')
       ? [...completed, { id: eventId('assistant'), kind: 'message' as const, role: 'assistant' as const, content: terminalText }]
       : completed
-    return event.usage ? [...withTerminalText, {
+    const finalItemIds = new Set(Array.isArray(event.metadata?.final_item_ids)
+      ? event.metadata.final_item_ids.map(String) : [])
+    let lastAssistantIndex = -1
+    for (let index = currentRoundStartIndex(withTerminalText); index < withTerminalText.length; index += 1) {
+      const item = withTerminalText[index]
+      if (terminalStatus === 'completed' && item.kind === 'message' && item.role === 'assistant'
+        && item.content.trim() && (!finalItemIds.size || finalItemIds.has(item.providerItemId || ''))) {
+        lastAssistantIndex = index
+      }
+    }
+    if (lastAssistantIndex < 0 && terminalStatus === 'completed'
+      && typeof event.metadata?.text === 'string' && event.metadata.text.trim()) {
+      lastAssistantIndex = withTerminalText.length
+      withTerminalText = [...withTerminalText, {
+        id: eventId('assistant'), kind: 'message', role: 'assistant', content: event.metadata.text,
+        providerItemId: [...finalItemIds].at(-1), streaming: false,
+      }]
+    }
+    const finalized = withTerminalText.map((item, index) => index >= currentRoundStartIndex(withTerminalText)
+      && item.kind === 'message' && item.role === 'assistant'
+      ? {
+          ...item, level: index === lastAssistantIndex ? 'final' as const : 'interim' as const,
+          content: index === lastAssistantIndex && typeof event.metadata?.text === 'string'
+            ? event.metadata.text : item.content,
+        }
+      : item)
+    return event.usage ? [...finalized, {
       id: eventId('usage'), kind: 'usage', usage: event.usage,
       elapsedMs: event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms),
       toolCalls: event.metadata?.tool_calls === undefined ? undefined : Number(event.metadata.tool_calls),
       providerRequestCount: event.usage.provider_request_count === undefined ? undefined : Number(event.usage.provider_request_count),
-    }] : withTerminalText
+    }] : finalized
   }
   return items
 }
-
-function historyToolStatus(status: string): 'running' | 'success' | 'error' {
-  if (status === 'running') return 'running'
-  if (status === 'completed' || status === 'success' || status === 'duplicate_reused') return 'success'
-  return 'error'
-}
-
-export function buildHistoryItems(history: HistoryResponse | undefined): ChatItem[] {
-  const metrics = new Map((history?.round_metrics || []).map((item) => [item.round, item]))
-  const traces = new Map((history?.round_traces || []).map((item) => [item.round, item]))
-  const result: ChatItem[] = []
-  let round = Math.max(0, Number(history?.pagination?.first_round || 1) - 1)
-  let messagePosition = 0
-  const renderedArtifacts = new Set<string>()
-  const appendArtifacts = (artifacts: MediaArtifact[] | undefined, prefix: string) => {
-    for (const artifact of artifacts || []) {
-      const key = `${artifact.asset_id}\0${artifact.path}`
-      if (renderedArtifacts.has(key)) continue
-      renderedArtifacts.add(key)
-      result.push({ id: `${prefix}_${renderedArtifacts.size}`, kind: 'media', artifact })
-    }
-  }
-
-  for (const message of history?.messages ?? []) {
-    if (message.role !== 'user' && message.role !== 'assistant') continue
-    if (message.role === 'user') {
-      round += 1
-      messagePosition = 0
-      if (message.metadata?.synthetic === true && message.metadata.origin === 'long_task_continuation') {
-        result.push({
-          id: `history_long_task_${round}`,
-          kind: 'long_task_boundary',
-          taskId: String(message.metadata.long_task_id || ''),
-          continuation: Math.max(1, Number(message.metadata.continuation || 1)),
-        })
-        continue
-      }
-      if (message.content.startsWith(PLAN_EXECUTION_PROMPT_PREFIX)) {
-        result.push({ id: `history_execution_${round}`, kind: 'execution_marker', planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
-        continue
-      }
-      result.push({ id: `history_${round}_user`, kind: 'message', role: 'user', content: message.content, attachments: message.attachments })
-      continue
-    }
-
-    messagePosition += 1
-    const trace = traces.get(round)
-    if (trace?.reasoning) {
-      result.push({
-        id: `history_reasoning_${round}`,
-        kind: 'reasoning',
-        content: trace.reasoning,
-        streaming: false,
-      })
-    }
-    trace?.tools.forEach((tool, toolIndex) => {
-      result.push({ id: `history_tool_${round}_${toolIndex}`, kind: 'tool', callId: tool.call_id || `history-call-${round}-${toolIndex + 1}`, name: tool.name, status: historyToolStatus(tool.status), elapsedMs: tool.elapsed_ms, argumentsText: tool.arguments_text, argumentsTruncated: tool.arguments_truncated, resultText: tool.result_text, resultTruncated: tool.result_truncated, mediaInputs: tool.media_inputs })
-      appendArtifacts(tool.artifacts, `history_tool_media_${round}_${toolIndex}`)
-      if (!tool.result_truncated) {
-        try {
-          const plan = extractPlanSummary(JSON.parse(tool.result_text))
-          if (plan) result.push({ id: `history_task_plan_${plan.plan_id}_${round}`, kind: 'task_plan', plan })
-        } catch { /* historical tool output need not be JSON */ }
-      }
-    })
-    result.push({ id: `history_${round}_assistant_${messagePosition}`, kind: 'message', role: 'assistant', content: message.content })
-
-    const selected = metrics.get(round)
-    if (selected) {
-      appendArtifacts(selected.artifacts, `history_media_${round}`)
-      const guidanceDetails = selected.guidance_details ?? []
-      if (guidanceDetails.length) {
-        guidanceDetails.forEach((detail, guidanceIndex) => result.push({
-          id: `history_guidance_${round}_${guidanceIndex}`,
-          kind: 'guidance',
-          guidanceId: detail.id,
-          content: detail.display_text || detail.text || '附件引导',
-          attachments: detail.uploaded_files,
-          status: 'completed',
-          finalized: true,
-        }))
-      } else {
-        selected.guidance.forEach((content, guidanceIndex) => result.push({ id: `history_guidance_${round}_${guidanceIndex}`, kind: 'guidance', content, status: 'completed', finalized: true }))
-      }
-      result.push({
-        id: `history_usage_${round}`, kind: 'usage', usage: selected.usage,
-        elapsedMs: selected.elapsed_ms, toolCalls: selected.tool_calls, round,
-        providerRequestCount: selected.usage.provider_request_count === undefined
-          ? undefined
-          : Number(selected.usage.provider_request_count),
-      })
-    }
-  }
-  return result
-}
-
-export function mergeHistoryPages(pages: HistoryResponse[] | undefined): HistoryResponse | undefined {
-  if (!pages?.length) return undefined
-  if (pages.length === 1) return pages[0]
-  const ordered = [...pages].reverse()
-  const earliest = ordered[0]
-  const latest = pages[0]
-  return {
-    ...latest,
-    messages: ordered.flatMap((page) => page.messages),
-    round_metrics: ordered.flatMap((page) => page.round_metrics),
-    round_traces: ordered.flatMap((page) => page.round_traces),
-    pagination: {
-      limit: latest.pagination?.limit ?? HISTORY_PAGE_SIZE,
-      total_rounds: latest.pagination?.total_rounds
-        ?? ordered.reduce((total, page) => total + page.messages.filter((message) => message.role === 'user').length, 0),
-      first_round: earliest.pagination?.first_round ?? 1,
-      last_round: latest.pagination?.last_round
-        ?? latest.pagination?.total_rounds
-        ?? ordered.reduce((total, page) => total + page.messages.filter((message) => message.role === 'user').length, 0),
-      has_more_before: earliest.pagination?.has_more_before ?? false,
-      next_before: earliest.pagination?.next_before ?? null,
-    },
-  }
-}
-
 export function compactPlanAssistantText(content: string, hasPlanBubble: boolean) {
   if (!hasPlanBubble) return content
   const markers = ['以下是计划详情', '以下是计划的详细信息', '新计划已生成', '任务计划已生成', '计划已生成', '计划包含', '计划 ID', '## 任务计划', '📋']
   const cut = markers.map((marker) => content.indexOf(marker)).filter((index) => index >= 0).sort((left, right) => left - right)[0]
-  return cut === undefined ? content : '任务计划已创建，请在发送框上方查看并确认。'
+  return cut === undefined ? content : '任务计划已创建，请在左侧计划卡片中查看并确认。'
 }
 
 export function dropLastLiveRound(items: ChatItem[]) {
@@ -709,7 +609,6 @@ export function selectDockedPlan(plans: PlanSummary[]) {
 
 function isConversationBoundary(item: ChatItem) {
   return item.kind === 'execution_marker'
-    || item.kind === 'long_task_boundary'
     || item.kind === 'retry_boundary'
     || item.kind === 'message' && item.role === 'user'
 }
@@ -785,10 +684,12 @@ function currentRetryAttemptItems(items: ChatItem[]) {
 
 export function partitionAssistantTurnItems(items: ChatItem[]) {
   const currentAttempt = currentRetryAttemptItems(items)
+  const assistantMessages = currentAttempt.filter(
+    (item): item is AssistantMessageItem => item.kind === 'message' && item.role === 'assistant',
+  )
   return {
-    assistantMessages: currentAttempt.filter(
-      (item): item is AssistantMessageItem => item.kind === 'message' && item.role === 'assistant',
-    ),
+    assistantMessages,
+    finalAssistantMessage: [...assistantMessages].reverse().find((item) => item.level === 'final'),
     usageItems: currentAttempt.filter((item): item is UsageItem => item.kind === 'usage'),
     planItems: currentAttempt.filter(
       (item): item is TaskPlanItem => item.kind === 'task_plan' && item.presentation !== 'reference',

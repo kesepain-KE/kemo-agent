@@ -23,10 +23,6 @@ export type RunErrorNotice = {
   message: string
 }
 
-export function shouldShowLongTaskBubble(status: string) {
-  return ['running', 'pausing', 'paused', 'cancelling'].includes(status)
-}
-
 export function removeSubmittedUploads(
   current: PendingUploadedFile[],
   submitted: PendingUploadedFile[],
@@ -58,7 +54,6 @@ export function pendingInputAttachment(file: PendingUploadedFile): InputAttachme
 
 export function isSuccessfulRunCompletion(event: RunEvent) {
   if (event.type !== 'done' || event.metadata?.committed === false) return false
-  if (event.metadata?.long_task === true && event.metadata?.terminal === false) return false
   const status = String(event.metadata?.status || '').toLowerCase()
   return status === 'completed'
 }
@@ -78,18 +73,13 @@ export function isFailedRunCompletion(event: RunEvent) {
   const metadata = event.metadata || {}
   if (metadata.retryable === true && metadata.committed === false) return false
   if (metadata.cancelled === true || event.error?.cancelled === true) return false
-  if (metadata.long_task === true && metadata.terminal === false) return false
-  const nestedState = metadata.long_task_state
-  const nestedStatus = nestedState && typeof nestedState === 'object'
-    ? String((nestedState as Record<string, unknown>).status || '').toLowerCase()
-    : ''
-  const status = String(metadata.status || nestedStatus || '').toLowerCase()
+  const status = String(metadata.status || '').toLowerCase()
   if (NON_FAILURE_RUN_STATUSES.has(status)) return false
   if (event.type === 'done') return status === 'failed' || status === 'error'
   if (event.type !== 'error') return false
   if (status === 'failed' || status === 'error') return true
   // The runtime can emit a terminal error without a status field when an
   // exception escapes the provider adapter.  It is still a failed run unless
-  // explicitly marked as a non-terminal long-task update.
+  // explicitly marked as a provisional event.
   return Boolean(event.error) && metadata.terminal !== false
 }

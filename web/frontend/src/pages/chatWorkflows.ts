@@ -1,10 +1,13 @@
 import type { QueryClient } from '@tanstack/react-query'
-import { ApiError, commandPlan, retryPlanStep, streamChat } from '../api/client'
-import type { ChatItem, LongTaskResponse, LongTaskState, PlanSummary, RunEvent } from '../types/api'
+import { ApiError, commandPlan, retryPlanStep, streamChat, withdrawIntegration } from '../api/client'
+import { t as tr } from '../i18n'
+import type { ChatItem, OverviewResponse, PlanSummary, RunEvent } from '../types/api'
 import { chatDraftKey, type PendingUploadedFile } from '../store/chatDrafts'
+import { useCompressionStatus } from '../store/compressionStatus'
 import { randomUUID } from '../randomId'
 import {
   createDeltaEventBatcher,
+  dropLastLiveRound,
   extractPlanSummary,
   finalizeCurrentRoundItems,
   isProvisionalRunError,
@@ -12,6 +15,7 @@ import {
   prepareRunUserMessage,
   reduceRunEvent,
   resetCurrentRoundItemsForRetry,
+  resetProviderResponseForRetry,
   resolveHistoryUserMessages,
 } from './chatState'
 import {
@@ -50,11 +54,11 @@ export interface SendWorkflowDependencies {
   beginChatRun: AnyFn
   setRunRetryNoticeFor: (user: string, sessionId: string, value: RunRetryNotice | null) => void
   setRunErrorNoticeFor: (user: string, sessionId: string, value: RunErrorNotice | null) => void
+  setConversationBusy: AnyFn
   setDraft: AnyFn
   setPendingUploads: AnyFn
   setRunning: AnyFn
   setActiveRunId: AnyFn
-  setConversationMenuOpen: AnyFn
   setShowFollowOutput: AnyFn
   setEditedSources: AnyFn
   updateChatRunItems: AnyFn
@@ -81,8 +85,8 @@ export function createSendHandler(dependencies: SendWorkflowDependencies) {
     persistedUserMessages, editingSource, lastAttemptSessionRef, currentUserRef,
     currentLiveSessionRef, submittedUploadsRef, undoneRoundBaselineRef,
     followOutputRef, locallyCommittedSessionRef, queryClient, beginChatRun,
-    setRunRetryNoticeFor, setRunErrorNoticeFor, setDraft, setPendingUploads,
-    setRunning, setActiveRunId, setConversationMenuOpen, setShowFollowOutput,
+    setRunRetryNoticeFor, setRunErrorNoticeFor, setConversationBusy, setDraft, setPendingUploads,
+    setRunning, setActiveRunId, setShowFollowOutput,
     setEditedSources, updateChatRunItems, setEditingSource, setChatAbortController,
     playCompletionSoundOnce, playFailureSoundOnce, setDraftUploads,
     refreshSessions, isCurrentConversation, moveDraft, setSessionId,
@@ -120,6 +124,36 @@ return async (
       return false
     } finally { creatingSendSessionRef.current = false }
   }
+  let historyUserMessages = resolveHistoryUserMessages(
+    activeSession,
+    sessionId,
+    persistedUserMessages,
+    options.historyUserMessages,
+    editingSource,
+    undoneRoundBaselineRef.current,
+  )
+  if (editingSource?.sessionId === activeSession) {
+    creatingSendSessionRef.current = true
+    setConversationBusy('edit')
+    try {
+      const undo = await withdrawIntegration(
+        user, activeSession, editingSource.remainingRounds, editingSource.content,
+      )
+      historyUserMessages = undo.integration_count
+      undoneRoundBaselineRef.current = { sessionId: activeSession, remainingRounds: historyUserMessages }
+      updateChatRunItems(user, activeSession, (current: ChatItem[]) => dropLastLiveRound(current))
+      await queryClient.invalidateQueries({ queryKey: ['history', user, activeSession] })
+    } catch (error) {
+      setRunErrorNoticeFor(user, activeSession, {
+        id: eventId('run-error'),
+        message: error instanceof Error ? error.message : tr('撤销最新一轮失败，请重试'),
+      })
+      return false
+    } finally {
+      creatingSendSessionRef.current = false
+      setConversationBusy('')
+    }
+  }
   const targetUser = user
   const submissionDraftKey = chatDraftKey(user, activeSession)
   const finalDraftKey = submissionDraftKey
@@ -131,14 +165,6 @@ return async (
   if (uploadedFiles.length) {
     submittedUploadsRef.current.set(runId, uploadedFiles.map((file) => ({ ...file })))
   }
-  const historyUserMessages = resolveHistoryUserMessages(
-    activeSession,
-    sessionId,
-    persistedUserMessages,
-    options.historyUserMessages,
-    editingSource,
-    undoneRoundBaselineRef.current,
-  )
   beginChatRun(targetUser, activeSession, runId, historyUserMessages)
   setRunRetryNoticeFor(targetUser, activeSession, null)
   setRunErrorNoticeFor(targetUser, activeSession, null)
@@ -149,7 +175,6 @@ return async (
   if (draftKey !== submissionDraftKey) moveDraft(draftKey, submissionDraftKey)
   setRunning(true, targetUser, activeSession, runId)
   setActiveRunId(runId, targetUser, activeSession)
-  setConversationMenuOpen(false)
   followOutputRef.current = true
   setShowFollowOutput(false)
   if (editingSource) setEditedSources((current: any) => new Set(current).add(editingSource.id))
@@ -192,21 +217,28 @@ return async (
       runId,
       signal: controller.signal,
       onEvent: (event) => {
-        const eventState = event.metadata?.long_task_state
-        if (eventState && typeof eventState === 'object') {
-          queryClient.setQueryData<LongTaskResponse>(
-            ['long-task', user, activeSession],
-            { user, source: 'web', session_id: activeSession, long_task: eventState as LongTaskState },
-          )
-        }
-        if (event.type === 'long_task_update') {
-          const nextRunId = String(event.metadata?.next_run_id || '')
-          if (nextRunId) {
-            beginChatRun(targetUser, activeSession, nextRunId, historyUserMessages)
-            setActiveRunId(nextRunId, targetUser, activeSession)
-            activeRunIdForScope = nextRunId
-            setChatAbortController(controller, targetUser, activeSession, nextRunId)
+        if (event.type === 'usage') {
+          const rate = event.metadata?.session_cache_hit_rate
+          if (rate === null || typeof rate === 'number') {
+            const queryKey = ['overview', user, activeSession]
+            void queryClient.cancelQueries({ queryKey, exact: true }, { revert: false })
+            const updated = queryClient.setQueryData<OverviewResponse>(queryKey, (current) => current ? {
+              ...current,
+              context: { ...current.context, usage: { ...current.context.usage, cache_hit_rate: rate } },
+            } : current)
+            if (!updated) void queryClient.invalidateQueries({ queryKey, exact: true })
           }
+        }
+        if (event.type === 'context_compression') {
+          const status = String(event.metadata?.status || 'started')
+          useCompressionStatus.getState().setStatus(user, activeSession, {
+            status: status === 'ready' || status === 'failed' ? status : 'started',
+            trigger: String(event.metadata?.trigger || 'automatic'),
+            historyTokensBefore: Math.max(0, Number(event.metadata?.history_tokens_before || 0)),
+            historyTokensAfter: Math.max(0, Number(event.metadata?.history_tokens_after || 0)),
+            absorbedCards: Math.max(0, Number(event.metadata?.absorbed_cards || 0)),
+            content: String(event.content || ''),
+          })
         }
         if (event.type === 'retrying') {
           const failedAttempt = Math.max(1, Number(event.metadata?.failed_attempt || 1))
@@ -219,7 +251,9 @@ return async (
           deltaBatcher.flush()
           setRunRetryNoticeFor(targetUser, activeSession, { failedAttempt, nextAttempt, maxAttempts })
           setRunErrorNoticeFor(targetUser, activeSession, null)
-          updateChatRunItems(user, activeSession, (current: any) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt, boundaryKey))
+          updateChatRunItems(user, activeSession, (current: ChatItem[]) => event.metadata?.phase === 'provider'
+            ? resetProviderResponseForRetry(current, event)
+            : resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt, boundaryKey))
           return
         }
         if (isProvisionalRunError(event)) return
@@ -348,7 +382,6 @@ return async (
     setChatAbortController(null, targetUser, activeSession, activeRunIdForScope)
     setStopping(false, targetUser, activeSession, activeRunIdForScope)
     setRunning(false, targetUser, activeSession, activeRunIdForScope)
-    void queryClient.invalidateQueries({ queryKey: ['long-task', user, activeSession] })
   }
   return committed
 }
@@ -483,6 +516,17 @@ const executePlan = async (plan: PlanSummary) => {
       runId,
       signal: controller.signal,
       onEvent: (event) => {
+        if (event.type === 'context_compression') {
+          const status = String(event.metadata?.status || 'started')
+          useCompressionStatus.getState().setStatus(user, activeSession, {
+            status: status === 'ready' || status === 'failed' ? status : 'started',
+            trigger: String(event.metadata?.trigger || 'automatic'),
+            historyTokensBefore: Math.max(0, Number(event.metadata?.history_tokens_before || 0)),
+            historyTokensAfter: Math.max(0, Number(event.metadata?.history_tokens_after || 0)),
+            absorbedCards: Math.max(0, Number(event.metadata?.absorbed_cards || 0)),
+            content: String(event.content || ''),
+          })
+        }
         if (!refreshedRunningPlan) {
           refreshedRunningPlan = true
           void queryClient.invalidateQueries({ queryKey: ['tasks', user] })
@@ -497,7 +541,9 @@ const executePlan = async (plan: PlanSummary) => {
           deltaBatcher.flush()
           setRunRetryNoticeFor(targetUser, activeSession, { failedAttempt, nextAttempt, maxAttempts })
           setRunErrorNoticeFor(targetUser, activeSession, null)
-          updateChatRunItems(user, activeSession, (current: any) => resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt, boundaryKey))
+          updateChatRunItems(user, activeSession, (current: ChatItem[]) => event.metadata?.phase === 'provider'
+            ? resetProviderResponseForRetry(current, event)
+            : resetCurrentRoundItemsForRetry(current, failedAttempt, nextAttempt, boundaryKey))
           return
         }
         if (isProvisionalRunError(event)) return

@@ -4,7 +4,7 @@ const terminalStatuses = new Set(['completed', 'completed_after_timeout', 'compl
 const liveStatuses = new Set(['queued', 'started', 'running', 'model_request', 'tool_running', 'validating', 'retrying', 'timed_out_running'])
 
 export function reduceSubagentProgress(items: ChatItem[], event: RunEvent): ChatItem[] {
-  if (['done', 'error', 'long_task_update', 'retrying'].includes(event.type)) {
+  if (['done', 'error', 'retrying'].includes(event.type)) {
     if (event.type === 'error' && event.metadata?.retryable === true && event.metadata?.committed === false) return items
     return items.filter((item) => item.kind !== 'subagent_progress')
   }

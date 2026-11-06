@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const production = readFileSync(resolve(process.cwd(), 'src/reference/styles/production.css'), 'utf8')
+const taskPlanStyles = readFileSync(resolve(process.cwd(), 'src/components/TaskPlanBubble.module.css'), 'utf8')
 const chatView = readFileSync(resolve(process.cwd(), 'src/pages/ChatPageView.tsx'), 'utf8')
 const welcomeStyles = readFileSync(resolve(process.cwd(), 'src/reference/styles/chat.css'), 'utf8')
 const main = readFileSync(resolve(process.cwd(), 'src/main.tsx'), 'utf8')
@@ -105,14 +106,11 @@ describe('用户正文气泡', () => {
   })
 })
 
-describe('输入框轮数气泡', () => {
-  it('三个轮数共用独立的主题圆角气泡', () => {
-    const bubble = production.match(/\.reference-round-bubble\s*\{([^}]*)\}/)?.[1] ?? ''
-    expect(bubble).toContain('display: inline-flex')
-    expect(bubble).toContain('border-radius: var(--r-full)')
-    expect(bubble).toContain('border: 1px solid var(--border-subtle)')
-    expect(bubble).toContain('background: var(--bg-surface)')
-    expect(bubble).toContain('white-space: nowrap')
+describe('输入框上下文用量入口', () => {
+  it('不再渲染紧凑的卡片与整合计数气泡', () => {
+    expect(production).not.toContain('.reference-round-stat')
+    expect(production).not.toContain('.reference-round-bubble')
+    expect(production).not.toContain('.reference-stat-divider')
   })
 })
 
@@ -179,16 +177,47 @@ describe('ChatPage tool-call theme styles', () => {
   })
 })
 
+describe('输入框斜杠菜单位置', () => {
+  it('以整个输入卡片为定位容器，并与卡片顶部保留间距', () => {
+    const composer = production.match(/\.composer\.composer-inner\s*\{([^}]*)\}/)?.[1] ?? ''
+    const menu = production.match(/\.composer-slash-menu\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(composer).toContain('position: relative')
+    expect(composer).toContain('overflow: visible')
+    expect(menu).toContain('position: absolute')
+    expect(menu).toContain('bottom: calc(100% + 8px)')
+    expect(menu).toContain('overflow-y: auto')
+  })
+})
+
 describe('ChatPage active plan dock styles', () => {
-  it('bounds the shared auxiliary area while keeping the composer outside that scroll area', () => {
-    const productionDockRule = production.match(/\.composer-plan-dock\s*\{([^}]*)\}/g)?.at(-1) ?? ''
+  it('floats the active plan at the left of the chat stage', () => {
+    const productionDockRule = taskPlanStyles.match(/\.sideDock\s*\{([^}]*)\}/)?.[1] ?? ''
     const auxiliary = production.match(/\.composer-zone > \.composer-auxiliary\s*\{([^}]*)\}/)?.[1] ?? ''
 
-    expect(productionDockRule).toContain('margin-bottom: var(--composer-aux-card-gap, .5rem)')
+    expect(productionDockRule).toContain('position: absolute')
+    expect(productionDockRule).toContain('top: var(--s-6)')
+    expect(productionDockRule).toContain('left: var(--chat-edge-space)')
+    expect(productionDockRule).toContain('max-height: calc(100% - 2 * var(--s-6))')
+    expect(productionDockRule).toContain('scrollbar-width: none')
+    expect(taskPlanStyles).toContain(':global([data-workspace-open="true"]) .sideDock { display: none; }')
     expect(auxiliary).toContain('overflow-y: auto')
     expect(auxiliary).toContain('flex-shrink: 1')
     expect(auxiliary).toContain('max-height: 52dvh')
     expect(chatView).toContain('<div className="composer-auxiliary">')
+    expect(chatView).toContain('className={taskPlanStyles.sideDock} ref={taskPlanDockRef}')
+    expect(chatView).not.toContain('composer-plan-dock')
+  })
+
+  it('keeps the original chat layout regardless of plan visibility and sidebar width', () => {
+    const expandedSidebarDock = taskPlanStyles.match(/:global\(\.app-shell:not\(\.sidebar-collapsed\)\) \.sideDock\s*\{([^}]*)\}/)?.[1] ?? ''
+
+    expect(expandedSidebarDock).toContain('max-width: calc((100cqw - var(--chat-column-width)) / 2 - var(--chat-avatar-gap) - var(--chat-edge-space))')
+    expect(production).not.toContain('.chat-layout.has-task-plan')
+    expect(chatView).not.toContain('has-task-plan')
+    expect(taskPlanStyles).not.toContain('@container (max-width: 1650px)')
+    expect(chatView.indexOf('className="chat-scroll-stage"')).toBeLessThan(chatView.indexOf('className={taskPlanStyles.sideDock}'))
+    expect(chatView.indexOf('className={taskPlanStyles.sideDock}')).toBeLessThan(chatView.indexOf('className="chat-scroll"'))
+    expect(taskPlanStyles).toContain('@container task-plan-side (max-width: 420px)')
   })
 
   it('renders the created task plan as a responsive conversation card', () => {

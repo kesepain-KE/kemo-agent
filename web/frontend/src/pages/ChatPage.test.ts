@@ -1,19 +1,22 @@
+import { cardHistory } from '../test/cardHistory'
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, ContextCompressionBubble, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isRetryAttemptProgress, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan, shouldShowLongTaskBubble } from './ChatPage'
-import type { ChatItem, CronTaskSummary, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isRetryAttemptProgress, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
+import type { ChatItem, CronTaskSummary, HistoryResponse, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
+import { resetProviderResponseForRetry } from './chatState'
 import { splitInlineWidgets } from '../components/Chat/inlineWidgetProtocol'
+import { shouldPrefetchEarlierHistory } from './chatHistory'
 
 describe('正文内联组件消息链路', () => {
   const incompleteWidget = '分析如下：\n\n```kemo-widget\n{"schema_version":1,"id":"retry-widget"'
 
   it('历史恢复原样保留组件声明，由正文渲染层重新解析', () => {
     const widget = '```kemo-widget\n{"schema_version":1,"id":"history-widget","component":"metric-grid","props":{"items":[{"label":"通过","value":12}]}}\n```'
-    const items = buildHistoryItems({
+    const items = buildHistoryItems(cardHistory({
       user: 'alice', source: 'web', session_id: 's1',
       messages: [{ role: 'user', content: '查看摘要' }, { role: 'assistant', content: widget }],
-      round_metrics: [], round_traces: [],
-    })
+      integrations: [], integration_traces: [],
+    }))
 
     expect(items.find((item) => item.kind === 'message' && item.role === 'assistant')).toMatchObject({ content: widget })
     expect(splitInlineWidgets(widget)).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'widget', complete: true })]))
@@ -31,22 +34,95 @@ describe('正文内联组件消息链路', () => {
     expect(splitInlineWidgets(snapshot.content)).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'widget', complete: false })]))
     expect(retried).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'retry_boundary', phase: 'active', attempt: 2 })]))
   })
+
+  it('编辑重发后从聊天历史中排除整轮已撤回的原始卡片', () => {
+    const history = cardHistory({
+      user: 'alice', source: 'web', session_id: 's1',
+      messages: [
+        { role: 'user', content: '保留的问题' },
+        { role: 'assistant', content: '保留的回答' },
+        { role: 'user', content: '已编辑的问题' },
+        { role: 'assistant', content: '旧回答' },
+      ],
+      integrations: [
+        { integration_id: 'i_1', integration_number: 1 },
+        { integration_id: 'i_2', integration_number: 2, withdrawn: true },
+      ],
+    })
+    const messages = buildHistoryItems(history).filter((item) => item.kind === 'message')
+
+    expect(messages).toEqual([
+      expect.objectContaining({ role: 'user', content: '保留的问题' }),
+      expect.objectContaining({ role: 'assistant', content: '保留的回答' }),
+    ])
+  })
 })
 
-describe('长任务气泡显示条件', () => {
-  it('只显示活跃状态和可操作的暂停状态', () => {
-    expect(shouldShowLongTaskBubble('running')).toBe(true)
-    expect(shouldShowLongTaskBubble('pausing')).toBe(true)
-    expect(shouldShowLongTaskBubble('cancelling')).toBe(true)
-    expect(shouldShowLongTaskBubble('paused')).toBe(true)
-    expect(shouldShowLongTaskBubble('failed')).toBe(false)
-    expect(shouldShowLongTaskBubble('interrupted')).toBe(false)
-    expect(shouldShowLongTaskBubble('completed')).toBe(false)
-    expect(shouldShowLongTaskBubble('cancelled')).toBe(false)
+describe('历史轮次预加载', () => {
+  it('视口进入已加载最早轮次前两轮时自动预取更早历史', () => {
+    expect(shouldPrefetchEarlierHistory(18, 20, true)).toBe(true)
+    expect(shouldPrefetchEarlierHistory(17, 20, true)).toBe(true)
+    expect(shouldPrefetchEarlierHistory(23, 20, true)).toBe(false)
+    expect(shouldPrefetchEarlierHistory(20, 20, false)).toBe(false)
   })
 })
 
 describe('reduceRunEvent', () => {
+  it('同一响应中的 commentary 和 final 消息分别收集，只把后端确认的最终正文放到正文区', () => {
+    let items = reduceRunEvent([], {
+      type: 'text_delta', response_id: 'resp_one', item_id: 'msg_commentary', content: '正在核对',
+    })
+    items = reduceRunEvent(items, {
+      type: 'text_delta', response_id: 'resp_one', item_id: 'msg_final', content: '最终结果',
+    })
+    items = reduceRunEvent(items, { type: 'done', metadata: {
+      status: 'completed', text: '最终结果', final_item_ids: ['msg_final'],
+    } })
+    expect(items.filter((item) => item.kind === 'message')).toEqual([
+      expect.objectContaining({ content: '正在核对', level: 'interim', streaming: false }),
+      expect.objectContaining({ content: '最终结果', level: 'final', streaming: false }),
+    ])
+  })
+
+  it('不同响应复用 Item ID 也不会把两次正文拼接', () => {
+    let items = reduceRunEvent([], {
+      type: 'text_delta', response_id: 'resp_first', item_id: 'msg_body', content: '阶段性说明',
+    })
+    items = reduceRunEvent(items, {
+      type: 'text_delta', response_id: 'resp_second', item_id: 'msg_body', content: '最终结果',
+    })
+    items = reduceRunEvent(items, { type: 'done', metadata: {
+      status: 'completed', text: '最终结果', final_item_ids: ['msg_body'],
+    } })
+    expect(items.filter((item) => item.kind === 'message')).toHaveLength(2)
+    expect(items.at(-1)).toMatchObject({ content: '最终结果', level: 'final' })
+  })
+
+  it.each(['partial', 'failed', 'cancelled', 'limited'])('%s 收尾不把阶段性正文标成最终正文', (status) => {
+    const items: ChatItem[] = [
+      { id: 'u1', kind: 'message', role: 'user', content: '执行任务' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '开始执行', streaming: true },
+      { id: 't1', kind: 'tool', callId: 'tool_one', name: 'shell', status: 'running' },
+    ]
+    const result = reduceRunEvent(items, { type: 'done', metadata: {
+      status, unfinished_tasks: [{ tool_call_id: 'tool_one', execution_live: true }],
+    } })
+    expect(result.some((item) => item.kind === 'message' && item.level === 'final')).toBe(false)
+    expect(result.find((item) => item.kind === 'tool')).toMatchObject({ status: 'still_running' })
+  })
+
+  it('正常完成时从终态补齐未通过正文增量发送的拒绝答复，不把旧正文当成最终交付', () => {
+    const items: ChatItem[] = [
+      { id: 'u1', kind: 'message', role: 'user', content: '执行任务' },
+      { id: 'a1', kind: 'message', role: 'assistant', content: '正在检查', providerItemId: 'msg_old' },
+    ]
+    const result = reduceRunEvent(items, { type: 'done', metadata: {
+      status: 'completed', text: '无法执行该操作', final_item_ids: ['msg_refusal'],
+    } })
+    expect(result[1]).toMatchObject({ content: '正在检查', level: 'interim' })
+    expect(result.at(-1)).toMatchObject({ content: '无法执行该操作', level: 'final', streaming: false })
+  })
+
   it('重试成功收到下一次尝试的首个事件后清除重试气泡', () => {
     expect(isRetryAttemptProgress({ type: 'reasoning_delta', content: '新尝试' })).toBe(true)
     expect(isRetryAttemptProgress({ type: 'tool_call_start', tool_name: 'file' })).toBe(true)
@@ -79,13 +155,13 @@ describe('reduceRunEvent', () => {
     }
   })
 
-  it('上下文压缩事件更新同一运行的小气泡状态和记忆排队说明', () => {
+  it('上下文压缩事件更新运行中的压缩状态记录', () => {
     let items = reduceRunEvent([], {
       type: 'context_compression',
       content: '正在压缩对话上下文',
       metadata: {
-        status: 'started', run_id: 'run-1', trigger: 'round_limit',
-        rounds_before: 80, rounds_removed: 60, rounds_remaining: 20,
+        status: 'started', run_id: 'run-1', trigger: 'occupancy',
+        history_tokens_before: 80, absorbed_cards: 60, history_tokens_after: 20,
         memory_mode: 'background',
       },
     })
@@ -93,25 +169,19 @@ describe('reduceRunEvent', () => {
       type: 'context_compression',
       content: '对话上下文摘要已就绪',
       metadata: {
-        status: 'ready', run_id: 'run-1', trigger: 'round_limit',
-        rounds_before: 80, rounds_removed: 60, rounds_remaining: 20,
+        status: 'ready', run_id: 'run-1', trigger: 'occupancy',
+        history_tokens_before: 80, absorbed_cards: 60, history_tokens_after: 20,
         memory_mode: 'background', memory_status: 'queued_after_commit',
       },
     })
     expect(items).toHaveLength(1)
     expect(items[0]).toMatchObject({
       kind: 'context_compression', status: 'ready', runId: 'run-1',
-      roundsBefore: 80, roundsRemoved: 60, roundsRemaining: 20,
-      memoryStatus: 'queued_after_commit',
+      historyTokensBefore: 80, absorbedCards: 60, historyTokensAfter: 20,
     })
-    if (items[0].kind !== 'context_compression') throw new Error('压缩状态项缺失')
-    render(ContextCompressionBubble({ item: items[0] }))
-    expect(screen.getByText('对话上下文已压缩')).toBeInTheDocument()
-    expect(screen.getByText(/80 轮 → 保留 20 轮，裁剪 60 轮/)).toBeInTheDocument()
-    expect(screen.getByText(/进入后台记忆整理/)).toBeInTheDocument()
   })
 
-  it('取消编辑后仍沿用撤销成功返回的历史轮次基线', () => {
+  it('确认撤回后沿用服务器返回的历史轮次基线', () => {
     const undone = { sessionId: 'session-1', remainingRounds: 4 }
     expect(resolveHistoryUserMessages('session-1', 'session-1', 5, undefined, null, undone)).toBe(4)
     expect(resolveHistoryUserMessages('session-1', 'session-1', 1, undefined, null, { sessionId: 'session-1', remainingRounds: 0 })).toBe(0)
@@ -141,8 +211,6 @@ describe('reduceRunEvent', () => {
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'paused' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'rejected' } })).toBe(false)
     expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'stopped' } })).toBe(false)
-    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: false } })).toBe(false)
-    expect(isSuccessfulRunCompletion({ type: 'done', metadata: { committed: true, status: 'completed', long_task: true, terminal: true } })).toBe(true)
     expect(isSuccessfulRunCompletion({ type: 'error' })).toBe(false)
   })
 
@@ -154,9 +222,6 @@ describe('reduceRunEvent', () => {
     expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'paused' } })).toBe(false)
     expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'pausing' } })).toBe(false)
     expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'limited' } })).toBe(false)
-    expect(isFailedRunCompletion({ type: 'done', metadata: { status: 'completed', long_task: true, terminal: false } })).toBe(false)
-    expect(isFailedRunCompletion({ type: 'error', metadata: { long_task: true, terminal: false } })).toBe(false)
-    expect(isFailedRunCompletion({ type: 'error', metadata: { long_task: true, terminal: true, long_task_state: { status: 'failed' } } })).toBe(true)
     expect(isFailedRunCompletion({ type: 'error', metadata: { status: 'interrupted' } })).toBe(false)
     expect(isFailedRunCompletion({ type: 'error', error: { message: 'Provider error' } })).toBe(true)
     expect(isFailedRunCompletion({ type: 'error', metadata: { status: 'failed' }, error: { message: 'Provider error' } })).toBe(true)
@@ -171,8 +236,29 @@ describe('reduceRunEvent', () => {
     ], 18)
 
     expect(markers).toEqual([
-      { id: 'history_18_user', content: '第十八轮问题', round: 18 },
-      { id: 'user_live', content: '最新问题', round: 20 },
+      { id: 'history_18_user', content: '第十八轮问题', integration_number: 18 },
+      { id: 'user_live', content: '最新问题', integration_number: 20 },
+    ])
+  })
+
+  it('完整发言索引与正文页按卡片去重，保留重复文本、纯附件和最新实时发言', () => {
+    const markers = buildUserMessageMarkers([
+      { id: 'history_new_user', kind: 'message', role: 'user', content: '重复问题', integrationNumber: 18 },
+      { id: 'history_execution_19', kind: 'execution_marker', planId: 'plan' },
+      { id: 'guide', kind: 'guidance', content: '过程引导', status: 'completed' },
+      { id: 'live', kind: 'message', role: 'user', content: '最新问题' },
+    ], 18, [
+      { card_id: 'old', seq: 1, integration_number: 1, role: 'user', content: '重复问题' },
+      { card_id: 'attachment', seq: 3, integration_number: 2, role: 'user', content: '',
+        attachments: [{ asset_id: 'doc', name: 'notes.txt', media_kind: 'file', mime_type: 'text/plain',
+          size: 0, checksum_sha256: '', scope: 'external', relative_path: '', available: false }] },
+      { card_id: 'new', seq: 35, integration_number: 18, role: 'user', content: '重复问题' },
+    ])
+    expect(markers).toEqual([
+      { id: 'history_old_user', content: '重复问题', integration_number: 1 },
+      { id: 'history_attachment_user', content: '[附件] notes.txt', integration_number: 2 },
+      { id: 'history_new_user', content: '重复问题', integration_number: 18 },
+      { id: 'live', content: '最新问题', integration_number: 20 },
     ])
   })
 
@@ -188,21 +274,21 @@ describe('reduceRunEvent', () => {
       relative_path: 'board.png',
       available: true,
     }
-    const items = buildHistoryItems({
+    const items = buildHistoryItems(cardHistory({
       user: 'kesepain', source: 'web', session_id: 's1',
       messages: [
         { role: 'user', content: '', attachments: [attachment] },
         { role: 'assistant', content: '已识别图片' },
       ],
-      round_metrics: [], round_traces: [],
-    })
+      integrations: [], integration_traces: [],
+    }))
 
     expect(items[0]).toMatchObject({
-      id: 'history_1_user', kind: 'message', role: 'user', content: '',
+      id: 'history_card_s1_1_user', kind: 'message', role: 'user', content: '',
       attachments: [attachment],
     })
     expect(buildUserMessageMarkers(items)).toEqual([
-      { id: 'history_1_user', content: '[附件] board.png', round: 1 },
+      { id: 'history_card_s1_1_user', content: '[附件] board.png', integration_number: 1 },
     ])
   })
 
@@ -277,7 +363,7 @@ describe('reduceRunEvent', () => {
   })
 
   it('消息流中的计划详情压缩为轻量确认文本', () => {
-    expect(compactPlanAssistantText('新计划已生成：\n\n| 步骤 | 操作 |\n| --- | --- |', true)).toBe('任务计划已创建，请在发送框上方查看并确认。')
+    expect(compactPlanAssistantText('新计划已生成：\n\n| 步骤 | 操作 |\n| --- | --- |', true)).toBe('任务计划已创建，请在左侧计划卡片中查看并确认。')
     expect(compactPlanAssistantText('普通回复正文', true)).toBe('普通回复正文')
     expect(compactPlanAssistantText('新计划已生成：完整步骤', false)).toBe('新计划已生成：完整步骤')
   })
@@ -346,7 +432,7 @@ describe('reduceRunEvent', () => {
   })
 
   it('历史中的计划执行控制提示只生成执行标记，不显示伪用户气泡', () => {
-    const items = buildHistoryItems({
+    const items = buildHistoryItems(cardHistory({
       user: 'kesepain',
       source: 'web',
       session_id: 's1',
@@ -354,9 +440,9 @@ describe('reduceRunEvent', () => {
         { role: 'user', content: '【任务计划连续执行】\n计划 ID：plan_12345678\n起始步骤：step_1' },
         { role: 'assistant', content: '计划已经执行完成。' },
       ],
-      round_metrics: [],
-      round_traces: [],
-    })
+      integrations: [],
+      integration_traces: [],
+    }))
 
     expect(items).toMatchObject([
       { kind: 'execution_marker', planId: 'plan_12345678' },
@@ -379,10 +465,99 @@ describe('reduceRunEvent', () => {
     expect(items[1]).toMatchObject({ kind: 'message', content: '你好' })
   })
 
+  it('连续工具调用期间复用同一个思考卡片，最终正文结束该卡片', () => {
+    let items: ChatItem[] = []
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '先检查。' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'file' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', tool_name: 'file', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '再判断。' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c2', tool_name: 'shell' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c2', tool_name: 'shell', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '最后核对。' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c3', tool_name: 'file' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c3', tool_name: 'file', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'text_delta', content: '最终正文' })
+    items = reduceRunEvent(items, { type: 'done', metadata: { status: 'completed' }, usage: { total_tokens: 1 } })
+
+    expect(items.map((item) => item.kind)).toEqual([
+      'reasoning', 'tool', 'tool', 'tool', 'message', 'usage',
+    ])
+    expect(items[0]).toMatchObject({
+      kind: 'reasoning',
+      content: '先检查。再判断。最后核对。',
+      streaming: false,
+    })
+    expect(items[4]).toMatchObject({ kind: 'message', content: '最终正文', streaming: false, level: 'final' })
+  })
+
+  it('临时正文结束前一思考组，后续工具共享新的思考组', () => {
+    let items: ChatItem[] = []
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '第一段思考' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'file' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', tool_name: 'file', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'text_delta', content: '临时正文' })
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '第二段思考' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c2', tool_name: 'shell' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c2', tool_name: 'shell', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c3', tool_name: 'file' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c3', tool_name: 'file', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'text_delta', content: '最终正文' })
+    items = reduceRunEvent(items, { type: 'done', metadata: { status: 'completed' }, usage: { total_tokens: 1 } })
+
+    expect(items.map((item) => item.kind)).toEqual([
+      'reasoning', 'tool', 'message', 'reasoning', 'tool', 'tool', 'message', 'usage',
+    ])
+    expect(items[0]).toMatchObject({
+      kind: 'reasoning', content: '第一段思考', streaming: false,
+    })
+    expect(items[2]).toMatchObject({
+      kind: 'message', content: '临时正文', streaming: false, level: 'interim',
+    })
+    expect(items[3]).toMatchObject({
+      kind: 'reasoning', content: '第二段思考', streaming: false,
+    })
+    expect(items[6]).toMatchObject({ kind: 'message', content: '最终正文', streaming: false, level: 'final' })
+  })
+
   it('按 tool_call_id 配对开始和结果', () => {
     let items: ChatItem[] = reduceRunEvent([], { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'time', arguments: { zone: 'local' } })
     items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', tool_name: 'time', result: { ok: false }, metadata: { status: 'failed', elapsed_ms: 12 } })
     expect(items[0]).toMatchObject({ kind: 'tool', callId: 'c1', status: 'error', result: { ok: false }, elapsedMs: 12 })
+  })
+
+  it.each(['timed_out_running', 'failed'])('保留超时后未确认退出的工具回执，不随响应结束改成失败：%s', (status) => {
+    const receipt = { ok: false, error: { message: '线程尚未退出', still_running: true } }
+    const items = reduceRunEvent(
+      reduceRunEvent([], { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'file' }),
+      { type: 'tool_call_result', tool_call_id: 'c1', result: receipt, metadata: { status, elapsed_ms: 300000 } },
+    )
+    expect(items[0]).toMatchObject({ status: 'still_running', result: receipt, elapsedMs: 300000 })
+    for (const event of [
+      { type: 'done', metadata: { status: 'limited' } },
+      { type: 'error', error: { message: '连接断开' } },
+    ] satisfies RunEvent[]) {
+      expect(reduceRunEvent(items, event)[0]).toMatchObject({ status: 'still_running', result: receipt })
+    }
+    expect(finalizeCurrentRoundItems(items, { message: '响应结束' })[0]).toMatchObject({
+      status: 'still_running', result: receipt,
+    })
+  })
+
+  it('历史恢复保留超时后未确认退出，已确认终止的超时仍为失败', () => {
+    const items = buildHistoryItems(cardHistory({
+      user: 'alice', source: 'web', session_id: 's1',
+      messages: [{ role: 'user', content: '执行工具' }, { role: 'assistant', content: '部分完成' }],
+      integrations: [],
+      integration_traces: [{
+        integration_number: 1, reasoning: '', tools: [
+          { call_id: 'c1', name: 'file', status: 'timed_out_running', arguments_text: '{}', arguments_truncated: false, result_text: '{"ok":false}', result_truncated: false, elapsed_ms: 300000 },
+          { call_id: 'c2', name: 'subagent_dispatch', status: 'failed', arguments_text: '{}', arguments_truncated: false, result_text: '{"ok":false,"error":{"timeout":true}}', result_truncated: false, elapsed_ms: 1000 },
+        ],
+      }],
+    }))
+    expect(items.filter((item) => item.kind === 'tool')).toMatchObject([
+      { name: 'file', status: 'still_running' }, { name: 'subagent_dispatch', status: 'error' },
+    ])
   })
 
   it('新 Run 的正文、思考和同名工具结果不会写回旧边界', () => {
@@ -468,6 +643,34 @@ describe('reduceRunEvent', () => {
     expect(nextAttempt.at(-1)).toMatchObject({ kind: 'tool', callId: 'c1', status: 'running' })
   })
 
+  it('模型请求恢复只封存中断正文，保留仍在执行的工具和子任务', () => {
+    const runningTool: ChatItem = { id: 'tool-live', kind: 'tool', callId: 'call-live', name: 'shell', status: 'running' }
+    const progress: ChatItem = { id: 'child-live', kind: 'subagent_progress', callId: 'child', agent: 'worker', status: 'running', iteration: 1, toolName: '', toolCount: 0, nextAttempt: 0 }
+    const items: ChatItem[] = [
+      { id: 'u1', kind: 'message', role: 'user', content: '继续任务' },
+      runningTool,
+      progress,
+      { id: 'partial', kind: 'message', role: 'assistant', content: '中断的片段', streaming: true },
+    ]
+    const retried = resetProviderResponseForRetry(items, {
+      type: 'retrying', metadata: { phase: 'provider', partial_response: true,
+        failed_request_id: 'req_failed', failed_attempt: 2, next_attempt: 3 },
+    })
+    expect(retried.find(item => item.id === runningTool.id)).toBe(runningTool)
+    expect(retried.find(item => item.id === progress.id)).toBe(progress)
+    expect(retried.find(item => item.id === 'partial')).toMatchObject({ streaming: false })
+    const next = reduceRunEvent(retried, { type: 'text_delta', content: '恢复后的正文' })
+    expect(next.at(-1)).toMatchObject({ content: '恢复后的正文', streaming: true })
+    expect(next.find(item => item.id === 'partial')).toMatchObject({ content: '中断的片段' })
+  })
+
+  it('没有部分输出的模型重试不改动现有对话项', () => {
+    const items: ChatItem[] = [{ id: 'u1', kind: 'message', role: 'user', content: '继续任务' }]
+    expect(resetProviderResponseForRetry(items, {
+      type: 'retrying', metadata: { phase: 'provider', partial_response: false },
+    })).toBe(items)
+  })
+
   it('Provider error 事件统一收束当前思考、正文和工具', () => {
     const items = reduceRunEvent([
       { id: 'u1', kind: 'message', role: 'user', content: '执行任务' },
@@ -507,68 +710,6 @@ describe('reduceRunEvent', () => {
     expect(prepareRunUserMessage(failedAttempt, userItem, false)).toEqual(failedAttempt)
   })
 
-  it('长任务边界不是终态，并开启新的助手分组', () => {
-    let items: ChatItem[] = [
-      { id: 'u1', kind: 'message', role: 'user', content: '执行很长的任务' },
-      { id: 'r1', kind: 'reasoning', content: '第一 Run', streaming: true },
-      { id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'running' },
-      { id: 'a1', kind: 'message', role: 'assistant', content: '阶段结果', streaming: true },
-    ]
-    items = reduceRunEvent(items, {
-      type: 'long_task_update',
-      content: '长任务自动续跑 · 第 2 轮',
-      metadata: {
-        continuation: 1,
-        next_run_id: 'run-next',
-        long_task_state: { task_id: 'long-1', continuation_count: 0 },
-      },
-    })
-    expect(items.at(-1)).toMatchObject({ kind: 'long_task_boundary', taskId: 'long-1', continuation: 1 })
-    expect(items[1]).toMatchObject({ streaming: false })
-    expect(items[2]).toMatchObject({ status: 'error', result: { error: { exception_type: 'LongTaskRunBoundary' } } })
-    expect(items[3]).toMatchObject({ streaming: false })
-
-    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '继续思考' })
-    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'call-2', tool_name: 'file' })
-    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'call-2', tool_name: 'file', result: { ok: true } })
-    items = reduceRunEvent(items, { type: 'text_delta', content: '继续完成' })
-    const blocks = groupConversationItems(items)
-    expect(blocks).toHaveLength(3)
-    expect(blocks[1]).toMatchObject({ kind: 'assistant', items: expect.arrayContaining([expect.objectContaining({ id: 'a1' })]) })
-    expect(blocks[2]).toMatchObject({ kind: 'assistant', items: expect.arrayContaining([
-      expect.objectContaining({ kind: 'long_task_boundary' }),
-      expect.objectContaining({ kind: 'reasoning', content: '继续思考' }),
-      expect.objectContaining({ kind: 'tool', callId: 'call-2', status: 'success' }),
-      expect.objectContaining({ content: '继续完成' }),
-    ]) })
-  })
-
-  it('历史中的 synthetic 续跑提示只显示边界，不生成伪用户气泡', () => {
-    const items = buildHistoryItems({
-      user: 'kesepain', source: 'web', session_id: 'long-history',
-      messages: [
-        { role: 'user', content: '原始任务' },
-        { role: 'assistant', content: '第一阶段' },
-        {
-          role: 'user',
-          content: '【长任务自动续跑】继续',
-          metadata: {
-            synthetic: true,
-            origin: 'long_task_continuation',
-            long_task_id: 'long-1',
-            continuation: 1,
-            long_task_original_prompt: '原始任务',
-          },
-        },
-        { role: 'assistant', content: '第二阶段' },
-      ],
-      round_metrics: [], round_traces: [],
-    })
-    expect(items.filter((item) => item.kind === 'message' && item.role === 'user')).toHaveLength(1)
-    expect(items.find((item) => item.kind === 'long_task_boundary')).toMatchObject({ continuation: 1, taskId: 'long-1' })
-    expect(buildUserMessageMarkers(items)).toEqual([{ id: 'history_1_user', content: '原始任务', round: 1 }])
-  })
-
   it('逐条确认运行中引导并在本轮结束时固化全部状态', () => {
     let items: ChatItem[] = [
       { id: 'u1', kind: 'message', role: 'user', content: '开始执行' },
@@ -582,6 +723,59 @@ describe('reduceRunEvent', () => {
     items = reduceRunEvent(items, { type: 'done', metadata: { guidance_count: 1 } })
     expect(items[1]).toMatchObject({ kind: 'guidance', status: 'completed', finalized: true })
     expect(items[2]).toMatchObject({ kind: 'guidance', status: 'not_applied', finalized: true })
+  })
+
+  it('历史中的未投递引导不能在刷新后显示为成功', () => {
+    const items = buildHistoryItems(cardHistory({
+      user: 'alice', source: 'web', session_id: 'scope',
+      messages: [{ role: 'user', content: 'start' },
+        { role: 'user', level: 'guidance', integration_number: 1, guidance_id: 'late', content: 'late revision' },
+        { role: 'assistant', content: 'done' }],
+      integrations: [{
+        integration_number: 1, usage: {}, elapsed_ms: 1, tool_calls: 0, guidance: [],
+        guidance_details: [{ id: 'late', text: 'late revision', status: 'not_applied', ok: false }],
+      }], integration_traces: [],
+    }))
+    expect(items.find(item => item.kind === 'guidance')).toMatchObject({
+      guidanceId: 'late', status: 'not_applied', finalized: true,
+    })
+  })
+
+  it('终态按 id 区分重复文本的成功与未投递引导', () => {
+    const items: ChatItem[] = [
+      { id: 'late', guidanceId: 'late', kind: 'guidance', content: 'same', status: 'queued' },
+      { id: 'applied', guidanceId: 'applied', kind: 'guidance', content: 'same', status: 'queued' },
+    ]
+    const result = reduceRunEvent(items, { type: 'done', metadata: {
+      guidance_count: 1, guidance_details: [
+        { id: 'applied', status: 'applied', ok: true },
+        { id: 'late', status: 'not_applied', ok: false },
+      ],
+    } })
+    expect(result[0]).toMatchObject({ status: 'not_applied' })
+    expect(result[1]).toMatchObject({ status: 'completed' })
+  })
+
+  it('终态有精确 id 明细时不能用计数确认另一个未匹配的引导', () => {
+    const items: ChatItem[] = [
+      { id: 'late', guidanceId: 'late', kind: 'guidance', content: 'same', status: 'queued' },
+      { id: 'used', guidanceId: 'used', kind: 'guidance', content: 'same', status: 'queued' },
+    ]
+    const result = reduceRunEvent(items, { type: 'done', metadata: {
+      guidance_count: 1, guidance_details: [{ id: 'used', status: 'applied', ok: true }],
+    } })
+    expect(result[0]).toMatchObject({ status: 'not_applied' })
+    expect(result[1]).toMatchObject({ status: 'completed' })
+  })
+
+  it('最终 error 中明确未投递的明细优先于前一次尝试的 accepted 状态', () => {
+    const items: ChatItem[] = [
+      { id: 'late', guidanceId: 'late', kind: 'guidance', content: 'revision', status: 'accepted' },
+    ]
+    const result = reduceRunEvent(items, { type: 'error', error: { message: 'offline' }, metadata: {
+      committed: true, guidance_details: [{ id: 'late', status: 'not_applied', ok: false }],
+    } })
+    expect(result[0]).toMatchObject({ status: 'not_applied', finalized: true })
   })
 
   it('按 guidance id 确认重复文本的多媒体引导并保留附件', () => {
@@ -607,7 +801,7 @@ describe('reduceRunEvent', () => {
     expect(reduced[1]).toMatchObject({ status: 'accepted', attachments: [attachment] })
   })
 
-  it('无论事件到达顺序如何都按思考、工具、正文排列一轮内容', () => {
+  it('按到达顺序保留阶段正文、工具和后续思考', () => {
     let items: ChatItem[] = [{ id: 'u1', kind: 'message', role: 'user', content: '请处理' }]
     items = reduceRunEvent(items, { type: 'text_delta', content: '最终正文' })
     items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'file' })
@@ -615,14 +809,14 @@ describe('reduceRunEvent', () => {
     items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', tool_name: 'file', result: { ok: true } })
     items = reduceRunEvent(items, { type: 'done', usage: { total_tokens: 12 } })
 
-    expect(items.map((item) => item.kind)).toEqual(['message', 'reasoning', 'tool', 'message', 'usage'])
-    expect(items[1]).toMatchObject({ kind: 'reasoning', content: '先分析问题', streaming: false })
+    expect(items.map((item) => item.kind)).toEqual(['message', 'message', 'tool', 'reasoning', 'usage'])
+    expect(items[1]).toMatchObject({ kind: 'message', role: 'assistant', content: '最终正文', streaming: false })
     expect(items[2]).toMatchObject({ kind: 'tool', callId: 'c1', status: 'success' })
-    expect(items[3]).toMatchObject({ kind: 'message', role: 'assistant', content: '最终正文', streaming: false })
+    expect(items[3]).toMatchObject({ kind: 'reasoning', content: '先分析问题', streaming: false })
   })
 
   it('从已提交历史恢复思考按钮和始终可见的工具卡片', () => {
-    const items = buildHistoryItems({
+    const items = buildHistoryItems(cardHistory({
       user: 'kesepain',
       source: 'web',
       session_id: 's1',
@@ -630,9 +824,9 @@ describe('reduceRunEvent', () => {
         { role: 'user', content: '检查状态' },
         { role: 'assistant', content: '检查完成' },
       ],
-      round_metrics: [{ round: 1, usage: { total_tokens: 12 }, elapsed_ms: 20, tool_calls: 1, guidance: [] }],
-      round_traces: [{
-        round: 1,
+      integrations: [{ integration_number: 1, usage: { total_tokens: 12 }, elapsed_ms: 20, tool_calls: 1, guidance: [] }],
+      integration_traces: [{
+        integration_number: 1,
         reasoning: '先分析',
         tools: [{
           call_id: 'c1', name: 'shell', status: 'success', elapsed_ms: 12,
@@ -640,44 +834,161 @@ describe('reduceRunEvent', () => {
           result_text: 'ok', result_truncated: false,
         }],
       }],
-    })
+    }))
 
     expect(items.map((item) => item.kind)).toEqual(['message', 'reasoning', 'tool', 'message', 'usage'])
     expect(items[1]).toMatchObject({ kind: 'reasoning', content: '先分析', streaming: false })
     expect(items[2]).toMatchObject({ kind: 'tool', callId: 'c1', argumentsText: '{"command":"status"}', resultText: 'ok' })
   })
 
+  it('历史恢复时仅在助手正文出现后分割思考组', () => {
+    const integrationId = 'i_1'
+    const createdAt = '2026-11-04T00:00:00Z'
+    const assistantCard = (
+      seq: number,
+      content: string,
+      reasoning: string,
+      level: 'interim' | 'final' = 'interim',
+    ): HistoryResponse['cards'][number] => ({
+      card_id: `card_${seq}`,
+      integration_id: integrationId,
+      seq,
+      raw_kind: 'agent_text',
+      raw_level: level,
+      created_at: createdAt,
+      message: { role: 'assistant', content, reasoning },
+    })
+    const toolCard = (seq: number, callId: string): HistoryResponse['cards'][number] => ({
+      card_id: `card_${seq}`,
+      integration_id: integrationId,
+      seq,
+      raw_kind: 'tool_result',
+      raw_level: null,
+      created_at: createdAt,
+      tool: {
+        call_id: callId,
+        execution_id: `exec_${callId}`,
+        seq,
+        name: 'file',
+        status: 'success',
+        elapsed_ms: 10,
+        arguments_text: '{}',
+        arguments_truncated: false,
+        result_text: '{"ok":true}',
+        result_truncated: false,
+      },
+    })
+    const cards: HistoryResponse['cards'] = [
+      {
+        card_id: 'card_1', integration_id: integrationId, seq: 1,
+        raw_kind: 'user_text', raw_level: 'initial', created_at: createdAt,
+        message: { role: 'user', content: '处理任务' },
+      },
+      assistantCard(2, '', '第一段思考'),
+      toolCard(3, 'c1'),
+      assistantCard(4, '', '继续思考'),
+      toolCard(5, 'c2'),
+      assistantCard(6, '临时正文', ''),
+      assistantCard(7, '', '正文后的思考'),
+      toolCard(8, 'c3'),
+      assistantCard(9, '最终正文', '', 'final'),
+    ]
+    const items = buildHistoryItems(cardHistory({
+      session_id: 'history-thinking-groups',
+      cards,
+      messages: [],
+      integrations: [{
+        integration_id: integrationId,
+        integration_number: 1,
+        response_closed: true,
+        last_seq: 9,
+        usage: { total_tokens: 3 },
+        elapsed_ms: 100,
+        tool_calls: 3,
+        guidance: [],
+      }],
+    }))
+
+    expect(items.map((item) => item.kind)).toEqual([
+      'message', 'reasoning', 'tool', 'tool', 'message', 'reasoning', 'tool', 'message', 'usage',
+    ])
+    expect(items[1]).toMatchObject({
+      kind: 'reasoning', content: '第一段思考继续思考', streaming: false,
+    })
+    expect(items[4]).toMatchObject({ kind: 'message', content: '临时正文' })
+    expect(items[5]).toMatchObject({ kind: 'reasoning', content: '正文后的思考', streaming: false })
+    expect(items[7]).toMatchObject({ kind: 'message', content: '最终正文', level: 'final' })
+  })
+
   it('合并向上分页结果并保留绝对轮次和稳定消息标识', () => {
-    const latest = {
+    const latest = cardHistory({
       user: 'kesepain', source: 'web' as const, session_id: 's1',
       messages: [
         { role: 'user' as const, content: '第 21 轮' },
         { role: 'assistant' as const, content: '第 21 轮回复' },
       ],
-      round_metrics: [{ round: 21, usage: { total_tokens: 21 }, elapsed_ms: 21, tool_calls: 0, guidance: [] }],
-      round_traces: [{ round: 21, reasoning: '思考 21', tools: [] }],
-      pagination: { limit: 20, total_rounds: 21, first_round: 21, last_round: 21, has_more_before: true, next_before: 21 },
-    }
-    const earlier = {
+      integrations: [{ integration_number: 21, usage: { total_tokens: 21 }, elapsed_ms: 21, tool_calls: 0, guidance: [] }],
+      integration_traces: [{ integration_number: 21, reasoning: '思考 21', tools: [] }],
+      pagination: { limit: 20, integration_count: 21, first_seq: 61, first_integration_number: 21, last_integration_number: 21, has_more_before: true, next_before: 21 },
+    })
+    const earlier = cardHistory({
       user: 'kesepain', source: 'web' as const, session_id: 's1',
       messages: [
         { role: 'user' as const, content: '第 1 轮' },
         { role: 'assistant' as const, content: '第 1 轮回复' },
       ],
-      round_metrics: [{ round: 1, usage: { total_tokens: 1 }, elapsed_ms: 1, tool_calls: 0, guidance: [] }],
-      round_traces: [{ round: 1, reasoning: '思考 1', tools: [] }],
-      pagination: { limit: 20, total_rounds: 21, first_round: 1, last_round: 20, has_more_before: false, next_before: null },
-    }
+      integrations: [{ integration_number: 1, usage: { total_tokens: 1 }, elapsed_ms: 1, tool_calls: 0, guidance: [] }],
+      integration_traces: [{ integration_number: 1, reasoning: '思考 1', tools: [] }],
+      pagination: { limit: 20, integration_count: 21, first_integration_number: 1, last_integration_number: 20, has_more_before: false, next_before: null },
+    })
 
     const merged = mergeHistoryPages([latest, earlier])
-    expect(merged?.messages.map((message) => message.content)).toEqual([
+    expect(merged?.messages.filter((message) => message.content).map((message) => message.content)).toEqual([
       '第 1 轮', '第 1 轮回复', '第 21 轮', '第 21 轮回复',
     ])
-    expect(merged?.pagination).toMatchObject({ total_rounds: 21, first_round: 1, last_round: 21, has_more_before: false })
+    expect(merged?.pagination).toMatchObject({ integration_count: 21, first_integration_number: 1, last_integration_number: 21, has_more_before: false })
     const items = buildHistoryItems(latest)
-    expect(items[0]).toMatchObject({ id: 'history_21_user', content: '第 21 轮' })
-    expect(items[1]).toMatchObject({ id: 'history_reasoning_21', content: '思考 21' })
-    expect(items.at(-1)).toMatchObject({ id: 'history_usage_21', round: 21 })
+    expect(items[0]).toMatchObject({ id: 'history_card_s1_61_user', content: '第 21 轮' })
+    expect(items[1]).toMatchObject({ id: 'history_reasoning_card_s1_62', content: '思考 21' })
+    expect(items.at(-1)).toMatchObject({ id: 'history_usage_i_21', round: 21 })
+  })
+
+  it('长任务只加载末页时仍恢复原始提问，合并包含原始卡片的前页时不重复', () => {
+    const initial: HistoryResponse['cards'][number] = {
+      card_id: 'long-input', integration_id: 'long', seq: 3, raw_kind: 'user_text', raw_level: 'initial',
+      created_at: '2026-11-04T00:00:00Z',
+      message: { role: 'user', content: '长任务的原始提问', integration_number: 2 },
+    }
+    const latest = cardHistory({
+      cards: [{ card_id: 'long-final', integration_id: 'long', seq: 426, raw_kind: 'agent_text',
+        raw_level: 'final', created_at: '2026-11-04T01:00:00Z',
+        message: { role: 'assistant', content: '最终结果' } }],
+      integrations: [{ integration_id: 'long', integration_number: 2, last_seq: 426, initial_card: initial }],
+      pagination: { first_seq: 426, last_seq: 426, next_before: 426, has_more_before: true },
+    })
+    const latestItems = buildHistoryItems(latest)
+    expect(latestItems.filter((item) => item.kind === 'message')).toMatchObject([
+      { id: 'history_long-input_user', role: 'user', content: '长任务的原始提问', integrationNumber: 2 },
+      { role: 'assistant', content: '最终结果', level: 'final' },
+    ])
+    const earlier = cardHistory({ cards: [initial],
+      integrations: latest.integrations, pagination: { first_seq: 3, last_seq: 3 } })
+    const mergedItems = buildHistoryItems(mergeHistoryPages([latest, earlier]))
+    expect(mergedItems.filter((item) => item.kind === 'message' && item.role === 'user')).toHaveLength(1)
+    expect(groupConversationItems(mergedItems).at(-1)?.id).toBe(groupConversationItems(latestItems).at(-1)?.id)
+  })
+
+  it('加载更早轮次不会改变已显示智能体容器的标识', () => {
+    const recent: ChatItem[] = [
+      { id: 'recent-user', kind: 'message', role: 'user', content: '当前问题' },
+      { id: 'recent-answer', kind: 'message', role: 'assistant', content: '当前回复' },
+    ]
+    const earlier: ChatItem[] = [
+      { id: 'earlier-user', kind: 'message', role: 'user', content: '更早问题' },
+      { id: 'earlier-answer', kind: 'message', role: 'assistant', content: '更早回复' },
+    ]
+    expect(groupConversationItems([...earlier, ...recent]).at(-1)?.id)
+      .toBe(groupConversationItems(recent).at(-1)?.id)
   })
 
   it('done 结束流式标记，error 生成错误项', () => {
@@ -789,19 +1100,19 @@ describe('reduceRunEvent', () => {
   })
 
   it('历史中的未执行和拦截工具按错误状态恢复', () => {
-    const items = buildHistoryItems({
+    const items = buildHistoryItems(cardHistory({
       user: 'kesepain', source: 'web', session_id: 'limited',
       messages: [
         { role: 'user', content: '开始' },
         { role: 'assistant', content: '[本轮工具循环已达到最大次数 80，本轮已停止]' },
       ],
-      round_metrics: [{ round: 1, usage: {}, elapsed_ms: 1, tool_calls: 2, guidance: [] }],
-      round_traces: [{ round: 1, reasoning: '', tools: [
+      integrations: [{ integration_number: 1, usage: {}, elapsed_ms: 1, tool_calls: 2, guidance: [] }],
+      integration_traces: [{ integration_number: 1, reasoning: '', tools: [
         { call_id: 'one', name: 'file', status: 'not_executed', elapsed_ms: 0, arguments_text: '{}', arguments_truncated: false, result_text: '{}', result_truncated: false, artifacts: [] },
         { call_id: 'two', name: 'file', status: 'identical_call_blocked', elapsed_ms: 0, arguments_text: '{}', arguments_truncated: false, result_text: '{}', result_truncated: false, artifacts: [] },
       ] }],
-      pagination: { limit: 20, total_rounds: 1, first_round: 1, last_round: 1, has_more_before: false, next_before: null },
-    })
+      pagination: { limit: 20, integration_count: 1, first_integration_number: 1, last_integration_number: 1, has_more_before: false, next_before: null },
+    }))
     expect(items.filter((item) => item.kind === 'tool')).toEqual([
       expect.objectContaining({ callId: 'one', status: 'error' }),
       expect.objectContaining({ callId: 'two', status: 'error' }),
