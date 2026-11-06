@@ -9,11 +9,12 @@ import threading
 from typing import Iterator
 
 from run.config import user_dir
-from run.infra import SchemaMigrationError, execute_schema, schema_migration, schema_needs_repair
-from run.infra.fulltext import load_simple
+from run.infra import (
+    SchemaMigrationError, execute_schema, load_simple, schema_migration, schema_needs_repair,
+)
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCK_GUARD = threading.Lock()
 
@@ -63,6 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_cards_session ON context_cards(session_key,seq);
 CREATE INDEX IF NOT EXISTS idx_cards_active ON context_cards(session_key,token_active,seq);
 CREATE INDEX IF NOT EXISTS idx_cards_integration ON context_cards(session_key,integration_id,seq);
 CREATE INDEX IF NOT EXISTS idx_cards_call ON context_cards(session_key,tool_call_id,seq);
+CREATE INDEX IF NOT EXISTS idx_cards_absorbed ON context_cards(absorbed_by);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_summary ON context_cards(session_key)
     WHERE token_active=1 AND view_kind='summary';
 CREATE TRIGGER IF NOT EXISTS cards_raw_immutable
@@ -183,22 +185,28 @@ def _safe_path(root: Path, user: str) -> Path:
 
     root = root.resolve()
     directory = user_dir(user, root)
-    path = directory / "cards.sqlite3"
+    path = directory / "history" / "cards.sqlite3"
     reject_link_components(root, path, label="CardStream 数据库")
     if path.exists() and (not path.is_file() or path.stat().st_nlink > 1):
         raise ValueError("CardStream database must be an ordinary, non-linked user file")
     path.resolve().relative_to(directory.resolve())
+    if (directory / "cards.sqlite3").exists():
+        raise SchemaMigrationError(
+            "CardStream 数据库仍在用户根目录；请先停止全部服务，"
+            "通过更新器迁移到 history/cards.sqlite3 后再启动，避免建立空库或使用两份历史"
+        )
     return path
 
 
 @contextmanager
 def connection(root: Path, user: str, *, write: bool = False) -> Iterator[sqlite3.Connection]:
     """Short database ownership prevents Windows WAL close/path-check races."""
-    identity = os.path.normcase(str(root.resolve() / "users" / user / "cards.sqlite3"))
+    identity = os.path.normcase(str(root.resolve() / "users" / user / "history" / "cards.sqlite3"))
     with _LOCK_GUARD:
         lock = _LOCKS.setdefault(identity, threading.RLock())
     with lock:
         path = _safe_path(root, user)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(path, timeout=5.0)) as db:
             db.row_factory = sqlite3.Row
             load_simple(db)

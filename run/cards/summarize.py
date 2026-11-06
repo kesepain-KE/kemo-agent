@@ -448,7 +448,7 @@ class ProviderSummarizer:
                     budget.check()
                     raise
                 except Exception as error:
-                    from run.conversation.provider_events import (
+                    from run.conversation import (
                         is_context_length_exceeded, is_request_size_exceeded,
                     )
                     if (retries_left <= 0 or is_request_size_exceeded(error)

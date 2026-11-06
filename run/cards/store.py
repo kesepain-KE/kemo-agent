@@ -24,7 +24,7 @@ class CardStore:
 
     @property
     def path(self) -> Path:
-        return self.root / "users" / self.user / "cards.sqlite3"
+        return self.root / "users" / self.user / "history" / "cards.sqlite3"
 
     def db(self, *, write=False):
         return connection(self.root, self.user, write=write)
