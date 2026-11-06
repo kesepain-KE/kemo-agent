@@ -27,7 +27,7 @@ export function TerminalView({ lines, active, pending, onRefresh }: {
   return <>
     <div className={styles.toolbar}>
       <input type="search" aria-label={t('搜索输出')} placeholder={t('搜索输出')} value={search} onChange={event => setSearch(event.target.value)} />
-      <button className={styles.button} onClick={() => setFollow(!follow)} aria-pressed={follow}>{t(follow ? '暂停跟随' : '跟随最新输出')}</button>
+      <button className={styles.button} onClick={() => setFollow(!follow)} aria-pressed={follow}>{follow ? t('暂停跟随') : t('跟随最新输出')}</button>
       <button className={styles.icon} aria-label={t('复制输出')} title={t('复制输出')} onClick={() => { void copyText(visible.map(line => line.text).join('\n')).then(() => setFeedback(t('已复制'))).catch(() => setFeedback(t('复制失败'))) }}><Copy size={15} /></button>
       <button className={styles.icon} aria-label={t('刷新输出')} title={t('刷新输出')} onClick={onRefresh} disabled={pending}><RefreshCw size={15} className={pending ? 'spin' : undefined} /></button>
     </div>
@@ -42,7 +42,7 @@ export function TerminalView({ lines, active, pending, onRefresh }: {
       }}>
       {visible.length ? visible.map(line => <div key={line.id} className={styles.line} data-stream={line.stream}>
         <span>{line.stream === 'stderr' ? 'ERR' : 'OUT'}</span><pre>{line.text}</pre>
-      </div>) : <p className={styles.hint}>{t(search ? '没有匹配的输出' : '暂无输出')}</p>}
+      </div>) : <p className={styles.hint}>{search ? t('没有匹配的输出') : t('暂无输出')}</p>}
     </div>
   </>
 }

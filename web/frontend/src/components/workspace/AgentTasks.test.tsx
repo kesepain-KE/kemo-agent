@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { server } from '../../test/server'
 import type { AgentTask, AgentTaskEvent } from '../../api/workspace'
 import { languages, translate } from '../../i18n'
@@ -25,7 +25,33 @@ const task: AgentTask = { id: 'agent-task-1', root_task_id: 'main-task-1', agent
     output_tokens: 17638, total_tokens: 598530, cached_input_tokens: 518528,
     cached_prompt_tokens: 518528, cache_hit_rate: .893, provider_request_count: 18 } }
 
-afterEach(() => useUiStore.getState().setLanguage('zh-CN', ''))
+afterEach(() => {
+  vi.restoreAllMocks()
+  useUiStore.getState().setLanguage('zh-CN', '')
+})
+
+it('treats a limited root as a controlled terminal, not an active waiting task', async () => {
+  const root = { ...task, id: 'limited-root', root_task_id: '', agent: 'main',
+    status: 'limited', execution_live: false, children: [] }
+  server.use(http.get('/api/users/alice/workspace/agents', () => HttpResponse.json({ tasks: [root], total: 1, total_pages: 1 })))
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}><AgentTasks user="alice" sessionId="s1" active /></QueryClientProvider>)
+  const group = await screen.findByRole('region', { name: '主任务 · limited-root' })
+  expect(within(group).getByText('受限结束')).toHaveAttribute('data-active', 'false')
+  for (const language of languages) {
+    if (language.code !== 'zh-CN') expect(translate('受限结束', language.code)).not.toBe('受限结束')
+  }
+})
+
+it.each([true, false])('keeps partial root activity tied to real execution: %s', async (live) => {
+  const root = { ...task, id: 'partial-root', root_task_id: '', agent: 'main',
+    status: 'partial', execution_live: live, children: [] }
+  server.use(http.get('/api/users/alice/workspace/agents', () => HttpResponse.json({ tasks: [root], total: 1, total_pages: 1 })))
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}><AgentTasks user="alice" sessionId="s1" active /></QueryClientProvider>)
+  const group = await screen.findByRole('region', { name: '主任务 · partial-root' })
+  expect(within(group).getByText('部分完成')).toHaveAttribute('data-active', String(live))
+})
 
 it('pairs only call IDs, preserves parameters on completion, and keeps simultaneous same-name calls distinct', () => {
   const rows = timelineRows([
@@ -165,10 +191,83 @@ it('localizes usage labels and number formatting, formats percentages, and dedup
 it.each(languages)('has translated details and metrics for $code', ({ code }) => {
   for (const label of ['调用参数', '返回结果', 'Token 用量', '输入 Token', '推理 Token', '模型请求次数',
     '超时停止', '超时停止中', '执行轮次', '已有结论', '已保存进度，主智能体可继续此任务并重新计时。',
-    '正在等待执行真实退出，暂不能继续任务。']) {
+    '正在等待执行真实退出，暂不能继续任务。', '子任务指导', '发送指导', '取消子任务',
+    '停止并取消子任务', '待投递', '已投递']) {
     expect(translate(label, code)).toBeTruthy()
     if (code !== 'zh-CN') expect(translate(label, code)).not.toBe(label)
   }
+})
+
+it('guides and cancels a live child only when the server grants closed-parent controls', async () => {
+  let current: AgentTask = {
+    ...task, status: 'running', finished_at: '', execution_live: true,
+    controls: { guide: true, cancel: true }, guidance_pending: 1, guidance_delivered: 2,
+  }
+  let guidanceBody: unknown
+  let cancelCalls = 0
+  server.use(
+    http.get('/api/users/alice/workspace/agents/agent-task-1', () => HttpResponse.json({ task: current })),
+    http.post('/api/users/alice/workspace/agents/agent-task-1/guide', async ({ request }) => {
+      guidanceBody = await request.json()
+      current = { ...current, guidance_pending: 2 }
+      return HttpResponse.json({ ok: true, task_id: current.id, status: 'guidance_queued', pending: 2 })
+    }),
+    http.post('/api/users/alice/workspace/agents/agent-task-1/cancel', () => {
+      cancelCalls += 1
+      current = { ...current, status: 'cancelling', controls: { guide: false, cancel: false } }
+      return HttpResponse.json({
+        ok: true, task_id: current.id, status: 'cancelling',
+        cancel_requested: true, process_terminated: false,
+      })
+    }),
+  )
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}>
+    <AgentTaskView user="alice" taskId={task.id} source="web" sessionId="s1" active />
+  </QueryClientProvider>)
+  expect(await screen.findByText('指导：待投递 1 · 已投递 2')).toBeVisible()
+  fireEvent.change(screen.getByRole('textbox', { name: '子任务指导' }), { target: { value: '只补充现有证据' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送指导' }))
+  await screen.findByText('指导：待投递 2 · 已投递 2')
+  expect(guidanceBody).toEqual({ guidance: '只补充现有证据' })
+  expect(screen.queryByText('只补充现有证据')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '取消子任务' }))
+  const dialog = await screen.findByRole('alertdialog', { name: '取消子任务？' })
+  expect(cancelCalls).toBe(0)
+  fireEvent.click(within(dialog).getByRole('button', { name: '取消子任务' }))
+  expect(await screen.findByText('取消收尾中')).toBeVisible()
+  expect(cancelCalls).toBe(1)
+})
+
+it('shows cancellation even when the child agent does not support guidance', async () => {
+  let cancelCalls = 0
+  let current: AgentTask = {
+    ...task, status: 'running', finished_at: '', execution_live: true,
+    controls: { guide: false, cancel: true },
+  }
+  server.use(
+    http.get('/api/users/alice/workspace/agents/agent-task-1', () => HttpResponse.json({ task: current })),
+    http.post('/api/users/alice/workspace/agents/agent-task-1/cancel', () => {
+      cancelCalls += 1
+      current = { ...current, status: 'cancelling', controls: { guide: false, cancel: false } }
+      return HttpResponse.json({
+        ok: true, task_id: task.id, status: 'cancelling',
+        cancel_requested: true, process_terminated: false,
+      })
+    }),
+  )
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}>
+    <AgentTaskView user="alice" taskId={task.id} source="web" sessionId="s1" active />
+  </QueryClientProvider>)
+  expect(await screen.findByRole('button', { name: '取消子任务' })).toBeVisible()
+  expect(screen.queryByRole('textbox', { name: '子任务指导' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '取消子任务' }))
+  const dialog = await screen.findByRole('alertdialog', { name: '取消子任务？' })
+  expect(cancelCalls).toBe(0)
+  fireEvent.click(within(dialog).getByRole('button', { name: '取消子任务' }))
+  expect(await screen.findByText('取消收尾中')).toBeVisible()
+  expect(cancelCalls).toBe(1)
 })
 
 it('distinguishes stopped timeout from still-stopping execution and displays the original task round', async () => {

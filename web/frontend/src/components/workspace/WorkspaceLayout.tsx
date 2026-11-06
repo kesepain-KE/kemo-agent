@@ -106,7 +106,7 @@ export function WorkspaceLayout({ user, sessionId, children }: { user: string; s
         <button className={styles.icon} aria-label={t('草稿本')} title={t('草稿本')} onClick={() => openWorkspaceBlank(user)}><NotebookPen size={16} /></button>
         <button className={styles.icon} aria-label={t('智能体任务')} title={t('智能体任务')} onClick={() => openWorkspaceAgents(user)}><Bot size={16} /></button>
         <button className={styles.icon} aria-label={t('Shell 后台任务')} title={t('Shell 后台任务')} onClick={() => openWorkspaceJobs(user)}><ListChecks size={16} /></button>
-        <button className={styles.icon} aria-label={t(workspace?.maximized ? '还原面板' : '最大化面板')} title={t(workspace?.maximized ? '还原面板' : '最大化面板')} onClick={() => useWorkspaceStore.getState().patch(user, { maximized: !workspace?.maximized })}>{workspace?.maximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
+        <button className={styles.icon} aria-label={workspace?.maximized ? t('还原面板') : t('最大化面板')} title={workspace?.maximized ? t('还原面板') : t('最大化面板')} onClick={() => useWorkspaceStore.getState().patch(user, { maximized: !workspace?.maximized })}>{workspace?.maximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
         <button className={styles.icon} aria-label={t('收起工作面板')} title={t('收起工作面板')} onClick={() => useWorkspaceStore.getState().patch(user, { open: false })}><PanelRightClose size={16} /></button>
       </div>
       <div className={styles.tabs} role="tablist" aria-label={t('工作面板标签')}>
@@ -115,7 +115,7 @@ export function WorkspaceLayout({ user, sessionId, children }: { user: string; s
             tabIndex={tab.id === workspace?.activeId ? 0 : -1} title={tab.title} onClick={() => useWorkspaceStore.getState().select(user, tab.id)} onKeyDown={event => tabKey(event, index)}>
             {icon(tab)}<span>{tab.type === 'blank' || tab.type === 'jobs' || tab.type === 'agents' ? t(tab.title) : tab.title}</span>
           </button>
-          <button className={styles.icon} aria-label={`${t(tab.pinned ? '取消固定标签' : '固定标签')} ${tab.title}`} aria-pressed={Boolean(tab.pinned)} onClick={() => useWorkspaceStore.getState().pin(user, tab.id)}><Pin size={12} /></button>
+          <button className={styles.icon} aria-label={`${tab.pinned ? t('取消固定标签') : t('固定标签')} ${tab.title}`} aria-pressed={Boolean(tab.pinned)} onClick={() => useWorkspaceStore.getState().pin(user, tab.id)}><Pin size={12} /></button>
           <button className={styles.icon} aria-label={`${t('关闭标签')} ${tab.title}`} onClick={() => useWorkspaceStore.getState().close(user, tab.id)}><X size={14} /></button>
         </div>)}
       </div>

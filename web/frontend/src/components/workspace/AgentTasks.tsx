@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, ChevronRight, RefreshCw } from 'lucide-react'
-import { getAgentTask, getAgentTasks, type AgentTask } from '../../api/workspace'
+import { Bot, ChevronRight, RefreshCw, Send, Square } from 'lucide-react'
+import { cancelAgentTask, getAgentTask, getAgentTasks, guideAgentTask, type AgentTask } from '../../api/workspace'
 import { t, useLanguage } from '../../i18n'
 import { openWorkspaceAgentTask, openWorkspaceAgents, openWorkspacePath } from '../../store/workspace'
 import { formatDateTime } from '../ModuleUi'
+import { GlobalConfirmDialog } from '../GlobalConfirmDialog'
 import { AgentTimeline } from './AgentTimeline'
 import { AgentTaskResult } from './AgentTaskResult'
 import { AgentUsage } from './AgentUsage'
@@ -12,7 +13,7 @@ import styles from './Workspace.module.css'
 
 const labels: Record<string, string> = {
   queued: '排队中', running: '执行中', waiting_children: '等待子任务', merging: '汇总结果',
-  completed: '已完成', failed: '失败', cancelling: '取消收尾中', cancelled: '已取消',
+  completed: '已完成', limited: '受限结束', failed: '失败', cancelling: '取消收尾中', cancelled: '已取消',
   interrupted: '已中断', timed_out: '超时停止', timed_out_running: '超时停止中',
   tool_limit: '工具额度停止',
   model_request: '请求模型', tool_running: '执行工具', tool_finished: '工具已返回',
@@ -25,7 +26,7 @@ const labels: Record<string, string> = {
 }
 export function agentStatus(status: string) { return t(labels[status] || status) }
 function Badge({ task }: { task: AgentTask }) {
-  return <span className={styles.badge} data-active={!['completed', 'failed', 'cancelled', 'interrupted', 'timed_out', 'tool_limit'].includes(task.status) || task.execution_live}>
+  return <span className={styles.badge} data-active={!['completed', 'limited', 'partial', 'failed', 'cancelled', 'interrupted', 'timed_out', 'tool_limit'].includes(task.status) || task.execution_live}>
     {agentStatus(task.status)}
   </span>
 }
@@ -75,6 +76,9 @@ export function AgentTaskView({ user, taskId, source, sessionId, active }: {
   user: string; taskId: string; source: string; sessionId: string; active: boolean
 }) {
   useLanguage()
+  const [guidance, setGuidance] = useState('')
+  const [controlBusy, setControlBusy] = useState(false)
+  const [controlError, setControlError] = useState('')
   const query = useQuery({
     queryKey: ['workspace-agent', user, taskId, source, sessionId],
     queryFn: () => getAgentTask(user, taskId, source, sessionId),
@@ -83,6 +87,36 @@ export function AgentTaskView({ user, taskId, source, sessionId, active }: {
       && (!query.state.data?.task.finished_at || query.state.data?.task.execution_live) ? 1500 : false,
   })
   const task = query.data?.task
+  const sendGuidance = async () => {
+    const value = guidance.trim()
+    if (!task?.controls?.guide || !value || controlBusy) return
+    setControlBusy(true)
+    setControlError('')
+    try {
+      await guideAgentTask(user, task.id, source, sessionId, value)
+      setGuidance('')
+      await query.refetch()
+    } catch (error) {
+      setControlError(error instanceof Error ? error.message : t('指导发送失败'))
+    } finally {
+      setControlBusy(false)
+    }
+  }
+  const [confirmCancel, setConfirmCancel] = useState(false)
+  const cancelSubagent = async () => {
+    if (!task?.controls?.cancel || controlBusy) return
+    setConfirmCancel(false)
+    setControlBusy(true)
+    setControlError('')
+    try {
+      await cancelAgentTask(user, task.id, source, sessionId)
+      await query.refetch()
+    } catch (error) {
+      setControlError(error instanceof Error ? error.message : t('取消请求失败'))
+    } finally {
+      setControlBusy(false)
+    }
+  }
   return <>
     <div className={styles.toolbar}><Bot size={16} /><strong>{task?.agent || t('子智能体')}</strong>
       {task && <Badge task={task} />}<button className={styles.button} onClick={() => openWorkspaceAgents(user)}>{t('任务总览')}</button>
@@ -95,8 +129,24 @@ export function AgentTaskView({ user, taskId, source, sessionId, active }: {
         <div className={styles.meta}>{task.submission_order != null && <span>#{task.submission_order}</span>}<span>{task.id}</span><span>{source} · {sessionId}</span>
           <span>{t('开始')}：{formatDateTime(task.started_at || task.created_at)}</span>
           {task.finished_at && <span>{t('结束')}：{formatDateTime(task.finished_at)}</span>}
-          {task.run_count != null && <span>{t('执行轮次')}：{task.run_count}</span>}
+        {task.run_count != null && <span>{t('执行轮次')}：{task.run_count}</span>}
+          {((task.guidance_pending ?? 0) > 0 || (task.guidance_delivered ?? 0) > 0)
+            && <span>{t('指导')}：{t('待投递')} {task.guidance_pending ?? 0} · {t('已投递')} {task.guidance_delivered ?? 0}</span>}
         </div>
+        {(task.controls?.guide || task.controls?.cancel) && <div className={styles.agentControls}>
+          {task.controls?.guide && <>
+            <textarea aria-label={t('子任务指导')} maxLength={8000} rows={3} value={guidance}
+              onChange={event => setGuidance(event.target.value)} />
+            <button className={styles.button} type="button" disabled={!guidance.trim() || controlBusy} onClick={() => void sendGuidance()}>
+              <Send size={14} />{t('发送指导')}
+            </button>
+          </>}
+          {task.controls?.cancel && <button className={`${styles.button} ${styles.dangerButton}`} type="button"
+            disabled={controlBusy} onClick={() => setConfirmCancel(true)}>
+            <Square size={14} />{t('取消子任务')}
+          </button>}
+          {controlError && <div className={styles.notice} role="alert">{controlError}</div>}
+        </div>}
         {task.status === 'timed_out' && task.resumable && <p className={styles.hint}>{t('已保存进度，主智能体可继续此任务并重新计时。')}</p>}
         {task.status === 'tool_limit' && task.resumable && <p className={styles.hint}>{t('已保存进度，主智能体可继续此任务并分配新一段工具额度。')}</p>}
         {task.status === 'timed_out_running' && <p className={styles.hint}>{t('正在等待执行真实退出，暂不能继续任务。')}</p>}
@@ -110,7 +160,7 @@ export function AgentTaskView({ user, taskId, source, sessionId, active }: {
         <p className={styles.hint}>{t('点击行为卡片查看脱敏后的调用参数与返回结果。不展示私有推理、系统提示词或凭据；最多保留最近 160 条事件。')}</p>
         <AgentTimeline key={task.id} events={task.events || []} statusLabel={agentStatus} />
         {task.error?.message && <div className={styles.notice}>{task.error.message}</div>}
-        {task.result != null && <><h4>{t(task.status.startsWith('timed_out') || task.status === 'tool_limit' || task.status === 'failed' || task.status === 'cancelled' ? '已有结论' : '最终结果')}</h4><AgentTaskResult result={task.result} /></>}
+        {task.result != null && <><h4>{task.status.startsWith('timed_out') || task.status === 'tool_limit' || task.status === 'failed' || task.status === 'cancelled' ? t('已有结论') : t('最终结果')}</h4><AgentTaskResult result={task.result} /></>}
         {Boolean(task.artifacts?.length) && <><h4>{t('文件产物')}</h4><div className={styles.toolbar}>
           {task.artifacts?.map(file => <button key={`${file.scope}:${file.relative_path}`} className={styles.button}
             onClick={() => openWorkspacePath(user, file.scope, file.relative_path, file.name, file.size)}>{file.name}</button>)}
@@ -118,5 +168,15 @@ export function AgentTaskView({ user, taskId, source, sessionId, active }: {
         {task.usage && <AgentUsage usage={task.usage} />}
       </>}
     </div>
+    <GlobalConfirmDialog
+      open={confirmCancel}
+      title={t('取消子任务？')}
+      description={t('确认请求取消这个子任务？执行中的操作不会被强制终止。')}
+      icon={<Square size={20} />}
+      tone="danger"
+      confirmLabel={t('取消子任务')}
+      onConfirm={() => void cancelSubagent()}
+      onCancel={() => setConfirmCancel(false)}
+    />
   </>
 }

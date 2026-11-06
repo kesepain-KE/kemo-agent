@@ -1,6 +1,6 @@
 import { AlertCircle, CheckCircle2, ChevronDown, CircleHelp, CircleSlash, LoaderCircle, Wrench } from 'lucide-react'
 import type { AgentTaskEvent } from '../../api/workspace'
-import { t } from '../../i18n'
+import { t , useLanguage } from '../../i18n'
 import { formatDateTime } from '../ModuleUi'
 import { toolArgumentSummary } from '../RunEventCards'
 import styles from './AgentTaskDetail.module.css'
@@ -53,6 +53,7 @@ function ToolState({ event, label }: { event: AgentTaskEvent; label: string }) {
 export function AgentTimeline({ events, statusLabel }: {
   events: AgentTaskEvent[]; statusLabel: (status: string) => string
 }) {
+  useLanguage()
   return <ol className={styles.timeline}>
     {timelineRows(events).map(event => {
       const label = event.tool_name || statusLabel(event.status)
@@ -77,7 +78,7 @@ export function AgentTimeline({ events, statusLabel }: {
             <h5>{t('调用参数')}</h5>
             {event.arguments !== undefined ? <DetailValue value={event.arguments} /> : <p>{t('此历史事件未保存调用参数')}</p>}
             <h5>{t('返回结果')}</h5>
-            {event.result !== undefined ? <DetailValue value={event.result} /> : <p>{t(event.status === 'tool_running' ? '等待工具返回…' : '此历史事件未保存返回结果')}</p>}
+            {event.result !== undefined ? <DetailValue value={event.result} /> : <p>{event.status === 'tool_running' ? t('等待工具返回…') : t('此历史事件未保存返回结果')}</p>}
           </div>
         </details> : <div className={styles.phaseCard}>{label}</div>}
       </li>

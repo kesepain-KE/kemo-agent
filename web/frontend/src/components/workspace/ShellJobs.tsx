@@ -14,6 +14,7 @@ function duration(job: ShellJob) {
   return Number.isFinite(seconds) ? `${Math.max(0, Math.round(seconds))}s` : '—'
 }
 export function JobBadge({ job }: { job: ShellJob }) {
+  useLanguage()
   return <span className={styles.badge} data-active={activeJob(job.status)}>{t(labels[job.status] || '状态未知')}</span>
 }
 export function ShellJobs({ user, sessionId, active }: { user: string; sessionId: string; active: boolean }) {
@@ -41,11 +42,11 @@ function ConversationShellJobs({ user, sessionId, active }: { user: string; sess
     {query.isError && <div className={styles.notice} role="alert">{query.error.message}<button className={styles.button} onClick={() => void query.refetch()}>{t('重试')}</button></div>}
     <div className={styles.list}>
       {query.isPending && active && bound ? <div className={styles.empty} role="status">{t('正在读取后台任务…')}</div> : null}
-      {(!bound || jobs?.length === 0) && <div className={styles.empty}><Terminal size={26} /><span>{t(bound ? '暂无后台任务' : '未绑定对话')}</span></div>}
+      {(!bound || jobs?.length === 0) && <div className={styles.empty}><Terminal size={26} /><span>{bound ? t('暂无后台任务') : t('未绑定对话')}</span></div>}
       {jobs?.map(job => <button key={job.job_id} className={styles.job} onClick={() => openWorkspaceJob(user, job)}>
         <span className={styles.jobTitle}><Terminal size={15} /><code>{job.label || `Shell · ${job.job_id.slice(-6)}`}</code><JobBadge job={job} /></span>
         <span className={styles.jobCopy}><code>{job.job_id}</code> · PID {job.pid || '—'}</span>
-        <span className={styles.jobCopy}>{t(job.owner_task_id ? '所属子代理' : '所属主任务')} · {job.owner_task_id || job.root_task_id || '—'}</span>
+        <span className={styles.jobCopy}>{job.owner_task_id ? t('所属子代理') : t('所属主任务')} · {job.owner_task_id || job.root_task_id || '—'}</span>
         <span className={styles.jobCopy}>{job.working_dir || '—'}</span>
         <span className={styles.jobCopy}>{t('开始时间')}：{formatDateTime(job.started_at)}</span>
         {job.finished_at && <span className={styles.jobCopy}>{t('完成时间')}：{formatDateTime(job.finished_at)} · {t('耗时')} {duration(job)}</span>}
