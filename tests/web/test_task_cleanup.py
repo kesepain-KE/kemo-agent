@@ -46,7 +46,7 @@ class TaskCleanupTests(unittest.TestCase):
             else "2030-01-01T09:00:00+08:00",
         ))
 
-    def logs(self, count=1, *, status="completed", user="alice", task_id="cron_12345678",
+    def logs(self, count=1, *, status="success", user="alice", task_id="cron_12345678",
              offset=0):
         LogStore(self.root, retention_days=0).append_cron_records([
             {"user": user, "task_id": task_id, "status": status,
@@ -162,7 +162,8 @@ class TaskCleanupTests(unittest.TestCase):
     def test_execution_cleanup_is_durable_and_preserves_sources_and_new_runs(self):
         plan = self.plan()
         self.plan(status="failed", step_status="failed")
-        self.logs(105)
+        self.logs(104)
+        self.logs(status="completed", offset=104)
         # Older failures must reappear after filtering BEFORE the 100-row limit.
         self.logs(status="failed", offset=-200)
         self.logs(user="bob")
@@ -200,6 +201,36 @@ class TaskCleanupTests(unittest.TestCase):
         self.logs(task_id=cron["task_id"])
         self.assertEqual(self.cleanup(self.preview("executions"))["removed_count"], 1)
         self.assertEqual(CronStore(self.root, "alice").read(cron["task_id"]), cron)
+
+    def test_successful_executions_of_every_schedule_type_can_be_cleaned(self):
+        schedules = [
+            ("once", {}),
+            ("daily", {"time": "09:00"}),
+            ("weekly", {"weekdays": [1], "time": "09:00"}),
+            ("monthly", {"month_days": [1], "time": "09:00"}),
+            ("recurring", {"interval_seconds": 60}),
+        ]
+        store = CronStore(self.root, "alice")
+        definitions = []
+        for task_type, fields in schedules:
+            cron = store.create(normalize_task(
+                title=f"Cron {task_type}", prompt="Fixture only", user="alice",
+                type=task_type, status="completed" if task_type == "once" else "enabled",
+                next_run_at="" if task_type == "once" else "2030-01-01T09:00:00+08:00",
+                **fields,
+            ))
+            definitions.append(cron)
+            self.logs(task_id=cron["task_id"])
+
+        self.assertEqual(len(self.service.tasks("alice")["executions"]), len(schedules))
+        preview = self.preview("executions")
+        self.assertEqual(preview["count"], len(schedules))
+        self.assertEqual(self.cleanup(preview)["removed_count"], len(schedules))
+        self.assertEqual(WebRunService(self.root).tasks("alice")["executions"], [])
+        self.assertEqual(len(LogStore(self.root).list_cron("alice")), len(schedules))
+        for cron in definitions:
+            with self.subTest(task_type=cron["type"]):
+                self.assertEqual(store.read(cron["task_id"]), cron)
 
     def test_cron_definition_cleanup_preserves_diagnostic_execution_logs(self):
         cron = self.cron()

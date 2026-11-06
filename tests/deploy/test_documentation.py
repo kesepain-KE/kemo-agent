@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 GUIDES = (
     "readme.md",
     "README_EN.md",
-    "knowledge/global/project-introduction.md",
-    "knowledge/global/deployment-and-release.md",
+    "knowledge/global/overview/project-introduction.md",
+    "knowledge/global/release/deployment-and-release.md",
     "deploy/README.md",
 )
 
@@ -60,9 +60,11 @@ class DeploymentDocumentationTests(unittest.TestCase):
 
         self.assertEqual(code_blocks(read("readme.md")), code_blocks(read("README_EN.md")))
 
-    def test_knowledge_is_discoverable_from_manual_and_index(self) -> None:
-        for guide in ("agents.md", "knowledge/global/data_structure.md"):
-            self.assertIn("deployment-and-release.md", read(guide))
+    def test_knowledge_is_discoverable_from_manual(self) -> None:
+        self.assertIn("knowledge/global/release/deployment-and-release.md", read("agents.md"))
+        self.assertTrue(
+            (ROOT / "knowledge/global/release/deployment-and-release.md").is_file()
+        )
         for guide in GUIDES:
             text = read(guide)
             self.assertIn("kemo-agent-release-<version>.zip", text)
@@ -85,7 +87,7 @@ class DeploymentDocumentationTests(unittest.TestCase):
 
     def test_project_introductions_keep_only_the_latest_release_notes(self) -> None:
         version = json.loads(read("version.json"))["version"]
-        for guide in ("readme.md", "README_EN.md", "knowledge/global/project-introduction.md"):
+        for guide in ("readme.md", "README_EN.md", "knowledge/global/overview/project-introduction.md"):
             with self.subTest(guide=guide):
                 release_headings = re.findall(
                     r"^### (\d+\.\d+\.\d+)(?=[\s（(])", read(guide), re.MULTILINE,
@@ -93,13 +95,14 @@ class DeploymentDocumentationTests(unittest.TestCase):
                 self.assertEqual(release_headings, [version])
 
     def test_chat_scroll_contract_and_release_notes_are_discoverable(self) -> None:
-        for guide in ("agents.md", "knowledge/global/data_structure.md"):
-            with self.subTest(guide=guide):
-                self.assertIn("frontend-conventions.md", read(guide))
-        topic = read("knowledge/global/frontend-conventions.md")
+        self.assertIn(
+            "knowledge/global/web/frontend-conventions.md",
+            read("agents.md"),
+        )
+        topic = read("knowledge/global/web/frontend-conventions.md")
         self.assertIn("composer-auxiliary", topic)
         self.assertIn("内部滚动", topic)
-        for guide in ("readme.md", "README_EN.md", "knowledge/global/project-introduction.md"):
+        for guide in ("readme.md", "README_EN.md", "knowledge/global/overview/project-introduction.md"):
             with self.subTest(guide=guide):
                 text = read(guide)
                 self.assertIn("scrollable" if guide == "README_EN.md" else "内部滚动", text)

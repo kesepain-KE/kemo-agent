@@ -176,6 +176,9 @@ class UpdateSafetyContractTests(unittest.TestCase):
         masked_value = update_utils.redact_json(
             {
                 "device_token": "device-secret",
+                "accessToken": "access-token-secret",
+                "refreshToken": "refresh-token-secret",
+                "clientSecret": "client-secret-value",
                 "client_id": "safe-to-show",
                 "private_key": "-----BEGIN PRIVATE KEY-----secret-----END PRIVATE KEY-----",
             }
@@ -183,6 +186,9 @@ class UpdateSafetyContractTests(unittest.TestCase):
         assert isinstance(masked_value, dict)
         masked = masked_value
         self.assertEqual(masked["device_token"], "***")
+        self.assertEqual(masked["accessToken"], "***")
+        self.assertEqual(masked["refreshToken"], "***")
+        self.assertEqual(masked["clientSecret"], "***")
         self.assertEqual(masked["client_id"], "safe-to-show")
         self.assertEqual(masked["private_key"], "***")
 

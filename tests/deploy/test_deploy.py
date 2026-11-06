@@ -461,44 +461,25 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
         self.assertIn(str(self.root), out.getvalue())
         self.assertIn('installed=1.3.0', out.getvalue())
 
-    def test_default_classification_tables_are_publishable_but_other_runtime_data_is_not(self):
-        self.assertTrue(publishable('knowledge/global/classify.sqlite3'))
-        self.assertTrue(publishable('knowledge/share/classify.sqlite3'))
-        for name in ('users/alice/improve/memory.sqlite3',
-                     'runtime/logs.sqlite3',
-                     'knowledge/share/other.sqlite3',
-                     'knowledge/global/classify.sql'):
+    def test_retired_classification_metadata_is_not_publishable(self):
+        for name in ('knowledge/global/classify.sqlite3', 'knowledge/share/classify.sqlite3',
+                     'knowledge/global/classify.sql', 'users/alice/improve/memory.sqlite3',
+                     'runtime/logs.sqlite3', 'knowledge/share/other.sqlite3'):
             self.assertFalse(publishable(name), name)
 
-    def test_release_archive_accepts_default_classification_tables(self):
-        extra = {'knowledge/global/classify.sqlite3': b'SQLite format 3\x00seed',
-                 'knowledge/share/classify.sqlite3': b'SQLite format 3\x00seed'}
-        bundle = parse_archive(self.archive(extra=extra).read_bytes(), '1.3.0')
-        self.assertIn('knowledge/global/classify.sqlite3', bundle.files)
-        self.assertIn('knowledge/share/classify.sqlite3', bundle.files)
-
-    def test_default_classification_tables_are_seeded_once_and_never_overwritten(self):
-        seed = {'knowledge/global/classify.sqlite3': b'SQLite format 3\x00seed',
-                'knowledge/share/classify.sqlite3': b'SQLite format 3\x00seed'}
-        self.install(self.bundle(extra=seed))
-        global_table = self.root / 'knowledge/global/classify.sqlite3'
-        self.assertEqual(global_table.read_bytes(), seed['knowledge/global/classify.sqlite3'])
-
-        # 本机维护的分类数据必须原样保留，也不能被登记成托管文件。
-        global_table.write_bytes(b'SQLite format 3\x00local')
-        old = sync.installed(self.root)
-        changes, files = sync.plan(self.root, self.bundle('1.3.1', extra=seed), self.doc, old)
-        self.assertEqual([c for c in changes if 'classify.sqlite3' in c.name], [])
-        self.assertNotIn('knowledge/global/classify.sqlite3', files)
-        self.assertEqual(global_table.read_bytes(), b'SQLite format 3\x00local')
-
-    def test_obsolete_classification_table_is_not_deleted_on_update(self):
+    def test_legacy_classification_seed_is_accepted_without_overwriting_or_removing_local_data(self):
         seed = {'knowledge/global/classify.sqlite3': b'SQLite format 3\x00seed'}
+        # Older supported releases still contain these files, even though new packs omit them.
+        bundle = parse_archive(self.archive(extra=seed).read_bytes(), '1.3.0')
+        self.assertIn('knowledge/global/classify.sqlite3', bundle.files)
         self.install(self.bundle(extra=seed))
-        old = sync.installed(self.root)
-        changes, _ = sync.plan(self.root, self.bundle('1.3.1'), self.doc, old)
-        self.assertEqual([c for c in changes if 'classify.sqlite3' in c.name], [])
-        self.assertTrue((self.root / 'knowledge/global/classify.sqlite3').is_file())
+        legacy = self.root / 'knowledge/global/classify.sqlite3'
+        legacy.write_bytes(b'SQLite format 3\x00local')
+        for extra in (seed, {}):
+            changes, files = sync.plan(self.root, self.bundle('1.3.1', extra=extra), self.doc, sync.installed(self.root))
+            self.assertEqual([c for c in changes if 'classify.sqlite3' in c.name], [])
+            self.assertNotIn('knowledge/global/classify.sqlite3', files)
+            self.assertEqual(legacy.read_bytes(), b'SQLite format 3\x00local')
 
 
 def read_version(root):

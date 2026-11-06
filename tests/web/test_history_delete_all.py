@@ -1,4 +1,4 @@
-"""Bulk deletion hides CardStream identities atomically and preserves RAW."""
+"""Explicit history deletion erases RAW atomically while preserving user isolation."""
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +28,9 @@ def seed(service, source="web", session_id="shared", user="alice"):
     integration.start()
     store.append(source, session_id, integration.id, "user_text",
                  {"text": f"isolated {source} {session_id}"}, level="initial")
+    execution, _ = integration.register_tool("call", {"name": "read", "arguments": {}})
+    integration.tool_result(execution["execution_id"], {"ok": True, "text": "tool result"},
+                            status="completed", duration_ms=1)
     integration.request_started()
     integration.request_finished(accepted_seq=store.snapshot(source, session_id).last_seq)
     integration.finish("completed", final_payload={"text": "isolated response"})
@@ -44,13 +47,14 @@ def request(service, url):
     return asyncio.run(invoke())
 
 
-def test_all_hides_every_source_and_reservation_but_preserves_raw_and_user_files(service):
+def test_all_purges_every_source_and_reservation_but_preserves_other_user_files(service):
     sources = ["web", "app", "cli", "message:nya_desk_pet",
                "background:cron:cron_1234abcd", "direct_api"]
     stores = [seed(service, source) for source in sources]
+    service.mark_session("alice", "shared", pinned=True, favorite=True)
     reserve_session(service.root, "alice", "cli", "reserved-only", active_key="cli:alice")
     bob = seed(service, user="bob")
-    before = {source: stores[0].raw_page(source, "shared") for source in sources}
+    bob_raw = bob.raw_page("web", "shared")
     sentinels = {
         service.root / "users/alice/history/history.sqlite3": b"do not open old history",
         service.root / "users/alice/history/window.json": b'{"legacy":"keep"}',
@@ -69,32 +73,98 @@ def test_all_hides_every_source_and_reservation_but_preserves_raw_and_user_files
     assert response.status_code == 200, response.text
     assert response.json() == {
         "user": "alice", "source": "all", "deleted": True,
-        "deleted_sessions": 7, "raw_preserved": True,
+        "deleted_sessions": 7, "raw_preserved": False,
     }
     assert service.sessions("alice", source="all")["sessions"] == []
     assert bob.session("web", "shared")["lifecycle"] == "open"
+    assert bob.raw_page("web", "shared") == bob_raw
     for source in sources:
-        assert stores[0].raw_page(source, "shared") == before[source]
-        assert stores[0].session(source, "shared")["lifecycle"] == "deleted"
+        assert stores[0].raw_page(source, "shared") == ()
+        tombstone = stores[0].session(source, "shared")
+        assert tombstone["lifecycle"] == "deleted"
+        assert tombstone["record_json"] == "{}"
+        assert tombstone["last_seq"] == tombstone["active_tokens"] == 0
     for path, body in sentinels.items():
         assert path.read_bytes() == body
     assert ("alice", "web", "shared") not in service._session_leases
     assert ("bob", "web", "shared") in service._session_leases
-    with stores[0].db() as db:
-        assert db.execute("SELECT count(*) FROM context_cards").fetchone()[0] == 12
-        assert db.execute("SELECT count(*) FROM card_bindings").fetchone()[0] == 0
-        assert db.execute("SELECT count(*) FROM card_leases").fetchone()[0] == 0
+    with stores[0].db(write=True) as db:
+        for table in ("context_cards", "card_integrations", "card_tool_executions",
+                      "card_bindings", "card_leases", "card_text_fts"):
+            assert db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT count(*) FROM card_text_fts WHERE card_text_fts MATCH 'isolated'"
+        ).fetchone()[0] == 0
+        db.execute("INSERT INTO card_text_fts(card_text_fts,rank) VALUES('integrity-check',1)")
 
 
-def test_default_only_hides_web_and_readonly_single_mutation_is_rejected(service):
+def test_default_only_purges_web_and_readonly_single_mutation_is_rejected(service):
     store = seed(service)
     seed(service, "message:nya_desk_pet")
     response = request(service, "/api/users/alice/sessions")
     assert response.status_code == 200 and response.json()["source"] == "web"
     assert store.session("web", "shared")["lifecycle"] == "deleted"
+    assert store.raw_page("web", "shared") == ()
     assert store.session("message:nya_desk_pet", "shared")["lifecycle"] == "open"
+    assert store.raw_page("message:nya_desk_pet", "shared")
     rejected = request(service, "/api/users/alice/sessions/shared?source=message:nya_desk_pet")
     assert rejected.status_code == 400
+
+
+@pytest.mark.parametrize("already_hidden", [False, True])
+def test_single_pinned_favorite_delete_erases_history_and_keeps_other_sessions(service, already_hidden):
+    from run.history.session_api import _hide
+
+    store = seed(service)
+    seed(service, "app")
+    seed(service, session_id="keep")
+    service.mark_session("alice", "shared", pinned=True, favorite=True)
+    before_app, before_keep = store.raw_page("app", "shared"), store.raw_page("web", "keep")
+    generation = store.session("web", "shared")["generation"]
+    with store.db(write=True) as db:
+        deleted_rowids = {row[0] for row in db.execute(
+            "SELECT rowid FROM context_cards WHERE session_key=?", (session_key("web", "shared"),)
+        )}
+        if already_hidden:
+            _hide(db, session_key("web", "shared"))
+
+    response = request(service, "/api/users/alice/sessions/shared")
+
+    assert response.status_code == 200 and response.json()["deleted"]
+    assert store.raw_page("web", "shared") == ()
+    assert store.session("web", "shared")["record_json"] == "{}"
+    assert store.session("web", "shared")["generation"] != generation
+    assert store.raw_page("app", "shared") == before_app
+    assert store.raw_page("web", "keep") == before_keep
+    assert request(service, "/api/users/alice/sessions/shared").status_code == 404
+    with store.db(write=True) as db:
+        indexed_rowids = {row[0] for row in db.execute(
+            "SELECT rowid FROM card_text_fts WHERE card_text_fts MATCH 'isolated'"
+        )}
+        assert deleted_rowids.isdisjoint(indexed_rowids)
+        assert db.execute("SELECT count(*) FROM card_integrations WHERE session_key=?",
+                          (session_key("web", "shared"),)).fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM card_tool_executions").fetchone()[0] == 2
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+        db.execute("INSERT INTO card_text_fts(card_text_fts,rank) VALUES('integrity-check',1)")
+        with pytest.raises(sqlite3.IntegrityError, match="cannot be deleted"):
+            db.execute("DELETE FROM context_cards WHERE session_key=?", (session_key("web", "keep"),))
+
+
+def test_all_purges_history_hidden_by_the_previous_delete_behavior(service):
+    from run.history.session_api import _hide
+
+    store = seed(service)
+    seed(service, "cli")
+    with store.db(write=True) as db:
+        _hide(db, session_key("cli", "shared"))
+    assert store.raw_page("cli", "shared")
+
+    response = request(service, "/api/users/alice/sessions?source=all")
+
+    assert response.status_code == 200 and response.json()["deleted_sessions"] == 2
+    assert store.raw_page("web", "shared") == store.raw_page("cli", "shared") == ()
+    assert request(service, "/api/users/alice/sessions?source=all").json()["deleted_sessions"] == 0
 
 
 def test_all_sources_selects_beyond_the_first_listing_page(service):
@@ -143,13 +213,12 @@ def test_other_live_document_lease_blocks_all_with_source_scoping(service, sourc
 
 def test_own_and_expired_other_leases_allow_idempotent_delete(service):
     store = seed(service)
-    before = store.raw_page("web", "shared")
     assert touch_session_lease(service.root, "alice", "web", "shared", "client-mine-123")
     assert touch_session_lease(service.root, "alice", "web", "shared", "expired", now=0)
     response = request(service, "/api/users/alice/sessions?source=all&client_id=client-mine-123")
     assert response.status_code == 200 and response.json()["deleted_sessions"] == 1
     assert request(service, "/api/users/alice/sessions?source=all").json()["deleted_sessions"] == 0
-    assert store.raw_page("web", "shared") == before
+    assert store.raw_page("web", "shared") == ()
 
 
 def test_transaction_failure_rolls_back_lifecycle_bindings_leases_and_raw(service):
@@ -158,6 +227,7 @@ def test_transaction_failure_rolls_back_lifecycle_bindings_leases_and_raw(servic
     reserve_session(service.root, "alice", "web", "shared", active_key="browser")
     assert touch_session_lease(service.root, "alice", "web", "shared", "client-mine-123")
     before = store.raw_page("web", "shared")
+    before_cli = store.raw_page("cli", "shared")
     with store.db(write=True) as db:
         db.execute("""CREATE TRIGGER isolated_fail_hide BEFORE UPDATE OF lifecycle ON card_sessions
             WHEN NEW.lifecycle='deleted' AND NEW.source='cli'
@@ -168,22 +238,29 @@ def test_transaction_failure_rolls_back_lifecycle_bindings_leases_and_raw(servic
         assert db.execute("SELECT count(*) FROM card_sessions WHERE lifecycle='deleted'").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM card_bindings").fetchone()[0] == 1
         assert db.execute("SELECT count(*) FROM card_leases").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM card_integrations").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM card_tool_executions").fetchone()[0] == 2
+        assert db.execute(
+            "SELECT count(*) FROM card_text_fts WHERE card_text_fts MATCH 'isolated'"
+        ).fetchone()[0] == 4
     assert store.raw_page("web", "shared") == before
+    assert store.raw_page("cli", "shared") == before_cli
     with store.db(write=True) as db:
+        with pytest.raises(sqlite3.IntegrityError, match="cannot be deleted"):
+            db.execute("DELETE FROM context_cards")
         db.execute("DROP TRIGGER isolated_fail_hide")
     assert service.delete_all_sessions("alice", source="all", client_id="client-mine-123")["deleted_sessions"] == 2
 
 
 def test_stale_writer_cannot_resurrect_a_deleted_identity(service):
     store = seed(service, "message:nya_desk_pet")
-    before = store.raw_page("message:nya_desk_pet", "shared")
     reserve_session(service.root, "alice", "cli", "reserved-only")
     service.delete_all_sessions("alice", source="all")
     with pytest.raises(CardSessionClosedError):
         store.append("message:nya_desk_pet", "shared", "late", "agent_text", {"text": "late"})
     with pytest.raises(CardSessionClosedError):
         reserve_session(service.root, "alice", "cli", "reserved-only")
-    assert store.raw_page("message:nya_desk_pet", "shared") == before
+    assert store.raw_page("message:nya_desk_pet", "shared") == ()
     assert find_record(service.root, "alice", "message:nya_desk_pet", "shared") is None
     assert store.session("cli", "reserved-only")["session_key"] == session_key("cli", "reserved-only")
 

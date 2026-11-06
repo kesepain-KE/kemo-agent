@@ -100,7 +100,7 @@ def test_maintenance_exposes_interrupted_system_task_count(backend):
 
 def test_congestion_http_snapshots_follow_shared_slots_without_building_prompts(backend, monkeypatch):
     import provider.factory as factory
-    import web.services.runtime_status as status_module
+    import web.services.runtime_status_aggregate as status_module
 
     config = {"provider_runtime": {"max_concurrent_requests": 2}}
     (backend.root / "config/global_config.yaml").write_text(json.dumps(config), encoding="utf-8")

@@ -33,7 +33,7 @@ from run.extensions import history_attachment_descriptors
 from run.conversation import GuidanceInput
 from run.scheduler import CronStore, normalize_task
 from run.config import load_config
-from run.cards import CardStore, IntegrationStore, compact
+from run.cards import CARD_SCHEMA_VERSION, CardStore, IntegrationStore, compact
 from tests.card_history_support import seed_history, session_history
 from run.history import find_record, mutate_registry_record
 from run.history import (
@@ -2624,17 +2624,22 @@ class WebBackendTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertEqual(self.request(app, "PATCH", "/api/users/alice/sessions/s1", json={"title": title}).status_code, 400)
 
-    def test_session_delete_hides_identity_and_preserves_raw_and_other_users(self):
+    def test_session_delete_erases_raw_keeps_tombstone_and_preserves_other_users(self):
         _, root = self.make_root()
         history = card_seed(root)
         bob = card_seed(root, user="bob")
-        before = history.cards
+        self.assertEqual(len(history.cards), 2)
+        bob_before = bob.cards
         app = create_app(service=WebRunService(root))
         response = self.request(app, "DELETE", "/api/users/alice/sessions/s1")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(response.json()["deleted"])
-        self.assertEqual(history.cards, before)
-        self.assertEqual(len(bob.cards), 2)
+        self.assertEqual(history.cards, [])
+        tombstone = history.store.session("web", "s1")
+        self.assertEqual(tombstone["lifecycle"], "deleted")
+        self.assertEqual(tombstone["record_json"], "{}")
+        self.assertEqual(tombstone["last_seq"], 0)
+        self.assertEqual(bob.cards, bob_before)
         self.assertEqual(self.request(app, "GET", "/api/users/alice/sessions/s1/history").status_code, 404)
         self.assertEqual(self.request(app, "DELETE", "/api/users/alice/sessions/s1").status_code, 404)
 
@@ -2750,7 +2755,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(self.request(app, "POST", "/api/users/alice/sessions/s1/withdraw-integration", json=body).status_code, 409)
         self.assertEqual(history.store.snapshot("web", "s1"), before)
 
-    def test_delete_all_sessions_is_scoped_and_preserves_raw(self):
+    def test_delete_all_sessions_is_scoped_and_erases_raw(self):
         _, root = self.make_root()
         histories = [card_seed(root, sid) for sid in ("s1", "s2")]
         card_seed(root, user="bob")
@@ -2759,7 +2764,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["deleted_sessions"], 2)
         self.assertEqual(self.request(app, "GET", "/api/users/alice/sessions").json()["sessions"], [])
-        self.assertTrue(all(len(h.cards) == 2 for h in histories))
+        self.assertTrue(all(len(h.cards) == 0 for h in histories))
         self.assertIsNotNone(find_record(root, "bob", "web", "s1"))
 
     def test_active_session_cannot_be_deleted(self):
@@ -5831,7 +5836,7 @@ class WebBackendTests(unittest.TestCase):
             settings.json()["schema_versions"],
             {
                 "config_schema": 1,
-                "card_schema": 4,
+                "card_schema": CARD_SCHEMA_VERSION,
                 "memory_storage_schema": 4,
             },
         )

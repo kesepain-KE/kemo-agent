@@ -51,6 +51,48 @@ def test_scoped_tree_pagination_and_private_fields(backend):
         task(backend, 'alice', child.id, source='', session_id='')
     assert 'owner' not in json.dumps(result) and 'process_started' not in json.dumps(result)
 
+def test_task_tree_filters_roots_without_children_before_counting_and_paging(backend):
+    older, first_child = register(backend, 1)
+    newer, second_child = register(backend, 2)
+    ledger = older.ledger
+    ledger.update(first_child.id, status='completed', execution_live=False)
+    ledger.update(second_child.id, status='failed', execution_live=False)
+    for index in range(25):
+        coordinator = TaskCoordinator(backend.root, 'alice', 'web', 'scope',
+                                      f'ordinary-{index}', {'prompt': 'no subagents'})
+        coordinator.ensure_started()
+        ledger.update(coordinator.id, status='completed', execution_live=False)
+    pending = TaskCoordinator(backend.root, 'alice', 'web', 'scope',
+                              'later-dispatch', {'prompt': 'not dispatched yet'})
+    pending.ensure_started()
+
+    first = tasks(backend, 'alice', source='web', session_id='scope', page_size=1)
+    second = tasks(backend, 'alice', source='web', session_id='scope', page=2, page_size=1)
+    assert first['total'] == second['total'] == 2
+    assert first['total_pages'] == second['total_pages'] == 2
+    assert [root['id'] for root in first['tasks']] == [newer.id]
+    assert [root['id'] for root in second['tasks']] == [older.id]
+    assert first['tasks'][0]['children'][0]['status'] == 'failed'
+    assert second['tasks'][0]['children'][0]['status'] == 'completed'
+    assert ledger.records('web', 'scope', parent='')[1] == 28
+
+    child = AgentTask('agent-task-' + 'f' * 32, 'worker', {}, source='web', session_id='scope')
+    ledger.register(child, pending.ownership('first-dispatch'))
+    updated = tasks(backend, 'alice', source='web', session_id='scope', page_size=1)
+    assert updated['total'] == 3 and updated['total_pages'] == 3
+    assert [root['id'] for root in updated['tasks']] == [pending.id]
+    assert updated['tasks'][0]['children'][0]['id'] == child.id
+
+def test_task_tree_is_empty_when_no_main_task_has_dispatched_a_subagent(backend):
+    coordinator = TaskCoordinator(backend.root, 'alice', 'web', 'scope',
+                                  'ordinary', {'prompt': 'no subagents'})
+    coordinator.ensure_started()
+
+    result = tasks(backend, 'alice', source='web', session_id='scope')
+
+    assert result == {'tasks': [], 'total': 0, 'page': 1, 'total_pages': 1}
+    assert coordinator.ledger.get(coordinator.id, 'web', 'scope') is not None
+
 def test_artifacts_are_only_existing_user_files(backend):
     coordinator, child = register(backend)
     directory = backend.root / 'users/alice/download'

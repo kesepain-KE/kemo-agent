@@ -4,6 +4,8 @@ from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -40,6 +42,54 @@ def test_update_saves_all_original_databases_before_first_migration(tmp_path):
         assert stored_version(db_path(tmp_path, kind), kind) == VERSIONS[kind]
         assert snapshot(backups.directory / db_path(tmp_path, kind).relative_to(tmp_path))[0] == originals[kind][0]
     assert len(list((tmp_path / "runtime/db_backups").iterdir())) == 1
+
+
+def test_update_relocates_cardstream_with_committed_wal_and_keeps_original_backup(tmp_path):
+    setup_databases(tmp_path)
+    destination = db_path(tmp_path, "cards")
+    previous = destination.parent.parent / "cards.sqlite3"
+    destination.rename(previous)
+    legacy = destination.parent / "history.sqlite3"
+    legacy.write_bytes(b"retired history must remain untouched")
+    # An abruptly exited writer leaves committed data in WAL for the updater.
+    subprocess.run([
+        sys.executable, "-c",
+        "import os,sqlite3,sys; db=sqlite3.connect(sys.argv[1]); "
+        "db.execute('PRAGMA journal_mode=WAL'); db.execute('PRAGMA wal_autocheckpoint=0'); "
+        "db.execute(\"INSERT INTO audit_sentinel VALUES('committed in WAL')\"); "
+        "db.commit(); os._exit(0)",
+        str(previous),
+    ], check=True, timeout=10)
+    assert Path(str(previous) + "-wal").stat().st_size > 0
+    backups = migrations.backup_runtime_databases(root=tmp_path, dry_run=False)
+    migrations.initialize_runtime_state_databases(root=tmp_path, dry_run=False, backups=backups)
+    assert not previous.exists()
+    assert not Path(str(previous) + "-wal").exists()
+    assert not Path(str(previous) + "-shm").exists()
+    assert stored_version(destination, "cards") == VERSIONS["cards"]
+    for path in (destination, backups.directory / previous.relative_to(tmp_path)):
+        with closing(sqlite3.connect(path)) as db:
+            assert db.execute("SELECT body FROM audit_sentinel ORDER BY rowid").fetchall() == [
+                ("keep original data",), ("committed in WAL",),
+            ]
+            assert db.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert legacy.read_bytes() == b"retired history must remain untouched"
+
+
+def test_update_refuses_to_overwrite_either_cardstream_location(tmp_path):
+    setup_databases(tmp_path)
+    destination = db_path(tmp_path, "cards")
+    previous = destination.parent.parent / "cards.sqlite3"
+    sqlite_migrations.backup_database(destination, previous)
+    with closing(sqlite3.connect(previous)) as db, db:
+        db.execute("INSERT INTO audit_sentinel VALUES('previous location only')")
+    originals = snapshot(previous), snapshot(destination)
+    with pytest.raises(UpdateError, match="新旧位置同时存在"):
+        migrations.initialize_runtime_state_databases(root=tmp_path, dry_run=False)
+    assert (snapshot(previous), snapshot(destination)) == originals
+    directory = next((tmp_path / "runtime/db_backups").iterdir())
+    for path, original in zip((previous, destination), originals):
+        assert snapshot(directory / path.relative_to(tmp_path))[0] == original[0]
 
 
 def test_core_cli_completes_database_backups_before_all_initializers(tmp_path):

@@ -240,6 +240,76 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertFalse((root / "expand" / "share" / "new_module").exists())
             self.assertEqual((root / "operator-note.txt").read_text("utf-8"), "keep")
 
+    def test_rollback_restores_skills_registry_and_preserves_runtime_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root / "skills" / "register.py", "old registry")
+            write(root / "skills" / "custom" / "SKILL.md", "local skill")
+
+            backup = backup_update.make_backup(root=root)
+            assert backup is not None
+            self.assertEqual(
+                (backup / "skills" / "register.py").read_text(encoding="utf-8"),
+                "old registry",
+            )
+            self.assertFalse((backup / "skills" / "custom" / "SKILL.md").exists())
+
+            write(root / "skills" / "register.py", "updated registry")
+            write(root / "skills" / "custom" / "SKILL.md", "locally updated skill")
+            write(root / "skills" / "new-custom" / "SKILL.md", "new local skill")
+            backup_update.restore_backup(backup_dir=backup, root=root)
+
+            self.assertEqual(
+                (root / "skills" / "register.py").read_text(encoding="utf-8"),
+                "old registry",
+            )
+            self.assertEqual(
+                (root / "skills" / "custom" / "SKILL.md").read_text(encoding="utf-8"),
+                "locally updated skill",
+            )
+            self.assertEqual(
+                (root / "skills" / "new-custom" / "SKILL.md").read_text(encoding="utf-8"),
+                "new local skill",
+            )
+
+    def test_rollback_removes_new_skills_registry_without_touching_other_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root / "skills" / "custom" / "SKILL.md", "local skill")
+
+            backup = backup_update.make_backup(root=root)
+            assert backup is not None
+            self.assertFalse((backup / "skills" / "register.py").exists())
+            self.assertTrue((backup / "skills" / ".register.py.absent").is_file())
+
+            write(root / "skills" / "register.py", "new registry")
+            backup_update.restore_backup(backup_dir=backup, root=root)
+
+            self.assertFalse((root / "skills" / "register.py").exists())
+            self.assertEqual(
+                (root / "skills" / "custom" / "SKILL.md").read_text(encoding="utf-8"),
+                "local skill",
+            )
+
+    def test_rollback_from_legacy_backup_preserves_skills_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root / "skills" / "register.py", "existing registry")
+
+            backup = backup_update.make_backup(root=root)
+            assert backup is not None
+            (backup / "skills" / "register.py").unlink()
+            marker = backup / "skills" / ".register.py.absent"
+            marker.unlink(missing_ok=True)
+
+            write(root / "skills" / "register.py", "current registry")
+            backup_update.restore_backup(backup_dir=backup, root=root)
+
+            self.assertEqual(
+                (root / "skills" / "register.py").read_text(encoding="utf-8"),
+                "current registry",
+            )
+
     def test_write_json_atomic_replaces_manifest_without_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "version.json"
@@ -263,7 +333,7 @@ class UpdateModuleTests(unittest.TestCase):
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM task_plans").fetchone()[0], 0)
             finally:
                 database.close()
-            database = sqlite3.connect(user_dir / "cards.sqlite3")
+            database = sqlite3.connect(user_dir / "history" / "cards.sqlite3")
             try:
                 self.assertEqual(
                     database.execute("SELECT COUNT(*) FROM context_cards").fetchone()[0],
