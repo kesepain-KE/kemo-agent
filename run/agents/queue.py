@@ -26,7 +26,7 @@ from run.agents.task_ledger import register_owned_task, task_progress
 from run.agents.queue_models import AgentTask, TaskStatus
 from run.agents.ready_queue import ReadyTaskQueue
 from run.agents.budgets import effective_limit, SegmentBudget
-from run.agents.contracts import AgentToolLimitError
+from run.agents.contracts import AgentToolLimitError, AgentInputError, bounded_schema_hint
 from run.retry import HOST_CONTROL_EXCEPTIONS
 
 
@@ -47,6 +47,7 @@ _ERROR_DETAIL_FIELDS = (
     "retry_budget_exhausted",
     "stop_reason",
     "process_terminated",
+    "schema_hint",
 )
 
 
@@ -64,7 +65,10 @@ def _agent_task_error_detail(error: BaseException) -> dict[str, Any]:
     }
     for field_name in _ERROR_DETAIL_FIELDS:
         value = getattr(error, field_name, None)
-        if isinstance(value, (bool, int, float)):
+        if field_name == "schema_hint" and isinstance(error, AgentInputError) and isinstance(value, dict):
+            detail["message"] = detail["message"][:160]
+            detail[field_name] = bounded_schema_hint(value, limit=600 - len(detail["message"]))
+        elif isinstance(value, (bool, int, float)):
             detail[field_name] = value
         elif isinstance(value, str) and value.strip():
             detail[field_name] = value.strip()[:160]
@@ -257,7 +261,7 @@ class AgentScheduler:
         )
         definition = registry.get(agent)
         if max_tool_calls is not None:
-            effective_limit(definition, config or self.runner.config, max_tool_calls)
+            effective_limit(definition, max_tool_calls)
         if not allow_sync and definition.execution != "background_serial":
             raise AgentQueueError(f"子代理 {agent} 未声明 background_serial 执行模式")
         if not isinstance(input_data, dict):
@@ -307,7 +311,7 @@ class AgentScheduler:
             )
             if isinstance(self.runner, AgentRunner):
                 task.progress = {"status": "queued", "budget": SegmentBudget(
-                    definition, config or self.runner.config, max_tool_calls,
+                    definition, max_tool_calls,
                     timeout if timeout is not None else definition.timeout).snapshot()}
                 task.progress["budget"]["elapsed_seconds"] = 0
             self._submission_counter += 1
@@ -458,6 +462,16 @@ class AgentScheduler:
                     if record and record.get(key) is not None:
                         snapshot[key] = record[key]
             return snapshot
+
+    def has_local_task(self, task_id: str, *, source: str, session_id: str) -> bool:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            return bool(
+                task
+                and task.source == source
+                and task.session_id == session_id
+                and task.status in {"queued", "running", "timed_out_running"}
+            )
 
     def resume(self, task_id: str, *, source: str, session_id: str,
                guidance: str = "", timeout: float | None = None, ownership=None,

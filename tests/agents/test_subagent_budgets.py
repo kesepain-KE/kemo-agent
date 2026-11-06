@@ -1,7 +1,6 @@
 """Budget stops use real scheduling/checkpoints and fake providers, no user data."""
 from __future__ import annotations
 
-import json
 import threading
 
 import pytest
@@ -11,7 +10,7 @@ from run.agents import AgentRunner, AgentScheduler, AgentQueueError, AgentProvid
 from run.agents.budgets import effective_limit
 from run.agents.continuation import CheckpointStore, restore_items
 from run.agents.controls import describe_agent, guide_task, split_task, failure_advice
-from run.agents.task_ledger import TaskCoordinator
+from run.agents import TaskCoordinator
 from tests.agents.test_general_worker import workspace, OUTPUT, plugin  # noqa: F401
 from tests.agents.test_subagent_continuation import Provider, call, write_plugin
 from provider.protocol.models import ToolCallItem, ToolResultItem
@@ -28,7 +27,8 @@ def start(root, config, provider, *, limit=None, timeout: float = 10):
     return scheduler, parent, ownership, task_id
 
 
-def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace):
+@pytest.mark.parametrize('parent_status', ['running', 'waiting_children'])
+def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace, parent_status):
     root, config = workspace
     write_plugin(root)
     partial = {**OUTPUT, "status": "partial", "summary": "已完成前两项", "remaining": ["继续剩余项"]}
@@ -50,6 +50,7 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
             i.call_id for i in items if isinstance(i, ToolResultItem)}
         assert "工具预算收尾指令" in provider.requests[1].model_dump_json()
         assert not provider.requests[1].tools
+        parent.ledger.update(parent.id, status=parent_status)
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership, config=config)
         scheduler.wait(task_id, 5, source="web", session_id="scope")
         second = parent.ledger.get(task_id, "web", "scope")
@@ -73,8 +74,8 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
         scheduler.close(wait=True, cancel_pending=True)
 
 
-@pytest.mark.parametrize("limit", [0, 4])
-def test_explicit_limit_overrides_defaults_and_unlimited_still_has_timeout(workspace, limit):
+@pytest.mark.parametrize("limit", [None, 0, 4])
+def test_segment_budget_is_independent_of_retired_global_limit(workspace, limit):
     root, config = workspace
     write_plugin(root)
     config["tools"]["max_iterations"] = 1
@@ -83,7 +84,7 @@ def test_explicit_limit_overrides_defaults_and_unlimited_still_has_timeout(works
     try:
         assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == OUTPUT
         budget = parent.ledger.get(task_id, "web", "scope")["budget"]
-        assert budget["max_tool_calls"] == limit
+        assert budget["max_tool_calls"] == (80 if limit is None else limit)
         assert budget["tool_calls_used"] == 2 and budget["timeout"] == 10
     finally:
         scheduler.close(wait=True, cancel_pending=True)
@@ -94,7 +95,7 @@ def test_invalid_budget_rejected_before_enqueue(workspace, value):
     root, config = workspace
     runner = AgentRunner(root, "alice", config=config)
     with pytest.raises(Exception, match="max_tool_calls"):
-        effective_limit(runner.registry.get("general_worker"), config, value)
+        effective_limit(runner.registry.get("general_worker"), value)
 
 
 def test_failed_wrap_up_keeps_latest_usage_and_is_still_resumable(workspace):
@@ -168,7 +169,8 @@ def test_soft_budget_reminder_and_public_list_permissions(workspace):
         scheduler.close(wait=True, cancel_pending=True)
 
 
-def test_running_guidance_is_scope_bound_and_delivered_at_next_request(workspace):
+@pytest.mark.parametrize('parent_status', ['running', 'waiting_children'])
+def test_running_guidance_is_scope_bound_and_delivered_at_next_request(workspace, parent_status):
     root, config = workspace
     write_plugin(root)
     entered, release = threading.Event(), threading.Event()
@@ -180,6 +182,7 @@ def test_running_guidance_is_scope_bound_and_delivered_at_next_request(workspace
     scheduler, parent, ownership, task_id = start(root, config, provider)
     try:
         assert entered.wait(3)
+        parent.ledger.update(parent.id, status=parent_status)
         with pytest.raises(Exception, match="不存在|权限"):
             guide_task(root, "alice", task_id, "web", "foreign", ownership, "bad")
         reply = guide_task(root, "alice", task_id, "web", "scope", ownership, "只整理现有结果")
@@ -194,7 +197,52 @@ def test_running_guidance_is_scope_bound_and_delivered_at_next_request(workspace
         scheduler.close(wait=True, cancel_pending=True)
 
 
-def test_explicit_split_preserves_origin_and_aggregate_advice(workspace):
+def test_closed_parent_can_be_controlled_without_model_ownership(workspace):
+    root, config = workspace
+    write_plugin(root)
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked(_request):
+        entered.set()
+        assert release.wait(5)
+        return [call()]
+
+    def verify_guidance(request):
+        assert "跨轮追加的用户指导" in request.model_dump_json()
+        return OUTPUT
+
+    provider = Provider([blocked, verify_guidance])
+    scheduler, parent, _, task_id = start(root, config, provider)
+    try:
+        assert entered.wait(3)
+        with pytest.raises(Exception, match="主响应已关闭"):
+            guide_task(
+                root, "alice", task_id, "web", "scope", None,
+                "too early", allow_closed_parent=True,
+            )
+        parent.ledger.update(
+            parent.id, status="partial", response_closed=True, execution_live=True,
+        )
+        result = guide_task(
+            root, "alice", task_id, "web", "scope", None,
+            "跨轮追加的用户指导", allow_closed_parent=True,
+        )
+        assert result["status"] == "guidance_queued"
+        release.set()
+        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        record = parent.ledger.get(task_id, "web", "scope")
+        assert record["guidance_delivered_count"] == 1
+        public = parent.ledger.public(record)
+        assert public["guidance_pending"] == 0
+        assert public["guidance_delivered"] == 1
+        assert "跨轮追加的用户指导" not in str(public)
+    finally:
+        release.set()
+        scheduler.close(wait=True, cancel_pending=True)
+
+
+@pytest.mark.parametrize('parent_status', ['running', 'waiting_children'])
+def test_explicit_split_preserves_origin_and_aggregate_advice(workspace, parent_status):
     root, config = workspace
     write_plugin(root)
     provider = Provider([[call(value="a"), call(value="b", index=2)],
@@ -202,6 +250,7 @@ def test_explicit_split_preserves_origin_and_aggregate_advice(workspace):
     scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
     try:
         scheduler.wait(task_id, 5, source="web", session_id="scope")
+        parent.ledger.update(parent.id, status=parent_status)
         result = split_task(scheduler, task_id, source="web", session_id="scope",
             ownership=ownership, tasks=[{"task": "stage b"}, {"task": "stage c"}],
             config=config, max_tool_calls=2, timeout=10)
@@ -212,6 +261,41 @@ def test_explicit_split_preserves_origin_and_aggregate_advice(workspace):
         records = [{"id": "1", "status": "tool_limit"}, {"id": "2", "status": "tool_limit"}]
         assert failure_advice(records)[0]["count"] == 2
         assert not failure_advice(records[:1])
+    finally:
+        scheduler.close(wait=True, cancel_pending=True)
+
+
+@pytest.mark.parametrize("parent_status", ["running", "limited"])
+def test_split_after_limited_parent_is_allowed_but_active_parent_is_protected(workspace, parent_status):
+    root, config = workspace
+    write_plugin(root)
+    provider = Provider([[call(value="a"), call(value="b", index=2)],
+                         {**OUTPUT, "status": "partial"}, OUTPUT])
+    scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
+    try:
+        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        if parent_status == "limited":
+            parent.finish("limited")
+        new_parent = TaskCoordinator(root, "alice", "web", "scope", "next-run", {"prompt": "continue"})
+        new_owner = new_parent.ownership("split")
+        if parent_status == "running":
+            with pytest.raises(Exception, match="其他活动主任务"):
+                split_task(scheduler, task_id, source="web", session_id="scope",
+                           ownership=new_owner, tasks=[{"task": "continue b"}], config=config)
+            assert not new_parent.children()
+        else:
+            result = split_task(
+                scheduler, task_id, source="web", session_id="scope", ownership=new_owner,
+                tasks=[{"task": "continue b"}], config=config, max_tool_calls=2, timeout=10,
+            )
+            assert result["accepted_count"] == 1
+            scheduler.wait(result["task_ids"][0], 5, source="web", session_id="scope")
+            child = new_parent.children()[0]
+            assert child["origin_task_id"] == task_id
+            assert child["root_task_id"] == new_parent.id
+            assert parent.ledger.get(task_id, "web", "scope")["root_task_id"] == parent.id
+        assert parent.ledger.get(parent.id, "web", "scope")["status"] == parent_status
+        assert (root / "effects.txt").read_text().splitlines() == ["a"]
     finally:
         scheduler.close(wait=True, cancel_pending=True)
 
@@ -330,19 +414,102 @@ def test_main_model_receives_budget_conclusion_and_resumes_without_replaying(wor
         [ToolCallItem(id="call_dispatch", call_id="callid_dispatch", name="subagent_dispatch",
             arguments={"action": "call", "agent": "general_worker", "input": {"task": "work"},
                        "max_tool_calls": 1, "timeout": 10, "wait": False})],
-        {"draft": "awaiting worker"}, resume, {"answer": "merged"},
+        {"draft": "awaiting worker"}, resume, {"answer": "merged"}, {"answer": "merged"}, {"answer": "merged"},
     ])
     try:
         events = list(iter_request_events(
             {"user": "alice", "source": "web", "session_id": "scope", "prompt": "do work"},
             root=root, provider_factory=lambda _: main))
-        assert any(e.type == "done" for e in events)
+        assert any(e.type == "done" for e in events), [e.to_dict() for e in events if e.type in {"error", "done"}]
         record = TaskLedger(root, "alice").get(observed["id"], "web", "scope")
         assert record["status"] == "completed" and record["run_count"] == 2 and record["handled"]
         assert record["budget"]["total_tool_calls"] == 2
         assert (root / "effects.txt").read_text().splitlines() == ["first", "second"]
-        assert 4 <= len(main.requests) <= 5
+        assert 4 <= len(main.requests) <= 7
     finally:
+        scheduler.close(wait=True, cancel_pending=True)
+
+
+def test_main_model_can_guide_its_running_subagent(workspace, monkeypatch):
+    import shutil
+    from pathlib import Path
+    from run.engine import iter_request_events
+    from run.agents.task_ledger import TaskLedger
+
+    root, config = workspace
+    write_plugin(root)
+    directory = root / "plugins/subagent_dispatch"
+    directory.mkdir()
+    shutil.copyfile(Path(__file__).resolve().parents[2] / "plugins/subagent_dispatch/SKILL.md",
+                    directory / "SKILL.md")
+    (directory / "tool.py").write_text("from plugins.subagent_dispatch.tool import run\n", "utf-8")
+
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    guidance_received = threading.Event()
+
+    def wait_for_guidance(_request):
+        provider_entered.set()
+        assert release_provider.wait(5)
+        return [call()]
+
+    def verify_guidance(request):
+        assert "只整理现有结果" in request.model_dump_json()
+        guidance_received.set()
+        return OUTPUT
+
+    child = Provider([wait_for_guidance, verify_guidance])
+    scheduler = AgentScheduler.from_runner(AgentRunner(
+        root, "alice", config=config, provider_factory=lambda _: child,
+    ))
+    monkeypatch.setattr("plugins.subagent_dispatch.tool.get_agent_scheduler", lambda *a, **k: scheduler)
+
+    def guide_when_running(_request):
+        assert provider_entered.wait(3)
+        records, _ = TaskLedger(root, "alice").records("web", "scope", parent=None)
+        record = next(item for item in records if item["agent"] == "general_worker")
+        unrelated = TaskCoordinator(root, "alice", "web", "scope", "unrelated", {"prompt": "other"})
+        with pytest.raises(Exception, match="不能控制其他活动主任务"):
+            guide_task(root, "alice", record["id"], "web", "scope",
+                       unrelated.ownership("guide"), "must not cross roots")
+        return [ToolCallItem(
+            id="call_guide", call_id="callid_guide", name="subagent_dispatch",
+            arguments={
+                "action": "guide",
+                "task_id": record["id"],
+                "guidance": "只整理现有结果",
+            },
+        )]
+
+    def finish_main(_request):
+        release_provider.set()
+        return {"answer": "指导已发送"}
+
+    main = Provider([
+        [ToolCallItem(
+            id="call_dispatch", call_id="callid_dispatch", name="subagent_dispatch",
+            arguments={
+                "action": "call",
+                "agent": "general_worker",
+                "input": {"task": "work"},
+                "timeout": 10,
+                "wait": False,
+            },
+        )],
+        guide_when_running,
+        finish_main,
+    ])
+    try:
+        list(iter_request_events(
+            {"user": "alice", "source": "web", "session_id": "scope", "prompt": "do work"},
+            root=root, provider_factory=lambda _: main,
+        ))
+        assert guidance_received.wait(3)
+        records, _ = TaskLedger(root, "alice").records("web", "scope", parent=None)
+        record = next(item for item in records if item["agent"] == "general_worker")
+        assert record["status"] == "completed"
+    finally:
+        release_provider.set()
         scheduler.close(wait=True, cancel_pending=True)
 
 

@@ -8,7 +8,7 @@ import queue
 
 from run.agents.continuation import CheckpointStore, MAX_RESUME_ROUNDS
 from run.agents.queue_models import AgentTask
-from run.agents.task_ledger import TaskLedger, _OWNER, now
+from run.agents.task_ledger import TaskLedger, _OPEN_PARENT, _OWNER, now
 from run.agents.budgets import BUDGET_STOPS, effective_limit, SegmentBudget, legacy_tool_stop, upgrade_legacy_budget
 
 
@@ -69,14 +69,14 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                     raise AgentQueueError("续跑必须由当前主任务显式调度")
                 parent = ledger.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?",
                                        (ownership.get("root_task_id"),)).fetchone())
-                if (not parent or parent["status"] not in {"running", "merging"}
+                if (not parent or parent["status"] not in _OPEN_PARENT
                         or parent["source"] != source or parent["session_id"] != session_id
                         or parent["attempt_id"] != ownership.get("attempt_id")):
                     raise AgentQueueError("主任务已收束或续跑归属无效")
                 if record.get("root_task_id") != parent["id"]:
                     previous_parent = ledger.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?",
                                                (record.get("root_task_id"),)).fetchone())
-                    if previous_parent and previous_parent["status"] not in {"completed", "failed", "cancelled", "interrupted"}:
+                    if previous_parent and (previous_parent.get("execution_live") or previous_parent["status"] not in {"completed", "limited", "partial", "failed", "cancelled", "interrupted"}):
                         raise AgentQueueError("原主任务仍在运行，不能由另一主任务接管")
                     record["submission_order"] = parent.get("last_submission_order", 0) + 1
                     parent["last_submission_order"] = record["submission_order"]
@@ -85,7 +85,7 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                 previous_budget = restored.get("budget") or {}
                 requested = max_tool_calls if max_tool_calls is not None else previous_budget.get("max_tool_calls")
                 if requested is not None:
-                    effective_limit(definition, current_config, requested)
+                    effective_limit(definition, requested)
                 task = AgentTask(
                     id=task_id, agent=record["agent"], input_data=restored["input_data"],
                     source=source, session_id=session_id,
@@ -98,7 +98,7 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                     max_tool_calls=requested,
                 )
                 task.progress = {"status": "queued", "budget": SegmentBudget(
-                    definition, current_config, requested, task.timeout, restored).snapshot()}
+                    definition, requested, task.timeout, restored).snapshot()}
                 task.progress["budget"]["elapsed_seconds"] = 0
                 history = list(record.get("round_history") or [])[-(MAX_RESUME_ROUNDS - 1):]
                 history.append({
@@ -116,6 +116,10 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                     process_started=parent["process_started"],
                     stop_reason=None, budget=task.progress["budget"], progress={},
                     _guidance=[],
+                    cardstream_integration_id=parent.get("cardstream_integration_id", ""),
+                    cardstream_generation=parent.get("cardstream_generation", ""),
+                    cardstream_meter_key=parent.get("cardstream_meter_key", ""),
+                    card_result_seq=None, card_result_error_type="",
                 )
                 ledger.put(db, record)
                 scheduler._ensure_worker_locked()

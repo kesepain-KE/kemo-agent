@@ -40,6 +40,12 @@ def get_agent_scheduler(
         return scheduler
 
 
+def find_agent_scheduler(root: Path, user: str) -> AgentScheduler | None:
+    key = (str(root.resolve()).casefold(), user)
+    with _lock:
+        return _schedulers.get(key)
+
+
 def close_agent_schedulers(*, wait: bool = True, cancel_pending: bool = False) -> None:
     with _lock:
         schedulers = list(_schedulers.values())

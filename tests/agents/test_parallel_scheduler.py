@@ -13,7 +13,7 @@ import pytest
 import provider.factory as factory
 from provider.schema import ChatResponse
 from run.agents import AgentQueueError, AgentRunner, AgentScheduler, AgentTimeoutError
-from run.agents.task_ledger import TaskCoordinator, TaskLedger
+from run.agents import TaskCoordinator, TaskLedger
 from tests.agents.test_general_worker import OUTPUT, workspace  # noqa: F401
 from tests.agents.test_subagent_hotplug import ScriptedProvider
 

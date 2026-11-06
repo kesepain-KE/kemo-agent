@@ -1,25 +1,92 @@
-"""Sub-agent model loop extracted from :mod:`run.agents.runner`.
-
-The AgentRunner method remains the public compatibility entry point; dependencies
-are resolved lazily so factories and tests can continue to patch runner globals.
-"""
+"""Sub-agent model loop used by AgentRunner."""
 
 from __future__ import annotations
 
-
-from run.agents.contracts import AgentToolRetryError as _AnnotationAgentToolRetryError
-
+import copy
+import json
+import uuid
 from typing import TYPE_CHECKING, Any
-from run.extensions import MediaInputHost, declared_input_token_limit
+
+from events import RunEvent
+from provider.factory import ProviderCongestionError, provider_request_slot
+from provider.protocol.diagnostics import incomplete_retry_metadata, safe_provider_message
+from provider.protocol.enums import MessageRole, ResponseStatus
+from provider.protocol.models import (
+    JsonContent, KemoRequest, KemoResponse, MessageItem, ReasoningConfig,
+    ReasoningItem, ToolCallItem, ToolDefinition, ToolResultItem, text_from_content,
+)
+from agents._runtime.resources import effective_knowledge_scopes
+from run.extensions import MediaInputHost, context_input_budget, resolve_reasoning_selection
+from run.agents.contracts import (
+    AgentCancelledError, AgentInputError, AgentOutputError, AgentProviderError,
+    AgentRunError, AgentRunResult, AgentToolRetryError,
+    _parse_json_object, resolve_agent_provider_config, validate_json_schema,
+)
 from run.agents.continuation import restore_items
 from run.agents.loop_safepoints import drain_tool, wrap_request
 from run.agents.budgets import SegmentBudget, capture_budget, stopped_result, overridable, provider_attempt, validate_input_budget
 from run.agents.controls import take_guidance
-from run.retry import HOST_CONTROL_EXCEPTIONS
+from run.agents.retry_policy import (
+    _AgentRetryState, _agent_recovery_items, _agent_recovery_records,
+    _agent_tool_failure_is_retryable,
+    _record_agent_recovery,
+)
+from run.retry import HOST_CONTROL_EXCEPTIONS, AttemptToolDedup, view_from_error
+from run.tools import (
+    ConsecutiveIdenticalToolCallTracker, ConsecutiveToolFailureTracker, ShellInbox,
+    ToolExecutionCapacityError, ToolResultTooLargeError, execute_tool,
+    invalid_tool_name, response_invalid_tool_arguments_error,
+    system_prompt_with_tool_argument_repair, tool_call_signature,
+    tool_result_payload, validate_tool_call_batch,
+)
 
 if TYPE_CHECKING:
-    from run.agents.runner import AgentExecutionContext, AgentRunResult
-    from run.agents.retry_policy import _AgentRetryState
+    from run.agents.runner import AgentExecutionContext
+
+
+_STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
+
+
+def _response_items_for_next_request(output: list[Any]) -> list[Any]:
+    """Copy Provider output into local history with request-unique IDs.
+
+    Provider item and tool-call IDs are only guaranteed to be unique inside a
+    single response. A subagent request carries several response iterations,
+    so every local item and tool call needs a fresh identity. Tool results
+    created by the runner use the normalized call IDs and remain linked.
+    """
+    call_id_map: dict[str, str] = {}
+    normalized_call_ids: dict[int, str] = {}
+    for item in output:
+        if not isinstance(item, ToolCallItem):
+            continue
+        call_id = f"callid_{uuid.uuid4().hex}"
+        normalized_call_ids[id(item)] = call_id
+        call_id_map.setdefault(item.call_id, call_id)
+
+    normalized: list[Any] = []
+    for item in output:
+        prefix = (
+            "rs"
+            if isinstance(item, ReasoningItem)
+            else (
+                "call"
+                if isinstance(item, ToolCallItem)
+                else (
+                    "result"
+                    if isinstance(item, ToolResultItem)
+                    else "msg" if isinstance(item, MessageItem) else "item"
+                )
+            )
+        )
+        updates = {"id": f"{prefix}_{uuid.uuid4().hex}"}
+        if isinstance(item, ToolCallItem):
+            updates["call_id"] = normalized_call_ids[id(item)]
+        elif isinstance(item, ToolResultItem) and item.call_id in call_id_map:
+            updates["call_id"] = call_id_map[item.call_id]
+        item = item.model_copy(update=updates)
+        normalized.append(item)
+    return normalized
 
 
 def run_model(
@@ -31,65 +98,12 @@ def run_model(
     attempt: int = 1,
     max_attempts: int = 1,
 ) -> AgentRunResult:
-    import importlib
-    _runner = importlib.import_module("run.agents.runner")
-    AgentCancelledError = _runner.AgentCancelledError
-    AgentInputError = _runner.AgentInputError
-    AgentOutputError = _runner.AgentOutputError
-    AgentProviderError = _runner.AgentProviderError
-    AgentRunError = _runner.AgentRunError
-    AgentRunResult = _runner.AgentRunResult
-    AgentToolLimitError = _runner.AgentToolLimitError
-    AgentToolRetryError = _runner.AgentToolRetryError
-    ConsecutiveIdenticalToolCallTracker = _runner.ConsecutiveIdenticalToolCallTracker
-    ConsecutiveToolFailureTracker = _runner.ConsecutiveToolFailureTracker
-    JsonContent = _runner.JsonContent
-    KemoRequest = _runner.KemoRequest
-    KemoResponse = _runner.KemoResponse
-    MessageItem = _runner.MessageItem
-    MessageRole = _runner.MessageRole
-    ProviderCongestionError = _runner.ProviderCongestionError
-    ReasoningConfig = _runner.ReasoningConfig
-    ResponseStatus = _runner.ResponseStatus
-    ToolCallItem = _runner.ToolCallItem
-    ToolDefinition = _runner.ToolDefinition
-    ToolResultItem = _runner.ToolResultItem
-    ToolResultTooLargeError = _runner.ToolResultTooLargeError
-    from run.agents.retry_policy import _AgentRetryState
-    _STRUCTURED_OUTPUT_TOOL_NAME = _runner._STRUCTURED_OUTPUT_TOOL_NAME
-    _agent_recovery_items = _runner._agent_recovery_items
-    _agent_recovery_records = _runner._agent_recovery_records
-    _agent_tool_failure_is_retryable = _runner._agent_tool_failure_is_retryable
-    _agent_tool_result_reuse_allowed = _runner._agent_tool_result_reuse_allowed
-    _parse_json_object = _runner._parse_json_object
-    _record_agent_recovery = _runner._record_agent_recovery
-    _response_items_for_next_request = _runner._response_items_for_next_request
-    _safe_int = _runner._safe_int
-    copy = _runner.copy
-    effective_knowledge_scopes = _runner.effective_knowledge_scopes
-    execute_tool = _runner.execute_tool
-    field = _runner.field
-    invalid_tool_name = _runner.invalid_tool_name
-    incomplete_retry_metadata = _runner.incomplete_retry_metadata
-    json = _runner.json
-    provider_request_slot = _runner.provider_request_slot
-    resolve_agent_provider_config = _runner.resolve_agent_provider_config
-    resolve_reasoning_selection = _runner.resolve_reasoning_selection
-    response_invalid_tool_arguments_error = _runner.response_invalid_tool_arguments_error
-    safe_provider_message = _runner.safe_provider_message
-    system_prompt_with_tool_argument_repair = _runner.system_prompt_with_tool_argument_repair
-    text_from_content = _runner.text_from_content
-    tool_call_signature = _runner.tool_call_signature
-    uuid = _runner.uuid
-    validate_tool_call_batch = _runner.validate_tool_call_batch
-    validate_json_schema = _runner.validate_json_schema
     retry_state = retry_state or _AgentRetryState()
     # Snapshots present before this attempt are the only records that should
     # be labelled as recovered. Current-attempt results are emitted via
     # ``tool_records`` and must retain statuses such as ``completed``.
     recovery_signatures_at_start = set(retry_state.recovery)
     definition = context.definition
-    from run.tools import ShellInbox
     shell_inbox = ShellInbox(agent_runner.root, agent_runner.user, context.source,
                              context.session_id, owner_task_id=context.task_id)
     runtime = resolve_agent_provider_config(
@@ -113,7 +127,7 @@ def run_model(
         session_id=context.session_id, known=[],
         user_text=json.dumps(input_data, ensure_ascii=False),
         cancel_event=context.cancel_event,
-        input_limit=declared_input_token_limit(reasoning_selection.capabilities),
+        input_limit=None,
     )
     system = (
         context.prompt_bundle.text
@@ -157,7 +171,7 @@ def run_model(
     response_ids: list[str] = list(retry_state.response_ids)
     parent_request_id: str | None = None
     tool_config = agent_runner.config.get("tools") or {}
-    context.budget = context.budget or SegmentBudget(definition, agent_runner.config, None, definition.timeout)
+    context.budget = context.budget or SegmentBudget(definition, None, definition.timeout)
     raw_invalid_tool_arguments_retries = tool_config.get(
         "invalid_tool_arguments_retries", 2
     )
@@ -175,7 +189,7 @@ def run_model(
         "default_timeout", 600
     )
     raw_identical_call_limit = tool_config.get(
-        "consecutive_identical_call_limit", 8
+        "consecutive_identical_call_limit", 3
     )
     if (
         isinstance(raw_identical_call_limit, bool)
@@ -196,12 +210,7 @@ def run_model(
     failure_limit = raw_failure_limit
     failures = ConsecutiveToolFailureTracker(failure_limit)
     identical_calls = ConsecutiveIdenticalToolCallTracker(identical_call_limit)
-    seen_calls: dict[str, dict[str, Any]] = {
-        signature: copy.deepcopy(value["result"])
-        for signature, value in retry_state.recovery.items()
-        if value.get("replay_policy") == "reuse"
-        and isinstance(value.get("result"), dict)
-    }
+    seen_calls = AttemptToolDedup(retry_state.recovery)
     tool_argument_retry_count = 0
     def progress(status: str, **detail: Any) -> None:
         if context.event_callback is not None:
@@ -210,7 +219,7 @@ def run_model(
             for key in ("arguments", "result"):
                 if key in detail:
                     detail[key] = public_tool_data(detail[key])
-            context.event_callback(_runner.RunEvent(type="subagent_progress", metadata={
+            context.event_callback(RunEvent(type="subagent_progress", metadata={
                 "phase": "subagent", "agent": definition.name,
                 "task_id": context.task_id, "source": context.source,
                 "session_id": context.session_id, "status": status,
@@ -255,6 +264,15 @@ def run_model(
                 )
             )
         tool_definitions, request_max_tokens = wrap_request(context, items, tool_definitions)
+        configured_limit = int((agent_runner.config.get("agents") or {}).get("token_limit", 1000000))
+        reservation = request_max_tokens or runtime.get("max_tokens") or int(
+            (agent_runner.config.get("agents") or {}).get("output_reserve", 8192))
+        capacity = context_input_budget(
+            configured_limit, reasoning_selection.capabilities, output_reserve=reservation)
+        request_max_tokens = capacity["output_reserve"]
+        request_input_limit = min(capacity["effective_token_limit"],
+                                  context.input_token_limit or capacity["effective_token_limit"])
+        media_inputs.input_limit = request_input_limit
         if continuation is not None:
             continuation.capture(items, total_usage, response_ids)
         invalid_tool_arguments_retries = 0
@@ -271,7 +289,8 @@ def run_model(
                 else system
             )
             try:
-                validate_input_budget(context, request_system, items, tool_definitions)
+                validate_input_budget(context, request_system, items, tool_definitions,
+                                      input_limit=request_input_limit)
                 media_inputs.validate_items(items, request_system, tool_definitions)
                 progress("model_request", iteration=iteration)
                 with provider_request_slot(
@@ -518,7 +537,7 @@ def run_model(
             )
             break
         retry_state.progress = True
-        retryable_tool_failure: _AnnotationAgentToolRetryError | None = None
+        retryable_tool_failure: AgentToolRetryError | None = None
         for call in calls:
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
@@ -532,31 +551,16 @@ def run_model(
                 continuation.capture(items, total_usage, response_ids)
                 break
             signature = tool_call_signature(call.name, call.arguments)
-            reuse_allowed = _agent_tool_result_reuse_allowed(
-                call.name,
-                call.arguments,
-            )
             duplicate = False
-            identical_call_count = identical_calls.record(call.name, call.arguments)
-            if identical_calls.is_blocked(identical_call_count):
-                payload = {
-                    "ok": False,
-                    "error": {
-                        "message": (
-                            f"工具 {call.name} 使用完全相同参数连续调用已达到"
-                            f"上限 {identical_call_limit} 次"
-                        ),
-                        "exception_type": (
-                            "ConsecutiveIdenticalToolCallLimitExceeded"
-                        ),
-                        "limit": identical_call_limit,
-                        "consecutive_identical_calls": identical_call_count,
-                        "instruction": (
-                            "请修改参数、改用其他工具或根据已有结果继续任务"
-                        ),
-                    },
-                }
-                status = "identical_call_blocked"
+            identical_call_count = identical_calls.count if signature == identical_calls.signature else 0
+            # Safe defaults so the record below is always bound; every branch of the
+            # dispatch chain assigns both before they are read.
+            payload: dict[str, Any] = {}
+            status = "failed"
+            dedup_result = (None if failures.is_unavailable(call.name)
+                            else seen_calls.check(call.name, call.arguments, identical_calls))
+            if dedup_result is not None:
+                payload, status, duplicate, identical_call_count = dedup_result
             elif failures.is_unavailable(call.name):
                 payload = {
                     "ok": False,
@@ -572,26 +576,15 @@ def run_model(
                 }
                 status = "temporarily_unavailable"
             else:
-                blocked_result = retry_state.recovery.get(signature)
-                if (
-                    not isinstance(blocked_result, dict)
-                    or blocked_result.get("replay_policy") != "blocked"
-                ):
-                    blocked_result = None
-                duplicate = reuse_allowed and signature in seen_calls
-                if blocked_result is not None:
-                    payload = copy.deepcopy(blocked_result.get("result") or {})
-                    status = "retry_reuse_blocked"
-                    duplicate = True
-                elif duplicate:
-                    payload = copy.deepcopy(seen_calls[signature])
-                    status = "duplicate_reused"
-                else:
+                capacity_limited = False
+                execution_attempted = False
+                if dedup_result is None:
                     try:
                         tool = context.tool_registry.get(call.name)
                         progress("tool_running", iteration=iteration, tool_name=call.name,
                                  tool_call_id=call.call_id, arguments=call.arguments,
                                  tool_count=len(tool_records) + 1)
+                        execution_attempted = True
                         value = execute_tool(
                             tool,
                             call.arguments,
@@ -603,7 +596,11 @@ def run_model(
                                 "caller": "subagent",
                                 "agent": definition.name,
                                 "task_id": context.task_id,
-                                "shell_ownership": shell_inbox.ownership(),
+                                "shell_ownership": {
+                                    **shell_inbox.ownership(), "tool_call_id": call.call_id,
+                                    "original_call": {"name": call.name,
+                                                      "arguments": copy.deepcopy(call.arguments)},
+                                },
                                 "agent_trigger": input_data.get("trigger"),
                                 "tool_timeout": tool_timeout,
                                 "agent_timeout": agent_timeout,
@@ -614,6 +611,10 @@ def run_model(
                                     )
                                 ),
                                 "uploaded_files": list(media_inputs.known),
+                                **({
+                                    "user_text": media_inputs.user_text,
+                                    "tool_records": copy.deepcopy(tool_records),
+                                } if call.name == "multimodal" else {}),
                             },
                             timeout=tool_timeout,
                             cancel_event=context.cancel_event,
@@ -623,14 +624,18 @@ def run_model(
                                 tool, call.arguments, value,
                                 call_id=call.call_id, tool_records=tool_records,
                             )
-                        payload = {"ok": True, "result": value}
-                        status = "completed"
+                        payload = tool_result_payload(
+                            call.name, value, root=agent_runner.root,
+                            user=agent_runner.user, session_id=context.session_id,
+                        )
+                        status = "completed" if payload["ok"] is True else "failed"
                     except ToolResultTooLargeError as exc:
                         payload = {"ok": False, "error": exc.error_payload()}
                         status = "result_too_large"
                     except HOST_CONTROL_EXCEPTIONS:
                         raise
                     except Exception as exc:
+                        capacity_limited = isinstance(exc, ToolExecutionCapacityError)
                         error = {
                             "message": safe_provider_message(
                                 str(exc),
@@ -669,16 +674,19 @@ def run_model(
                         )
                         if recovered is not None:
                             payload, status = recovered
-                    if payload.get("ok") is True:
-                        if reuse_allowed:
-                            seen_calls[signature] = copy.deepcopy(payload)
-                    else:
-                        seen_calls.pop(signature, None)
-                    failure_count = failures.record(
-                        call.name,
-                        succeeded=(
-                            bool(payload.get("ok")) or status == "result_too_large"
-                        ),
+                    finally:
+                        if execution_attempted and not capacity_limited:
+                            identical_call_count = identical_calls.record(call.name, call.arguments)
+                    seen_calls.remember(call.name, call.arguments, payload, iteration)
+                    failure_count = (
+                        failures.record_capacity_limited(call.name)
+                        if capacity_limited
+                        else failures.record(
+                            call.name,
+                            succeeded=(
+                                bool(payload.get("ok")) or status == "result_too_large"
+                            ),
+                        )
                     )
                     if failure_count >= failure_limit:
                         payload["error"].update(
@@ -705,7 +713,7 @@ def run_model(
                      arguments=call.arguments, result=payload,
                      elapsed_ms=round((_tool_time.monotonic() - tool_started) * 1000),
                      summary="执行成功" if payload.get("ok") else "执行失败")
-            _record_agent_recovery(retry_state, call, payload)
+            _record_agent_recovery(retry_state, call, payload, iteration=iteration)
             items.append(
                 ToolResultItem(
                     id=f"result_{uuid.uuid4().hex}",
@@ -729,10 +737,11 @@ def run_model(
                 error = payload.get("error")
                 if not isinstance(error, dict):
                     error = {}
+                failure = view_from_error(error)
                 retryable_tool_failure = AgentToolRetryError(
                     call.name,
-                    status_code=_safe_int(error.get("status_code")),
-                    retry_after_ms=_safe_int(error.get("retry_after_ms")),
+                    status_code=failure.status_code,
+                    retry_after_ms=failure.retry_after_ms,
                 )
         if retryable_tool_failure is not None:
             raise retryable_tool_failure

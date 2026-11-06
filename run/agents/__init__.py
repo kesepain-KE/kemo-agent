@@ -2,7 +2,7 @@
 
 from agents._runtime.schema import *  # noqa: F401,F403
 
-_DOMAIN_MODULES = ("runner", "queue", "service", "subagent_invocation", "external", "task_ledger", "conclusions", "controls", "budgets")
+_DOMAIN_MODULES = ("runner", "queue", "service", "subagent_invocation", "external", "task_ledger", "coordinator", "conclusions", "controls", "budgets", "contracts")
 
 
 def __getattr__(name: str):

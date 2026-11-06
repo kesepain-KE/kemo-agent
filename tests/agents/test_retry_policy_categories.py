@@ -19,7 +19,8 @@ def test_tool_failure_retryability_uses_only_transient_categories_by_default() -
 
 
 def test_explicit_retryable_flag_overrides_category_default() -> None:
-    assert _agent_tool_failure_is_retryable(
+    # A server flag cannot expand a deterministic category into a retry.
+    assert not _agent_tool_failure_is_retryable(
         {"error": {"category": "validation_error", "retryable": True}},
         "failed",
     )

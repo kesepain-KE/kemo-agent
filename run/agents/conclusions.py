@@ -1,16 +1,9 @@
 """Small, public delivery contract; tool history belongs to the workbench."""
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from run.agents.public_trace import public_tool_data
-
-_HIDDEN = {
-    "metadata", "tool_calls", "tool_records", "trace", "events", "messages",
-    "raw_text", "reasoning", "thinking", "system_prompt", "checkpoint", "input",
-}
 
 
 def numeric_usage(value):
@@ -19,43 +12,8 @@ def numeric_usage(value):
 
 
 def conclusion_data(value: Any) -> Any:
-    """Filter legacy result envelopes too; never project raw runner metadata."""
-    budget = [512]
-    def visit(item, depth=0):
-        budget[0] -= 1
-        if depth > 8 or budget[0] < 0:
-            return "[truncated]"
-        if isinstance(item, dict):
-            result = {}
-            for k, v in list(item.items())[:80]:
-                normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(k)).lower().replace("-", "_")
-                if normalized not in _HIDDEN:
-                    result[k] = visit(v, depth + 1)
-                if budget[0] <= 0:
-                    result["truncated"] = True
-                    break
-            if len(item) > 80:
-                result["truncated"] = True
-            return result
-        if isinstance(item, (list, tuple)):
-            result = []
-            for v in item[:80]:
-                if budget[0] <= 0:
-                    break
-                result.append(visit(v, depth + 1))
-            if len(result) < len(item):
-                result.append("[truncated]")
-            return result
-        if isinstance(item, str) and len(item) <= 16000 and item.lstrip().startswith(("{", "[")):
-            try:
-                parsed = json.loads(item)
-            except (ValueError, RecursionError):
-                pass
-            else:
-                if isinstance(parsed, (dict, list)):
-                    return json.dumps(visit(parsed, depth + 1), ensure_ascii=False)
-        return item
-    return public_tool_data(visit(value))
+    """Project business data after the caller removes the runtime envelope."""
+    return public_tool_data(value, hide_private_fields=False)
 
 
 def delivery(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -63,9 +21,15 @@ def delivery(snapshot: dict[str, Any]) -> dict[str, Any]:
     result_usage = result.get("usage") if isinstance(result, dict) else None
     if result is not None and hasattr(result, "data"):
         result = getattr(result, "data")
-    elif isinstance(result, dict) and "data" in result and "agent" in result:
+    elif (
+        "execution_live" not in snapshot
+        and isinstance(result, dict) and "data" in result and "agent" in result
+    ):
+        # Durable task records already contain business data. Only scheduler
+        # snapshots still carry the runtime result envelope.
         result = result["data"]
     response = {
+        "ok": snapshot.get("status") in {"queued", "running", "completed", "cancelling"},
         "task_id": snapshot.get("id", snapshot.get("task_id", "")),
         "agent": snapshot.get("agent", ""),
         "status": snapshot.get("status", ""),

@@ -7,27 +7,24 @@ import time
 import uuid
 
 from provider.protocol.enums import MessageRole
-from provider.protocol.models import MessageItem
+from provider.protocol.models import KemoResponse, MessageItem
+from provider.token_usage import complete_usage
 from run.agents.contracts import AgentRunError, AgentToolLimitError
 
 BUDGET_STOPS = {"timed_out", "tool_limit"}
 
 
-def validate_input_budget(context, system, items, tools):
+def validate_input_budget(context, system, items, tools, *, input_limit=None):
     """Include native framing and repair additions in the last safety gate."""
-    if context.input_token_limit is None:
+    limit = context.input_token_limit if input_limit is None else input_limit
+    if limit is None:
         return
-    from run.context import estimate_messages_tokens, estimate_tools_tokens
+    from run.cards import estimate_request_tokens
     from run.agents.contracts import AgentProviderError
-    measured = estimate_messages_tokens([
-        {"role": "system", "content": system},
-        *[item.model_dump(mode="json", exclude_none=True) for item in items],
-    ]) + estimate_tools_tokens([
-        tool.model_dump(mode="json", exclude_none=True) for tool in tools
-    ])
-    if measured > context.input_token_limit:
+    measured = estimate_request_tokens(system, items, tools)
+    if measured > limit:
         raise AgentProviderError(
-            "摘要完整请求超过输入预算", category="context_length_exceeded",
+            "子代理完整请求超过输入预算", category="context_length_exceeded",
             code="summary_input_budget_exceeded", retryable=False,
         )
 
@@ -58,22 +55,19 @@ def overridable(definition):
             and "main_agent" in definition.capabilities.allowed_callers)
 
 
-def effective_limit(definition, config, requested=None):
+def effective_limit(definition, requested=None):
     if requested is not None:
         if isinstance(requested, bool) or not isinstance(requested, int) or requested < 0:
             raise AgentRunError("max_tool_calls 必须是非负整数；0 表示不限工具次数")
         if not overridable(definition):
             raise AgentRunError("此子代理不支持覆盖工具预算")
         return requested
-    value = (config.get("tools") or {}).get("max_iterations", 80)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise AgentRunError("tools.max_iterations 必须是正整数")
-    return min(value, definition.capabilities.max_tool_iterations)
+    return definition.capabilities.max_tool_iterations
 
 
 class SegmentBudget:
-    def __init__(self, definition, config, requested, timeout, resume=None):
-        self.limit = effective_limit(definition, config, requested)
+    def __init__(self, definition, requested, timeout, resume=None):
+        self.limit = effective_limit(definition, requested)
         self.timeout = timeout
         self.started = time.monotonic()
         self.used = 0
@@ -142,12 +136,15 @@ def capture_budget(context):
 
 
 def provider_attempt(context, usage, retry_state, provider, request):
+    if context.compression_budget is not None:
+        context.compression_budget.claim_attempt()
     usage["provider_attempt_count"] = usage.get("provider_attempt_count", 0) + 1
     retry_state.usage = copy.deepcopy(usage)
     if context.continuation is not None:
         with context.continuation.lock:
             context.continuation.payload["usage"] = copy.deepcopy(usage)
-    return provider.create(request)
+    response = provider.create(request)
+    return complete_usage(request, response) if isinstance(response, KemoResponse) else response
 
 
 def stopped_result(context, items, usage, response_ids, *, conclusion=None):

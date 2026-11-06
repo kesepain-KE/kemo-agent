@@ -4,6 +4,7 @@ from typing import Any
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from events import RunEvent
-from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
+from provider.protocol.enums import IncompleteReason, MessagePhase, MessageRole, ResponseStatus
 from provider.protocol.models import (
     KemoResponse,
     Measurement,
@@ -150,12 +151,47 @@ class StubRunner:
 class SubAgentRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         clear_model_capability_cache()
-        self.root = Path(__file__).resolve().parents[2]
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        repository = Path(__file__).resolve().parents[2]
+        shutil.copytree(repository / "agents", self.root / "agents",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        for plugin in ("memory_manage", "skill_creater"):
+            shutil.copytree(repository / "plugins" / plugin, self.root / "plugins" / plugin,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+        for user in ("kesepain", "alice", "bob"):
+            (self.root / "users" / user).mkdir(parents=True)
+        # Generic AgentRunner schema/retry tests use their own fixture agent.
+        # Context compression is covered through the CardStream summarizer.
+        directory = self.root / "agents" / "schema_worker"
+        directory.mkdir()
+        (directory / "agent.json").write_text(json.dumps({
+            "schema_version": 2, "name": "schema_worker", "version": "1.0.0",
+            "description": "Isolated schema validation fixture", "enabled": True,
+            "instruction": "AGENT.md", "trigger": "trigger.md", "executor": "builtin:llm",
+            "model_profile": "cheap", "timeout": 600, "execution": "sync", "write_policy": "none",
+            "input_schema": {"type": "object", "additionalProperties": True},
+            "output_schema": {"type": "object", "required": list(SUMMARY),
+                "properties": {key: ({"type": "string"} if key == "narrative" else
+                    {"type": "array", "items": {"type": "string"}, "maxItems": 12})
+                    for key in SUMMARY}, "additionalProperties": False},
+        }), "utf-8")
+        (directory / "AGENT.md").write_text("Return the fixture JSON schema.", "utf-8")
+        (directory / "trigger.md").write_text("Schema validation fixture trigger.", "utf-8")
+        (directory / "agent-config.json").write_text(json.dumps({
+            "schema_version": 1, "exposure": {"mode": "internal", "allowed_callers": []},
+            "tools": {"plugins": {"allow": []}, "max_iterations": 80},
+            "prompt_sources": {"skills": {"shared": [], "user": []},
+                               "expand": {"global": [], "shared": [], "user": []}},
+            "knowledge": {"scopes": [], "index_enabled": False},
+            "context": {"inherit_main_history": False, "inherit_current_request": False},
+        }), "utf-8")
         self.config = {
             "provider": {
                 "type": "kemo",
                 "base_url": "http://127.0.0.1:1",
-                "api_key_env": "TEST_AGENT_KEY",
+                "api_key_env": "KEMO_API_KEY",
                 "model": "main-model",
                 "reasoning_effort": "high",
             },
@@ -175,7 +211,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(
             set(registry.agents),
             {
-                "context_manage",
+                "schema_worker",
                 "history_summary",
                 "general_worker",
                 "memory_temporary_important",
@@ -184,11 +220,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "time_plan",
             },
         )
-        context_definition = registry.get("context_manage")
-        self.assertEqual(context_definition.version, "1.2.0")
+        context_definition = registry.get("schema_worker")
+        self.assertEqual(context_definition.version, "1.0.0")
         self.assertEqual(context_definition.instruction_file, "AGENT.md")
-        self.assertEqual(context_definition.trigger_file, "trigger.md")
-        self.assertIn("按完整对话轮", context_definition.trigger_registration)
         self.assertEqual(context_definition.model_profile, "cheap")
         self.assertEqual(context_definition.timeout, 600.0)
         self.assertEqual(context_definition.input_schema["type"], "object")
@@ -202,6 +236,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(task_definition.capabilities.knowledge_scopes, ("global", "shared"))
         self.assertEqual(task_definition.capabilities.knowledge_body_access, "none")
         summary_definition = registry.get("history_summary")
+        self.assertEqual(summary_definition.trigger_file, "trigger.md")
+        self.assertTrue(summary_definition.trigger_registration)
         self.assertEqual(summary_definition.version, "1.1.0")
         self.assertEqual(summary_definition.output_schema["required"], ["title", "summary"])
         self.assertFalse(summary_definition.output_schema["additionalProperties"])
@@ -218,19 +254,19 @@ class SubAgentRuntimeTests(unittest.TestCase):
         with self.assertRaises(AgentManifestError):
             discover_agents(root)
 
-        definition = registry.agents["context_manage"]
+        definition = registry.agents["schema_worker"]
         object.__setattr__(definition, "enabled", False)
         try:
             with self.assertRaises(AgentDisabledError):
-                registry.get("context_manage")
+                registry.get("schema_worker")
         finally:
             object.__setattr__(definition, "enabled", True)
 
     def test_runner_uses_explicit_input_and_inherits_main_model(self) -> None:
         provider = MockProvider()
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [{"round": 1}], "trigger": "manual"},
             )
         self.assertEqual(result.data["narrative"], "summary")
@@ -240,7 +276,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(request.reasoning.effort, "high")
         self.assertEqual(request.reasoning.return_mode, "content")
         self.assertEqual(len(request.input), 1)
-        self.assertIn("[trigger_registration]", request.system_prompt)
+        self.assertIn("[agent_instruction]", request.system_prompt)
         self.assertNotIn("# 操作信息", request.system_prompt)
         self.assertNotIn(
             "main conversation",
@@ -321,18 +357,18 @@ class SubAgentRuntimeTests(unittest.TestCase):
             config=config,
             provider_factory=lambda _: provider,
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             runner.run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         self.assertEqual(provider.requests[0].model, "summary-model")
 
     def test_runner_omits_reasoning_when_kemo_model_declares_it_unsupported(self) -> None:
         provider = MockProvider(reasoning_supported=False)
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             self.runner(provider).run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         request = provider.requests[0]
@@ -354,9 +390,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     config=config,
                     provider_factory=lambda _: provider,
                 )
-                with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+                with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
                     runner.run(
-                        "context_manage",
+                        "schema_worker",
                         {"previous_summary": None, "rounds": [], "trigger": "manual"},
                     )
                 request = provider.requests[0]
@@ -375,9 +411,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
             config=config,
             provider_factory=lambda _: provider,
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             runner.run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         request = provider.requests[0]
@@ -400,14 +436,14 @@ class SubAgentRuntimeTests(unittest.TestCase):
         provider = FlakyProvider()
         events = []
         with (
-            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
                 "run.agents.runner._agent_retry_delay_seconds",
                 return_value=0.0,
             ),
         ):
             result = self.runner(provider).run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 event_callback=events.append,
             )
@@ -437,7 +473,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         provider = FailingProvider()
         events = []
         with (
-            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
                 "run.agents.runner._agent_retry_delay_seconds",
                 return_value=0.0,
@@ -445,7 +481,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         ):
             with self.assertRaises(ProviderError) as raised:
                 self.runner(provider).run(
-                    "context_manage",
+                    "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                     event_callback=events.append,
                 )
@@ -463,7 +499,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(events[-1].metadata["retry_budget_exhausted"])
 
-    def test_subagent_retry_budget_resets_after_progress(self) -> None:
+    def test_subagent_retry_budget_is_bounded_despite_progress(self) -> None:
         events: list[RunEvent] = []
         context = SimpleNamespace(
             definition=SimpleNamespace(name="episode_agent"),
@@ -494,8 +530,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 model="test-model",
             )
 
-        with patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0):
-            result = _run_agent_with_retries(
+        with (patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0),
+              self.assertRaises(ProviderError) as raised):
+            _run_agent_with_retries(
                 run_once,
                 context,
                 {},
@@ -505,10 +542,12 @@ class SubAgentRuntimeTests(unittest.TestCase):
         retries = [
             event for event in events if event.metadata.get("status") == "retrying"
         ]
-        self.assertEqual(calls, 9)
-        self.assertEqual(result.data, {"ok": True})
-        self.assertEqual([event.metadata["failed_attempt"] for event in retries], [1] * 8)
-        self.assertEqual([event.metadata["run_attempt"] for event in retries], list(range(1, 9)))
+        self.assertEqual(calls, 6)
+        self.assertTrue(raised.exception.retry_budget_exhausted)
+        self.assertEqual([event.metadata["failed_attempt"] for event in retries], list(range(1, 6)))
+        self.assertEqual([event.metadata["run_attempt"] for event in retries], list(range(1, 6)))
+        self.assertTrue(all(event.metadata["consecutive_failures"] == 1 for event in retries))
+        self.assertTrue(all(event.metadata["retry_progress"] for event in retries))
         self.assertTrue(all(event.metadata["retry_progress"] for event in retries))
 
     def test_runner_retries_gateway_response_when_retryable_is_omitted(self) -> None:
@@ -522,7 +561,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                         model=request.model,
                         error=UnifiedError.model_validate({
                                   'type': "connection_error",
-                                  'code': "UPSTREAM_DISCONNECTED",
+                                  'code': "PROVIDER_UNAVAILABLE",
                                   'message': "gateway disconnected",
                                   'provider_status': 503,
                               }),
@@ -531,14 +570,14 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
         provider = FailedResponseProvider()
         with (
-            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
                 "run.agents.runner._agent_retry_delay_seconds",
                 return_value=0.0,
             ),
         ):
             result = self.runner(provider).run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
 
@@ -554,7 +593,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
                            'status': ResponseStatus.INCOMPLETE,
                            'model': request.model,
                            'incomplete_details': {
-                        "reason": "output_truncated",
+                        "reason": IncompleteReason.OUTPUT_TRUNCATED,
                         "details": {
                             "finish_reason": "length",
                             "category": "upstream_error",
@@ -564,17 +603,18 @@ class SubAgentRuntimeTests(unittest.TestCase):
                        })
 
         provider = TruncatedProvider()
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaises(AgentProviderError) as raised:
                 self.runner(provider).run(
-                    "context_manage",
+                    "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
 
-        self.assertEqual(len(provider.requests), 6)
+        # R1 3.3: output truncation is deterministic, even with remote true.
+        self.assertEqual(len(provider.requests), 1)
         self.assertTrue(raised.exception.retryable_declared)
         self.assertFalse(raised.exception.retryable)
-        self.assertTrue(raised.exception.retry_budget_exhausted)
+        self.assertFalse(getattr(raised.exception, "retry_budget_exhausted", False))
         self.assertEqual(raised.exception.code, "output_truncated")
 
     def test_runner_retries_transient_incomplete_response(self) -> None:
@@ -587,24 +627,26 @@ class SubAgentRuntimeTests(unittest.TestCase):
                                'status': ResponseStatus.INCOMPLETE,
                                'model': request.model,
                                'incomplete_details': {
-                            "reason": "empty_output",
-                            "category": "upstream_error",
-                            "status_code": 503,
-                            "retry_after_ms": 0,
+                            "reason": IncompleteReason.EMPTY_OUTPUT,
+                            "details": {
+                                "category": "upstream_error",
+                                "status_code": 503,
+                                "retry_after_ms": 0,
+                            },
                         },
                            })
                 return super().create(request)
 
         provider = EmptyThenCompleteProvider()
         with (
-            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
                 "run.agents.runner._agent_retry_delay_seconds",
                 return_value=0.0,
             ),
         ):
             result = self.runner(provider).run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
 
@@ -629,18 +671,19 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 )
 
         provider = InvalidRequestProvider()
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaises(AgentProviderError) as raised:
                 self.runner(provider).run(
-                    "context_manage",
+                    "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
 
-        self.assertEqual(len(provider.requests), 6)
+        # R1 3.3: HTTP 400 cannot consume a transient retry budget.
+        self.assertEqual(len(provider.requests), 1)
         self.assertEqual(raised.exception.status_code, 400)
-        self.assertTrue(raised.exception.retryable_declared)
+        self.assertFalse(raised.exception.retryable_declared)
         self.assertFalse(raised.exception.retryable)
-        self.assertTrue(raised.exception.retry_budget_exhausted)
+        self.assertFalse(getattr(raised.exception, "retry_budget_exhausted", False))
 
     def test_runner_uses_declared_chat_reasoning_capabilities(self) -> None:
         provider = MockProvider()
@@ -658,9 +701,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
             config=config,
             provider_factory=lambda _: provider,
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             runner.run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         self.assertEqual(provider.capability_calls, ["main-model"])
@@ -685,9 +728,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
             config=config,
             provider_factory=lambda _: provider,
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             runner.run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         self.assertEqual(provider.requests[0].reasoning.effort, "medium")
@@ -747,8 +790,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
         provider = ReusedResponseIdProvider()
         with (
-            patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False),
-            patch("run.agents.runner.execute_tool", return_value={"matches": []}),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("run.agents.model_loop.execute_tool", return_value={"matches": []}),
         ):
             result = self.runner(provider).run(
                 "self_improve",
@@ -801,35 +844,26 @@ class SubAgentRuntimeTests(unittest.TestCase):
             )
         )
 
-    def test_history_summary_repairs_non_json_output_once(self) -> None:
-        repaired = {
-            "title": "历史摘要格式自动修复",
-            "summary": "后台摘要在首次格式错误后自动修复，并生成稳定清晰的历史对话标题与内容说明。",
-        }
-        provider = MockProvider(
-            texts=[
-                "标题已经整理好了，但这次没有按照 JSON 格式输出。",
-                json.dumps(repaired, ensure_ascii=False),
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+    def test_history_summary_uses_local_fallback_after_one_invalid_response(self) -> None:
+        provider = MockProvider(text="标题已经整理好了，但这次没有按照 JSON 格式输出。")
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
                 "history_summary",
                 {
                     "trigger": "session_closed",
                     "session_id": "conv_summary_test",
-                    "target_round": 1,
-                    "previous_summary": None,
-                    "rounds": [{"round": 1, "user": "请整理摘要", "assistant": "已经完成整理"}],
+                    "target_seq": 2,
+                    "records": [
+                        {"seq": 1, "role": "user", "text": "请整理摘要"},
+                        {"seq": 2, "role": "assistant", "text": "已经完成整理"},
+                    ],
                 },
                 max_tokens=512,
             )
-        self.assertEqual(result.data, repaired)
-        self.assertEqual(len(provider.requests), 2)
-        repair_payload = json.loads(text_from_content(provider.requests[1].input[0].content))
-        self.assertTrue(repair_payload["_format_repair"]["required"])
-        self.assertIn("没有按照 JSON", repair_payload["_format_repair"]["previous_output"])
-        self.assertEqual(provider.requests[1].generation.max_output_tokens, 512)
+        self.assertEqual(result.data["title"], "历史对话内容摘要")
+        self.assertEqual(result.metadata["history_summary_recovery"], "deterministic_fallback")
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(provider.requests[0].generation.max_output_tokens, 512)
 
     def test_history_summary_recovers_labelled_text_without_second_request(self) -> None:
         provider = MockProvider(
@@ -838,15 +872,14 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 "摘要：模型即使没有返回 JSON，系统也能从明确标签中恢复标题和摘要内容。"
             )
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
                 "history_summary",
                 {
                     "trigger": "session_closed",
                     "session_id": "conv_labelled_summary",
-                    "target_round": 1,
-                    "previous_summary": None,
-                    "rounds": [{"round": 1, "user": "整理历史", "assistant": "已完成"}],
+                    "target_seq": 1,
+                    "records": [{"seq": 1, "role": "user", "text": "整理历史"}],
                 },
             )
         self.assertEqual(result.data["title"], "历史摘要普通文本恢复")
@@ -857,31 +890,24 @@ class SubAgentRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(len(provider.requests), 1)
 
-    def test_context_manage_repairs_truncated_json_once(self) -> None:
+    def test_schema_worker_rejects_truncated_json_without_reexecution(self) -> None:
         provider = MockProvider(
             texts=[
                 '{"facts":["unfinished response"]',
                 json.dumps(SUMMARY, ensure_ascii=False),
             ]
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
-            result = self.runner(provider).run(
-                "context_manage",
-                {"previous_summary": None, "rounds": [], "trigger": "manual"},
-                max_tokens=1024,
-            )
-        self.assertEqual(result.data, SUMMARY)
-        self.assertTrue(result.metadata["format_repaired"])
-        self.assertIn("疑似被截断", result.metadata["format_error"])
-        self.assertEqual(len(provider.requests), 2)
-        repair_payload = json.loads(
-            text_from_content(provider.requests[1].input[0].content)
-        )
-        self.assertTrue(repair_payload["_format_repair"]["required"])
-        self.assertIn("确保 JSON 完整闭合", repair_payload["_format_repair"]["instruction"])
-        self.assertEqual(provider.requests[1].generation.max_output_tokens, 1024)
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+            with self.assertRaises(AgentOutputError) as caught:
+                self.runner(provider).run(
+                    "schema_worker", {"rounds": [], "trigger": "manual"}, max_tokens=1024,
+                )
+        self.assertIn("疑似被截断", str(caught.exception))
+        self.assertEqual(caught.exception.raw_text, '{"facts":["unfinished response"]')
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(provider.requests[0].generation.max_output_tokens, 1024)
 
-    def test_context_manage_repairs_schema_overflow_once(self) -> None:
+    def test_schema_worker_rejects_schema_overflow_without_reexecution(self) -> None:
         overflow = {**SUMMARY, "facts": [f"fact-{index}" for index in range(13)]}
         provider = MockProvider(
             texts=[
@@ -889,29 +915,26 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 json.dumps(SUMMARY, ensure_ascii=False),
             ]
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
-            result = self.runner(provider).run(
-                "context_manage",
-                {"previous_summary": None, "rounds": [], "trigger": "manual"},
-            )
-        self.assertEqual(result.data, SUMMARY)
-        self.assertIn("元素数量不能大于 12", result.metadata["format_error"])
-        self.assertEqual(len(provider.requests), 2)
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+            with self.assertRaises(AgentOutputError) as caught:
+                self.runner(provider).run("schema_worker", {"rounds": []})
+        self.assertIn("元素数量不能大于 12", str(caught.exception))
+        self.assertEqual(json.loads(caught.exception.raw_text), overflow)
+        self.assertEqual(len(provider.requests), 1)
 
-    def test_context_manage_failed_repair_preserves_last_raw_output(self) -> None:
-        provider = MockProvider(texts=["first invalid", "second invalid"] * 6)
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+    def test_schema_worker_preserves_invalid_output_without_outer_retries(self) -> None:
+        provider = MockProvider(texts=["first invalid", "second invalid"])
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaises(AgentOutputError) as caught:
                 self.runner(provider).run(
-                    "context_manage",
+                    "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
-        self.assertEqual(caught.exception.raw_text, "second invalid")
-        self.assertIn("JSON 修复失败", str(caught.exception))
-        self.assertEqual(len(provider.requests), 12)
-        self.assertTrue(caught.exception.retry_budget_exhausted)
+        self.assertEqual(caught.exception.raw_text, "first invalid")
+        self.assertEqual(len(provider.requests), 1)
+        self.assertFalse(getattr(caught.exception, "retry_budget_exhausted", False))
 
-    def test_context_manage_extracts_json_object_from_surrounding_text(self) -> None:
+    def test_schema_worker_extracts_json_object_from_surrounding_text(self) -> None:
         provider = MockProvider(
             text=(
                 "摘要如下：\n"
@@ -919,35 +942,37 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 + "\n以上为完整结果。"
             )
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
             )
         self.assertEqual(result.data, SUMMARY)
         self.assertEqual(len(provider.requests), 1)
 
-    def test_history_summary_falls_back_after_failed_repair(self) -> None:
-        provider = MockProvider(texts=["first invalid", "second invalid"])
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+    def test_history_summary_uses_local_fallback_without_repair_request(self) -> None:
+        provider = MockProvider(text="first invalid")
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
                 "history_summary",
                 {
                     "trigger": "session_closed",
                     "session_id": "conv_summary_test",
-                    "target_round": 1,
-                    "previous_summary": None,
-                    "rounds": [{"round": 1, "user": "问题", "assistant": "回答"}],
+                    "target_seq": 2,
+                    "records": [
+                        {"seq": 1, "role": "user", "text": "问题"},
+                        {"seq": 2, "role": "assistant", "text": "回答"},
+                    ],
                 },
                 max_tokens=512,
             )
-        self.assertEqual(result.data["title"], "关于问题的历史对话")
-        self.assertIn("完整内容已保存在历史记录中", result.data["summary"])
+        self.assertEqual(result.data["title"], "历史对话内容摘要")
+        self.assertIn("已保存在历史记录中", result.data["summary"])
         self.assertEqual(
             result.metadata["history_summary_recovery"],
             "deterministic_fallback",
         )
-        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(len(provider.requests), 1)
 
     def test_history_summary_accepts_strict_structured_output_tool(self) -> None:
         expected = {
@@ -982,15 +1007,17 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 )
 
         provider = StructuredProvider()
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
                 "history_summary",
                 {
                     "trigger": "session_closed",
                     "session_id": "conv_structured_summary",
-                    "target_round": 1,
-                    "previous_summary": None,
-                    "rounds": [{"round": 1, "user": "生成摘要", "assistant": "完成"}],
+                    "target_seq": 2,
+                    "records": [
+                        {"seq": 1, "role": "user", "text": "生成摘要"},
+                        {"seq": 2, "role": "assistant", "text": "完成"},
+                    ],
                 },
                 max_tokens=1024,
                 structured_output_tool=True,
@@ -1009,15 +1036,17 @@ class SubAgentRuntimeTests(unittest.TestCase):
         provider = MockProvider(
             text=json.dumps({"title": title, "summary": summary}, ensure_ascii=False)
         )
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = self.runner(provider).run(
                 "history_summary",
                 {
                     "trigger": "session_closed",
                     "session_id": "conv_summary_trim",
-                    "target_round": 1,
-                    "previous_summary": None,
-                    "rounds": [{"round": 1, "user": "问题", "assistant": "回答"}],
+                    "target_seq": 2,
+                    "records": [
+                        {"seq": 1, "role": "user", "text": "问题"},
+                        {"seq": 2, "role": "assistant", "text": "回答"},
+                    ],
                 },
                 max_tokens=512,
             )
@@ -1026,18 +1055,18 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(len(provider.requests), 1)
 
     def test_runner_uses_loose_input_but_rejects_invalid_output_timeout_and_cancel(self) -> None:
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
-            loose = self.runner(MockProvider()).run("context_manage", {"rounds": []})
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+            loose = self.runner(MockProvider()).run("schema_worker", {"rounds": []})
             self.assertEqual(loose.data["narrative"], "summary")
             with self.assertRaises(AgentOutputError):
                 self.runner(MockProvider(text="not-json")).run(
-                    "context_manage",
+                    "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
             timeout_events = []
             with self.assertRaises(AgentTimeoutError) as raised:
                 self.runner(MockProvider(delay=0.2)).run(
-                    "context_manage",
+                    "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                     timeout=0.02,
                     event_callback=timeout_events.append,
@@ -1050,7 +1079,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
             cancelled.set()
             with self.assertRaises(AgentCancelledError):
                 self.runner(MockProvider()).run(
-                    "context_manage",
+                    "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                     cancel_event=cancelled,
                 )
@@ -1058,7 +1087,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
     def test_two_users_keep_independent_runner_context(self) -> None:
         first_provider = MockProvider()
         second_provider = MockProvider()
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             first = AgentRunner(
                 self.root,
                 "alice",
@@ -1072,11 +1101,11 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 provider_factory=lambda _: second_provider,
             )
             first.run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [{"owner": "alice"}], "trigger": "manual"},
             )
             second.run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [{"owner": "bob"}], "trigger": "manual"},
             )
         first_input = json.loads(text_from_content(first_provider.requests[0].input[0].content))
@@ -1107,7 +1136,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         errors: list[BaseException] = []
 
         def executor(_context, input_data):
-            marker = int(input_data["target_round"])
+            marker = int(input_data["target_seq"])
             order.append(("start", marker))
             if marker == 1:
                 first_started.set()
@@ -1128,11 +1157,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     {
                         "trigger": "session_closed",
                         "session_id": "conv_serial_test",
-                        "target_round": marker,
-                        "previous_summary": None,
-                        "rounds": [
-                            {"round": marker, "user": "u", "assistant": "a"}
-                        ],
+                        "target_seq": marker,
+                        "records": [{"seq": marker, "role": "user", "text": "u"}],
                     },
                 )
             except BaseException as exc:
@@ -1162,7 +1188,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         order: list[tuple[str, int]] = []
 
         def executor(context, input_data):
-            marker = int(input_data["target_round"])
+            marker = int(input_data["target_seq"])
             order.append(("start", marker))
             if marker == 1:
                 context.runner.run(
@@ -1170,9 +1196,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
                     {
                         "trigger": "session_closed",
                         "session_id": "conv_nested_serial_test",
-                        "target_round": 2,
-                        "previous_summary": None,
-                        "rounds": [{"round": 2, "user": "u", "assistant": "a"}],
+                        "target_seq": 2,
+                        "records": [{"seq": 2, "role": "user", "text": "u"}],
                     },
                     timeout=2,
                 )
@@ -1191,9 +1216,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
                 {
                     "trigger": "session_closed",
                     "session_id": "conv_nested_serial_test",
-                    "target_round": 1,
-                    "previous_summary": None,
-                    "rounds": [{"round": 1, "user": "u", "assistant": "a"}],
+                    "target_seq": 1,
+                    "records": [{"seq": 1, "role": "user", "text": "u"}],
                 },
                 timeout=2,
             )
@@ -1205,9 +1229,9 @@ class SubAgentRuntimeTests(unittest.TestCase):
 
     def test_subagent_events_are_observable(self) -> None:
         events = []
-        with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             self.runner(MockProvider()).run(
-                "context_manage",
+                "schema_worker",
                 {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 event_callback=events.append,
                 source="web",
@@ -1294,7 +1318,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         runner.gate.set()
         scheduler.wait(third, 1)
         with self.assertRaises(AgentQueueError):
-            scheduler.submit("context_manage", {"rounds": [], "trigger": "manual"})
+            scheduler.submit("schema_worker", {"rounds": [], "trigger": "manual"})
 
     def test_scoped_scheduler_task_cannot_use_legacy_unscoped_access(self) -> None:
         registry = discover_agents(self.root)

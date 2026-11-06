@@ -156,8 +156,8 @@ def _scope_roots(root: Path, user: str) -> tuple[tuple[str, Path], ...]:
     safe_user = validate_user_name(user)
     base = root.resolve()
     return (
-        ("global", base / "global_expand"),
-        ("shared", base / "shared_expand"),
+        ("global", base / "expand" / "global"),
+        ("shared", base / "expand" / "share"),
         ("user", base / "users" / safe_user / "expand"),
     )
 
@@ -343,6 +343,7 @@ def call_external_agent(
     usage = raw_result.get("usage")
     model = raw_result.get("model")
     return {
+        "ok": True,
         "status": "completed",
         "agent": binding.handle,
         "source": "external",

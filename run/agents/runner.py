@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import copy
-import json
 import importlib.util
 import math
-import re
 import sys
 import threading
 import time
@@ -17,39 +15,19 @@ from pathlib import Path
 from typing import Any, Callable
 
 from events import RunEvent
-from provider.factory import (
-    ProviderCongestionError,
-    create_provider,
-    provider_request_slot,
-)
-from provider.protocol.enums import MessageRole, ResponseStatus
+from provider.factory import create_provider
 from provider.protocol.models import (
-    JsonContent,
-    KemoRequest,
-    KemoResponse,
-    MessageItem,
-    ReasoningItem,
-    ReasoningConfig,
-    ToolCallItem,
     ToolDefinition,
-    ToolResultItem,
     Usage,
-    text_from_content,
 )
-from provider.protocol.diagnostics import (
-    incomplete_retry_metadata,
-    safe_provider_message,
-)
-from provider.schema import ProviderError
-from provider.request_scope import provider_request_scope
+from provider.request_scope import provider_priority, provider_request_scope
 from agents._runtime.resources import (
     AgentPromptBundle,
     build_agent_prompt_bundle,
     build_agent_tool_registry,
-    effective_knowledge_scopes,
 )
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
-from run.config import load_config, provider_runtime_config, resolve_agent_model
+from run.config import load_config
 from run.tools import (
     ExecutionCapacityError,
     abandon_execution,
@@ -57,32 +35,16 @@ from run.tools import (
     release_execution,
     reserve_execution,
 )
-from run.extensions import resolve_reasoning_selection
 from run.agents.model_loop import run_model as _run_model_loop
 from run.agents.continuation import ContinuationState, definition_digest
 from run.agents.budgets import SegmentBudget, execution_error_detail
 from run.retry.loop import RetryLedger, RunAttemptContext, run_attempts
 from run.retry import HOST_CONTROL_EXCEPTIONS
-from run.retry.policy import _safe_int
-from run.tools import (
-    invalid_tool_name,
-    response_invalid_tool_arguments_error,
-    system_prompt_with_tool_argument_repair,
-    validate_tool_call_batch,
-)
-from run.tools import (
-    ConsecutiveIdenticalToolCallTracker,
-    ConsecutiveToolFailureTracker,
-    ToolResultTooLargeError,
-    ToolRegistry,
-    execute_tool,
-    tool_call_signature,
-)
+from run.tools import ToolRegistry
 
 
 _AGENT_TIMEOUT_CLEANUP_GRACE = 1.0
 _AGENT_CANCEL_CLEANUP_GRACE = 0.1
-_STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
 _SERIAL_EXECUTION_LOCKS_GUARD = threading.RLock()
 _SERIAL_EXECUTION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _SERIAL_EXECUTION_LOCAL = threading.local()
@@ -92,14 +54,8 @@ from run.agents.retry_policy import (
     _MAX_AGENT_RETRY_ATTEMPTS,
     _AgentRetryState,
     _agent_error_is_retryable,
-    _agent_recovery_items,
-    _agent_recovery_records,
     _agent_retry_delay_seconds,
     _agent_retry_reason,
-    _agent_tool_result_reuse_allowed,
-    _agent_tool_failure_is_retryable,
-    _mark_agent_retry_exhausted,
-    _record_agent_recovery,
 )
 
 def _run_agent_with_retries(
@@ -143,10 +99,6 @@ def _run_agent_with_retries(
             raise AgentCancelledError(
                 f"子代理 {context.definition.name} 已取消"
             ) from exc
-        if context.definition.name == "context_manage":
-            from run.context import failure_kind
-            if failure_kind(exc) in {"input_limit", "request_too_large"}:
-                return False  # The summary planner retries with smaller input.
         continuation = getattr(context, "continuation", None)
         if continuation is not None and continuation.wrap_up.is_set():
             return False
@@ -167,8 +119,8 @@ def _run_agent_with_retries(
             source=context.source,
             session_id=context.session_id,
             detail={
-                "failed_attempt": ledger.consecutive_failures,
-                "next_attempt": ledger.consecutive_failures + 1,
+                "failed_attempt": attempt.attempt_index,
+                "next_attempt": attempt.attempt_index + 1,
                 "max_attempts": attempt.max_attempts,
                 "max_retries": max(0, attempt.max_attempts - 1),
                 "consecutive_failures": ledger.consecutive_failures,
@@ -194,49 +146,6 @@ def _run_agent_with_retries(
         on_retry=on_retry,
         wait_before_retry=wait_before_retry,
     )
-
-
-def _response_items_for_next_request(output: list[Any]) -> list[Any]:
-    """Copy Provider output into local history with request-unique IDs.
-
-    Provider item and tool-call IDs are only guaranteed to be unique inside a
-    single response.  A subagent request carries several response iterations,
-    so every local item and tool call needs a fresh identity.  Tool results
-    created by the runner use the normalized call IDs and remain linked.
-    """
-
-    call_id_map: dict[str, str] = {}
-    normalized_call_ids: dict[int, str] = {}
-    for item in output:
-        if not isinstance(item, ToolCallItem):
-            continue
-        call_id = f"callid_{uuid.uuid4().hex}"
-        normalized_call_ids[id(item)] = call_id
-        call_id_map.setdefault(item.call_id, call_id)
-
-    normalized: list[Any] = []
-    for item in output:
-        prefix = (
-            "rs"
-            if isinstance(item, ReasoningItem)
-            else (
-                "call"
-                if isinstance(item, ToolCallItem)
-                else (
-                    "result"
-                    if isinstance(item, ToolResultItem)
-                    else "msg" if isinstance(item, MessageItem) else "item"
-                )
-            )
-        )
-        updates = {"id": f"{prefix}_{uuid.uuid4().hex}"}
-        if isinstance(item, ToolCallItem):
-            updates["call_id"] = normalized_call_ids[id(item)]
-        elif isinstance(item, ToolResultItem) and item.call_id in call_id_map:
-            updates["call_id"] = call_id_map[item.call_id]
-        item = item.model_copy(update=updates)
-        normalized.append(item)
-    return normalized
 
 
 def _serial_execution_key(root: Path, user: str) -> tuple[str, str]:
@@ -272,7 +181,8 @@ def _execute_agent(
         if serial_key is not None:
             owned.add(serial_key)
         try:
-            with provider_request_scope(
+            priority = 1 if context.definition.capabilities.exposure != "tool" else 2
+            with provider_priority(priority), provider_request_scope(
                 context.runner.root, context.runner.user, context.source, context.session_id,
             ):
                 return _run_agent_with_retries(
@@ -313,8 +223,6 @@ from run.agents.contracts import (
     AgentToolLimitError,
     AgentToolRetryError,
     _event,
-    _parse_json_object,
-    resolve_agent_provider_config,
     validate_json_schema,
 )
 
@@ -341,6 +249,7 @@ class AgentExecutionContext:
     continuation: ContinuationState | None = field(default=None, repr=False)
     budget: Any = field(default=None, repr=False)
     input_token_limit: int | None = None
+    compression_budget: Any = None
 
     def run_model(self, input_data: dict[str, Any]) -> AgentRunResult:
         return self.runner._run_model(
@@ -503,6 +412,7 @@ class AgentRunner:
         run_count: int = 1,
         max_tool_calls: int | None = None,
         input_token_limit: int | None = None,
+        compression_budget: Any = None,
     ) -> AgentRunResult:
         definition = self.refresh_registry().get(name)
         if resume_state is not None and resume_state.get("definition_digest") != definition_digest(definition):
@@ -513,7 +423,18 @@ class AgentRunner:
             type(input_token_limit) is not int or input_token_limit < 1
         ):
             raise AgentInputError("input_token_limit 必须是正整数")
-        validate_json_schema(input_data, definition.input_schema)
+        try:
+            validate_json_schema(input_data, definition.input_schema)
+        except AgentInputError as exc:
+            from run.agents.contracts import agent_input_hint
+            hint = agent_input_hint(
+                definition.input_schema, input_data, field_path=exc.field_path,
+                expected_type=exc.expected_type, reason=exc.reason,
+            )
+            raise AgentInputError(
+                str(exc), schema_hint=hint, field_path=exc.field_path,
+                expected_type=exc.expected_type, reason=exc.reason,
+            ) from exc
         caller_cancel_event = cancel_event
         stopped = threading.Event()
         if caller_cancel_event is not None and caller_cancel_event.is_set():
@@ -568,8 +489,9 @@ class AgentRunner:
                 self, definition, task_id, str(source), str(session_id), input_data,
                 resume_state=resume_state, run_count=run_count,
             ),
-            budget=SegmentBudget(definition, self.config, max_tool_calls, effective_timeout, resume_state),
+            budget=SegmentBudget(definition, max_tool_calls, effective_timeout, resume_state),
             input_token_limit=input_token_limit,
+            compression_budget=compression_budget,
         )
         function = _load_executor(definition)
         _event(

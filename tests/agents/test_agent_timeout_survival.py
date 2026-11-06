@@ -24,7 +24,7 @@ from run.agents import (
 from run.agents import AgentError, discover_agents
 
 
-_INPUT = {"previous_summary": None, "rounds": [], "trigger": "manual"}
+_INPUT = {"task": "timeout survival contract"}
 _CONFIG = {
     "provider": {
         "type": "kemo",
@@ -38,7 +38,7 @@ _CONFIG = {
 
 def _result() -> AgentRunResult:
     return AgentRunResult(
-        agent="context_manage",
+        agent="general_worker",
         data={"ok": True},
         raw_text="{}",
         usage={},
@@ -68,7 +68,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
 
         with patch("run.agents.runner._load_executor", return_value=execute):
             result = self.runner().run(
-                "context_manage",
+                "general_worker",
                 _INPUT,
                 timeout=0.015,
                 timeout_survival_seconds=0.15,
@@ -92,7 +92,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
         with patch("run.agents.runner._load_executor", return_value=execute):
             with self.assertRaises(AgentTimeoutError) as raised:
                 self.runner().run(
-                    "context_manage",
+                    "general_worker",
                     _INPUT,
                     timeout=0.01,
                     timeout_survival_seconds=0.02,
@@ -113,7 +113,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
         with patch("run.agents.runner._load_executor", return_value=execute):
             with self.assertRaises(AgentTimeoutError):
                 self.runner().run(
-                    "context_manage",
+                    "general_worker",
                     _INPUT,
                     timeout=0.01,
                     timeout_survival_seconds=0,
@@ -137,7 +137,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             ):
                 with self.assertRaises(AgentTimeoutError) as raised:
                     self.runner().run(
-                        "context_manage",
+                        "general_worker",
                         _INPUT,
                         timeout=0.01,
                         timeout_survival_seconds=0,
@@ -165,7 +165,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
         def invoke() -> None:
             try:
                 self.runner().run(
-                    "context_manage",
+                    "general_worker",
                     _INPUT,
                     cancel_event=cancel_event,
                     timeout=0.02,
@@ -501,7 +501,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
                 patch("run.agents.runner._AGENT_TIMEOUT_CLEANUP_GRACE", 0.01),
             ):
                 task_id = scheduler.submit(
-                    "context_manage",
+                    "general_worker",
                     _INPUT,
                     timeout=0.01,
                     timeout_survival_seconds=0,
@@ -525,7 +525,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             release.set()
 
         self.assertTrue(snapshot["completed_after_timeout"])
-        self.assertEqual(snapshot["result"]["agent"], "context_manage")
+        self.assertEqual(snapshot["result"]["agent"], "general_worker")
 
     def test_scheduler_uses_submission_config_for_new_runner(self) -> None:
         first_config = dict(_CONFIG)
@@ -549,7 +549,7 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
         self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
         with patch("run.agents.runner._load_executor", return_value=execute):
             task_id = scheduler.submit(
-                "context_manage",
+                "general_worker",
                 _INPUT,
                 allow_sync=True,
                 config=second_config,

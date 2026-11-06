@@ -9,13 +9,13 @@ from provider.protocol.enums import MessageRole
 from provider.protocol.models import MessageItem
 from run.agents.budgets import effective_limit, overridable, BUDGET_STOPS
 from run.agents.contracts import AgentRunError
-from run.agents.task_ledger import TaskLedger, now
+from run.agents.task_ledger import TaskLedger, _OPEN_PARENT, now
 
 
 def describe_agent(root, user, definition, config):
     return {
         "default_timeout": definition.timeout,
-        "max_iterations": effective_limit(definition, config),
+        "max_iterations": effective_limit(definition),
         "supports_budget_override": overridable(definition),
         "supports_resume": overridable(definition),
         "authorized_plugins": sorted(build_agent_tool_registry(root, user, definition, config).tools),
@@ -23,32 +23,57 @@ def describe_agent(root, user, definition, config):
     }
 
 
-def _owned_record(ledger, db, task_id, source, session_id, ownership, *, active=False):
+def _owned_record(
+    ledger, db, task_id, source, session_id, ownership, *,
+    active=False, allow_closed_parent=False,
+):
     record = ledger.decode(db.execute(
         "SELECT * FROM agent_tasks WHERE id=? AND source=? AND session=?",
         (task_id, source, session_id)).fetchone())
-    if not record or not isinstance(ownership, dict):
+    if not record:
         raise AgentRunError("任务不存在或当前主任务无控制权限")
-    parent = ledger.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?",
-                                     (ownership.get("root_task_id"),)).fetchone())
+    parent = ledger.decode(db.execute(
+        "SELECT * FROM agent_tasks WHERE id=?", (record.get("root_task_id"),)
+    ).fetchone())
+    if allow_closed_parent:
+        if (
+            not parent
+            or parent["source"] != source
+            or parent["session_id"] != session_id
+            or parent["status"] not in {
+                "completed", "limited", "partial", "failed", "cancelled", "interrupted",
+            }
+            or not parent.get("response_closed")
+        ):
+            raise AgentRunError("仅能控制同一会话中主响应已关闭的子任务")
+        return record
+    if not isinstance(ownership, dict):
+        raise AgentRunError("任务不存在或当前主任务无控制权限")
+    parent = ledger.decode(db.execute(
+        "SELECT * FROM agent_tasks WHERE id=?", (ownership.get("root_task_id"),)
+    ).fetchone())
     if (not parent or parent["source"] != source or parent["session_id"] != session_id
-            or parent["status"] not in {"running", "merging"}
+            or parent["status"] not in _OPEN_PARENT
             or parent["attempt_id"] != ownership.get("attempt_id")):
         raise AgentRunError("当前主任务归属无效")
     if record.get("root_task_id") != parent["id"]:
         old = ledger.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?",
                                       (record.get("root_task_id"),)).fetchone())
-        if active or (old and old["status"] not in {"completed", "failed", "cancelled", "interrupted"}):
+        if active or (old and (old.get("execution_live") or old["status"] not in {"completed", "limited", "partial", "failed", "cancelled", "interrupted"})):
             raise AgentRunError("不能控制其他活动主任务的子任务")
     return record
 
 
-def guide_task(root, user, task_id, source, session_id, ownership, guidance):
+def guide_task(root, user, task_id, source, session_id, ownership, guidance, *,
+               allow_closed_parent=False):
     if not isinstance(guidance, str) or not guidance.strip() or len(guidance) > 8000:
         raise AgentRunError("运行中指导必须为 1..8000 字符的非空文本")
     ledger = TaskLedger(root, user)
     with ledger.db(write=True) as db:
-        record = _owned_record(ledger, db, task_id, source, session_id, ownership, active=True)
+        record = _owned_record(
+            ledger, db, task_id, source, session_id, ownership,
+            active=True, allow_closed_parent=allow_closed_parent,
+        )
         from run.agents import discover_agents
         if not overridable(discover_agents(root, user).get(record["agent"])):
             raise AgentRunError("此子代理不支持运行中指导")
@@ -60,7 +85,7 @@ def guide_task(root, user, task_id, source, session_id, ownership, guidance):
         mailbox.append(guidance)
         record.update(_guidance=mailbox, updated_at=now())
         ledger.put(db, record)
-    return {"task_id": task_id, "status": "guidance_queued", "pending": len(mailbox),
+    return {"ok": True, "task_id": task_id, "status": "guidance_queued", "pending": len(mailbox),
             "message": "指导将在下一请求安全点交付，不扩权、不启动另一个执行器。"}
 
 
@@ -80,6 +105,9 @@ def take_guidance(context, items):
                 or record["status"] != "running"):
             return
         messages = record.pop("_guidance", [])
+        record["guidance_delivered_count"] = (
+            int(record.get("guidance_delivered_count") or 0) + len(messages)
+        )
         ledger.put(db, record)
     for text in messages:
         items.append(MessageItem.text(MessageRole.USER,
@@ -103,7 +131,7 @@ def split_task(scheduler, task_id, *, source, session_id, ownership=None, tasks,
     definition = scheduler.runner.refresh_registry().get(record["agent"])
     if not overridable(definition):
         raise AgentRunError("此代理不支持业务任务拆分")
-    effective_limit(definition, config or scheduler.runner.config, max_tool_calls)
+    effective_limit(definition, max_tool_calls)
     for payload in tasks:
         if not isinstance(payload, dict):
             raise AgentRunError("split 每项必须是完整的子代理 input 对象")
@@ -123,7 +151,7 @@ def split_task(scheduler, task_id, *, source, session_id, ownership=None, tasks,
                     "task_ids": accepted, "accepted_count": len(accepted),
                     "error": safe_provider_message(str(exc), "拆分入队失败"),
                     "message": "已接受任务不会回滚或重新执行；只补交尚未接受的输入。"}
-    return {"status": "queued", "origin_task_id": task_id, "task_ids": accepted,
+    return {"ok": True, "status": "queued", "origin_task_id": task_id, "task_ids": accepted,
             "accepted_count": len(accepted)}
 
 

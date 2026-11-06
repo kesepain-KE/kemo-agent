@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from plugins.subagent_dispatch.tool import run as dispatch
+from run.agents import close_agent_schedulers
 from run.agents.external import (
     ExternalAgentError,
     call_external_agent,
@@ -25,19 +26,19 @@ class ExternalAgentBridgeTests(unittest.TestCase):
         for directory in (
             self.root / "agents",
             self.root / "plugins",
-            self.root / "shared_skills",
-            self.root / "shared_knowledge",
-            self.root / "global_knowledge",
-            self.root / "global_expand",
-            self.root / "shared_expand",
-            self.root / "global_sense",
+            self.root / "skills",
+            self.root / "knowledge" / "share",
+            self.root / "knowledge" / "global",
+            self.root / "expand" / "global",
+            self.root / "expand" / "share",
+            self.root / "sense",
             self.root / "config",
             self.root / "users" / "alice" / "agents",
             self.root / "users" / "alice" / "expand",
             self.root / "users" / "alice" / "user_skills",
         ):
             directory.mkdir(parents=True, exist_ok=True)
-        (self.root / "config" / "global_config.json").write_text(
+        (self.root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "provider": {
@@ -51,7 +52,7 @@ class ExternalAgentBridgeTests(unittest.TestCase):
             ),
             "utf-8",
         )
-        (self.root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        (self.root / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")
         module = self.root / "users" / "alice" / "expand" / "remote_bridge"
         module.mkdir()
         (module / "expand.json").write_text(
@@ -129,6 +130,44 @@ class ExternalAgentBridgeTests(unittest.TestCase):
         self.assertEqual(result["source"], "external")
         self.assertEqual(result["data"], {"answer": "from remote"})
         self.assertEqual(result["model"], "remote-mock")
+
+    def test_dispatch_preserves_business_fields_without_runtime_metadata(self) -> None:
+        module = self.root / "users" / "alice" / "expand" / "remote_bridge"
+        bridge_path = module / "agent_bridge.json"
+        bridge = json.loads(bridge_path.read_text("utf-8"))
+        bridge["agents"][0]["output_schema"] = {"type": "object"}
+        bridge_path.write_text(json.dumps(bridge), "utf-8")
+        data = {
+            "messages": ["confirmed"],
+            "input": {"filename": "source.txt"},
+            "metadata": {"count": 1, "api_key": "never-publish"},
+        }
+        (module / "start_expand.py").write_text(
+            "def execute(command, params):\n"
+            f"    return {{'status': 'completed', 'data': {data!r}}}\n",
+            "utf-8",
+        )
+        self.addCleanup(close_agent_schedulers)
+
+        result = dispatch(
+            "call",
+            agent=self.handle,
+            input={"value": "x"},
+            context={
+                "root": str(self.root),
+                "user": "alice",
+                "source": "web",
+                "session_id": "external-delivery",
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            result["data"],
+            {**data, "metadata": {"count": 1, "api_key": "[redacted]"}},
+        )
+        self.assertNotIn("metadata", result)
 
     def test_external_binding_rejects_background_call(self) -> None:
         with self.assertRaisesRegex(Exception, "只支持同步调用"):

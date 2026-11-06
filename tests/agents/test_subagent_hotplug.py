@@ -44,12 +44,12 @@ class SubAgentHotPlugTests(unittest.TestCase):
         for path in (
             root / "agents",
             root / "plugins",
-            root / "shared_skills",
-            root / "shared_knowledge",
-            root / "global_knowledge",
-            root / "global_expand",
-            root / "shared_expand",
-            root / "global_sense",
+            root / "skills",
+            root / "knowledge" / "share",
+            root / "knowledge" / "global",
+            root / "expand" / "global",
+            root / "expand" / "share",
+            root / "sense",
             root / "config",
             root / "users" / "alice" / "agents",
             root / "users" / "alice" / "user_skills",
@@ -71,9 +71,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
             },
             "tools": {"timeout": 2},
         }
-        (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
+        (root / "config" / "global_config.yaml").write_text(json.dumps(config), "utf-8")
         for user in ("alice", "bob"):
-            (root / "users" / user / "user_config.json").write_text("{}", "utf-8")
+            (root / "users" / user / "user_config.yaml").write_text("{}", "utf-8")
         return temporary, root, config
 
     def write_agent(
@@ -85,6 +85,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         enabled: bool = True,
         exposure: str = "tool",
         tools: list[str] | None = None,
+        permissions: list[str] | None = None,
         user_skills: list[str] | None = None,
         execution: str = "sync",
     ) -> Path:
@@ -114,7 +115,13 @@ class SubAgentHotPlugTests(unittest.TestCase):
         capabilities = {
             "schema_version": 1,
             "exposure": {"mode": exposure, "allowed_callers": ["main_agent"]},
-            "tools": {"plugins": {"allow": tools or []}, "max_iterations": 3},
+            "tools": {
+                "plugins": {
+                    "allow": tools or [],
+                    **({"permissions": permissions} if permissions is not None else {}),
+                },
+                "max_iterations": 3,
+            },
             "prompt_sources": {
                 "skills": {"shared": [], "user": user_skills or []},
                 "expand": {"global": [], "shared": [], "user": []},
@@ -135,7 +142,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
         return directory
 
-    def write_plugin(self, root: Path, name: str) -> None:
+    def write_plugin(
+        self, root: Path, name: str, *, permission: str = "write"
+    ) -> None:
         plugin = root / "plugins" / name
         plugin.mkdir()
         tool = {
@@ -150,13 +159,14 @@ class SubAgentHotPlugTests(unittest.TestCase):
             "version": "1",
             "enabled": True,
             "entrypoint": "tool.py:run",
+            "permission": permission,
         }
         (plugin / "SKILL.md").write_text(
             f"# {name}\n{name}\n\n## Tool\n```json\n" + json.dumps(tool) + "\n```\n",
             "utf-8",
         )
         (plugin / "tool.py").write_text(
-            "def run(value, *, context):\n    return {'value': value, 'user': context['user']}\n",
+            "def run(value, *, context):\n    return {'ok': True, 'value': value, 'user': context['user']}\n",
             "utf-8",
         )
 
@@ -311,7 +321,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         registry = discover_agents(root)
         expected = {
             "general_worker": {"main_agent"},
-            "self_improve": {"main_agent", "scheduler", "context_manage"},
+            "self_improve": {"main_agent", "scheduler"},
             "memory_temporary_important": {"main_agent", "scheduler"},
             "task_plan": {"main_agent"},
             "time_plan": {"main_agent"},
@@ -323,9 +333,6 @@ class SubAgentHotPlugTests(unittest.TestCase):
 
         public_names = {item.name for item in registry.public_agents("main_agent")}
         self.assertEqual(public_names, set(expected))
-        context_manage = registry.get("context_manage")
-        self.assertEqual(context_manage.capabilities.exposure, "internal")
-        self.assertEqual(set(context_manage.capabilities.allowed_callers), {"engine"})
         self.assertIn("manual_review", registry.get("self_improve").trigger_content)
         self.assertIn(
             "search_many tier=all",
@@ -469,27 +476,27 @@ class SubAgentHotPlugTests(unittest.TestCase):
             }
         )
 
-        skill = root / "shared_skills" / "child_skill"
+        skill = root / "skills" / "child_skill"
         skill.mkdir()
         (skill / "SKILL.md").write_text("# child_skill\nCHILD_SKILL", "utf-8")
-        (root / "shared_skills" / "register.py").write_text(
+        (root / "skills" / "register.py").write_text(
             "from pathlib import Path\n\n"
             "def register(registry):\n"
             "    registry.add_skills('shared', Path(__file__).resolve().parent)\n",
             "utf-8",
         )
 
-        expand = root / "global_expand" / "child_expand"
+        expand = root / "expand" / "global" / "child_expand"
         expand.mkdir()
         (expand / "inject.md").write_text("CHILD_EXPAND", "utf-8")
-        (root / "global_expand" / "register.py").write_text(
+        (root / "expand" / "global" / "register.py").write_text(
             "from pathlib import Path\n\n"
             "def register(registry):\n"
             "    base = Path(__file__).resolve().parent\n"
             "    registry.add_expand('global', 'child_expand', base / 'child_expand' / 'inject.md')\n",
             "utf-8",
         )
-        (root / "global_knowledge" / "index.md").write_text(
+        (root / "knowledge" / "global" / "index.md").write_text(
             "# Child Knowledge\nCHILD_KNOWLEDGE", "utf-8"
         )
 
@@ -547,7 +554,34 @@ class SubAgentHotPlugTests(unittest.TestCase):
         self.assertEqual(provider.requests[1].messages[-1]["role"], "tool")
         self.assertEqual(result.metadata["tool_calls"][0]["status"], "completed")
 
-    def test_subagent_retry_reuses_successful_tool_result_after_provider_failure(self) -> None:
+    def test_subagent_permissions_filter_provider_tools(self) -> None:
+        _, root, config = self.make_root()
+        self.write_plugin(root, "read_data", permission="read")
+        self.write_plugin(root, "write_data", permission="write")
+        self.write_agent(
+            root,
+            "alice",
+            "read_only_agent",
+            tools=["read_data", "write_data"],
+            permissions=["read"],
+        )
+        provider = ScriptedProvider(
+            [ChatResponse(text='{"answer":"done"}', model="mock", usage=Usage())]
+        )
+
+        AgentRunner(
+            root,
+            "alice",
+            config=config,
+            provider_factory=lambda _: provider,
+        ).run("read_only_agent", {})
+
+        self.assertEqual(
+            [tool["function"]["name"] for tool in provider.requests[0].tools],
+            ["read_data"],
+        )
+
+    def test_subagent_retry_blocks_duplicate_effect_after_provider_failure(self) -> None:
         _, root, config = self.make_root()
         self.write_plugin(root, "echo")
         self.write_agent(root, "alice", "retry_agent", tools=["echo"])
@@ -572,8 +606,8 @@ class SubAgentHotPlugTests(unittest.TestCase):
         )
         with patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0):
             with patch(
-                "run.agents.runner.execute_tool",
-                return_value={"value": "stable"},
+                "run.agents.model_loop.execute_tool",
+                return_value={"ok": True, "value": "stable"},
             ) as mocked_execute:
                 result = AgentRunner(
                     root,
@@ -587,7 +621,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         self.assertEqual(mocked_execute.call_count, 1)
         self.assertEqual(
             [call["status"] for call in result.metadata["tool_calls"]],
-            ["recovered", "duplicate_reused"],
+            ["recovered", "duplicate_blocked"],
         )
         self.assertEqual(result.metadata["retry_attempts"], 2)
 
@@ -611,7 +645,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
         with (
             patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0),
             patch(
-                "run.agents.runner.execute_tool",
+                "run.agents.model_loop.execute_tool",
                 side_effect=ProviderError(
                     "temporary tool failure",
                     category="gateway_error",
@@ -630,14 +664,18 @@ class SubAgentHotPlugTests(unittest.TestCase):
         self.assertEqual(mocked_execute.call_count, 1)
         self.assertEqual(
             [call["status"] for call in result.metadata["tool_calls"]],
-            ["recovery_blocked", "retry_reuse_blocked"],
+            ["recovery_blocked", "duplicate_blocked"],
         )
 
-    def test_global_tool_call_limit_is_a_hard_ceiling_for_subagents(self) -> None:
+    def test_subagent_uses_its_own_tool_budget(self) -> None:
         _, root, config = self.make_root()
         config["tools"]["max_iterations"] = 1
         self.write_plugin(root, "echo")
-        self.write_agent(root, "alice", "limited_agent", tools=["echo"])
+        directory = self.write_agent(root, "alice", "limited_agent", tools=["echo"])
+        agent_config_path = directory / "agent-config.json"
+        agent_config = json.loads(agent_config_path.read_text("utf-8"))
+        agent_config["tools"]["max_iterations"] = 1
+        agent_config_path.write_text(json.dumps(agent_config), "utf-8")
         provider = ScriptedProvider(
             [
                 ChatResponse(
@@ -696,9 +734,9 @@ class SubAgentHotPlugTests(unittest.TestCase):
         calls = result.metadata["tool_calls"]
         self.assertEqual(
             [call["status"] for call in calls],
-            ["completed", "duplicate_reused", "identical_call_blocked", "completed"],
+            ["completed", "duplicate_blocked", "duplicate_blocked", "completed"],
         )
-        self.assertEqual(calls[2]["consecutive_identical_calls"], 3)
+        self.assertEqual(calls[2]["consecutive_identical_calls"], 1)
         self.assertEqual(calls[3]["consecutive_identical_calls"], 1)
 
     def test_background_scheduler_detects_hot_plugged_agent(self) -> None:

@@ -14,7 +14,7 @@ from provider.protocol.models import Item, JsonContent, KemoResponse, MessageIte
 from run.agents import AgentQueueError, AgentRunner, AgentScheduler, AgentTimeoutError
 from run.agents.conclusions import conclusion_data, delivery
 from run.agents.continuation import CheckpointStore, MAX_RESUME_ROUNDS, restore_items
-from run.agents.task_ledger import TaskCoordinator, TaskLedger
+from run.agents import TaskCoordinator, TaskLedger
 from tests.agents.test_general_worker import OUTPUT, workspace  # noqa: F401
 from tests.agents.test_subagent_runtime import MockProvider
 
@@ -32,7 +32,10 @@ class Provider(MockProvider):
         if isinstance(step, Exception):
             raise step
         output: list[Item] = step if isinstance(step, list) else [
-            MessageItem.text(MessageRole.ASSISTANT, json.dumps(step, ensure_ascii=False))
+            # The same fake drives child structured output and main prose.
+            # Only an explicit answer is a main final, never a progress draft.
+            MessageItem.text(MessageRole.ASSISTANT, json.dumps(step, ensure_ascii=False),
+                             phase="final_answer" if isinstance(step, dict) and "answer" in step else None)
         ]
         return KemoResponse(
             request_id=request.request_id, model=request.model,
@@ -94,7 +97,7 @@ def write_plugin(root):
         "def run(value, *, context):\n"
         "    with (Path(context['root']) / 'effects.txt').open('a') as f: f.write(value+'\\n')\n"
         "    if value == 'first': time.sleep(.4)\n"
-        "    return {'written': value}\n", "utf-8")
+        "    return {'ok': True, 'written': value}\n", "utf-8")
 
 
 def start(root, config, provider, *, timeout=.2, survival=.6):
@@ -111,9 +114,34 @@ def start(root, config, provider, *, timeout=.2, survival=.6):
     return scheduler, coordinator, ownership, task_id
 
 
-def test_timeout_conclusions_then_same_task_resume_retimes_and_does_not_replay(workspace):
+def test_timeout_conclusions_then_same_task_resume_retimes_and_does_not_replay(workspace, monkeypatch):
+    from types import SimpleNamespace
+    from run.agents import runner as runner_module
+    from run.agents import model_loop
+
     root, config = workspace
     write_plugin(root)
+    # This test verifies timeout -> wrap-up -> resume, not filesystem latency.
+    # Advance the runner's deadline only after its initial deadline is armed
+    # and the first real tool starts. Keep checkpoint fsync time out of this
+    # phase clock; real survival expiry is covered by the live-provider tests.
+    origin = time.monotonic()
+    deadline_armed = threading.Event()
+    first_tool_started = threading.Event()
+    execute = model_loop.execute_tool
+
+    def phase_clock():
+        deadline_armed.set()
+        return origin + (.21 if first_tool_started.is_set() else 0)
+
+    def execute_after_deadline_armed(definition, arguments, **kwargs):
+        assert deadline_armed.wait(2)
+        if arguments.get("value") == "first":
+            first_tool_started.set()
+        return execute(definition, arguments, **kwargs)
+
+    monkeypatch.setattr(runner_module, "time", SimpleNamespace(monotonic=phase_clock, sleep=time.sleep))
+    monkeypatch.setattr(model_loop, "execute_tool", execute_after_deadline_armed)
     partial = {**OUTPUT, "status": "partial", "summary": "已确认 first 完成", "remaining": ["second"]}
     provider = Provider([[call(), call(value="second", index=2)], partial,
                          [call(value="second", index=3)], OUTPUT])
@@ -194,11 +222,15 @@ def timed_out_task(workspace):
 
 def test_resume_concurrent_claim_only_one_queue_entry(workspace):
     root, config, provider, scheduler, coordinator, ownership, task_id = timed_out_task(workspace)
-    gate = threading.Event()
+    requests_before_resume = len(provider.requests)
+    gate, entered = threading.Event(), threading.Event()
     def block(_):
+        entered.set()
         gate.wait(3)
         return OUTPUT
-    provider.steps.append(block)
+    # Old wrap-up may never have started. Its queued partial response must not
+    # become the resumed segment's response; count only this actual new segment.
+    provider.steps[:] = [block]
     def attempt():
         try:
             return scheduler.resume(task_id, source="web", session_id="scope", timeout=2,
@@ -209,9 +241,13 @@ def test_resume_concurrent_claim_only_one_queue_entry(workspace):
         with ThreadPoolExecutor(2) as pool:
             results = list(pool.map(lambda _: attempt(), range(2)))
         assert results.count(task_id) == 1
+        assert entered.wait(3)
         gate.set()
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
-        assert len(provider.requests) == 3
+        assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == OUTPUT
+        assert len(provider.requests) == requests_before_resume + 1
+        snapshot = scheduler.get(task_id, source="web", session_id="scope")
+        assert snapshot["status"] == "completed" and snapshot["run_count"] == 2
+        assert (root / "effects.txt").read_text().splitlines() == ["first"]
     finally:
         gate.set()
         scheduler.close(wait=True, cancel_pending=True)
@@ -297,7 +333,9 @@ def test_resume_actual_space_admission_failure_preserves_old_timeout_result(work
 def test_restart_can_resume_stopped_builtin_task_from_private_snapshot(workspace):
     root, config, provider, scheduler, coordinator, ownership, task_id = timed_out_task(workspace)
     scheduler.close(wait=True)
-    provider.steps.append(OUTPUT)
+    # Survival may end before the old wrap-up request starts. Its unconsumed
+    # scripted partial reply belongs to that stopped segment, not the restart.
+    provider.steps[:] = [OUTPUT]
     new = AgentScheduler.from_runner(AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider))
     try:
         new.resume(task_id, source="web", session_id="scope", timeout=1, ownership=ownership, config=config)
@@ -308,12 +346,49 @@ def test_restart_can_resume_stopped_builtin_task_from_private_snapshot(workspace
 
 
 def test_default_delivery_filters_legacy_tool_traces_but_keeps_evidence():
-    value = {"summary": "done", "results": ["file.py:12 verified"],
-             "metadata": {"tool_calls": [{"arguments": "secret"}]},
-             "events": [{"status": "tool_running"}], "trace": ["x"], "raw_text": "raw"}
-    assert conclusion_data(value) == {"summary": "done", "results": ["file.py:12 verified"]}
-    assert delivery({"id": "a", "agent": "w", "status": "timed_out",
-                     "result": value, "resumable": True})["resumable"]
+    data = {"summary": "done", "results": ["file.py:12 verified"]}
+    envelope = {"agent": "w", "data": data,
+                "metadata": {"tool_calls": [{"arguments": "secret"}]},
+                "events": [{"status": "tool_running"}], "trace": ["x"], "raw_text": "raw"}
+    result = delivery({"id": "a", "agent": "w", "status": "timed_out",
+                       "result": envelope, "resumable": True})
+    assert result["data"] == data
+    assert result["resumable"]
+
+
+def test_business_result_fields_survive_delivery_with_credentials_redacted():
+    data = {"messages": ["delivery confirmed"], "input": {"filename": "source.txt"},
+            "metadata": {"count": 1, "api_key": "never-publish"},
+            "result": {"messages": ["nested"], "input": {"filename": "nested.txt"},
+                       "metadata": {"count": 2}}}
+    expected = {**data, "metadata": {"count": 1, "api_key": "[redacted]"}}
+    assert conclusion_data(data) == expected
+    assert json.loads(conclusion_data(json.dumps(data))) == expected
+    for result in (data, {"agent": "w", "data": data, "metadata": {"trace": "private"}}):
+        response = delivery({"id": "a", "agent": "w", "status": "completed", "result": result})
+        assert response["data"] == expected
+
+
+def test_schema_business_fields_survive_scheduler_and_durable_delivery(workspace):
+    root, config = workspace
+    schema_path = root / "agents/general_worker/schema.json"
+    schema = json.loads(schema_path.read_text("utf-8"))
+    schema["output_schema"] = {"type": "object", "additionalProperties": True}
+    schema_path.write_text(json.dumps(schema), "utf-8")
+    data = {"messages": ["confirmed"], "input": {"filename": "source.txt"},
+            "metadata": {"count": 1, "api_key": "never-publish"},
+            "agent": "business agent",
+            "data": {"messages": ["nested business data"]}}
+    expected = {**data, "metadata": {"count": 1, "api_key": "[redacted]"}}
+    scheduler, coordinator, _, task_id = start(root, config, Provider([data]), timeout=5)
+    try:
+        assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == data
+        assert delivery(scheduler.get(task_id, source="web", session_id="scope"))["data"] == expected
+        record = coordinator.ledger.get(task_id, "web", "scope")
+        assert record["result"] == expected
+        assert delivery(record)["data"] == expected
+    finally:
+        scheduler.close(wait=True, cancel_pending=True)
 
 
 def test_checkpoint_repairs_unstarted_calls_and_never_replays_paired_calls():
@@ -349,7 +424,7 @@ def test_live_tool_future_is_drained_and_checkpoint_contains_its_actual_result(w
     def detached(*a, **k):
         entered.set()
         raise ToolTimeoutError("tool still running", still_running=True, completion_future=future)
-    monkeypatch.setattr("run.agents.runner.execute_tool", detached)
+    monkeypatch.setattr("run.agents.model_loop.execute_tool", detached)
     monkeypatch.setattr("run.agents.runner._AGENT_TIMEOUT_CLEANUP_GRACE", .01)
     provider = Provider([[call()]])
     scheduler, coordinator, ownership, task_id = start(root, config, provider, timeout=.5, survival=0)
@@ -422,13 +497,14 @@ def test_cancel_priority_never_starts_wrap_up_or_resume(workspace, monkeypatch, 
         scheduler.close(wait=True, cancel_pending=True)
 
 
-def test_completed_parent_can_transfer_resume_to_new_same_session_parent(workspace):
+@pytest.mark.parametrize("parent_status", ["completed", "limited"])
+def test_completed_parent_can_transfer_resume_to_new_same_session_parent(workspace, parent_status):
     root, config, provider, scheduler, coordinator, ownership, task_id = timed_out_task(workspace)
     provider.steps.append(OUTPUT)
     try:
         coordinator.notifications()
         coordinator.acknowledge()
-        coordinator.finish("completed")
+        coordinator.finish(parent_status)
         new_parent = TaskCoordinator(root, "alice", "web", "scope", "next-run", {"prompt": "continue"})
         new_ownership = new_parent.ownership("resume-call")
         scheduler.resume(task_id, source="web", session_id="scope", timeout=1,
@@ -455,8 +531,16 @@ def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(w
     shutil.copyfile(repository / "plugins/subagent_dispatch/SKILL.md", dispatch_dir / "SKILL.md")
     (dispatch_dir / "tool.py").write_text("from plugins.subagent_dispatch.tool import run\n", "utf-8")
     config["agent_runtime"] = {"default_timeout": 1, "timeout_survival_seconds": .6}
-    (root / "config/global_config.json").write_text(json.dumps(config), "utf-8")
-    child = Provider([[call()], {**OUTPUT, "status": "partial", "summary": "timeout-conclusion"}, OUTPUT])
+    (root / "config/global_config.yaml").write_text(json.dumps(config), "utf-8")
+    def finish_child(request):
+        wire = request.model_dump_json()
+        if "框架原任务续跑" in wire:
+            return OUTPUT
+        assert "超时收尾指令" in wire
+        return {**OUTPUT, "status": "partial", "summary": "timeout-conclusion"}
+    # Survival may expire before wrap-up HTTP starts. Route the fake reply by
+    # the actual segment, not by assuming that wrap-up consumed a queue entry.
+    child = Provider([[call()], finish_child, finish_child])
     # The main fake model uses the same class; start this scenario's clock only
     # when its child model enters, rather than on the parent's dispatch response.
     timeout_from_provider_entry(monkeypatch, child)
@@ -465,11 +549,16 @@ def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(w
     observed = {}
     def choose_resume(request):
         wire = request.model_dump_json()
-        assert "timeout-conclusion" in wire
         tasks, _ = TaskLedger(root, "alice").records("web", "scope", parent=None)
         task = next(t for t in tasks if t["agent"] == "general_worker")
         observed["task_id"] = task["id"]
         assert task["status"] == "timed_out"
+        conclusion = task["result"]
+        assert conclusion["status"] == "partial"
+        wrap_requested = any("超时收尾指令" in item.model_dump_json() for item in child.requests)
+        expected_summary = "timeout-conclusion" if wrap_requested else "尚未形成可交付结论。"
+        assert conclusion["summary"] == expected_summary
+        assert expected_summary in wire
         return [ToolCallItem(
             id="call_resume", call_id="callid_resume", name="subagent_dispatch",
             arguments={"action": "resume", "task_id": task["id"], "wait": True, "timeout": 1},
@@ -481,21 +570,28 @@ def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(w
         {"draft": "waiting for worker"},
         choose_resume,
         {"answer": "merged"},
+        {"answer": "merged"},
+        {"answer": "merged"},
     ])
     try:
         events = list(iter_request_events(
             {"user": "alice", "source": "web", "session_id": "scope", "prompt": "perform work"},
             root=root, provider_factory=lambda _: main,
         ))
-        assert any(event.type == "done" for event in events)
+        assert any(event.type == "done" for event in events), [event.error for event in events if event.type == "error"]
         record = TaskLedger(root, "alice").get(observed["task_id"], "web", "scope")
         assert record["run_count"] == 2 and record["status"] == "completed" and record["handled"], main.requests[-1].model_dump_json()
-        assert len(main.requests) == 4
+        # A resumed child and the dispatch tool can publish separate late RAW
+        # facts after their running receipt. Each accepted snapshot is distinct.
+        assert 4 <= len(main.requests) <= 6
+        assert len({r.metadata["snapshot_id"] for r in main.requests}) == len(main.requests)
         for request in main.requests[1:]:
             tool_results = [i for i in request.input if isinstance(i, ToolResultItem)]
             for result in tool_results:
-                encoded = result.model_dump_json()
-                assert '"tool_calls":' not in encoded and '"arguments":' not in encoded
+                payload = result.content[0].data
+                assert set(payload["original_call"]) == {"name", "arguments"}
+                encoded = json.dumps(payload["result"])
+                assert '"tool_calls":' not in encoded and '"tool_records":' not in encoded
         assert (root / "effects.txt").read_text().splitlines() == ["first"]
     finally:
         scheduler.close(wait=True, cancel_pending=True)
@@ -504,17 +600,20 @@ def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(w
 def test_retry_during_resume_keeps_latest_safe_point_and_does_not_repeat_writes(workspace, monkeypatch):
     from run.agents.contracts import AgentProviderError
     root, config, provider, scheduler, coordinator, ownership, task_id = timed_out_task(workspace)
-    provider.steps.extend([
+    requests_before_resume = len(provider.requests)
+    # Old wrap-up may be cancelled before requesting its scripted partial reply.
+    # Start the resumed segment with its own replies, independent of that race.
+    provider.steps[:] = [
         [call(value="second", index=3)],
         AgentProviderError("transient", category="connection_error", retryable=True),
         OUTPUT,
-    ])
+    ]
     monkeypatch.setattr("run.agents.runner._agent_retry_delay_seconds", lambda *a: 0)
     try:
         scheduler.resume(task_id, source="web", session_id="scope", timeout=10,
                          ownership=ownership, config=config)
         final = scheduler.wait(task_id, 15, source="web", session_id="scope")
-        assert final.data == OUTPUT and len(provider.requests) == 5, {
+        assert final.data == OUTPUT and len(provider.requests) == requests_before_resume + 3, {
             "requests": len(provider.requests), "remaining_steps": len(provider.steps),
             "snapshot": scheduler.get(task_id, source="web", session_id="scope"),
         }

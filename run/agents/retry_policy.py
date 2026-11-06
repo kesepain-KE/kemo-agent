@@ -16,29 +16,15 @@ from run.retry.policy import (
     mark_retry_exhausted,
     retry_reason,
     should_retry,
+    view_from_error,
     view_from_exception,
 )
-from run.retry.recovery import MAX_RECOVERY_CALLS, MAX_RECOVERY_CHARS, reuse_allowed
+from run.retry.recovery import MAX_RECOVERY_CALLS, MAX_RECOVERY_CHARS
 from run.tools import tool_call_signature
 
 _MAX_AGENT_RETRY_ATTEMPTS = MAX_ATTEMPTS
 _MAX_AGENT_RETRY_RECOVERY_CALLS = MAX_RECOVERY_CALLS
 _MAX_AGENT_RETRY_RECOVERY_CHARS = MAX_RECOVERY_CHARS
-
-# Categories without an explicit ``retryable`` flag that still describe a
-# transient provider/tool boundary.  Keep this list deliberately narrow:
-# validation, authentication, cancellation, and user-input failures must not
-# consume the agent retry budget implicitly.
-_AGENT_RETRYABLE_CATEGORIES = frozenset(
-    {
-        "connection_error",
-        "gateway_error",
-        "transport_error",
-        "timeout",
-        "upstream_error",
-    }
-)
-
 
 def _new_agent_usage() -> dict[str, Any]:
     return {
@@ -62,24 +48,27 @@ def _agent_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def _agent_tool_result_reuse_allowed(
+def _agent_tool_result_dedup_required(
     name: str,
     arguments: dict[str, Any],
 ) -> bool:
-    """Return whether replaying a successful tool result is safe in one run."""
+    """Keep a signature guard for calls that must not execute twice."""
 
-    return reuse_allowed(name, arguments)
+    from run.retry.tool_dedup import attempt_dedup_policy
+
+    return attempt_dedup_policy(name, arguments) == "block"
 
 
 def _record_agent_recovery(
     state: _AgentRetryState,
     call: ToolCallItem,
     payload: dict[str, Any],
+    *,
+    iteration: int = 0,
 ) -> None:
     if not isinstance(payload, dict):
         return
-    succeeded = payload.get("ok") is True
-    if succeeded and not _agent_tool_result_reuse_allowed(call.name, call.arguments):
+    if not _agent_tool_result_dedup_required(call.name, call.arguments):
         return
     signature = tool_call_signature(call.name, call.arguments)
     if signature in state.recovery:
@@ -89,7 +78,8 @@ def _record_agent_recovery(
         "name": str(call.name),
         "arguments": copy.deepcopy(call.arguments),
         "result": copy.deepcopy(payload),
-        "replay_policy": "reuse" if succeeded else "blocked",
+        "iteration": iteration,
+        "dedup_policy": "block",
     }
     if len(state.recovery) >= _MAX_AGENT_RETRY_RECOVERY_CALLS:
         return
@@ -107,13 +97,20 @@ def _agent_recovery_items(
     for value in recovery.values():
         name = str(value.get("name") or "unknown_tool").strip()
         arguments = value.get("arguments")
-        result = value.get("result")
-        if not name or not isinstance(arguments, dict) or not isinstance(result, dict):
+        if not name or not isinstance(arguments, dict):
             continue
         call_id = str(value.get("id") or "").strip()
         if not call_id.startswith("callid_") or call_id in used_call_ids:
             call_id = f"callid_recovered_{uuid.uuid4().hex}"
         used_call_ids.add(call_id)
+        result = {
+            "ok": False,
+            "error": {
+                "code": "duplicate_blocked",
+                "message": "上一尝试中已有相同调用记录；未再次执行，也未返回此前结果。需要最新状态时调用查询工具。",
+            },
+            "execution": {"executed": False, "deduplicated": True},
+        }
         items.extend(
             [
                 ToolCallItem(
@@ -126,7 +123,7 @@ def _agent_recovery_items(
                     id=f"result_recovered_{uuid.uuid4().hex}",
                     call_id=call_id,
                     name=name,
-                    is_error=result.get("ok") is not True,
+                    is_error=True,
                     content=[JsonContent(data=copy.deepcopy(result))],
                 ),
             ]
@@ -178,6 +175,7 @@ def _agent_tool_failure_is_retryable(
 ) -> bool:
     if status in {
         "cancelled",
+        "duplicate_blocked",
         "duplicate_reused",
         "identical_call_blocked",
         "not_executed",
@@ -190,26 +188,9 @@ def _agent_tool_failure_is_retryable(
     error = payload.get("error")
     if not isinstance(error, dict) or error.get("cancelled") is True:
         return False
-    declared = error.get("retryable")
-    if isinstance(declared, bool):
-        return declared
     if error.get("still_running") is True:
         return False
-    category = str(
-        error.get("category")
-        or error.get("type")
-        or error.get("exception_type")
-        or ""
-    ).casefold()
-    if category in _AGENT_RETRYABLE_CATEGORIES:
-        return True
-    for key in ("status_code", "provider_status"):
-        try:
-            if int(numeric_value if (numeric_value := error.get(key)) is not None else "") in {408, 425, 429, 500, 502, 503, 504}:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
+    return should_retry(view_from_error(error))
 
 
 def _agent_error_is_retryable(

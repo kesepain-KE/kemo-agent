@@ -33,14 +33,14 @@ OUTPUT = {
 @pytest.fixture
 def workspace(tmp_path):
     for name in (
-        "agents", "plugins", "config", "shared_skills", "global_knowledge",
-        "shared_knowledge", "global_expand", "shared_expand", "global_sense",
+        "agents", "plugins", "config", "skills", "knowledge/global",
+        "knowledge/share", "expand/global", "expand/share", "sense",
     ):
-        (tmp_path / name).mkdir()
+        (tmp_path / name).mkdir(parents=True, exist_ok=True)
     for user in ("alice", "bob"):
         for name in ("agents", "user_skills", "expand", "knowledge", "download"):
             (tmp_path / "users" / user / name).mkdir(parents=True)
-        (tmp_path / "users" / user / "user_config.json").write_text("{}", "utf-8")
+        (tmp_path / "users" / user / "user_config.yaml").write_text("{}", "utf-8")
     shutil.copytree(REPOSITORY / "agents/general_worker", tmp_path / "agents/general_worker")
     config = {
         "provider": {
@@ -49,9 +49,9 @@ def workspace(tmp_path):
         },
         "tools": {"timeout": 3},
     }
-    (tmp_path / "config/global_config.json").write_text(json.dumps(config), "utf-8")
-    (tmp_path / "users/alice/user_config.json").write_text(json.dumps(config), "utf-8")
-    (tmp_path / "shared_skills/register.py").write_text(
+    (tmp_path / "config/global_config.yaml").write_text(json.dumps(config), "utf-8")
+    (tmp_path / "users/alice/user_config.yaml").write_text(json.dumps(config), "utf-8")
+    (tmp_path / "skills/register.py").write_text(
         "from pathlib import Path\n"
         "def register(registry):\n"
         "    registry.add_skills('shared', Path(__file__).resolve().parent)\n", "utf-8",
@@ -113,12 +113,12 @@ def test_wildcard_plugins_follow_user_policy_disable_and_hotplug(workspace):
 
 def test_skills_paths_user_isolation_and_knowledge_policy(workspace):
     root, config = workspace
-    skill(root / "shared_skills/allowed", "SHARED_ALLOWED")
-    skill(root / "shared_skills/denied", "SHARED_DENIED")
+    skill(root / "skills/allowed", "SHARED_ALLOWED")
+    skill(root / "skills/denied", "SHARED_DENIED")
     skill(root / "users/alice/user_skills/private", "ALICE_PRIVATE")
     skill(root / "users/bob/user_skills/private", "BOB_PRIVATE")
     for scope, directory in (
-        ("global", root / "global_knowledge"), ("shared", root / "shared_knowledge"),
+        ("global", root / "knowledge" / "global"), ("shared", root / "knowledge" / "share"),
         ("user", root / "users/alice/knowledge"),
     ):
         (directory / "index.md").write_text(f"# {scope.upper()}_KNOWLEDGE\n", "utf-8")
@@ -130,7 +130,7 @@ def test_skills_paths_user_isolation_and_knowledge_policy(workspace):
     assert "ALICE_PRIVATE" in bundle.text
     assert "BOB_PRIVATE" not in bundle.text
     assert "users/alice/user_skills/private/SKILL.md" in bundle.text
-    assert "shared_skills/allowed/SKILL.md" in bundle.text
+    assert "skills/allowed/SKILL.md" in bundle.text
     assert set(bundle.diagnostics["knowledge_scopes"]) == {"global", "shared", "user"}
     config["knowledge"] = {"use_global": False, "use_shared": False}
     restricted = build_agent_prompt_bundle(root, "alice", definition, config)
@@ -150,8 +150,8 @@ def test_no_expand_or_perception_injection_even_when_main_enables_it(workspace, 
 
     monkeypatch.setattr(PromptSourceRegistry, "select_expand", forbidden)
     monkeypatch.setattr(PromptSourceRegistry, "select_perception", forbidden)
-    config["expand"] = {"prompt_injection": True, "realtime_injection": True}
-    config["perception"] = {"prompt_injection": True, "realtime_injection": True}
+    config["expand"] = {"prompt_injection": True}
+    config["perception"] = {"prompt_injection": True}
     bundle = build_agent_prompt_bundle(
         root, "alice", discover_agents(root).get("general_worker"), config,
     )

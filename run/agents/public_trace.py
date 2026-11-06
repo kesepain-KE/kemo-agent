@@ -22,11 +22,13 @@ _SECRET_TEXT = re.compile(
 )
 
 
-def public_tool_data(value: Any) -> Any:
+def public_tool_data(value: Any, *, hide_private_fields: bool = True) -> Any:
     """Keep useful call data without publishing secrets or unbounded output.
 
     max_tokens and ordinary prompt arguments are not private model reasoning.
     This projection never receives Provider input/history/system messages.
+    Schema-validated business results may use the same field names; their
+    projection only redacts credentials and bounds output.
     """
     budget = [16000, 512]
 
@@ -42,7 +44,7 @@ def public_tool_data(value: Any) -> Any:
                     break
                 name = str(key)[:160]
                 normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower().replace("-", "_")
-                if normalized in _PRIVATE:
+                if hide_private_fields and normalized in _PRIVATE:
                     continue
                 budget[0] -= len(name)
                 result[name] = "[redacted]" if _SECRET.search(normalized) else visit(child, depth + 1)

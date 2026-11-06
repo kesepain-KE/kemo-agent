@@ -40,7 +40,235 @@ class AgentToolLimitError(AgentRunError):
 
 
 class AgentInputError(AgentRunError):
-    pass
+    _REASONS = frozenset(
+        {"type", "missing", "unknown", "length", "pattern", "enum", "one_of", "items"}
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        schema_hint: dict[str, Any] | None = None,
+        field_path: str | None = None,
+        expected_type: str | None = None,
+        reason: str = "type",
+    ):
+        self._field_path = field_path
+        self._expected_type = expected_type
+        self._reason = reason if reason in self._REASONS else "type"
+        self.schema_hint = None
+        if schema_hint is not None:
+            # Schema diagnostics must not echo const/default/config/input values.
+            message = "子代理 input 不符合契约，请按字段提示修正"
+            self.schema_hint = bounded_schema_hint(schema_hint, limit=600 - len(message))
+        super().__init__(message)
+
+    @property
+    def field_path(self) -> str | None:
+        return self._field_path
+
+    @property
+    def expected_type(self) -> str | None:
+        return self._expected_type
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+
+_SAFE_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+_SAFE_SCHEMA_TYPES = frozenset(
+    {"object", "array", "string", "integer", "number", "boolean", "null"}
+)
+
+
+def _safe_identifier(value: Any) -> bool:
+    return isinstance(value, str) and _SAFE_IDENTIFIER.fullmatch(value) is not None
+
+
+def _schema_type_label(expected: Any) -> str | None:
+    if isinstance(expected, str):
+        return expected if expected in _SAFE_SCHEMA_TYPES else None
+    if isinstance(expected, list):
+        values = [
+            item for item in expected
+            if isinstance(item, str) and item in _SAFE_SCHEMA_TYPES
+        ]
+        if values and len(values) == len(expected):
+            return "|".join(values)
+    return None
+
+
+def _schema_node_for_path(schema: dict[str, Any], field_path: str | None) -> tuple[str, Any] | None:
+    """Resolve only schema-backed ASCII property paths; never trust user path text."""
+    if not isinstance(field_path, str) or not field_path.startswith("$"):
+        return None
+    position = 1
+    node: Any = schema
+    final_field: str | None = None
+    token = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]{0,63})|\[(\d+)\]")
+    while position < len(field_path):
+        match = token.match(field_path, position)
+        if match is None:
+            return None
+        field_name, index = match.groups()
+        if field_name is not None:
+            properties = node.get("properties") if isinstance(node, dict) else None
+            if not isinstance(properties, dict) or field_name not in properties:
+                return None
+            node = properties[field_name]
+            final_field = field_name
+        else:
+            items = node.get("items") if isinstance(node, dict) else None
+            if not isinstance(items, dict):
+                return None
+            node = items
+        position = match.end()
+    if final_field is None:
+        return None
+    return final_field, node
+
+
+def _type_mismatch_for(
+    schema: dict[str, Any],
+    *,
+    field_path: str | None,
+    expected_type: str | None,
+) -> list[dict[str, str]]:
+    resolved = _schema_node_for_path(schema, field_path)
+    if resolved is None:
+        return []
+    field, node = resolved
+    expected = _schema_type_label(node.get("type")) if isinstance(node, dict) else None
+    if expected is None or expected_type is None:
+        return []
+    # The expected type must be schema-derived, not copied from an untrusted path.
+    if expected_type != expected:
+        return []
+    return [{"field": field, "expected": expected}]
+
+
+def agent_input_hint(
+    schema: dict[str, Any],
+    value: Any = None,
+    *,
+    field_path: str | None = None,
+    expected_type: str | None = None,
+    reason: str = "type",
+) -> dict[str, Any]:
+    """Field names only; validation remains exclusively validate_json_schema."""
+    properties = schema.get("properties") or {}
+    required = schema.get("required") or []
+    values = value if isinstance(value, dict) else {}
+    hint: dict[str, Any] = {
+        "missing": [name for name in required if name not in values],
+        "allowed": list(properties),
+        "required": list(required),
+        "reason": reason,
+    }
+    if schema.get("additionalProperties") is False:
+        unknown = [name for name in values if name not in properties]
+        safe_unknown = [name for name in unknown if _safe_identifier(name)]
+        unsafe_count = len(unknown) - len(safe_unknown)
+        hint["unknown"] = safe_unknown
+        if unsafe_count:
+            hint["unknown_unsafe"] = unsafe_count
+            hint["truncated"] = True
+    mismatch = _type_mismatch_for(
+        schema,
+        field_path=field_path,
+        expected_type=expected_type,
+    )
+    if mismatch:
+        hint["type_mismatch"] = mismatch
+    return hint
+
+
+def bounded_schema_hint(value: dict[str, Any], *, limit: int = 600) -> dict[str, Any]:
+    """Whitelist bounded identifiers, never arbitrary schema or diagnostic text."""
+    hint: dict[str, Any] = {}
+    truncated = bool(value.get("truncated"))
+    for key in ("missing", "unknown", "allowed", "required"):
+        original = value.get(key) or []
+        names = [
+            name for name in original
+            if _safe_identifier(name)
+        ] if isinstance(original, list) else []
+        hint[key] = names[:80]
+        truncated = truncated or not isinstance(original, list) or len(names) != len(original) or len(names) > 80
+    type_mismatch = value.get("type_mismatch")
+    safe_mismatch: list[dict[str, str]] = []
+    if isinstance(type_mismatch, list):
+        for item in type_mismatch:
+            if not isinstance(item, dict):
+                truncated = True
+                continue
+            field = item.get("field")
+            expected = item.get("expected")
+            if (
+                isinstance(field, str)
+                and _safe_identifier(field)
+                and isinstance(expected, str)
+                and expected in _SAFE_SCHEMA_TYPES
+            ):
+                safe_mismatch.append({"field": field, "expected": expected})
+            else:
+                truncated = True
+    elif type_mismatch is not None:
+        truncated = True
+    if safe_mismatch:
+        hint["type_mismatch"] = safe_mismatch[:16]
+        truncated = truncated or len(safe_mismatch) > 16
+
+    unknown_unsafe = value.get("unknown_unsafe")
+    if isinstance(unknown_unsafe, int) and not isinstance(unknown_unsafe, bool) and unknown_unsafe > 0:
+        hint["unknown_unsafe"] = min(unknown_unsafe, 100000)
+        truncated = truncated or unknown_unsafe > 100000
+    elif unknown_unsafe not in (None, 0):
+        truncated = True
+
+    # Narrow the reason to a mapping key; any non-string value uses the generic note.
+    raw_reason = value.get("reason")
+    reason = raw_reason if isinstance(raw_reason, str) else ""
+    if hint.get("type_mismatch"):
+        note = "字段类型不符，按 allowed 中字段的 schema 类型修正"
+    elif hint.get("unknown") or hint.get("unknown_unsafe"):
+        note = "移除未在 allowed 中声明的字段"
+    else:
+        note = {
+            "type": "字段类型不符，按 allowed 中字段的 schema 类型修正",
+            "missing": "补齐 required 字段",
+            "unknown": "移除未在 allowed 中声明的字段",
+        }.get(reason, "补齐 required 并核对类型；未列字段须遵守契约。")
+    hint["note"] = note
+    if truncated:
+        hint["truncated"] = True
+    while len(json.dumps(hint, ensure_ascii=False, separators=(",", ":"))) > limit:
+        hint["truncated"] = True
+        # Retain the most actionable diagnostics first.  Remove lower-priority
+        # fields before touching type_mismatch or missing.
+        key = None
+        for candidate in ("required", "allowed", "unknown_unsafe", "unknown", "missing", "type_mismatch"):
+            current = hint.get(candidate)
+            if not current:
+                continue
+            # Keep at least one required/missing/actionable type entry whenever
+            # the budget allows any useful contract diagnostic at all.
+            if isinstance(current, list) and candidate in {"required", "missing", "type_mismatch"}:
+                if len(current) <= 1:
+                    continue
+            key = candidate
+            break
+        if key is not None:
+            if isinstance(hint[key], list):
+                hint[key].pop()
+            else:
+                hint.pop(key, None)
+        elif hint["note"]:
+            hint["note"] = hint["note"][:-1]
+        else:
+            break
+    return hint
 
 
 class AgentOutputError(AgentRunError):
@@ -186,41 +414,82 @@ def validate_json_schema(
                 continue
             matches += 1
         if matches != 1:
-            raise AgentInputError(f"{location} 必须且只能匹配 oneOf 中的一个结构")
+            raise AgentInputError(
+                f"{location} 必须且只能匹配 oneOf 中的一个结构",
+                field_path=location,
+                reason="one_of",
+            )
         return
     if "const" in schema and value != schema["const"]:
-        raise AgentInputError(f"{location} 必须等于 {schema['const']!r}")
+        raise AgentInputError(
+            f"{location} 必须等于 {schema['const']!r}",
+            field_path=location,
+            reason="enum",
+        )
     enum = schema.get("enum")
     if isinstance(enum, list) and value not in enum:
-        raise AgentInputError(f"{location} 不在允许值中")
+        raise AgentInputError(
+            f"{location} 不在允许值中",
+            field_path=location,
+            reason="enum",
+        )
     expected = schema.get("type")
     if expected is not None and not _type_matches(value, expected):
-        raise AgentInputError(f"{location} 类型不符合 {expected}")
+        raise AgentInputError(
+            f"{location} 类型不符合 {expected}",
+            field_path=location,
+            expected_type=_schema_type_label(expected),
+            reason="type",
+        )
     if isinstance(value, str):
         minimum = schema.get("minLength")
         maximum = schema.get("maxLength")
         if isinstance(minimum, int) and len(value) < minimum:
-            raise AgentInputError(f"{location} 长度不能小于 {minimum}")
+            raise AgentInputError(
+                f"{location} 长度不能小于 {minimum}",
+                field_path=location,
+                reason="length",
+            )
         if isinstance(maximum, int) and len(value) > maximum:
-            raise AgentInputError(f"{location} 长度不能大于 {maximum}")
+            raise AgentInputError(
+                f"{location} 长度不能大于 {maximum}",
+                field_path=location,
+                reason="length",
+            )
         pattern = schema.get("pattern")
         if isinstance(pattern, str):
             try:
                 matches = re.search(pattern, value)
             except re.error as exc:
-                raise AgentInputError(f"{location} Schema pattern 无效") from exc
+                raise AgentInputError(
+                    f"{location} Schema pattern 无效",
+                    field_path=location,
+                    reason="pattern",
+                ) from exc
             if matches is None:
-                raise AgentInputError(f"{location} 不符合 pattern")
+                raise AgentInputError(
+                    f"{location} 不符合 pattern",
+                    field_path=location,
+                    reason="pattern",
+                )
     elif isinstance(value, dict):
         properties = schema.get("properties") or {}
         required = schema.get("required") or []
         missing = [name for name in required if name not in value]
         if missing:
-            raise AgentInputError(f"{location} 缺少字段：{', '.join(missing)}")
+            raise AgentInputError(
+                f"{location} 缺少字段：{', '.join(missing)}",
+                field_path=location,
+                reason="missing",
+            )
         if schema.get("additionalProperties") is False:
             extras = [name for name in value if name not in properties]
             if extras:
-                raise AgentInputError(f"{location} 包含未知字段：{', '.join(extras)}")
+                raise AgentInputError(
+                    f"{location} 包含未知字段：{', '.join(extras)}",
+                    field_path=location,
+                    reason="unknown",
+                )
         for name, item in value.items():
             child = properties.get(name)
             if isinstance(child, dict):
@@ -229,9 +498,9 @@ def validate_json_schema(
         minimum = schema.get("minItems")
         maximum = schema.get("maxItems")
         if isinstance(minimum, int) and len(value) < minimum:
-            raise AgentInputError(f"{location} 元素数量不能小于 {minimum}")
+            raise AgentInputError(f"{location} 元素数量不能小于 {minimum}", field_path=location, reason="items")
         if isinstance(maximum, int) and len(value) > maximum:
-            raise AgentInputError(f"{location} 元素数量不能大于 {maximum}")
+            raise AgentInputError(f"{location} 元素数量不能大于 {maximum}", field_path=location, reason="items")
         if isinstance(schema.get("items"), dict):
             for index, item in enumerate(value):
                 validate_json_schema(

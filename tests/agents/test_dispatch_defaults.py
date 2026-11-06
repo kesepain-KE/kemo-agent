@@ -46,7 +46,7 @@ def test_wait_policy_preserves_explicit_and_special_contracts(executor, executio
 def test_default_five_calls_register_before_first_finishes_and_share_pool(workspace, monkeypatch):
     root, config = workspace
     config["provider_runtime"] = {"max_concurrent_requests": 3}
-    for path in ("config/global_config.json", "users/alice/user_config.json"):
+    for path in ("config/global_config.yaml", "users/alice/user_config.yaml"):
         (root / path).write_text(json.dumps(config), "utf-8")
     plugin = root / "plugins/subagent_dispatch"
     plugin.mkdir()
