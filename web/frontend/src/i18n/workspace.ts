@@ -15,6 +15,15 @@ Web、APP、CLI、定时任务及外部消息的完整历史（含未加载记�
 语音识别|Speech recognition|Reconocimiento de voz|Reconnaissance vocale|Spracherkennung|Reconhecimento de voz|Распознавание речи|音声認識|음성 인식
 停止语音识别|Stop speech recognition|Detener reconocimiento|Arrêter la reconnaissance|Spracherkennung beenden|Parar reconhecimento|Остановить распознавание|音声認識を停止|음성 인식 중지
 停止生成|Stop generating|Detener generación|Arrêter la génération|Generierung stoppen|Parar geração|Остановить генерацию|生成を停止|생성 중지
+停止并取消子任务|Stop and cancel subagents|Detener y cancelar subagentes|Arrêter et annuler les sous-agents|Stoppen und Unteragenten abbrechen|Parar e cancelar subagentes|Остановить и отменить подзадачи|停止してサブエージェントをキャンセル|중지하고 하위 에이전트 취소
+子任务指导|Subagent guidance|Instrucciones para subagentes|Consigne au sous-agent|Anweisung für Unteragent|Orientação para subagente|Указание подзадаче|サブエージェントへの指示|하위 에이전트 지침
+发送指导|Send guidance|Enviar instrucciones|Envoyer une consigne|Anweisung senden|Enviar orientação|Отправить указание|指示を送信|지침 보내기
+取消子任务|Cancel subagent|Cancelar subagente|Annuler le sous-agent|Unteragent abbrechen|Cancelar subagente|Отменить подзадачу|サブエージェントをキャンセル|하위 에이전트 취소
+待投递|Pending|Pendiente|En attente|Ausstehend|Pendente|Ожидает отправки|送信待ち|전달 대기
+已投递|Delivered|Enviado|Envoyé|Übermittelt|Entregue|Доставлено|送信済み|전달됨
+指导发送失败|Could not send guidance|No se pudieron enviar las instrucciones|Impossible d’envoyer la consigne|Anweisung konnte nicht gesendet werden|Não foi possível enviar a orientação|Не удалось отправить указание|指示を送信できませんでした|지침을 보내지 못했습니다
+取消请求失败|Could not request cancellation|No se pudo solicitar la cancelación|Impossible de demander l’annulation|Abbruch konnte nicht angefordert werden|Não foi possível solicitar o cancelamento|Не удалось запросить отмену|キャンセルを要求できませんでした|취소를 요청하지 못했습니다
+确认请求取消这个子任务？执行中的操作不会被强制终止。|Request cancellation of this subagent? In-progress operations will not be forcefully terminated.|¿Solicitar la cancelación de este subagente? Las operaciones en curso no se interrumpirán a la fuerza.|Demander l’annulation de ce sous-agent ? Les opérations en cours ne seront pas interrompues de force.|Abbruch dieses Unteragenten anfordern? Laufende Vorgänge werden nicht erzwungen beendet.|Solicitar o cancelamento deste subagente? Operações em andamento não serão encerradas à força.|Запросить отмену этой подзадачи? Текущие операции не будут принудительно прерваны.|このサブエージェントのキャンセルを要求しますか？実行中の操作は強制終了されません。|이 하위 에이전트 취소를 요청할까요? 실행 중인 작업은 강제 종료되지 않습니다.
 正在停止…|Stopping…|Deteniendo…|Arrêt…|Wird gestoppt…|Parando…|Остановка…|停止中…|중지 중…
 展开对话操作|Open chat actions|Abrir acciones del chat|Ouvrir les actions|Chataktionen öffnen|Abrir ações da conversa|Открыть действия чата|チャット操作を開く|대화 작업 열기
 对话操作|Chat actions|Acciones del chat|Actions de discussion|Chataktionen|Ações da conversa|Действия чата|チャット操作|대화 작업

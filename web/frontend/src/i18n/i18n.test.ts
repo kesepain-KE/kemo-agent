@@ -1,16 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { coreMessages } from './core'
-import { appearanceMessages } from './appearance'
-import { workspaceMessages } from './workspace'
-import { backgroundMessages } from './background'
-import { workbenchMessages } from './workbench'
-import { agentDetailMessages } from './agentDetails'
-import { conversationRecordMessages } from './conversationRecords'
-import { historyMarkMessages } from './historyMarks'
-import { scratchMessages } from './scratch'
-import { agentBudgetMessages } from './agentBudgets'
-import { presenceDispatchMessages } from './presenceDispatch'
-import { languages, messages, normalizeLanguage, translate } from './index'
+import { catalogs, languages, messages, normalizeLanguage, translate } from './index'
 import { useUiStore } from '../store/ui'
 import { h } from '../reference/shared.js'
 
@@ -20,11 +9,18 @@ afterEach(() => {
 })
 
 describe('explicit UI localization', () => {
+  it('uses i18next with only the configured locale set', () => {
+    expect(messages.size).toBeGreaterThan(700)
+    for (const { code } of languages) {
+      if (code !== 'zh-CN') expect(translate('近期活动', code)).not.toBe('近期活动')
+    }
+  })
+
   it('provides exactly nine languages with complete, unique catalog rows and matching placeholders', () => {
     expect(languages).toHaveLength(9)
     const seen = new Set<string>()
     const placeholders = (value: string) => [...value.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort()
-    for (const group of [coreMessages, appearanceMessages, workspaceMessages, backgroundMessages, workbenchMessages, agentDetailMessages, conversationRecordMessages, historyMarkMessages, scratchMessages, agentBudgetMessages, presenceDispatchMessages]) {
+    for (const group of catalogs) {
       for (const row of group.trim().split('\n')) {
         const columns = row.split('|')
         expect(columns, row).toHaveLength(9)
