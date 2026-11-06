@@ -31,9 +31,9 @@ def seed(root, session="s1", *, source="web", count=1, metadata=None):
 
 def test_history_uses_cards_database_without_window_directories(root):
     history = seed(root)
-    assert history.store.path == root / "users/alice/cards.sqlite3"
+    assert history.store.path == root / "users/alice/history/cards.sqlite3"
     assert history.store.path.is_file()
-    assert not (root / "users/alice/history").exists()
+    assert not (root / "users/alice/history/history.sqlite3").exists()
     assert [card.raw_kind for card in history.cards] == ["user_text", "agent_text"]
 
 
@@ -88,9 +88,8 @@ def test_reserved_identity_can_close_and_hide_without_raw(root):
     assert CardStore(root, "alice").session("web", "empty")["lifecycle"] == "deleted"
 
 
-def test_hidden_identity_and_raw_cannot_be_reused_by_late_writers(root):
+def test_deleted_history_is_erased_and_identity_cannot_be_reused_by_late_writers(root):
     history = seed(root)
-    original = [(card.card_id, card.raw_payload_json) for card in history.cards]
     delete_session(root, "alice", "web", "s1")
     with pytest.raises(CardSessionClosedError):
         reserve_session(root, "alice", "web", "s1")
@@ -98,7 +97,7 @@ def test_hidden_identity_and_raw_cannot_be_reused_by_late_writers(root):
         history.store.append("web", "s1", "late", "user_text", {"text": "late"})
     new, created = get_or_reserve_active(root, "alice", "web", "browser", preferred_session_id="s1")
     assert created and new["session_id"] != "s1"
-    assert [(card.card_id, card.raw_payload_json) for card in history.cards] == original
+    assert history.cards == []
 
 
 def test_active_bindings_do_not_collide_across_sources(root):

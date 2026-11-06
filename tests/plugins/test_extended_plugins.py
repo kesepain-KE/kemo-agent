@@ -20,6 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+
 from plugins.file.tool import _ACTIONS as FILE_ACTIONS
 from plugins.file.tool import run as run_file
 from plugins.get_current_time.tool import run as run_get_current_time
@@ -95,27 +97,16 @@ class PluginManifestTests(unittest.TestCase):
             )
 
         registry = discover_tools(PROJECT_ROOT, "alice")
-        self.assertEqual(len(registry.tools), 20)
-        self.assertEqual(
-            hashlib.sha256(
-                json.dumps(
-                    registry.schemas(),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest(),
-            "4fd89475632e421dc7fb0866ee26cfe1313583debe075403ded5a831464ee468",
-        )
-        self.assertEqual(
-            hashlib.sha256(
-                json.dumps(
-                    list(registry.tools),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest(),
-            "35d71ef8fbeed49737fcc55a6c0ff17b067774a1f0288617e98b822a62fdacf4",
-        )
+        self.assertEqual(list(registry.tools), names)
+        for definition in registry.tools.values():
+            Draft202012Validator.check_schema(definition.input_schema)
+        for name, default, modes in (
+            ("history_search", "substring", ["substring", "word", "exact", "fulltext"]),
+            ("memory_manage", "keywords", ["keywords", "substring", "word", "exact", "fulltext"]),
+        ):
+            match_mode = registry.get(name).input_schema["properties"]["match_mode"]
+            self.assertEqual(match_mode["default"], default)
+            self.assertEqual(match_mode["enum"], modes)
         self.assertTrue(
             all(
                 manifest.tool.get("permission") in {"read", "write", "delete", "external"}

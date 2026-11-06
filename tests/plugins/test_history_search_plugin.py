@@ -142,12 +142,14 @@ def test_limit_counts_all_matches_and_character_budget_advances_offset(root):
     assert len(seen) == 10
 
 
-def test_hidden_session_is_not_searchable_but_raw_remains(root):
+def test_deleted_session_is_not_searchable_and_raw_is_erased(root):
     history = seed(root)
     before = history.cards
     assert search(root, "needle")["total_matches"] == 1
+    assert history.cards == before
     delete_session(root, "alice", "web", "s1")
-    assert search(root, "needle")["total_matches"] == 0 and history.cards == before
+    assert search(root, "needle")["total_matches"] == 0
+    assert history.cards == []
 
 
 def test_directory_dates_and_utf8_read_are_lossless(root):
@@ -192,7 +194,7 @@ def test_reads_do_not_create_database_or_touch_old_windows(root):
     legacy.parent.mkdir()
     legacy.write_bytes(b"old unrelated data")
     assert search(root, action="dates")["dates"] == []
-    assert not (root / "users/alice/cards.sqlite3").exists()
+    assert not (root / "users/alice/history/cards.sqlite3").exists()
     assert legacy.read_bytes() == b"old unrelated data"
 
 

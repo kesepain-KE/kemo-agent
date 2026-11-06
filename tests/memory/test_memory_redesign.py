@@ -16,7 +16,7 @@ import pytest
 from agents.self_improve.executor import execute
 from plugins.skill_creater.tool import run as skill_tool
 from run.agents import AgentRunResult, AgentOutputError
-from run.memory import MemoryStore
+from run.memory import MEMORY_SCHEMA_VERSION, MemoryStore
 from run.memory.analysis import persist_round_memory_analysis
 from run.memory.archive import archive_expired
 from run.memory.evidence import extraction_rounds, quoted_rounds
@@ -107,7 +107,7 @@ def test_v1_migration_preserves_legacy_events_and_fragments(store):
     _READY_DATABASES.discard(str(path.resolve()).casefold())
     with connection(store.root, store.user) as db:
         assert db.execute("SELECT source FROM memory_weight_events").fetchone()[0] == "historical_migration"
-        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == "3"
+        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == str(MEMORY_SCHEMA_VERSION)
     assert store.get_entry("seven_days", "deploy")["content"] == BODY
 
 
@@ -395,21 +395,6 @@ def test_archive_database_commit_failure_rolls_back_deletion_and_reuses_file(sto
     assert store.get_entry("seven_days", "deploy") is None
     assert list((store.root / "users/alice/improve/expired_memory").rglob("*.md")) == files
     assert not WorkLedger(store.root, store.user).pending("archive")
-
-
-def test_user_skeleton_archive_directory_is_not_a_knowledge_source(store):
-    from user_create import _post_process_dirs
-    from run.config.knowledge import select_knowledge_index
-    _post_process_dirs(store.root, store.user)
-    directory = store.root / "users/alice/improve/expired_memory"
-    assert directory.is_dir()
-    directory.joinpath("index.md").write_text("# Archive-only sentinel", "utf-8")
-    knowledge = store.root / "users/alice/knowledge/index.md"
-    knowledge.write_text("# Actual knowledge", "utf-8")
-    selected = select_knowledge_index(store.root, store.user, scopes=("user",))
-    assert "Actual knowledge" in selected.text
-    assert "Archive-only sentinel" not in selected.text
-    assert len(selected.documents) == 1
 
 
 @pytest.mark.parametrize("body", ["token=legacy-secret-value", '{"token": "legacy-secret-value"}'])

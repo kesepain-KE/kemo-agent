@@ -32,7 +32,7 @@ def history(root, query, **kwargs):
     return history_search(query, match_mode="fulltext", context={"root": str(root), "user": "alice"}, **kwargs)
 
 
-def test_history_fulltext_uses_body_only_and_preserves_scope_and_raw(root):
+def test_history_fulltext_uses_body_only_and_preserves_scope_then_erases_deleted_raw(root):
     store = CardStore(root, "alice")
     store.ensure_session("web", "s1")
     with patch("run.cards.store.utc_now", return_value="2026-07-19T16:00:00Z"):
@@ -50,9 +50,10 @@ def test_history_fulltext_uses_body_only_and_preserves_scope_and_raw(root):
     assert result["matches"][0]["card_id"] == user.card_id
     assert all(item["raw_kind"] in {"user_text", "agent_text"} for item in result["matches"][0]["context"])
     assert "秘密标记" not in json.dumps(result, ensure_ascii=False)
+    assert store.raw_page("web", "s1") == before
     delete_session(root, "alice", "web", "s1")
     assert history(root, "历史 压缩", source="web")["total_matches"] == 0
-    assert store.raw_page("web", "s1") == before
+    assert store.raw_page("web", "s1") == ()
 
 
 def test_history_fulltext_bm25_pagination_and_character_budget(root):
@@ -121,7 +122,7 @@ def test_memory_index_tracks_rename_edit_tier_change_delete_and_rollback(root):
 def test_existing_store_migration_backfills_index_and_keeps_pre_migration_backup(root, kind):
     if kind == "cards":
         seed_history(root, "alice", "web", "s1", [{"role": "user", "content": "保存历史压缩正文"}])
-        path = root / "users/alice/cards.sqlite3"
+        path = root / "users/alice/history/cards.sqlite3"
         index, version, triggers = "card_text_fts", 4, ["card_text_fts_insert"]
     else:
         MemoryStore(root, "alice", {}).create_fragment("seven_days", "历史配置.md", "保存历史压缩正文")
@@ -159,7 +160,7 @@ def test_existing_store_migration_backfills_index_and_keeps_pre_migration_backup
 
 def test_fulltext_native_query_boundaries_and_empty_history_have_no_side_effect(root):
     assert history(root, "历史 压缩")["total_matches"] == 0
-    assert not (root / "users/alice/cards.sqlite3").exists()
+    assert not (root / "users/alice/history/cards.sqlite3").exists()
     seed_history(root, "alice", "web", "s1", [{"role": "user", "content": "SQLite 记忆检索"}])
     assert history(root, '" OR * NOT')["total_matches"] == 0
     assert history(root, "SQLITE 检索")["total_matches"] == 1

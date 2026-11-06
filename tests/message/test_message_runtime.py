@@ -13,6 +13,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from events import RunEvent
 from message.identity import (
@@ -350,6 +351,49 @@ timestamp: 2026-07-18T14:31:25+08:00
         config_path.write_text(json.dumps(value), "utf-8")
         with self.assertRaisesRegex(MessagePluginError, "相对路径"):
             MessagePluginConfig.load(self.root, self.directory)
+
+    def test_failed_submit_is_quarantined_without_replay(self) -> None:
+        config = MessagePluginConfig.load(self.root, self.directory)
+        transport = FileMessageTransport(
+            config,
+            poll_interval=60,
+            health_interval=60,
+            settle_interval=0,
+        )
+        errors: list[BaseException] = []
+        attempts: list[MessageEnvelope] = []
+
+        def reject(envelope: MessageEnvelope) -> None:
+            attempts.append(envelope)
+            raise RuntimeError("queue full")
+
+        transport.start(reject, lambda _name, exc: errors.append(exc))
+        self.addCleanup(transport.stop)
+        (self.directory / "message.md").write_text(
+            ("""---
+machine_id: msg_filedemo
+message_id: rejected
+chat_type: private
+external_user_id: "u1"
+external_chat_id: "c1"
+timestamp: 2026-07-18T14:30:25+08:00
+---
+
+preserve this message
+""").replace("2026-07-18", datetime.now(timezone.utc).date().isoformat()),
+            "utf-8",
+        )
+
+        self.assertEqual(transport.poll_once(), 0)
+        failed_claims = list(self.directory.glob("*.failed"))
+        self.assertEqual(len(failed_claims), 1)
+        self.assertIn("preserve this message", failed_claims[0].read_text("utf-8"))
+        self.assertFalse(list(self.directory.glob("*.processing.md")))
+        self.assertEqual(transport._pending, {})
+        self.assertEqual(len(errors), 1)
+
+        self.assertEqual(transport.poll_once(), 0)
+        self.assertEqual(len(attempts), 1)
 
     def test_file_queue_batch_attachment_route_send_log_and_cleanup(self) -> None:
         image = self.directory / "files" / "p1_0.png"
@@ -1096,6 +1140,16 @@ class HostTests(unittest.TestCase):
             self.assertEqual(transport.sent[0].text, "reply:hello")
         finally:
             host.stop()
+
+    def test_message_submission_failure_is_not_reported_as_accepted(self) -> None:
+        host = self._host(cron=False, fake_cron=FakeCron())
+        host.start()
+        self.addCleanup(host.stop)
+        with mock.patch.object(
+            host.router, "submit", side_effect=RuntimeError("queue full")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "queue full"):
+                host._accept_message(_envelope())
 
     def test_cron_start_failure_fails_host_and_stops_router(self) -> None:
         host = self._host(fake_cron=FakeCron(fail_start=True))

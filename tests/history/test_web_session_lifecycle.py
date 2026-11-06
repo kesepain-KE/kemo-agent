@@ -203,7 +203,7 @@ def test_readonly_inspection_does_not_create_or_migrate_old_history(root):
     legacy.parent.mkdir()
     legacy.write_bytes(b"never open this old database")
     assert inspect_stale_web_sessions(root, "alice")["inspected"] == 0
-    assert not (root / "users/alice/cards.sqlite3").exists()
+    assert not (root / "users/alice/history/cards.sqlite3").exists()
     assert legacy.read_bytes() == b"never open this old database"
 
 

@@ -58,7 +58,7 @@ def test_only_expired_cron_sessions_are_hidden_and_raw_is_preserved(root):
     for n, source in enumerate(("web", "message:telegram", "background:plan:job", "background:cron:", "BACKGROUND:CRON:job")):
         seed(root, f"other{n}", source=source)
     sentinel = root / "users/alice/history/old-window.json"
-    sentinel.parent.mkdir()
+    sentinel.parent.mkdir(exist_ok=True)
     sentinel.write_bytes(b"legacy must remain")
     result = cleanup_cron_history(root, "alice", now=NOW)
     assert result["deleted_sessions"] == 1 and result["raw_preserved"]

@@ -343,7 +343,7 @@ def test_fact_null_threshold_preserves_legacy_zero_threshold(personal):
 
 def old_memory_database(path=":memory:"):
     db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
+    schema._configure(db)
     schema._ensure_schema(db)
     db.execute("ALTER TABLE memory_fragments DROP COLUMN domain")
     db.execute("UPDATE memory_meta SET value='2' WHERE key='schema_version'")
@@ -363,7 +363,7 @@ def test_v2_migration_assigns_fact_without_changing_old_data():
         after = dict(db.execute("SELECT * FROM memory_fragments").fetchone())
         assert after.pop("domain") == "fact"
         assert after == before
-        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == "3"
+        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == str(schema.MEMORY_DB_SCHEMA_VERSION)
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("UPDATE memory_fragments SET domain='typo'")
 
@@ -401,7 +401,7 @@ def test_v2_migration_keeps_existing_and_new_wal_readers_available(tmp_path):
 
     def upgrade():
         with closing(sqlite3.connect(path)) as database:
-            database.row_factory = sqlite3.Row
+            schema._configure(database)
             schema._ensure_schema(database)
 
     with closing(sqlite3.connect(path, timeout=0.1)) as reader:
@@ -439,12 +439,12 @@ def test_v2_migration_keeps_existing_and_new_wal_readers_available(tmp_path):
             "fact", "original")
         assert reader.execute(
             "SELECT value FROM memory_meta WHERE key='schema_version'"
-        ).fetchone() == ("3",)
+        ).fetchone() == (str(schema.MEMORY_DB_SCHEMA_VERSION),)
 
 
 def test_new_database_has_domain_constraint_and_no_extra_index(personal):
     personal.create_fragment("seven_days", "事实", "正文", now=NOW)
     with schema.connection(personal.root, personal.user) as db:
         assert db.execute("SELECT domain FROM memory_fragments").fetchone()[0] == "fact"
-        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == "3"
+        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == str(schema.MEMORY_DB_SCHEMA_VERSION)
         assert all("domain" not in str(r["name"]) for r in db.execute("PRAGMA index_list(memory_fragments)"))

@@ -25,7 +25,7 @@ META = {
 
 def db_path(root: Path, kind: str) -> Path:
     return {
-        "cards": root / "users/alice/cards.sqlite3",
+        "cards": root / "users/alice/history/cards.sqlite3",
         "tasks": root / "users/alice/task_plan/task_plans.sqlite3",
         "logs": root / "runtime/logs.sqlite3",
         "memory": root / "users/alice/improve/memory.sqlite3",
@@ -202,6 +202,18 @@ def test_cardstream_initialization_never_reads_or_migrates_legacy_history(tmp_pa
     assert legacy.read_bytes() == b"opaque legacy history; leave untouched"
     assert db_path(tmp_path, "cards").is_file()
     assert not list(legacy.parent.glob("*.bak.*"))
+
+
+@pytest.mark.parametrize("reader", (cards.connection, cards.read_connection))
+def test_unmoved_cardstream_database_is_reported_without_creating_empty_history(tmp_path, reader):
+    previous = tmp_path / "users/alice/cards.sqlite3"
+    previous.parent.mkdir(parents=True)
+    previous.write_bytes(b"existing CardStream database; do not replace")
+    with pytest.raises(SchemaMigrationError, match="history/cards.sqlite3"):
+        with reader(tmp_path, "alice"):
+            pass
+    assert previous.read_bytes() == b"existing CardStream database; do not replace"
+    assert not (previous.parent / "history").exists()
 
 
 @pytest.mark.parametrize("kind", KINDS)
