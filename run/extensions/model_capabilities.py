@@ -84,6 +84,46 @@ def declared_input_token_limit(
     return min(candidates) if candidates else None
 
 
+def context_input_budget(
+    configured_limit: int, capabilities: ModelCapabilities | None,
+    *, output_reserve: int = 0,
+) -> dict[str, Any]:
+    """Input-only limits and shared context windows are distinct constraints."""
+    if type(configured_limit) is not int or configured_limit < 1:
+        raise ValueError("Configured context capacity must be a positive integer")
+    if type(output_reserve) is not int or output_reserve < 0:
+        raise ValueError("Output reserve must be a nonnegative integer")
+    limits = getattr(capabilities, "limits", None)
+    extension_limits = getattr(capabilities, "extensions", {}).get("limits", {})
+    if not isinstance(extension_limits, dict):
+        extension_limits = {}
+    output_limits = [value for value in (
+        getattr(limits, "max_output_tokens", None), extension_limits.get("max_output_tokens"),
+    ) if type(value) is int and value > 0]
+    if output_reserve and output_limits:
+        output_reserve = min(output_reserve, *output_limits)
+    candidates = []
+    for value in (getattr(limits, "max_input_tokens", None),
+                  extension_limits.get("max_input_tokens")):
+        if type(value) is int and value > 0:
+            candidates.append(value)  # Already input-only; do not subtract again.
+    for value in (getattr(limits, "context_window", None),
+                  extension_limits.get("context_window")):
+        if type(value) is int and value > 0:
+            candidates.append(max(0, value - output_reserve))
+    declared = min(candidates) if candidates else None
+    effective = min([max(0, configured_limit - output_reserve), *candidates])
+    if effective < 1:
+        raise ValueError("输出预留已占满上下文容量")
+    return {
+        "configured_token_limit": configured_limit,
+        "provider_declared_input_limit": declared,
+        "effective_token_limit": effective,
+        "output_reserve": output_reserve,
+        "capability_unknown": declared is None,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class _CachedCapability:
     fresh_until: float
@@ -117,6 +157,18 @@ def _cache_key(
         str(model),
         str(capabilities_url or ""),
     )
+
+
+def cached_model_capabilities(
+    runtime_provider: dict[str, Any], *,
+    capabilities_url: str | None = None,
+) -> ModelCapabilities | None:
+    """Read current evidence without probing the network from a status page."""
+    key = _cache_key(runtime_provider, str(runtime_provider.get("model") or ""), capabilities_url)
+    with _capability_lock:
+        cached = _capability_cache.get(key)
+        return (cached.capabilities
+                if cached is not None and cached.fresh_until > time.monotonic() else None)
 
 
 def clear_model_capability_cache(

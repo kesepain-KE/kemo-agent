@@ -40,16 +40,9 @@ class WaitForConditionPluginTests(unittest.TestCase):
             "cancel_event": cancel_event or threading.Event(),
         }
 
-    def test_duration_completes_as_triggered(self) -> None:
-        result = run(
-            "duration",
-            1,
-            check_interval=0.1,
-            context=self.context(),
-        )
-        self.assertEqual(result["status"], "triggered")
-        self.assertEqual(result["trigger"], "duration_elapsed")
-        self.assertGreaterEqual(result["elapsed_seconds"], 0.9)
+    def test_duration_only_wait_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "未知 condition"):
+            run("duration", 1, context=self.context())
 
     def test_condition_timeout_is_a_normal_result(self) -> None:
         result = run(
@@ -327,28 +320,44 @@ class WaitForConditionPluginTests(unittest.TestCase):
         schema = definition.input_schema
         self.assertEqual(schema["required"], ["condition", "timeout"])
         self.assertEqual(schema["properties"]["timeout"]["maximum"], 7200)
+        self.assertNotIn("duration", schema["properties"]["condition"]["enum"])
         self.assertIn("job_exit", schema["properties"]["condition"]["enum"])
         self.assertIn("process_started_at", schema["properties"])
-        self.assertEqual(definition.version, "1.1.0")
+        self.assertEqual(definition.version, "1.2.0")
         self.assertEqual(definition.timeout_grace_seconds, 2)
         self.assertEqual(
             resolve_tool_timeout(
                 definition,
-                {"condition": "duration", "timeout": 7200},
+                {
+                    "condition": "job_exit",
+                    "job_id": "job_0123456789abcdef0123456789abcdef",
+                    "timeout": 7200,
+                },
                 default_timeout=240,
             ),
             7202,
         )
 
-    def test_execute_tool_finishes_duration_before_outer_watchdog(self) -> None:
+    def test_execute_tool_finishes_condition_wait_before_outer_watchdog(self) -> None:
         definition = discover_tools(PROJECT_ROOT, "alice").get("wait_for_condition")
         result = execute_tool(
             definition,
-            {"condition": "duration", "timeout": 1, "check_interval": 0.1},
-            context={"root": str(self.root), "user": "alice"},
+            {
+                "condition": "path_exists",
+                "timeout": 1,
+                "check_interval": 0.1,
+                "path": "never-created.txt",
+            },
+            context={
+                "root": str(self.root),
+                "user": "alice",
+                "source": "test",
+                "session_id": "space-a",
+                "cancel_event": threading.Event(),
+            },
             timeout=0.05,
         )
-        self.assertEqual(result["status"], "triggered")
+        self.assertEqual(result["status"], "timeout")
 
     def test_condition_specific_validation(self) -> None:
         with self.assertRaisesRegex(ValueError, "pid"):
@@ -370,7 +379,8 @@ class WaitForConditionPluginTests(unittest.TestCase):
                 context=self.context(),
             )
         with self.assertRaisesRegex(ValueError, "1..7200"):
-            run("duration", 7201, context=self.context())
+            run("job_exit", 7201, job_id="job_0123456789abcdef0123456789abcdef",
+                context=self.context())
 
 
 if __name__ == "__main__":

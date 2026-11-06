@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.card_history_support import session_history
+
 from unittest.mock import Mock
 from provider.protocol.models import KemoRequest
 
@@ -36,7 +38,7 @@ from run.extensions import (
 )
 from run.engine import handle_request
 from run.context import estimate_messages_tokens
-from run.history import find_window, load_window
+
 from run.extensions import (
     _capability_cache,
     configured_input_modalities,
@@ -85,12 +87,12 @@ class MultimodalRoutingTests(unittest.TestCase):
         (root / "config").mkdir()
         (root / "plugins").mkdir()
         for path in (
-            root / "shared_skills",
+            root / "skills",
             root / "users" / "alice" / "history",
             root / "users" / "alice" / "file_upload",
         ):
             path.mkdir(parents=True, exist_ok=True)
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"tools": {"enabled": False, "max_iterations": 4}}),
             "utf-8",
         )
@@ -103,7 +105,7 @@ class MultimodalRoutingTests(unittest.TestCase):
         }
         if input_modalities is not None:
             provider["input_modalities"] = input_modalities
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -287,15 +289,11 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertIn("[本轮输入资产]", historical_user_text)
         self.assertIn(descriptor["path"], historical_user_text)
 
-        window_path = find_window(root, "alice", "web", "attachment-only-history")
+        window_path = session_history(root, 'alice', 'web', 'attachment-only-history')
         self.assertIsNotNone(window_path)
         assert window_path is not None
-        window = load_window(window_path)
-        user_items = [
-            item
-            for item in window["items"]["items"]
-            if item.get("type") == "message" and item.get("role") == "user"
-        ]
+        window = window_path.refresh()
+        user_items = [item for item in window.items if item.get('type') == 'message' and item.get('role') == 'user']
         self.assertTrue(user_items[0]["content"])
         persisted = json.dumps(user_items[0]["content"], ensure_ascii=False)
         self.assertIn(descriptor["path"], persisted)
@@ -311,18 +309,12 @@ class MultimodalRoutingTests(unittest.TestCase):
             "scope": "file_upload",
             "relative_path": descriptor["relative_path"],
         }
+        self.assertEqual(window.messages[0]['attachments'], [history_attachment])
         self.assertEqual(
-            window["text"]["messages"][0]["attachments"],
+            window.cards[0].raw_payload["attachments"],
             [history_attachment],
         )
-        self.assertEqual(
-            user_items[0]["metadata"]["input_attachments"],
-            [history_attachment],
-        )
-        self.assertEqual(
-            window["data"]["round_metrics"][0]["input_attachments"],
-            [history_attachment],
-        )
+        self.assertEqual(window.cards[0].raw_payload["attachments"], [history_attachment])
         self.assertNotIn("path", history_attachment)
 
     def test_non_image_attachment_only_round_can_continue(self) -> None:
@@ -536,11 +528,15 @@ class MultimodalRoutingTests(unittest.TestCase):
 
     def test_kemo_dedicated_analysis_resolves_gateway_asset_outside_current_run(self) -> None:
         root, _ = self.make_root(vision="vision-model")
-        config_path = root / "users" / "alice" / "user_config.json"
+        config_path = root / "users" / "alice" / "user_config.yaml"
         config = json.loads(config_path.read_text("utf-8"))
         config["provider"]["type"] = "kemo"
-        config["provider"]["base_url"] = "http://gateway.test"
+        config["provider"]["base_url"] = "https://gateway.test"
         config_path.write_text(json.dumps(config), "utf-8")
+        instance_path = root / "config" / "global_config.yaml"
+        instance = json.loads(instance_path.read_text("utf-8"))
+        instance["provider_security"] = {"allowed_hosts": ["gateway.test"]}
+        instance_path.write_text(json.dumps(instance), "utf-8")
         from plugins.multimodal import tool
 
         descriptor = AssetDescriptor(
@@ -836,6 +832,7 @@ class MultimodalRoutingTests(unittest.TestCase):
                     "source": "cli",
                     "session_id": "absolute-path",
                     "uploaded_files": [],
+                    "user_text": str(absolute_image.resolve()),
                 },
             )
         media = require_present(fake.request).input[0].content[1]
@@ -909,7 +906,7 @@ class MultimodalRoutingTests(unittest.TestCase):
 
     def test_kemo_generation_downloads_verified_artifact(self) -> None:
         root, _ = self.make_root()
-        config_path = root / "users" / "alice" / "user_config.json"
+        config_path = root / "users" / "alice" / "user_config.yaml"
         config = json.loads(config_path.read_text("utf-8"))
         config["provider"]["type"] = "kemo"
         config["multimodal_models"]["image_generation"] = "image-model"

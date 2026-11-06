@@ -48,7 +48,7 @@ def request_media_attachment(
         raise AttachmentError("note 必须是不超过 4000 字的字符串")
     if not isinstance(detail, str) or detail not in {"auto", "low", "high"}:
         raise AttachmentError("detail 必须是 auto、low 或 high")
-    return {"media_input_request": {**checked, "note": note, "detail": detail}}
+    return {"ok": True, "media_input_request": {**checked, "note": note, "detail": detail}}
 
 
 def checked_media_path(root: Path, user: str, raw: str) -> Path:
@@ -97,6 +97,25 @@ def _referenced_paths(value: Any) -> Iterable[str]:
                 yield from _referenced_paths(item)
 
 
+def _path_mentioned_in_input(raw: str, user_text: str) -> bool:
+    if raw in user_text or json.dumps(raw, ensure_ascii=False) in user_text:
+        return True
+    try:
+        parsed = json.loads(user_text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    pending = [parsed]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str) and raw in value:
+            return True
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
+
+
 def resolve_media_attachment(
     root: Path,
     user: str,
@@ -140,7 +159,7 @@ def resolve_media_attachment(
             if observed_path.resolve() == path:
                 observed = True
                 break
-        mentioned = raw in user_text or json.dumps(raw, ensure_ascii=False) in user_text
+        mentioned = _path_mentioned_in_input(raw, user_text)
         if not managed and not observed and not mentioned:
             raise AttachmentError(
                 "本地路径必须由用户明确提供、由本轮成功工具结果返回，"

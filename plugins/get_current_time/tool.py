@@ -46,6 +46,7 @@ def run(target_timezone: str = "", format: str = "iso") -> dict[str, Any]:
     utc_now = datetime.now(timezone.utc)
     beijing_now = utc_now.astimezone(BEIJING)
     result: dict[str, Any] = {
+        "ok": True,
         "utc": _format_time(utc_now, format),
         "local": _format_time(beijing_now, format),
         "iana_timezone": BEIJING_TIMEZONE_NAME,

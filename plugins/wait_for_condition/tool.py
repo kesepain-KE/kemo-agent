@@ -23,7 +23,6 @@ MIN_CHECK_INTERVAL = 0.1
 MAX_CHECK_INTERVAL = 60.0
 CONDITIONS = frozenset(
     {
-        "duration",
         "job_exit",
         "process_exit",
         "path_exists",
@@ -209,10 +208,7 @@ def run(
         checks += 1
         triggered = False
         trigger = ""
-        if condition == "duration":
-            triggered = time.monotonic() >= deadline
-            trigger = "duration_elapsed"
-        elif condition == "job_exit":
+        if condition == "job_exit":
             current_job = read_background_job(root, user, job_id)
             assert_background_job_access(
                 current_job,

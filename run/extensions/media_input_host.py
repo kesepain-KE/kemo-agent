@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from provider.adapters.image_content import prepare_image_blocks
+from provider.adapters.image_content import message_item_type, prepare_image_blocks
 from provider.protocol.models import MessageItem
 from run.extensions.attachments import AttachmentError
 from run.extensions.media_input_queue import MediaInputQueue
@@ -83,10 +83,10 @@ class MediaInputHost:
 
     def refresh_messages(self, messages: list[dict[str, Any]]) -> None:
         # Guidance may have supplied a queued asset natively in the meantime.
+        # Rebuild this host's transient projection. Consumed entries may have
+        # been explicitly rearmed with a new attachment id since the last call.
         messages[:] = [
-            item for item in messages
-            if str(item.get("_media_input_id", "")).partition(":")[2]
-            not in self.visible_asset_ids
+            item for item in messages if not item.get("_media_input_id")
         ]
         for prepared in self._prepared():
             asset_id = prepared["_media_input_id"].split(":", 1)[1]
@@ -103,11 +103,15 @@ class MediaInputHost:
                 existing.update(prepared)
 
     def refresh_items(self, items: list[Any]) -> None:
+        # Rebuild owned transient media from pending entries, including explicit
+        # reloads. Ordinary historical user/tool items remain untouched.
+        items[:] = [item for item in items
+                    if not str(getattr(item, "id", "")).startswith("msg_media_")]
         for prepared in self._prepared():
             item_id = "msg_media_" + hashlib.sha256(
                 prepared["_media_input_id"].encode("utf-8")
             ).hexdigest()[:32]
-            message = MessageItem.model_validate({
+            message = message_item_type(str(self.runtime_provider.get("type") or "")).model_validate({
                 "id": item_id, "role": "user",
                 "content": prepare_image_blocks(
                     prepared["content"],
@@ -138,20 +142,17 @@ class MediaInputHost:
     ) -> None:
         if not self.queue.entries:
             return
-        from run.context import estimate_messages_tokens, estimate_tools_tokens
+        from run.cards import estimate_request_tokens
 
         messages = [
             item.model_dump(mode="json", exclude_none=True) for item in items
         ]
         self.validate_request(messages)
-        tokens = estimate_messages_tokens(
-            [{"role": "system", "content": system}, *messages]
-        ) + estimate_tools_tokens(
-            [tool.model_dump(mode="json", exclude_none=True) for tool in tools]
-        )
-        if self.input_limit is not None and tokens >= self.input_limit:
+        tokens = estimate_request_tokens(system, items, tools)
+        if self.input_limit is not None and tokens > self.input_limit:
             raise AttachmentError("含装载媒体的子代理请求超过上下文预算")
 
     def acknowledge(self) -> None:
         self.queue.acknowledge()
+        self.visible_asset_ids.clear()
         self._sync()

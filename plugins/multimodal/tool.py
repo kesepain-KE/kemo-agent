@@ -28,7 +28,7 @@ from provider.protocol.models import (
 )
 from provider.protocol.assets import AssetDescriptor
 from provider.schema import ProviderError
-from run.extensions import RunAssetResolver, describe_local_asset
+from run.extensions import RunAssetResolver, resolve_media_attachment
 from run.config import load_config, provider_runtime_config
 from run.extensions import persist_response_media
 
@@ -305,6 +305,20 @@ def run(
 
     root = Path(str(context["root"])).resolve()
     user = str(context["user"])
+    descriptors = context.get("uploaded_files") or []
+    if not isinstance(descriptors, list):
+        raise ValueError("当前 Run 的附件上下文无效")
+    local_descriptors = [
+        descriptor
+        for value in local_paths
+        for descriptor in resolve_media_attachment(
+            root, user, {"asset_ids": [], "paths": [value]}, descriptors,
+            user_text=context.get("user_text") or "",
+            tool_records=context.get("tool_records") or [],
+        )
+    ]
+    descriptors = [*descriptors, *local_descriptors]
+    ids.extend(str(item["asset_id"]) for item in local_descriptors)
     config = load_config(user, root)
     runtime = provider_runtime_config(config)
     runtime["timeout"] = _multimodal_provider_timeout(config, runtime, context)
@@ -340,14 +354,6 @@ def run(
         if output_modality and output_modality not in output_modalities:
             raise ValueError(f"模型 {model} 未声明 {output_modality} 输出能力")
 
-    descriptors = context.get("uploaded_files") or []
-    if not isinstance(descriptors, list):
-        raise ValueError("当前 Run 的附件上下文无效")
-    local_descriptors = [
-        describe_local_asset(root, user, {"path": value}) for value in local_paths
-    ]
-    descriptors = [*descriptors, *local_descriptors]
-    ids.extend(str(item["asset_id"]) for item in local_descriptors)
     local_asset_ids = {
         str(item.get("asset_id") or "")
         for item in descriptors
@@ -501,6 +507,7 @@ def run(
     if _OUTPUT_MODALITY.get(action) is not None and not artifacts:
         raise RuntimeError("多模态模型没有返回可下载的媒体 Asset")
     result = {
+        "ok": True,
         "action": action,
         "text": text,
         "artifacts": artifacts,

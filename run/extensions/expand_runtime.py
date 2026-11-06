@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterator
 
 from run.extensions.attachments import validate_media_file
 from run.config import load_config
-from run.extensions.module_runtime import module_execution_lock, run_protocol_process
+from run.extensions.module_runtime import _atomic_json, module_execution_lock, run_protocol_process
 from run.config import ExpandMeta, read_expand_meta
 from run.config import MainAgentSourcePolicy
 
@@ -186,9 +186,9 @@ def _is_link(path: Path) -> bool:
 
 def _scope_root(root: Path, user: str, scope: str) -> Path:
     if scope == "global":
-        return root / "global_expand"
+        return root / "expand" / "global"
     if scope == "shared":
-        return root / "shared_expand"
+        return root / "expand" / "share"
     return root / "users" / user / "expand"
 
 
@@ -293,25 +293,6 @@ def _state_lock(module_root: Path) -> Iterator[None]:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             finally:
                 handle.close()
-
-
-def _atomic_json(path: Path, payload: dict[str, Any]) -> bool:
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    try:
-        if path.read_text("utf-8") == rendered:
-            return False
-    except (OSError, UnicodeError):
-        pass
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(rendered)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        return True
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def read_expand_runtime(module_root: Path) -> dict[str, Any]:
@@ -669,6 +650,7 @@ def invoke_expand(
         result={"artifacts": artifacts},
     )
     return {
+        "ok": True,
         "scope": scope,
         "module": module,
         "command": command,

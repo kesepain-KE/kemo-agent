@@ -172,17 +172,21 @@ def test_dedupe_projection_and_receipt_lifecycle(tmp_path):
     assert messages[-1]["content"][1]["type"] == "image"
     assert messages[-1]["content"][1]["source"]["kind"] == "inline_base64"
     assert messages[-1]["role"] == "user"
+    projected = json.loads(json.dumps(messages[-1]))
     host.acknowledge()
     retry = make_host(tmp_path, config, state=state)
     retry.refresh_messages(messages)
-    assert len(messages) == 2
+    assert len(messages) == 1
     assert retry.audit[0]["status"] == "included"
     rebuilt = []
     retry.refresh_messages(rebuilt)
+    assert rebuilt == []
+    enqueue(retry, {"asset_ids": first["asset_ids"], "note": "explicit reload"})
+    retry.refresh_messages(rebuilt)
     assert len(rebuilt) == 1
-    assert "ignored later note" not in rebuilt[0]["content"][0]["text"]
+    assert "explicit reload" in rebuilt[0]["content"][0]["text"]
     mapped = kemo_request_to_chat(chat_request_to_kemo(ChatRequest(
-        model="vision-main", messages=rebuilt, stream=False,
+        model="vision-main", messages=[projected], stream=False,
     )))
     assert mapped.messages[0]["content"][1]["type"] == "image_url"
     assert mapped.messages[0]["content"][1]["image_url"]["url"].startswith("data:image/png")
@@ -223,12 +227,12 @@ def test_kemo_native_modalities_and_upload_reuse(tmp_path, extension, data, kind
     assert messages[0]["content"][1]["asset_id"] == "asset_remote_1"
     assert "source" not in messages[0]["content"][1]
     assert estimate_messages_tokens(messages) >= 1024
-    host.acknowledge()
     # A changed account is not allowed to reuse a remote file belonging to the old one.
     runtime = {**config["provider"], "api_key": "different-account"}
     retry = make_host(tmp_path, config, provider, state=state, runtime_provider=runtime)
     retry.refresh_messages([])
     assert len(provider.uploads) == 2
+    retry.acknowledge()
 
 
 @pytest.mark.parametrize("provider_type,kind", [

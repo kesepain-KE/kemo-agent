@@ -12,8 +12,8 @@
 - 主模型已直接收到某项媒体时，不要重复调用本工具。
 - 只有附件说明要求调用本工具，或用户明确要求媒体生成/转换时才调用。
 - 输入理解优先由明确支持对应模态的主模型完成；本工具负责专用模型回退和生成类能力。
-- `paths` 支持绝对路径和相对项目根目录的路径。路径会先验证文件存在、普通文件类型、媒体签名与大小，再直接编码（Chat 图片）或上传（Kemo Asset）给专用模型；不要先把路径改写成 Markdown 图片。
-- 不得猜测路径。只有路径由用户明确提供、当前 Run 的工具结果返回，或已经通过文件工具确认时才能使用。
+- `paths` 支持绝对路径和相对项目根目录的路径，复用原生附件授权链：当前用户 download/file_upload、当前 Run 用户原文明确给出的路径，或此前成功工具结果报告的路径才可使用。失败结果、工具参数或本工具 instruction 不构成授权，子代理只使用自身输入及工具结果。
+- 先拒绝跨用户文件、远程 URL、符号链接与目录联接（包括父目录），验证来源、普通文件类型、签名和大小后才创建 Provider、查询能力、编码或上传；路径授权不改变 asset_ids 的现有来源校验。不要猜路径或改写成 Markdown 图片。
 - 图片在请求前会完整解码校验；Chat 图片通道只接受 JPEG、PNG、WEBP 和 GIF，其他图片格式应先明确提示用户转换。
 - `analyze_image`、`transcribe_audio`、`analyze_video` 遇到可重试的瞬时上游错误时最多再尝试一次；生成与编辑类动作不自动重试，避免重复计费或产生重复产物。
 - 专用调用默认使用当前工具期限并预留收尾时间；用户显式配置 `provider.timeout` 时尊重该值，但不会越过工具期限。
@@ -44,7 +44,16 @@
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["analyze_image", "generate_image", "edit_image", "transcribe_audio", "generate_speech", "convert_speech", "analyze_video", "generate_video"]
+        "enum": [
+          "analyze_image",
+          "generate_image",
+          "edit_image",
+          "transcribe_audio",
+          "generate_speech",
+          "convert_speech",
+          "analyze_video",
+          "generate_video"
+        ]
       },
       "asset_ids": {
         "type": "array",
@@ -58,12 +67,7 @@
         "maxItems": 8,
         "description": "明确的本地媒体路径；支持绝对路径或相对项目根目录路径，与 asset_ids 合计最多 8 项"
       },
-      "instruction": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 8000,
-        "description": "分析、生成、编辑、转写或转换指令"
-      },
+      "instruction": {"type": "string", "minLength": 1, "maxLength": 8000, "description": "分析、生成、编辑、转写或转换指令"},
       "detail": {"type": "string", "enum": ["auto", "low", "high"]},
       "output_format": {"type": "string", "maxLength": 20},
       "voice": {"type": "string", "maxLength": 100},
@@ -80,6 +84,7 @@
   },
   "version": "2.2.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "external"
 }
 ```

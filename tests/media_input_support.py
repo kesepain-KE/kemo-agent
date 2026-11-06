@@ -71,8 +71,8 @@ def make_root(root: Path, *, provider_type="chat", route="auto"):
         "multimodal_routing": {"vision": route},
         "memory": {"enabled": False},
     }
-    (root / "config" / "global_config.json").write_text(json.dumps(config), "utf-8")
-    (root / "users/alice/user_config.json").write_text(
+    (root / "config" / "global_config.yaml").write_text(json.dumps(config), "utf-8")
+    (root / "users/alice/user_config.yaml").write_text(
         json.dumps({
             "schema_version": 1, "provider": runtime,
             "multimodal_routing": {"vision": route},

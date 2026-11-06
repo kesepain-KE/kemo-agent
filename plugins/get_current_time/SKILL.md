@@ -9,13 +9,6 @@
 3. **其他时区直接查询**：东京、纽约、伦敦等地区使用 `target_timezone` 的 IANA 时区名，不自行做固定时差加减；夏令时由时区数据库处理。
 4. **时间差使用 Unix 格式**：需要程序化计算时间差时使用 `format=unix`。Unix 时间戳表示绝对瞬间，所以同一次调用中的 `utc`、`local` 和 `target` 数值相同。
 
-## 参数说明
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `target_timezone` | string | 空 | 额外查询的 IANA 时区名，如 `Asia/Tokyo`、`America/New_York`、`Europe/London` |
-| `format` | string | `iso` | `iso`=ISO 8601、`unix`=秒级时间戳、`date`=当地日期、`time`=当地时刻 |
-
 ## 返回字段
 
 | 字段 | 说明 |
@@ -88,10 +81,7 @@
   "input_schema": {
     "type": "object",
     "properties": {
-      "target_timezone": {
-        "type": "string",
-        "description": "额外查询的 IANA 时区名，如 Asia/Tokyo、America/New_York；空值表示仅返回 UTC 和北京时间"
-      },
+      "target_timezone": {"type": "string", "description": "额外查询的 IANA 时区名，如 Asia/Tokyo、America/New_York；空值表示仅返回 UTC 和北京时间"},
       "format": {
         "type": "string",
         "enum": ["iso", "unix", "date", "time"],
@@ -103,6 +93,7 @@
   },
   "version": "1.1.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "read"
 }
 ```
