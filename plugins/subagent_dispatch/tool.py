@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -20,6 +21,8 @@ from run.agents import (
     resolve_external_agent,
 )
 from run.config import load_config
+from run.retry import HOST_CONTROL_EXCEPTIONS
+from run.agents import AgentInputError, validate_json_schema, agent_input_hint, bounded_schema_hint
 from run.agents import conclusion_data, delivery, describe_agent, guide_task, split_task, numeric_usage
 from run.agents import (
     persist_main_agent_result,
@@ -201,6 +204,7 @@ def _running_task_response(
     if status not in {"queued", "running", "timed_out_running"}:
         status = "running"
     return {
+        "ok": status != "timed_out_running",
         "status": status,
         "agent": agent,
         "task_id": str(snapshot.get("id") or ""),
@@ -289,9 +293,10 @@ def run(
                     "output_schema": binding.output_schema,
                 }
             )
-        return {"agents": agents}
+        return {"ok": True, "agents": agents}
     if action == "create":
         return {
+            "ok": True,
             "status": "created",
             "agent": create_user_agent_package(root, user, definition or {}),
         }
@@ -338,6 +343,8 @@ def run(
                 external_input = {} if input is None else input
                 if not isinstance(external_input, dict):
                     raise AgentError("外部子代理 input 必须是对象")
+                if callable(context.get("task_ownership_factory")):
+                    event_options["ownership"] = context["task_ownership_factory"]()
                 scheduler = get_agent_scheduler(root, user, config=config)
                 task_id = scheduler.submit_callable(
                     agent,
@@ -373,7 +380,11 @@ def run(
                         timeout=requested_timeout,
                         managed=bool(context.get("task_ownership")),
                     )
-                return conclusion_data({**value, "task_id": task_id}) if isinstance(value, dict) else conclusion_data(value)
+                if isinstance(value, dict):
+                    # The external bridge returns a runtime envelope around data.
+                    value = {key: item for key, item in value.items() if key != "metadata"}
+                    value["task_id"] = task_id
+                return conclusion_data(value)
             except AgentQueueError as exc:
                 raise AgentError(str(exc)) from exc
             except ExternalAgentError as exc:
@@ -392,6 +403,36 @@ def run(
         if invocation.synchronous_only and not wait:
             raise ValueError(f"{agent} 必须同步调用，以便完成校验和持久化")
         payload = invocation.payload
+        try:
+            input_schema = agent_definition.input_schema
+        except HOST_CONTROL_EXCEPTIONS:
+            raise
+        except Exception:
+            input_schema = None  # Plugin/external schemas may be unavailable.
+        if isinstance(input_schema, dict):
+            try:
+                validate_json_schema(payload, input_schema)
+            except AgentInputError as exc:
+                response = {
+                    "ok": False, "status": "invalid_input", "agent": agent,
+                    "error": {"code": "invalid_agent_input", "message": "input 不符合契约"},
+                }
+                available = 401 - len(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
+                response["error"].update(
+                    bounded_schema_hint(
+                        agent_input_hint(
+                            input_schema,
+                            payload,
+                            field_path=exc.field_path,
+                            expected_type=exc.expected_type,
+                            reason=exc.reason,
+                        ),
+                        limit=available,
+                    )
+                )
+                return response
+        if callable(context.get("task_ownership_factory")):
+            event_options["ownership"] = context["task_ownership_factory"]()
         if max_tool_calls is not None:
             event_options["max_tool_calls"] = max_tool_calls
         if wait:
@@ -451,6 +492,7 @@ def run(
             persisted = persisted_holder.get("plan")
             reason = str(result.metadata.get("stop_reason") or "") if result.metadata.get("partial") else ""
             response = {
+                "ok": not bool(result.metadata.get("partial")),
                 "task_id": task_id, "agent": result.agent,
                 "status": {"timeout": "timed_out", "tool_budget_exhausted": "tool_limit"}.get(reason, "completed"),
                 "data": conclusion_data(result.data), "model": result.model, "usage": numeric_usage(result.usage),
@@ -477,10 +519,10 @@ def run(
         budget = {}
         if hasattr(agent_definition, "capabilities"):
             from run.agents import SegmentBudget
-            budget = SegmentBudget(agent_definition, config, max_tool_calls,
+            budget = SegmentBudget(agent_definition, max_tool_calls,
                                    timeout if timeout is not None else agent_definition.timeout).snapshot()
             budget["elapsed_seconds"] = 0
-        return {"status": "queued", "agent": agent, "task_id": submitted,
+        return {"ok": True, "status": "queued", "agent": agent, "task_id": submitted,
                 "budget": budget}
     scheduler = get_agent_scheduler(root, user, config=config)
     if action == "resume":
@@ -515,13 +557,12 @@ def run(
         if not task_id:
             raise ValueError("cancel 需要 task_id")
         source, session_id = _require_control_scope(context)
+        cancelled = _scheduler_cancel(
+            scheduler, task_id, source=source, session_id=session_id,
+        )
         return {
+            "ok": bool(cancelled),
             "task_id": task_id,
-            "cancelled": _scheduler_cancel(
-                scheduler,
-                task_id,
-                source=source,
-                session_id=session_id,
-            ),
+            "cancelled": cancelled,
         }
     raise ValueError(f"未知 action：{action}")

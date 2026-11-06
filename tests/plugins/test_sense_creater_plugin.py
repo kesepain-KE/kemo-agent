@@ -33,7 +33,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
     @staticmethod
     def prepare_root(root: Path) -> None:
         (root / "users" / "alice").mkdir(parents=True)
-        sense = root / "global_sense"
+        sense = root / "sense"
         sense.mkdir()
         (sense / "register.py").write_text(REGISTER_SOURCE, "utf-8")
 
@@ -56,7 +56,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
                 context=context,
             )
             self.assertTrue(created["valid"])
-            self.assertEqual(created["path"], "global_sense/system_monitor")
+            self.assertEqual(created["path"], "sense/system_monitor")
             self.assertEqual(
                 created["files"],
                 [
@@ -159,7 +159,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
                     data_update="api_key = 'abcd123456'\ndef collect_data():\n    return {}\n",
                     context=context,
                 )
-            self.assertFalse((root / "global_sense" / "hardcoded_sensor").exists())
+            self.assertFalse((root / "sense" / "hardcoded_sensor").exists())
 
     def test_invalid_inputs_and_post_publish_failure_leave_no_partial_module(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -187,7 +187,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
                     data_update="def broken(:\n",
                     context=context,
                 )
-            self.assertFalse((root / "global_sense" / "broken_python").exists())
+            self.assertFalse((root / "sense" / "broken_python").exists())
 
             invalid_result = {
                 "valid": False,
@@ -202,9 +202,9 @@ class SenseCreaterPluginTests(unittest.TestCase):
                         sense_content="# rollback",
                         context=context,
                     )
-            self.assertFalse((root / "global_sense" / "rollback_sensor").exists())
+            self.assertFalse((root / "sense" / "rollback_sensor").exists())
             self.assertEqual(
-                [path.name for path in (root / "global_sense").iterdir() if path.name.startswith(".")],
+                [path.name for path in (root / "sense").iterdir() if path.name.startswith(".")],
                 [],
             )
 
@@ -213,7 +213,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
             root = Path(directory)
             self.prepare_root(root)
             context = self.context(root)
-            base = root / "global_sense"
+            base = root / "sense"
 
             missing = base / "missing_manifest"
             missing.mkdir()
@@ -283,7 +283,7 @@ class SenseCreaterPluginTests(unittest.TestCase):
                 outside = root / "outside"
                 outside.mkdir()
                 try:
-                    os.symlink(outside, root / "global_sense", target_is_directory=True)
+                    os.symlink(outside, root / "sense", target_is_directory=True)
                 except OSError:
                     pass
                 else:

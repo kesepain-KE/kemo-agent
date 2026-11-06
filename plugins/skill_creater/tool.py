@@ -43,7 +43,7 @@ def _reject_link_components(root: Path, target: Path) -> None:
 
 def _base_path(root: Path, user: str, scope: str) -> Path:
     if scope == "shared":
-        base = root / "shared_skills"
+        base = root / "skills"
     else:
         base = root / "users" / user / "user_skills" / scope
     resolved = base.resolve(strict=False)
@@ -133,7 +133,7 @@ def _validate_content(content: str) -> list[str]:
 def _run_list(root: Path, user: str, scope: str) -> dict[str, Any]:
     base = _base_path(root, user, scope)
     if not base.is_dir():
-        return {"action": "list", "scope": scope, "skills": []}
+        return {"ok": True, "action": "list", "scope": scope, "skills": []}
     skills: list[dict[str, str]] = []
     for path in sorted(base.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
         if path.name.startswith(".") or path.name == "__pycache__" or not path.is_dir() or _is_link(path):
@@ -153,7 +153,7 @@ def _run_list(root: Path, user: str, scope: str) -> dict[str, Any]:
         except OSError:
             pass
         skills.append({"name": path.name, "title": title})
-    return {"action": "list", "scope": scope, "skills": skills}
+    return {"ok": True, "action": "list", "scope": scope, "skills": skills}
 
 
 def _run_get(root: Path, user: str, scope: str, name: Any) -> dict[str, Any]:
@@ -163,6 +163,7 @@ def _run_get(root: Path, user: str, scope: str, name: Any) -> dict[str, Any]:
     if not skill_dir.is_dir() or not skill_file.is_file():
         raise FileNotFoundError(f"技能不存在：{scope}/{skill_name}")
     return {
+        "ok": True,
         "action": "get",
         "scope": scope,
         "name": skill_name,
@@ -187,6 +188,7 @@ def _run_validate(root: Path, user: str, scope: str, name: Any) -> dict[str, Any
         else:
             errors.extend(_validate_content(content))
     return {
+        "ok": not errors,
         "action": "validate",
         "scope": scope,
         "name": skill_name,
@@ -288,14 +290,14 @@ def run(
         if _is_link(skill_dir):
             raise ValueError("拒绝删除符号链接或目录联接技能目录")
         if not skill_dir.exists():
-            return {"action": action, "scope": scope, "name": skill_name, "deleted": False}
+            return {"ok": True, "action": action, "scope": scope, "name": skill_name, "deleted": False}
         if not skill_dir.is_dir():
             raise ValueError("技能路径不是目录")
         shutil.rmtree(skill_dir)
         if scope == "agent_create":
             from run.memory import remove_skill_record
             remove_skill_record(root, user, skill_name)
-        return {"action": action, "scope": scope, "name": skill_name, "deleted": True}
+        return {"ok": True, "action": action, "scope": scope, "name": skill_name, "deleted": True}
 
     body = _prepare_content(action, content, title, description, instruction, tool_schema)
     generated = context.get("agent") == "self_improve" or source_memories is not None
@@ -324,7 +326,7 @@ def run(
             from plugins.skill_creater.generated import resolve_generated_name
             resolved, reuse, resolution = resolve_generated_name(base, skill_name, body)
             if resolution["resolution"] == "needs_similarity_review":
-                return {"action": action, "scope": scope, "name": skill_name,
+                return {"ok": False, "action": action, "scope": scope, "name": skill_name,
                         "valid": False, "deferred": True, "deduplication": resolution}
             skill_name, base, skill_dir, skill_file = _skill_paths(root, user, scope, resolved)
             if reuse:
@@ -366,6 +368,7 @@ def run(
         _atomic_text(skill_dir / "memory-provenance.json",
                      json.dumps(provenance, ensure_ascii=False, indent=2))
     return {
+        "ok": True,
         "action": action,
         "scope": scope,
         "name": skill_name,

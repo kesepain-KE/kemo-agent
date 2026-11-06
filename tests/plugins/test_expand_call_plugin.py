@@ -36,9 +36,9 @@ class ExpandCallPluginTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         (self.root / "config").mkdir()
-        (self.root / "config" / "global_config.json").write_text("{}", "utf-8")
+        (self.root / "config" / "global_config.yaml").write_text("{}", "utf-8")
         (self.root / "users" / "alice").mkdir(parents=True)
-        (self.root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        (self.root / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")
         shutil.copytree(
             PROJECT_ROOT / "plugins" / "expand_call",
             self.root / "plugins" / "expand_call",
@@ -203,7 +203,7 @@ class ExpandCallPluginTests(unittest.TestCase):
                 "    raise TemporaryFailure('temporary graph outage')\n"
             )
         )
-        module = self.root / "global_expand" / "kemo_graph"
+        module = self.root / "expand" / "global" / "kemo_graph"
         module.parent.mkdir(parents=True)
         shutil.move(str(created), str(module))
 
@@ -220,10 +220,10 @@ class ExpandCallPluginTests(unittest.TestCase):
                 timeout=10,
             )
 
-        self.assertEqual(raised.exception.category, "upstream_error")
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertTrue(raised.exception.retryable)
-        self.assertEqual(raised.exception.retry_after_ms, 900)
+        self.assertEqual(getattr(raised.exception, "category"), "upstream_error")
+        self.assertEqual(getattr(raised.exception, "status_code"), 503)
+        self.assertTrue(getattr(raised.exception, "retryable"))
+        self.assertEqual(getattr(raised.exception, "retry_after_ms"), 900)
 
     def test_untrusted_or_mutating_expand_command_cannot_enable_whole_call_retry(
         self,
@@ -270,7 +270,7 @@ class ExpandCallPluginTests(unittest.TestCase):
                 "    return {'ok': False, 'retryable': True, 'libraries': rows}\n"
             )
         )
-        module = self.root / "global_expand" / "kemo_graph"
+        module = self.root / "expand" / "global" / "kemo_graph"
         module.parent.mkdir(parents=True)
         shutil.move(str(created), str(module))
 
@@ -312,7 +312,7 @@ class ExpandCallPluginTests(unittest.TestCase):
             scope="shared",
             code="def execute(command, params=None):\n    return {'ok': True}\n",
         )
-        config_path = self.root / "users" / "alice" / "user_config.json"
+        config_path = self.root / "users" / "alice" / "user_config.yaml"
         config_path.write_text(
             json.dumps({"expand": {"shared_whitelist": ["another"]}}),
             "utf-8",

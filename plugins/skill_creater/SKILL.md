@@ -2,7 +2,7 @@
 
 安全列出、读取、校验、创建、更新或删除当前用户技能及共享技能，支持结构化参数和全文两种写入方式。
 
-技能用于可复用的任务方法，不是自动执行器。主智能体只注入发现摘要，正文按来源路径读取；配套脚本须通过已有获准工具执行，不注册 Provider 工具。创建前先查重并确认作用域和内容；编写规范见 `global_knowledge/prompt-authoring-standard.md`。结构化模式中的 `tool_schema` 仅生成参数文档。
+技能用于可复用的任务方法，不是自动执行器。主智能体只注入发现摘要，正文按来源路径读取；配套脚本须通过已有获准工具执行，不注册 Provider 工具。创建前先查重并确认作用域和内容；编写规范见 `knowledge/global/prompt-authoring-standard.md`。结构化模式中的 `tool_schema` 仅生成参数文档。
 
 ## 使用原则
 
@@ -36,21 +36,7 @@
 
 不要套用固定的 `references/scripts/assets` 目录树，应根据真实需求组织，并由 `SKILL.md` 使用相对路径说明何时读取。`update` 只替换 `SKILL.md` 并保留其他文件；`delete` 会删除整个技能目录，因此删除前必须确认所有配套内容。
 
-## 参数说明
-
-| 参数 | 适用 action | 说明 |
-|---|---|---|
-| `action` | 全部 | `list` / `get` / `validate` / `create` / `update` / `delete` |
-| `scope` | 全部 | `agent_create` / `user_create` / `shared` |
-| `name` | 除 `list` 外 | 技能目录名 |
-| `content` | `create` / `update` | 完整 `SKILL.md`；提供后使用全文模式 |
-| `title` | `create` / `update` | 结构化模式的一级标题 |
-| `description` | `create` / `update` | 结构化模式的技能描述 |
-| `instruction` | `create` / `update` | 指令正文，与 `tool_schema` 二选一 |
-| `tool_schema` | `create` / `update` | 文档化 Tool JSON，与 `instruction` 二选一，不注册可执行工具 |
-| `source_memories` | 自动 `agent_create` 的 `create` / `update` | 必填的来源记忆引用/文件名数组；宿主核对现存行并保存稳定行身份、文件名和正文摘要 |
-
-### 自动技能生命周期
+## 自动技能生命周期
 
 `self_improve` 创建前先 `list`，对相近标题用 `get` 核对完整正文。同内容自动复用；
 同名不同内容使用稳定摘要后缀，不覆盖旧技能。形似但非完全相同的内容返回
@@ -79,35 +65,13 @@ Cron、网页读取和 Prompt 技能发现都执行核对；stale 不再自动�
         "enum": ["list", "get", "validate", "create", "update", "delete"],
         "description": "要执行的技能管理操作"
       },
-      "scope": {
-        "type": "string",
-        "enum": ["agent_create", "user_create", "shared"],
-        "description": "技能作用域"
-      },
-      "name": {
-        "type": "string",
-        "description": "技能目录名；list 以外的操作需要"
-      },
-      "content": {
-        "type": "string",
-        "description": "create/update 全文模式的完整 SKILL.md"
-      },
-      "title": {
-        "type": "string",
-        "description": "create/update 结构化模式的标题"
-      },
-      "description": {
-        "type": "string",
-        "description": "create/update 结构化模式的描述"
-      },
-      "instruction": {
-        "type": "string",
-        "description": "结构化模式的指令正文，与 tool_schema 二选一"
-      },
-      "tool_schema": {
-        "type": "object",
-        "description": "结构化模式的文档化 Tool JSON，与 instruction 二选一"
-      },
+      "scope": {"type": "string", "enum": ["agent_create", "user_create", "shared"], "description": "技能作用域"},
+      "name": {"type": "string", "description": "技能目录名；list 以外的操作需要"},
+      "content": {"type": "string", "description": "create/update 全文模式的完整 SKILL.md"},
+      "title": {"type": "string", "description": "create/update 结构化模式的标题"},
+      "description": {"type": "string", "description": "create/update 结构化模式的描述"},
+      "instruction": {"type": "string", "description": "结构化模式的指令正文，与 tool_schema 二选一"},
+      "tool_schema": {"type": "object", "description": "结构化模式的文档化 Tool JSON，与 instruction 二选一"},
       "source_memories": {
         "type": "array",
         "items": {"type": "string"},
@@ -119,6 +83,7 @@ Cron、网页读取和 Prompt 技能发现都执行核对；stale 不再自动�
   },
   "version": "1.2.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "write"
 }
 ```

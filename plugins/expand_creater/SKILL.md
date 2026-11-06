@@ -2,7 +2,7 @@
 
 热创建、列出并校验当前用户拓展或共享拓展。工具原子建立框架可发现的根合同和声明式用户配置组件；模块内部实现和工程结构不受模板限制，创建后立即使用真实 Expand 与组件面板契约复验。
 
-适用于可持续使用的设备、服务或配套工程连接；数据注入和调用能力可独立开启，允许只读拓展。纯共享环境观测优先感知，纯任务方法用技能。创建前确认范围与副作用并查重；编写规范见 `global_knowledge/prompt-authoring-standard.md`。
+适用于可持续使用的设备、服务或配套工程连接；数据注入和调用能力可独立开启，允许只读拓展。纯共享环境观测优先感知，纯任务方法用技能。创建前确认范围与副作用并查重；编写规范见 `knowledge/global/prompt-authoring-standard.md`。
 
 ## 创建拓展模块四步流程（必须遵守）
 
@@ -28,7 +28,7 @@
 
 向用户确认：
 
-1. 放在 `user`（`users/<user>/expand/`）还是 `shared`（`shared_expand/`）。
+1. 放在 `user`（`users/<user>/expand/`）还是 `shared`（`expand/share/`）。
 2. 英文目录名，必须匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`。
 3. 一句话功能说明，写入 `expand.json` 的 `explain`。
 
@@ -74,20 +74,6 @@
 - `create` 传入自定义 `start_expand` 时，创建器会移除默认 action 容器，避免把 `refresh` 错配给不支持它的自定义入口；模块作者再按真实命令补回 action。
 - 默认组件值和状态与 `input_data.md` 平行，不会自动进入 Prompt；模块代码必须显式、安全地消费配置。
 
-## 参数说明
-
-| 参数 | 适用 action | 默认值 | 说明 |
-|------|-------------|--------|------|
-| `action` | 全部 | 必填 | `list` / `create` / `validate` |
-| `scope` | 全部 | 必填 | `user` / `shared` |
-| `name` | create / validate | — | 英文模块目录名 |
-| `explain` | create | — | 一句话功能说明 |
-| `injection` | create | — | 注入层正文 |
-| `operations` | create | — | 操作层正文 |
-| `open_input` | create | true | 是否允许健康数据进入 Prompt |
-| `start_expand` | create | 模板 | 可选自定义操控入口 Python 源码 |
-| `data_update` | create | 模板 | 可选自定义采集入口 Python 源码 |
-
 ## Tool
 
 ```json
@@ -102,52 +88,21 @@
         "enum": ["list", "create", "validate"],
         "description": "list=列出模块，create=创建模块，validate=校验模块"
       },
-      "scope": {
-        "type": "string",
-        "enum": ["user", "shared"],
-        "description": "user=当前用户拓展，shared=共享拓展"
-      },
-      "name": {
-        "type": "string",
-        "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
-        "description": "create/validate 使用的模块目录名"
-      },
-      "explain": {
-        "type": "string",
-        "maxLength": 2000,
-        "description": "create 使用的一句话功能说明"
-      },
-      "injection": {
-        "type": "string",
-        "maxLength": 100000,
-        "description": "create 使用的注入层正文"
-      },
-      "operations": {
-        "type": "string",
-        "maxLength": 100000,
-        "description": "create 使用的操作层正文"
-      },
-      "open_input": {
-        "type": "boolean",
-        "default": true,
-        "description": "是否开启健康数据注入"
-      },
-      "start_expand": {
-        "type": "string",
-        "maxLength": 500000,
-        "description": "可选自定义 start_expand.py；不传则使用安全模板"
-      },
-      "data_update": {
-        "type": "string",
-        "maxLength": 500000,
-        "description": "可选自定义 data_update.py；不传则使用安全模板"
-      }
+      "scope": {"type": "string", "enum": ["user", "shared"], "description": "user=当前用户拓展，shared=共享拓展"},
+      "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$", "description": "create/validate 使用的模块目录名"},
+      "explain": {"type": "string", "maxLength": 2000, "description": "create 使用的一句话功能说明"},
+      "injection": {"type": "string", "maxLength": 100000, "description": "create 使用的注入层正文"},
+      "operations": {"type": "string", "maxLength": 100000, "description": "create 使用的操作层正文"},
+      "open_input": {"type": "boolean", "default": true, "description": "是否开启健康数据注入"},
+      "start_expand": {"type": "string", "maxLength": 500000, "description": "可选自定义 start_expand.py；不传则使用安全模板"},
+      "data_update": {"type": "string", "maxLength": 500000, "description": "可选自定义 data_update.py；不传则使用安全模板"}
     },
     "required": ["action", "scope"],
     "additionalProperties": false
   },
   "version": "1.2.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "write"
 }
 ```

@@ -153,7 +153,7 @@ def _resolve_scope_dir(root: Path, scope: Any, user: str) -> Path:
         raise ValueError(f"scope 必须是 user 或 shared，而不是 {scope!r}")
     resolved_root = root.resolve()
     if scope == "shared":
-        base = resolved_root / "shared_expand"
+        base = resolved_root / "expand" / "share"
     else:
         try:
             user_name = validate_user_name(user)
@@ -245,9 +245,9 @@ def _run_validate(root: Path, scope: str, user: str, name: str) -> dict[str, Any
     module_dir = _module_dir(root, scope, user, name)
     relative = module_dir.relative_to(root.resolve()).as_posix()
     if _is_link(module_dir):
-        return {"action": "validate", "scope": scope, "module": name, "path": relative, "valid": False, "errors": ["模块目录不允许是符号链接或目录联接"]}
+        return {"ok": False, "action": "validate", "scope": scope, "module": name, "path": relative, "valid": False, "errors": ["模块目录不允许是符号链接或目录联接"]}
     if not module_dir.is_dir():
-        return {"action": "validate", "scope": scope, "module": name, "path": relative, "valid": False, "errors": ["模块目录不存在"]}
+        return {"ok": False, "action": "validate", "scope": scope, "module": name, "path": relative, "valid": False, "errors": ["模块目录不存在"]}
 
     manifest, errors = _read_manifest(module_dir)
     if manifest:
@@ -328,6 +328,7 @@ def _run_validate(root: Path, scope: str, user: str, name: str) -> dict[str, Any
         else:
             panel_enabled = True
     return {
+        "ok": not errors,
         "action": "validate",
         "scope": scope,
         "module": name,
@@ -344,7 +345,7 @@ def _run_validate(root: Path, scope: str, user: str, name: str) -> dict[str, Any
 def _run_list(root: Path, scope: str, user: str) -> dict[str, Any]:
     base = _resolve_scope_dir(root, scope, user)
     if not base.is_dir():
-        return {"action": "list", "scope": scope, "count": 0, "modules": []}
+        return {"ok": True, "action": "list", "scope": scope, "count": 0, "modules": []}
     modules: list[dict[str, Any]] = []
     for path in sorted(base.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
         if path.name.startswith(".") or path.name == "__pycache__" or not path.is_dir() or _is_link(path):
@@ -369,7 +370,7 @@ def _run_list(root: Path, scope: str, user: str) -> dict[str, Any]:
             "valid": bool(result.get("valid")),
             "errors": result.get("errors", []),
         })
-    return {"action": "list", "scope": scope, "count": len(modules), "modules": modules}
+    return {"ok": True, "action": "list", "scope": scope, "count": len(modules), "modules": modules}
 
 
 def _run_create(
@@ -462,6 +463,7 @@ def _run_create(
             shutil.rmtree(temporary, ignore_errors=True)
 
     return {
+        "ok": True,
         "action": "create",
         "scope": scope,
         "name": name,

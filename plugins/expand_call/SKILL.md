@@ -12,16 +12,6 @@
 6. 同一操作失败后先分析错误；不能用 Shell 绕过白名单、路径校验或 `open_control`。
 7. 隔离子进程不是权限沙箱；只能调用已获准的受信任拓展，不能把未知代码当作安全插件执行。
 
-## 参数说明
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|:---:|------|
-| `scope` | string | 是 | `global`、`shared` 或 `user` |
-| `module` | string | 是 | 拓展模块目录名 |
-| `command` | string | 是 | 操作层声明的命令名 |
-| `params` | object | 否 | 命令的结构化参数，默认空对象 |
-| `timeout` | integer | 否 | 本次操作超时秒数；省略时使用全局工具超时 |
-
 ## Tool
 
 ```json
@@ -31,11 +21,7 @@
   "input_schema": {
     "type": "object",
     "properties": {
-      "scope": {
-        "type": "string",
-        "enum": ["global", "shared", "user"],
-        "description": "拓展所在作用域"
-      },
+      "scope": {"type": "string", "enum": ["global", "shared", "user"], "description": "拓展所在作用域"},
       "module": {"type": "string", "description": "拓展模块目录名"},
       "command": {"type": "string", "description": "操作层声明的命令名"},
       "params": {"type": "object", "description": "命令结构化参数"},
@@ -43,7 +29,7 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 3600,
-        "description": "可选超时秒数；默认使用 global_config.json → tools.timeout"
+        "description": "可选超时秒数；默认使用 global_config.yaml → tools.timeout"
       }
     },
     "required": ["scope", "module", "command"],
@@ -52,6 +38,7 @@
   "version": "1.0.0",
   "enabled": true,
   "strict": false,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "write"
 }
 ```

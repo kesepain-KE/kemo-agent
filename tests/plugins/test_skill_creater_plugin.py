@@ -77,7 +77,7 @@ class SkillCreaterPluginTests(unittest.TestCase):
             expected_bases = {
                 "agent_create": root / "users" / "alice" / "user_skills" / "agent_create",
                 "user_create": root / "users" / "alice" / "user_skills" / "user_create",
-                "shared": root / "shared_skills",
+                "shared": root / "skills",
             }
             for scope, base in expected_bases.items():
                 result = run(

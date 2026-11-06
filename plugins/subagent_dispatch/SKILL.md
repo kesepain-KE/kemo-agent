@@ -73,6 +73,12 @@
 - `list`：列出当前用户可由主智能体调用的公开子代理，含有效默认工具额度
   max_iterations、default_timeout、supports_budget_override、supports_resume、
   authorized_plugins（当前授权交集，不是声明的 *）和 knowledge_scopes。
+- `call` 在提交前复用代理 input_schema 校验；不合法返回 `ok=false/status=invalid_input`，
+  error 只含 missing/unknown/allowed/required 字段名与简短提示，整个回执最多400字符，
+  不自动补齐或改字段别名。该错误不入队、不建任务、不占子代理额度、不进入完成屏障，
+  仍是一次工具失败。过长列表会标记 truncated，需要完整契约时用 list。
+  取不到 schema 或读取异常时跳过前置校验，外部代理保持原调用链；runner 校验仍保留。
+  runner 输入错误的 schema_hint 只带字段提示，与message合计最多600字符。
 - `call/resume` 的 `max_tool_calls` 是本段工具额度：省略使用默认（resume 沿用上一段），
   正整数覆盖默认，0 显式不限工具次数。仅公开的本地 LLM 非串行业务代理可覆盖，
   不改变插件/技能/知识权限、不取消 timeout、取消、重复调用和连续失败保护。
@@ -93,10 +99,14 @@
 - status 附有界预算、最后阶段、最后工具名和已确认用量，不附参数或整包日志；
   约 80% 时子代理收到收尾提醒，主代理在请求安全点收到每段一次可确认的短预警。
   多个同根任务同类预算停止时附聚合建议，不自动增加费用。
+- 工具残留桶达到容量或死锁观察阈值时，`execution_mode="thread"` 且依赖闭包/事件回调等
+  不可 pickle 活上下文的调用不会伪装成隔离进程执行，而是返回明确的容量错误；这表示
+  当前调用未启动，不应自动重试或把它报告为子代理业务失败。若工具有可验证 entrypoint，
+  shell、external_message 和非只读 file 仍按进程隔离。
 - `call`：调用公开子代理；普通公开本地 LLM 非串行业务代理省略 `wait` 默认后台提交，显式 `wait=true` 同步等待、`wait=false` 后台提交。`resume` 使用相同缺省策略。
   两者都是当前用户请求的必要依赖；后台提交后可继续其他工作，但不能把 queued 当成完成。
   框架会在安全点自动交付子任务结果；通常不需要反复 status 轮询。主任务等待／取消与
-  网页执行详情合同见 `global_knowledge/agent-task-coordination.md`。
+  网页执行详情合同见 `knowledge/global/agent-task-coordination.md`。
 - 互不依赖的多个普通任务优先以 `wait=false` 分别提交，调度器会在共享 API 请求上限内并行执行。
   省略 wait 也会后台提交，不要求主模型靠记住额外参数才能获得并行；不要先同步等待一个再提交另一个，也无需自己用 status 轮询实现并行。
   `wait=true` 保留同步语义；串行维护代理及特殊同步规划不强行并行。
@@ -115,7 +125,7 @@
 - `task_plan` 是特殊的同步调用：框架会从当前 Tool Registry 和配置强制补齐规划输入并在返回前持久化计划；调用方不要手工传入工具白名单，也不能对它使用 `wait=false`。
 - `time_plan` 的 `current_time_beijing` 由框架按 `Asia/Shanghai` 强制注入；调用方无需先调时间工具，手工提交的同名值也会被覆盖。
 - `self_improve` 由主智能体调用时只允许 `manual_review`；压缩提取和记忆晋升模式属于引擎/调度器私有入口。
-- `context_manage` 是引擎内部代理，不出现在公开列表中；手动压缩必须走 `/compress` 对应的会话管线。
+- 手动压缩走 `/compress` 对应的 CardStream 请求屏障；滚动摘要由运行时直接请求 Provider，不通过子代理调用。
 - `general_worker` 是通用执行助手：明确传入 task、必要背景、约束和验收条件，可用 `wait=false`
   后台执行。插件、技能和知识采用当前用户授权；拓展/感知不自动注入，可通过已有授权工具按需使用。
   它不能继续委派，也不会自动继承主对话历史。调用前读取其 `trigger.md`。
@@ -189,20 +199,29 @@
             "properties": {
               "schema_version": {"type": "integer", "enum": [1]},
               "internal_mode": {"type": "boolean"},
-              "allowed_callers": {"type": "array", "items": {"type": "string"}},
+              "allowed_callers": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
               "tools": {
                 "type": "object",
                 "properties": {
                   "plugins": {
                     "type": "object",
                     "properties": {
-                      "allow": {"type": "array", "items": {"type": "string"}}
+                      "allow": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                      }
                     }
                   },
                   "shared_skills": {
                     "type": "object",
                     "properties": {
-                      "allow": {"type": "array", "items": {"type": "string"}}
+                      "allow": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                      }
                     }
                   },
                   "max_iterations": {"type": "integer", "minimum": 1}
@@ -212,18 +231,39 @@
               "shared_knowledge": {"type": "boolean"},
               "inherit_main_history": {"type": "boolean"}
             },
-            "required": ["schema_version", "internal_mode", "allowed_callers", "tools", "global_knowledge", "shared_knowledge", "inherit_main_history"],
+            "required": [
+              "schema_version",
+              "internal_mode",
+              "allowed_callers",
+              "tools",
+              "global_knowledge",
+              "shared_knowledge",
+              "inherit_main_history"
+            ],
             "additionalProperties": false
           }
         },
         "required": ["name", "description", "instruction"],
         "additionalProperties": false
       },
-      "wait": {"type": "boolean", "description": "call/resume 是否同步等待。普通本地 LLM 非串行业务代理省略默认 false；特殊规划、串行维护和外部代理默认 true。显式 true 保留同步等待，显式 false 仅用于支持后台的代理"},
+      "wait": {
+        "type": "boolean",
+        "description": "call/resume 是否同步等待。普通本地 LLM 非串行业务代理省略默认 false；特殊规划、串行维护和外部代理默认 true。显式 true 保留同步等待，显式 false 仅用于支持后台的代理"
+      },
       "timeout": {"type": "number", "description": "call/resume 时可选；本轮子代理运行预算秒数，必须为正数；省略时使用代理默认预算"},
       "guidance": {"type": "string", "maxLength": 8000, "description": "resume 时可选，guide 时必填；指导剩余工作，不新增权限，guide 在下一请求安全点交付"},
-      "max_tool_calls": {"type": "integer", "minimum": 0, "description": "call/resume/split 的每段工具调用额度；正整数覆盖默认，0 显式不限工具次数（仍受 timeout/取消/失败保护约束）。resume 省略沿用上一段有效额度。仅公开本地 LLM 非串行业务代理可覆盖"},
-      "tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object"}, "description": "split 时由主智能体明确给出的 1..8 个完整 input；原任务须已停止或失败且实际退出。只拆剩余工作，不重做已完成副作用"},
+      "max_tool_calls": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "call/resume/split 的每段工具调用额度；正整数覆盖默认，0 显式不限工具次数（仍受 timeout/取消/失败保护约束）。resume 省略沿用上一段有效额度。仅公开本地 LLM 非串行业务代理可覆盖"
+      },
+      "tasks": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 8,
+        "items": {"type": "object"},
+        "description": "split 时由主智能体明确给出的 1..8 个完整 input；原任务须已停止或失败且实际退出。只拆剩余工作，不重做已完成副作用"
+      },
       "task_id": {"type": "string", "description": "resume/status/cancel 时使用的原任务 ID"}
     },
     "required": ["action"],
@@ -234,6 +274,7 @@
   "entrypoint": "tool.py:run",
   "timeout_policy": "agent_runtime",
   "timeout_grace_seconds": 5,
-  "execution_mode": "thread"
+  "execution_mode": "thread",
+  "permission": "external"
 }
 ```

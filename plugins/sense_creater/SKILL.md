@@ -2,7 +2,7 @@
 
 热创建、列出并校验全局感知模块。工具同时原子建立声明式用户配置组件；感知模块只采集系统或环境数据，并通过 `sense.md` 单向注入 system prompt，不提供外部操控接口。
 
-适用于周期性、可共享的只读观测；用户私有数据连接用拓展，可复用方法用技能，一次性查询直接使用已有工具。创建前查重并确认共享范围，出口只写观测而非指令；编写规范见 `global_knowledge/prompt-authoring-standard.md`。
+适用于周期性、可共享的只读观测；用户私有数据连接用拓展，可复用方法用技能，一次性查询直接使用已有工具。创建前查重并确认共享范围，出口只写观测而非指令；编写规范见 `knowledge/global/prompt-authoring-standard.md`。
 
 ## 创建感知模块四步流程（必须遵守）
 
@@ -33,7 +33,7 @@
 
 ### 第四步：检查冲突与创建
 
-1. 调用 `action=list`，确认 `global_sense/` 下没有同名模块。
+1. 调用 `action=list`，确认 `sense/` 下没有同名模块。
 2. 汇总名称、功能说明、数据出口和框架入口合同，不强制内部实现布局。
 3. 获得用户最终确认后调用 `action=create`，不得覆盖或偷偷改名。
 4. 创建成功后报告模块路径、根合同、`module/` 组件文件和校验结果；默认组件提供配置、状态与立即采集，随后按真实采集参数调整，不得把感知面板扩成任意遥控接口。
@@ -46,7 +46,7 @@
 
 | | `sense_creater` | `expand_creater` |
 |---|---|---|
-| 目标目录 | `global_sense/` | `shared_expand/` 或用户 Expand |
+| 目标目录 | `sense/` | `expand/share/` 或用户 Expand |
 | 数据流 | 单向采集并注入 | 数据注入与外部操控 |
 | 创建器建立的最小合同 | 清单、数据出口、采集入口和用户配置组件 | 清单、数据/说明出口、采集/操控入口和用户配置组件 |
 | scope | 只有全局层，无需参数 | `user` / `shared` |
@@ -54,22 +54,12 @@
 ## 安全与运行时约束
 
 - 创建采用临时目录发布，发布后立即校验；失败会删除整个新模块。
-- 模块目录及清单引用文件不得是符号链接或目录联接，也不得跳出 `global_sense/`。
+- 模块目录及清单引用文件不得是符号链接或目录联接，也不得跳出 `sense/`。
 - `sense.json` 严格包含五个字段：`name`、`data_md`、`recent_update`、`health`、`start_update`。
 - 自定义 Python 在写入前检查语法和疑似硬编码凭据；认证信息必须从模块目录自己的 `.env` 读取。模块子进程不会隐式继承框架根目录的 Provider/Web 凭据。
 - `sense.md` 全文可能进入 system prompt，只应保存允许所有启用该模块的用户看到的数据。
 - 默认 `module/panel.json` 只允许框架内置 `refresh`；值文件和状态文件不会自动进入 Prompt。
 - `validate` 在面板存在时会用框架真实解析器复验，旧的无面板感知模块继续兼容。
-
-## 参数说明
-
-| 参数 | 适用 action | 说明 |
-|---|---|---|
-| `action` | 全部 | `list` / `create` / `validate` |
-| `name` | `create` / `validate` | 英文模块目录名 |
-| `explain` | `create` | 一句话功能说明，仅用于创建确认和返回结果，不写入五字段清单 |
-| `sense_content` | `create` | 初始 `sense.md` Markdown 数据模板 |
-| `data_update` | `create` | 可选自定义 `data_update.py`；不传则使用安全骨架 |
 
 ## Tool
 
@@ -85,32 +75,17 @@
         "enum": ["list", "create", "validate"],
         "description": "list=列出模块，create=创建模块，validate=校验模块"
       },
-      "name": {
-        "type": "string",
-        "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
-        "description": "create/validate 使用的模块目录名"
-      },
-      "explain": {
-        "type": "string",
-        "maxLength": 2000,
-        "description": "create 使用的一句话功能说明，不写入 sense.json"
-      },
-      "sense_content": {
-        "type": "string",
-        "maxLength": 100000,
-        "description": "create 使用的初始 sense.md Markdown 数据模板"
-      },
-      "data_update": {
-        "type": "string",
-        "maxLength": 500000,
-        "description": "create 可选自定义 data_update.py；不传则使用安全骨架"
-      }
+      "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$", "description": "create/validate 使用的模块目录名"},
+      "explain": {"type": "string", "maxLength": 2000, "description": "create 使用的一句话功能说明，不写入 sense.json"},
+      "sense_content": {"type": "string", "maxLength": 100000, "description": "create 使用的初始 sense.md Markdown 数据模板"},
+      "data_update": {"type": "string", "maxLength": 500000, "description": "create 可选自定义 data_update.py；不传则使用安全骨架"}
     },
     "required": ["action"],
     "additionalProperties": false
   },
   "version": "1.1.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "write"
 }
 ```

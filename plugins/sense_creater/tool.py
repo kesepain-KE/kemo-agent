@@ -119,7 +119,7 @@ def _python_contains_sensitive_credential(source: str) -> bool:
 
 
 def _sense_base(root: Path) -> Path:
-    base = root.resolve() / "global_sense"
+    base = root.resolve() / "sense"
     if not _is_within(base.resolve(strict=False), root.resolve()):
         raise ValueError("全局感知目录越出项目根目录")
     _reject_link_components(root, base)
@@ -131,7 +131,7 @@ def _module_dir(root: Path, name: Any) -> tuple[str, Path, Path]:
     base = _sense_base(root)
     module = base / module_name
     if not _is_within(module.resolve(strict=False), base.resolve(strict=False)):
-        raise ValueError("感知模块路径越出 global_sense")
+        raise ValueError("感知模块路径越出 sense")
     _reject_link_components(root, module)
     return module_name, base, module
 
@@ -210,6 +210,7 @@ def _run_validate(root: Path, name: Any) -> dict[str, Any]:
         else:
             panel_enabled = True
     return {
+        "ok": not errors,
         "action": "validate",
         "name": module_name,
         "valid": not errors,
@@ -224,7 +225,7 @@ def _run_validate(root: Path, name: Any) -> dict[str, Any]:
 def _run_list(root: Path) -> dict[str, Any]:
     base = _sense_base(root)
     if not base.is_dir():
-        return {"action": "list", "modules": []}
+        return {"ok": True, "action": "list", "modules": []}
     modules: list[dict[str, Any]] = []
     for path in sorted(base.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
         if path.name.startswith(".") or path.name == "__pycache__" or not path.is_dir() or _is_link(path):
@@ -250,7 +251,7 @@ def _run_list(root: Path) -> dict[str, Any]:
             "errors": result["errors"],
         }
         modules.append(item)
-    return {"action": "list", "modules": modules}
+    return {"ok": True, "action": "list", "modules": modules}
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -337,6 +338,7 @@ def _run_create(
         if temporary.is_dir() and not _is_link(temporary):
             shutil.rmtree(temporary, ignore_errors=True)
     return {
+        "ok": True,
         "action": "create",
         "name": module_name,
         "explain": explain_text,
