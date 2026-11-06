@@ -1,268 +1,176 @@
-"""Memory-extraction claim lifecycle for the history registry."""
-
+"""Durable bounded RAW-sequence claims, independent of VIEW compression."""
 from __future__ import annotations
 
-import copy
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any
-import uuid
+from contextlib import nullcontext
+import json
+from uuid import uuid4
 
-from run.history.index_core import (
-    MEMORY_CLAIM_STALE_SECONDS,
-    MEMORY_RETRY_DELAY_SECONDS,
-    _load_index_unlocked,
-    _now,
-    _timestamp,
-    _write_index_unlocked,
-    index_lock,
-    session_key,
-)
-from run.history.store import claim_registry_record
+from run.cards import CardConflictError, CardStore, json_text, session_key
+from run.history.index_core import _now, _timestamp
+from run.history.registry_store import session_record
 
 
-def _claim_is_stale(
-    record: dict[str, Any],
-    *,
-    now: datetime,
-    stale_after_seconds: float,
-) -> bool:
-    timestamp = _timestamp(
-        record.get("memory_claimed_at")
-        or record.get("memory_state_updated_at")
-        or record.get("run_state_updated_at")
-        or record.get("updated_at")
-    )
-    if timestamp is None:
-        return True
-    return (now - timestamp).total_seconds() >= max(1.0, stale_after_seconds)
+def maintenance_claim_active(record, now):
+    for kind in ("memory", "summary"):
+        if record.get(f"{kind}_status") != "processing":
+            continue
+        expires = _timestamp(record.get(f"{kind}_claim_expires_at"))
+        claimed = _timestamp(record.get(f"{kind}_claimed_at"))
+        if expires is None and claimed is not None:
+            expires = claimed + timedelta(seconds=record.get(f"{kind}_claim_ttl_seconds", 600))
+        if expires is None or expires > now:
+            return True
+    return False
 
 
-def _run_is_stale(
-    record: dict[str, Any],
-    *,
-    now: datetime,
-    stale_after_seconds: float,
-) -> bool:
-    timestamp = _timestamp(
-        record.get("run_state_updated_at") or record.get("updated_at")
-    )
-    if timestamp is None:
-        return True
-    return (now - timestamp).total_seconds() >= max(1.0, stale_after_seconds)
+def narrative_budget_end(db, key, start, target, input_tokens):
+    from run.cards.models import Card
+    from run.memory.evidence import narrative_record, narrative_rows
+    from provider.tokenizer import count_value
+    used, group_tokens, group_id, group_start = 0, 0, None, start
+    for row in narrative_rows(db, key, start, target):
+        item = narrative_record(Card.from_row(row))
+        if item is None:
+            continue
+        if group_id != item["integration_id"]:
+            if used and used + group_tokens > input_tokens:
+                return max(start, group_start - 1)
+            used += group_tokens
+            group_id, group_tokens = item["integration_id"], 0
+            group_start = db.execute(
+                "SELECT MIN(seq) FROM context_cards WHERE session_key=? AND integration_id=?",
+                (key, group_id)).fetchone()[0]
+        group_tokens += count_value(item)
+    if used and used + group_tokens > input_tokens:
+        return max(start, group_start - 1)
+    return target
 
 
-def claim_pending_memory(
-    root: Path,
-    user: str,
-    *,
-    worker_id: str | None = None,
-    stale_after_seconds: float = MEMORY_CLAIM_STALE_SECONDS,
-    statuses: set[str] | frozenset[str] | None = None,
-    max_rounds: int = 1,
-) -> dict[str, Any] | None:
-    """Atomically lease the next contiguous range of committed rounds."""
-
-    claimable_statuses = set(statuses or {"pending", "failed", "processing"})
-    if isinstance(max_rounds, bool):
-        raise ValueError("max_rounds 必须是正整数")
-    try:
-        batch_size = max(1, min(20, int(max_rounds)))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("max_rounds 必须是正整数") from exc
+def claim_job(root, user, kind, *, input_tokens=12000, statuses=None, stale_after_seconds=600,
+              source=None, session_id=None, max_attempts=5):
+    store = CardStore(root, user)
+    if not store.path.is_file():
+        return None
     now = datetime.now(timezone.utc)
-    claim_id = worker_id or f"memory_{uuid.uuid4().hex}"
-
-    def eligible(record: dict[str, Any]) -> bool:
-        try:
-            processed_round = max(0, int(record.get("memory_processed_round") or 0))
-            committed_round = max(0, int(record.get("last_committed_round") or 0))
-        except (TypeError, ValueError):
-            return False
-        try:
-            target_round = max(0, int(record.get("memory_target_round") or 0))
-        except (TypeError, ValueError):
-            target_round = 0
-        claim_limit = (
-            min(committed_round, target_round) if target_round else committed_round
-        )
-        if processed_round >= claim_limit or not record.get("archive_window"):
-            return False
-        status = str(record.get("memory_status") or "pending")
-        retry_at = _timestamp(record.get("memory_retry_at"))
-        if retry_at is not None and retry_at > now:
-            return False
-        if status == "processing" and not _claim_is_stale(
-            record, now=now, stale_after_seconds=stale_after_seconds
-        ):
-            return False
-        if status == "failed" and not _claim_is_stale(
-            record,
-            now=now,
-            stale_after_seconds=min(stale_after_seconds, MEMORY_RETRY_DELAY_SECONDS),
-        ):
-            return False
-        if record.get("run_state") == "running" and not _run_is_stale(
-            record, now=now, stale_after_seconds=stale_after_seconds
-        ):
-            return False
-        return True
-
-    def claim(record: dict[str, Any]) -> dict[str, Any]:
-        next_round = max(0, int(record.get("memory_processed_round") or 0)) + 1
-        committed_round = max(0, int(record.get("last_committed_round") or 0))
-        target_round = max(0, int(record.get("memory_target_round") or 0))
-        claim_limit = (
-            min(committed_round, target_round) if target_round else committed_round
-        )
-        end_round = min(claim_limit, next_round + batch_size - 1)
-        record["memory_status"] = "processing"
-        record["memory_claim_id"] = claim_id
-        record["memory_claimed_at"] = now.isoformat()
-        # Keep the legacy field pinned to the first round so an older worker
-        # cannot accidentally skip the beginning of a range claim.
-        record["memory_claim_round"] = next_round
-        record["memory_claim_start_round"] = next_round
-        record["memory_claim_end_round"] = end_round
-        record["memory_state_updated_at"] = now.isoformat()
-        record.pop("memory_retry_at", None)
-        return record
-
-    return claim_registry_record(
-        root,
-        user,
-        status_column="memory_status",
-        statuses=claimable_statuses,
-        predicate=eligible,
-        mutator=claim,
-        updated_at=now.isoformat(),
-    )
+    allowed = set(statuses or {"pending", "queued", "failed", "processing"})
+    with store.db(write=True) as db:
+        rows = db.execute("SELECT * FROM card_sessions WHERE lifecycle!='deleted' "
+                          "ORDER BY updated_at,session_key").fetchall()
+        for row in rows:
+            if (source is not None and row["source"] != source
+                    or session_id is not None and row["session_id"] != session_id):
+                continue
+            record = session_record(db, row)
+            if record["run_state"] != "idle":
+                continue
+            state = str(record.get(f"{kind}_status") or "pending")
+            if state not in allowed:
+                continue
+            if kind == "summary" and int(record.get("summary_attempt_count") or 0) >= max_attempts:
+                continue
+            retry_at = _timestamp(record.get(f"{kind}_retry_at"))
+            if retry_at and retry_at > now:
+                continue
+            claimed_at = _timestamp(record.get(f"{kind}_claimed_at"))
+            if record.get(f"{kind}_claim_id") and claimed_at and (
+                now - claimed_at).total_seconds() < stale_after_seconds:
+                continue
+            start = row["memory_processed_seq"] + 1 if kind == "memory" else 1
+            target = (row["last_seq"] if kind == "memory" and state == "pending" else
+                      min(row["last_seq"], int(record.get(f"{kind}_target_seq") or row["last_seq"])))
+            if start > target:
+                continue
+            end = (narrative_budget_end(db, row["session_key"], start, target, input_tokens)
+                   if kind == "memory" else target)
+            pending = record.get("memory_last_error") or {}
+            if (kind == "memory" and isinstance(pending, dict)
+                    and (pending.get("work_pending") or pending.get("capacity_blocked"))
+                    and record.get("memory_claim_start_seq") == start
+                    and start <= int(record.get("memory_claim_end_seq") or 0) <= target):
+                # Preserve the durable work's source geometry after a budget
+                # pause, even when the administrator changes the token budget.
+                end = int(record["memory_claim_end_seq"])
+            claim_id = f"{kind}_" + uuid4().hex
+            changes = {f"{kind}_claim_id": claim_id, f"{kind}_claimed_at": _now(),
+                       f"{kind}_claim_ttl_seconds": max(1, stale_after_seconds),
+                       f"{kind}_claim_expires_at": (now + timedelta(seconds=max(1, stale_after_seconds))).isoformat(),
+                       f"{kind}_claim_start_seq": start, f"{kind}_claim_end_seq": end,
+                       f"{kind}_status": "processing"}
+            if kind == "summary":
+                changes[f"{kind}_claim_end_seq"] = target
+                changes["summary_attempt_count"] = int(record.get("summary_attempt_count") or 0) + 1
+                changes["summary_max_attempts"] = max_attempts
+            metadata = {**json.loads(row["record_json"]), **changes}
+            db.execute("UPDATE card_sessions SET record_json=? WHERE session_key=?",
+                       (json_text(metadata), row["session_key"]))
+            return {**record, **changes}
+    return None
 
 
-def finish_memory_claim(
-    root: Path,
-    user: str,
-    source: str,
-    session_id: str,
-    *,
-    claim_id: str,
-    processed_round: int | None = None,
-    error: dict[str, Any] | None = None,
-    remaining_status: str = "pending",
-) -> dict[str, Any] | None:
-    """Finish a memory lease; stale workers cannot overwrite a newer claim."""
-
-    with index_lock(root, user):
-        index = _load_index_unlocked(root, user)
-        key = session_key(source, session_id)
-        record = index.setdefault("sessions", {}).get(key)
-        if not isinstance(record, dict) or record.get("memory_claim_id") != claim_id:
+def finish_job(root, user, source, session_id, kind, *, claim_id, error=None,
+               changes=None, defer=False, transaction=None, retry_delay=60):
+    store = CardStore(root, user)
+    with (nullcontext(transaction) if transaction is not None else store.db(write=True)) as db:
+        row = db.execute("SELECT * FROM card_sessions WHERE session_key=? AND lifecycle!='deleted'",
+                         (session_key(source, session_id),)).fetchone()
+        if row is None:
             return None
-        if processed_round is not None:
-            record["memory_processed_round"] = max(
-                int(record.get("memory_processed_round") or 0),
-                int(processed_round),
-            )
-        claimed_round = max(0, int(record.get("memory_claim_round") or 0))
-        claimed_start = max(
-            0,
-            int(record.get("memory_claim_start_round") or claimed_round),
-        )
-        claimed_end = max(
-            claimed_start,
-            int(record.get("memory_claim_end_round") or claimed_round),
-        )
-        for field in (
-            "memory_claim_id",
-            "memory_claimed_at",
-            "memory_claim_round",
-            "memory_claim_start_round",
-            "memory_claim_end_round",
-        ):
-            record.pop(field, None)
-        record.pop("memory_retry_at", None)
-        if error is not None:
-            previous_error = record.get("memory_last_error")
-            retry_count = (
-                max(0, int(previous_error.get("retry_count") or 0)) + 1
-                if isinstance(previous_error, dict)
-                else 1
-            )
-            diagnostic = {
-                **copy.deepcopy(error),
-                "round": claimed_start,
-                "round_start": claimed_start,
-                "round_end": claimed_end,
-                "occurred_at": _now(),
-                "retry_count": retry_count,
-            }
-            record["memory_status"] = "failed"
-            record["memory_error"] = diagnostic
-            record["memory_last_error"] = copy.deepcopy(diagnostic)
-        else:
-            record.pop("memory_error", None)
-            current_round = max(0, int(record.get("memory_processed_round") or 0))
-            committed_round = max(0, int(record.get("last_committed_round") or 0))
-            target_round = max(0, int(record.get("memory_target_round") or 0))
-            if target_round and current_round >= target_round:
-                for field in (
-                    "memory_queue_reason",
-                    "memory_target_round",
-                    "memory_queued_at",
-                ):
-                    record.pop(field, None)
-                record["memory_status"] = (
-                    "completed" if current_round >= committed_round else "deferred"
-                )
-            else:
-                record["memory_status"] = (
-                    "completed"
-                    if current_round >= committed_round
-                    else remaining_status
-                )
-        record["memory_state_updated_at"] = _now()
-        index["sessions"][key] = record
-        return _write_index_unlocked(root, user, index)["sessions"][key]
-
-
-def defer_memory_claim(
-    root: Path,
-    user: str,
-    source: str,
-    session_id: str,
-    *,
-    claim_id: str,
-    reason: str = "execution_capacity",
-    delay_seconds: float = MEMORY_RETRY_DELAY_SECONDS,
-) -> dict[str, Any] | None:
-    """Release a claim when execution capacity is temporarily unavailable.
-
-    Deferral is not a content failure: the cursor and historical diagnostic
-    remain unchanged, while the claim becomes eligible after ``memory_retry_at``.
-    """
-
-    with index_lock(root, user):
-        index = _load_index_unlocked(root, user)
-        key = session_key(source, session_id)
-        record = index.setdefault("sessions", {}).get(key)
-        if not isinstance(record, dict) or record.get("memory_claim_id") != claim_id:
+        record = json.loads(row["record_json"])
+        if record.get(f"{kind}_claim_id") != claim_id:
             return None
-        for field in (
-            "memory_claim_id",
-            "memory_claimed_at",
-            "memory_claim_round",
-            "memory_claim_start_round",
-            "memory_claim_end_round",
-        ):
-            record.pop(field, None)
-        record.pop("memory_error", None)
-        record["memory_status"] = "queued"
-        record["memory_queue_reason"] = str(reason or "execution_capacity")[:160]
-        record["memory_queued_at"] = _now()
-        record["memory_retry_at"] = (
-            datetime.now(timezone.utc)
-            + timedelta(seconds=max(1.0, float(delay_seconds)))
-        ).isoformat()
-        record["memory_state_updated_at"] = _now()
-        index["sessions"][key] = record
-        return _write_index_unlocked(root, user, index)["sessions"][key]
+        expires = _timestamp(record.get(f"{kind}_claim_expires_at"))
+        if not error and not defer and (expires is None or expires <= datetime.now(timezone.utc)):
+            raise CardConflictError("认领已过期，拒绝提交迟到的维护结果")
+        end = int(record[f"{kind}_claim_end_seq"])
+        if kind == "memory" and not error and not defer:
+            start = int(record[f"{kind}_claim_start_seq"])
+            if row["memory_processed_seq"] != start - 1:
+                raise CardConflictError("RAW memory cursor changed during extraction")
+            db.execute("UPDATE card_sessions SET memory_processed_seq=? WHERE session_key=?",
+                       (end, row["session_key"]))
+        record.pop(f"{kind}_claim_id", None)
+        changes = dict(changes or {})
+        if record.get("title_source") == "manual":
+            changes.pop("title", None)
+            changes.pop("title_source", None)
+        record.update(changes)
+        queued_target = record.get(f"{kind}_target_seq")
+        remaining_target = min(row["last_seq"], int(queued_target or row["last_seq"]))
+        record[f"{kind}_status"] = "queued" if defer else "failed" if error else (
+            ("queued" if queued_target is not None else "pending") if kind == "memory"
+            and end < remaining_target else
+            "pending" if kind == "memory" and end < row["last_seq"] else "completed")
+        if kind == "memory" and not error and not defer and end >= remaining_target:
+            record.pop("memory_target_seq", None)
+        if kind == "summary" and defer:
+            record["summary_attempt_count"] = max(0, int(record.get("summary_attempt_count") or 0) - 1)
+        record[f"{kind}_last_error"] = error
+        record[f"{kind}_retry_at"] = (
+            (datetime.now(timezone.utc) + timedelta(seconds=retry_delay)).isoformat() if error or defer else "")
+        if kind == "summary" and not error and not defer:
+            record["summary_completed_seq"] = end
+        db.execute("UPDATE card_sessions SET record_json=? WHERE session_key=?",
+                   (json_text(record), row["session_key"]))
+        return session_record(db, db.execute("SELECT * FROM card_sessions WHERE session_key=?",
+                                             (row["session_key"],)).fetchone())
+
+
+def claim_pending_memory(root, user, *, input_tokens=12000, statuses=None, stale_after_seconds=600,
+                         source=None, session_id=None):
+    if type(input_tokens) is not int or input_tokens < 1:
+        raise ValueError("记忆正文 token 预算必须是正整数")
+    return claim_job(root, user, "memory", input_tokens=input_tokens, statuses=statuses,
+                     stale_after_seconds=stale_after_seconds, source=source, session_id=session_id)
+
+
+def finish_memory_claim(root, user, source, session_id, *, claim_id, error=None,
+                        transaction=None, **changes):
+    return finish_job(root, user, source, session_id, "memory", claim_id=claim_id,
+                      error=error, changes=changes, transaction=transaction)
+
+
+def defer_memory_claim(root, user, source, session_id, *, claim_id, error=None,
+                       transaction=None, **changes):
+    return finish_job(root, user, source, session_id, "memory", claim_id=claim_id,
+                      error=error, changes=changes, defer=True, transaction=transaction)

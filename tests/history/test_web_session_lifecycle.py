@@ -1,65 +1,234 @@
-from contextlib import contextmanager
+"""Offline retirement uses CardStream lifecycle, actual execution and durable presence."""
 import asyncio
 import json
-from datetime import datetime, timezone
-import copy
-from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
+from run.cards import CardStore, IntegrationStore, session_key
 from run.conversation import session_lock
-from run.history import (cleanup_empty_web_sessions, inspect_stale_web_sessions,
-                         touch_web_session_lease, reserve_session, find_record,
-                         empty_window, commit_terminal_windows, runtime_window_path,
-                         update_run_state)
+from run.history import (cleanup_empty_web_sessions, close_session, delete_session, find_record,
+                         inspect_stale_web_sessions, mutate_registry_record, reopen_session,
+                         reserve_session, touch_web_session_lease)
 from run.history import web_lifecycle
-from run.history import store_core
-from run.history.store import connection
+from run.history.lease_presence import update_presence
 from run.scheduler import MaintenanceScheduler
+from tests.card_history_support import seed_history
+from web.app import create_app
 from web.errors import NotFoundError
 from web.service import WebRunService
-from web.app import create_app
 
 
-class WebSessionLifecycleTests(unittest.TestCase):
-    def test_expired_processing_lease_returns_to_offline_review(self):
-        self.seed_data('expired-processing')
-        from run.history.registry_store import mutate_registry_record
-        old = datetime.fromtimestamp(self.now - 4000, timezone.utc).isoformat()
-        mutate_registry_record(self.root, 'alice', 'web', 'expired-processing',
-            lambda record: {**record, 'memory_status': 'processing',
-                            'memory_claim_id': 'abandoned', 'memory_claimed_at': old},
-            updated_at=old)
-        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now)
-        self.assertIn('expired-processing', result['closed_sessions'])
+@pytest.fixture
+def root(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/global_config.yaml").write_text(json.dumps({
+        "memory": {"extraction_mode": "compression_only"}, "cron": {"session_idle_close_seconds": 3600}}))
+    for user in ("alice", "bob"):
+        (tmp_path / f"users/{user}").mkdir(parents=True)
+        (tmp_path / f"users/{user}/user_config.yaml").write_text('{}')
+    return tmp_path
 
-    def test_released_document_does_not_block_expired_processing_recovery(self):
-        self.seed_data('released-processing')
-        from run.history.registry_store import mutate_registry_record
-        from run.history.lease_presence import update_presence
-        old = datetime.fromtimestamp(self.now - 4000, timezone.utc).isoformat()
-        mutate_registry_record(self.root, 'alice', 'web', 'released-processing',
-            lambda record: {**record, 'memory_status': 'processing',
-                            'memory_claim_id': 'abandoned', 'memory_claimed_at': old},
-            updated_at=old)
-        update_presence(self.root, 'alice', 'web', 'released-processing',
-                        'old_document', 1, release=True, now=self.now)
-        # A live App lease with the same session ID is not a Web processing claim.
-        reserve_session(self.root, 'alice', 'app', 'released-processing')
-        update_presence(self.root, 'alice', 'app', 'released-processing',
-                        'app_device', 1, now=self.now)
-        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now)
-        self.assertIn('released-processing', result['closed_sessions'])
 
+def seed(root, sid="empty", *, data=False, source="web", user="alice", age=4000):
+    if data:
+        history = seed_history(root, user, source, sid, [
+            {"role": "user", "content": "保留的事实"}, {"role": "assistant", "content": "完成"}])
+    else:
+        reserve_session(root, user, source, sid, active_key=f"{source}:{user}:{sid}")
+        history = None
+    stamp = datetime.fromtimestamp(time.time() - age, timezone.utc).isoformat()
+    mutate_registry_record(root, user, source, sid, lambda r: r, updated_at=stamp)
+    return history
+
+
+def test_offline_empty_retirement_is_user_source_scoped_and_fences_late_leases(root):
+    seed(root)
+    seed(root, "other", user="bob")
+    seed(root, "app", source="app")
+    seed(root, "cron", source="background:cron:job")
+    reserve_session(root, "alice", "web", "newborn")
+    assert cleanup_empty_web_sessions(root, "alice")["deleted_sessions"] == ["empty"]
+    assert find_record(root, "alice", "web", "empty") is None
+    assert not touch_web_session_lease(root, "alice", "empty", "late")
+    assert find_record(root, "alice", "app", "app")
+    assert find_record(root, "bob", "web", "other")
+    assert find_record(root, "alice", "web", "newborn")
+
+
+def test_multi_tab_presence_survives_service_restart_and_expires(root):
+    seed(root)
+    one, two = WebRunService(root), WebRunService(root)
+    one.session_lease("alice", "empty", "client_one")
+    two.session_lease("alice", "empty", "client_two")
+    one.release_session_lease("alice", "empty", "client_one")
+    assert cleanup_empty_web_sessions(root, "alice")["deleted_sessions"] == []
+    assert WebRunService(root).cleanup_empty_web_sessions() == 0
+    assert cleanup_empty_web_sessions(root, "alice", now=time.time() + 100)["deleted_sessions"] == ["empty"]
+    with pytest.raises(NotFoundError):
+        two.session_lease("alice", "empty", "client_two")
+
+
+def test_closed_identity_requires_explicit_reopen_and_deleted_identity_stays_fenced(root):
+    history = seed(root, "ended", data=True)
+    before = history.cards
+    close_session(root, "alice", "web", "ended")
+    assert not touch_web_session_lease(root, "alice", "ended", "late")
+    assert reopen_session(root, "alice", "web", "ended")["lifecycle"] == "open"
+    assert touch_web_session_lease(root, "alice", "ended", "page")
+    assert history.cards == before
+    delete_session(root, "alice", "web", "ended")
+    assert reopen_session(root, "alice", "web", "ended") is None
+
+
+def test_empty_grace_is_independent_of_data_idle_threshold(root):
+    seed(root)
+    seed(root, "data", data=True)
+    result = inspect_stale_web_sessions(root, "alice", idle_seconds=7200)
+    assert result["deleted_sessions"] == ["empty"] and result["queued_memory"] == []
+    assert find_record(root, "alice", "web", "data")["lifecycle"] == "open"
+
+
+def test_active_integration_and_maintenance_claim_are_protected(root):
+    history = seed(root, "live", data=True)
+    integration = IntegrationStore(history.store, "web", "live", "live_id")
+    integration.start()
+    execution, _ = integration.register_tool("live_call", {"name": "work", "arguments": {}})
+    integration.finish("cancelled")
+    seed(root, "memory")
+    mutate_registry_record(root, "alice", "web", "memory", lambda r: {**r,
+        "memory_status": "processing", "memory_claim_expires_at": datetime.fromtimestamp(time.time() + 1000, timezone.utc).isoformat()})
+    result = inspect_stale_web_sessions(root, "alice")
+    assert not result["closed_sessions"] and not result["deleted_sessions"]
+    assert result["skipped_busy"] >= 1
+    integration.tool_result(execution["execution_id"], {"ok": True}, status="completed", duration_ms=1)
+
+
+def test_stale_processing_claim_can_return_to_offline_recovery(root):
+    seed(root, "expired", data=True)
+    mutate_registry_record(root, "alice", "web", "expired", lambda r: {**r,
+        "memory_status": "processing", "memory_claim_id": "abandoned",
+        "memory_claimed_at": "2000-01-01T00:00:00Z"})
+    assert "expired" in inspect_stale_web_sessions(root, "alice")["closed_sessions"]
+
+
+def test_session_lock_is_skipped_and_raw_data_never_treated_as_empty(root):
+    seed(root)
+    history = seed(root, "data", data=True)
+    ready, release = threading.Event(), threading.Event()
+    def hold():
+        with session_lock(root, "alice", "web", "empty"):
+            ready.set()
+            release.wait(5)
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert ready.wait(2)
+        result = cleanup_empty_web_sessions(root, "alice")
+        assert result["skipped_busy"] == 1 and result["deleted_sessions"] == []
+    finally:
+        release.set()
+        thread.join(3)
+    assert len(history.cards) == 2
+
+
+def test_transaction_rechecks_racing_presence_and_rolls_back_hide(root):
+    seed(root)
+    original, renewed = CardStore.db, False
+    @contextmanager
+    def race(store, *, write=False):
+        nonlocal renewed
+        if write and not renewed:
+            renewed = True
+            with original(store, write=True) as db:
+                db.execute("INSERT INTO card_leases VALUES(?,?,?,?,?)",
+                           (session_key("web", "empty"), "racer", time.time() + 90, 1, 0))
+        with original(store, write=write) as db:
+            yield db
+    with patch.object(CardStore, "db", race):
+        assert cleanup_empty_web_sessions(root, "alice")["deleted_sessions"] == []
+    update_presence(root, "alice", "web", "empty", "racer", 2, release=True)
+    original_hide = web_lifecycle._hide
+    def fail(db, key):
+        original_hide(db, key)
+        raise OSError("rollback")
+    with patch.object(web_lifecycle, "_hide", side_effect=fail), pytest.raises(OSError):
+        cleanup_empty_web_sessions(root, "alice")
+    assert find_record(root, "alice", "web", "empty")["lifecycle"] == "open"
+
+
+def test_bounded_pages_scan_all_candidates_and_repeated_inspection_is_idempotent(root):
+    for n in range(3):
+        seed(root, f"data{n}", data=True)
+    seed(root)
+    result = inspect_stale_web_sessions(root, "alice", batch_size=1)
+    assert result["queued_memory_count"] == 3 and result["deleted_count"] == 1
+    assert result["closed_count"] == 3 and result["inspected"] == 4
+    assert inspect_stale_web_sessions(root, "alice", batch_size=1)["inspected"] == 0
+    for n in range(3):
+        record = find_record(root, "alice", "web", f"data{n}")
+        assert record["memory_target_seq"] == 2 and record["summary_target_seq"] == 2
+
+
+def test_queue_failure_remains_recoverable_and_error_is_sanitized(root):
+    seed(root, "data", data=True)
+    first = inspect_stale_web_sessions(root, "alice", queue_memory=Mock(side_effect=RuntimeError("private detail")))
+    assert first["errors"] == [{"session_id": "data", "exception_type": "RuntimeError"}]
+    assert "private detail" not in json.dumps(first)
+    assert find_record(root, "alice", "web", "data")["offline_inspection_pending"]
+    second = inspect_stale_web_sessions(root, "alice")
+    assert second["queued_memory_count"] == 1 and second["error_count"] == 0
+
+
+def test_disabled_memory_and_bounded_result_samples(root):
+    (root / "config/global_config.yaml").write_text('{"memory":{"extraction_mode":"disabled"}}')
+    seed(root, "data", data=True)
+    for n in range(25):
+        seed(root, f"empty{n}")
+    result = inspect_stale_web_sessions(root, "alice", batch_size=3)
+    assert result["deleted_count"] == 25 and len(result["deleted_sessions"]) == 20
+    assert result["queued_memory_count"] == 0
+    assert {"session_id": "data", "reason": "memory_extraction_disabled"} in result["preserved_sessions"]
+
+
+def test_readonly_inspection_does_not_create_or_migrate_old_history(root):
+    legacy = root / "users/alice/history/history.sqlite3"
+    legacy.parent.mkdir()
+    legacy.write_bytes(b"never open this old database")
+    assert inspect_stale_web_sessions(root, "alice")["inspected"] == 0
+    assert not (root / "users/alice/cards.sqlite3").exists()
+    assert legacy.read_bytes() == b"never open this old database"
+
+
+def test_startup_service_checks_users_and_offline_app_once(root):
+    seed(root, "alice-data", data=True)
+    seed(root, "bob-data", data=True, user="bob")
+    seed(root, "app-data", data=True, source="app", age=8000)
+    wake, summary_wake = Mock(), Mock()
+    service = WebRunService(root, memory_waker=wake, summary_waker=summary_wake)
+    live = service.active_session("alice", "app_live_client", source="app")["session"]["session_id"]
+    result = service.inspect_conversation_spaces_on_startup()
+    assert result["state"] == "completed" and result["queued_memory"] == 3 and result["queued_summary"] == 3
+    assert find_record(root, "alice", "app", live)["lifecycle"] == "open"
+    assert service.inspect_conversation_spaces_on_startup()["queued_memory"] == 0
+    wake.assert_called_once()
+    summary_wake.assert_called_once()
+
+
+class LifecycleWorkerTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         (self.root / 'config').mkdir()
-        (self.root / 'config/global_config.json').write_text(
+        (self.root / 'config/global_config.yaml').write_text(
             json.dumps({
                 'memory': {'extraction_mode': 'compression_only'},
                 'cron': {'session_idle_close_seconds': 3600},
@@ -67,207 +236,8 @@ class WebSessionLifecycleTests(unittest.TestCase):
         )
         for user in ('alice', 'bob'):
             (self.root / 'users' / user).mkdir(parents=True)
-            (self.root / 'users' / user / 'user_config.json').write_text('{}', encoding='utf-8')
+            (self.root / 'users' / user / 'user_config.yaml').write_text('{}', encoding='utf-8')
         self.now = time.time()
-
-    def seed(self, sid='empty', user='alice', source='web'):
-        reserve_session(self.root, user, source, sid, active_key=f'{source}:{user}:{sid}')
-        self.age(sid, user=user, source=source)
-
-    def age(self, sid, *, user='alice', source='web'):
-        with connection(self.root, user, write=True) as db:
-            timestamp = datetime.fromtimestamp(self.now - 4000, timezone.utc).isoformat()
-            row = db.execute(
-                'SELECT record_json FROM history_sessions WHERE source=? AND session_id=?',
-                (source, sid),
-            ).fetchone()
-            record = json.loads(row['record_json']) if row is not None else {}
-            record['updated_at'] = timestamp
-            db.execute('UPDATE history_sessions SET updated_at=?, record_json=? WHERE source=? AND session_id=?',
-                       (timestamp, json.dumps(record, ensure_ascii=False), source, sid))
-
-    def clean(self, **kwargs):
-        return cleanup_empty_web_sessions(self.root, 'alice', now=self.now, **kwargs)
-
-    def seed_data(self, sid='data', *, user='alice', processed=0, active=True):
-        path = self.root / 'users' / user / 'history' / ('conv_' + sid)
-        window = empty_window(user, 'web', sid)
-        window['text']['messages'] = [
-            {'role': 'user', 'content': '需要记忆的旧对话'},
-            {'role': 'assistant', 'content': '已经完成一轮'},
-        ]
-        window['data'].update(rounds=1, memory_processed_round=processed,
-                              memory_status='completed' if processed else 'deferred')
-        commit_terminal_windows(
-            path, window, runtime_window_path(path), copy.deepcopy(window),
-            active_key=f'interactive:{user}:old_page' if active else None,
-        )
-        self.age(sid, user=user)
-        return path
-
-    def test_offline_empty_only_and_delete_fence(self):
-        self.seed()
-        self.seed('other-user', user='bob')
-        self.seed('app', source='app')
-        self.seed('cron', source='background:cron:job')
-        reserve_session(self.root, 'alice', 'web', 'newborn')
-        self.assertEqual(self.clean()['deleted_sessions'], ['empty'])
-        self.assertIsNone(find_record(self.root, 'alice', 'web', 'empty'))
-        self.assertIsNotNone(find_record(self.root, 'alice', 'web', 'newborn'))
-        self.assertIsNotNone(find_record(self.root, 'bob', 'web', 'other-user'))
-        self.assertIsNotNone(find_record(self.root, 'alice', 'app', 'app'))
-        self.assertIsNotNone(find_record(self.root, 'alice', 'background:cron:job', 'cron'))
-        self.assertFalse(touch_web_session_lease(self.root, 'alice', 'empty', 'late', now=self.now))
-        with connection(self.root, 'alice') as db:
-            self.assertIsNotNone(db.execute("SELECT 1 FROM history_deleted_sessions WHERE session_id='empty'").fetchone())
-            self.assertIsNone(db.execute("SELECT 1 FROM history_active_sessions WHERE session_id='empty'").fetchone())
-
-    def test_online_multi_tab_and_restart_checkpoint(self):
-        self.seed()
-        one, two = WebRunService(self.root), WebRunService(self.root)
-        one.session_lease('alice', 'empty', 'client_one')
-        two.session_lease('alice', 'empty', 'client_two')
-        one.release_session_lease('alice', 'empty', 'client_one')
-        self.assertEqual(self.clean()['deleted_sessions'], [])
-        # A fresh service/process does not own the other tabs' memory map;
-        # SQLite leases must still protect them.
-        self.assertEqual(WebRunService(self.root).cleanup_empty_web_sessions(), 0)
-        with patch.object(web_lifecycle.time, 'time', return_value=self.now + 100):
-            self.assertEqual(WebRunService(self.root).cleanup_empty_web_sessions(), 1)
-        with self.assertRaises(NotFoundError):
-            two.session_lease('alice', 'empty', 'client_two')
-
-    def test_checkpoint_coalesces_writes_and_errors_do_not_fake_presence(self):
-        self.seed()
-        with patch.object(web_lifecycle, 'connection', wraps=connection) as connect:
-            touch_web_session_lease(self.root, 'alice', 'empty', 'one', now=self.now)
-            touch_web_session_lease(self.root, 'alice', 'empty', 'one', now=self.now + 15)
-            touch_web_session_lease(self.root, 'alice', 'empty', 'one', now=self.now + 30)
-            self.assertEqual(sum(bool(call.kwargs.get('write')) for call in connect.call_args_list), 2)
-
-    def test_closed_session_rejects_late_lease_but_can_be_reopened_explicitly(self):
-        self.seed_data('ended')
-        from run.history import close_session, prepare_window, reopen_session
-        close_session(self.root, 'alice', 'web', 'ended')
-        self.assertFalse(touch_web_session_lease(self.root, 'alice', 'ended', 'late', now=self.now))
-        reopened = reopen_session(self.root, 'alice', 'web', 'ended')
-        self.assertEqual(reopened['lifecycle'], 'open')
-        self.assertTrue(touch_web_session_lease(self.root, 'alice', 'ended', 'page', now=self.now))
-        self.assertIsNotNone(prepare_window(self.root, 'alice', 'web', 'ended'))
-
-    def test_deleted_session_cannot_be_reopened(self):
-        self.seed_data('deleted')
-        from run.history import close_session, delete_session, reopen_session
-        close_session(self.root, 'alice', 'web', 'deleted')
-        self.assertEqual(delete_session(self.root, 'alice', 'web', 'deleted'), 1)
-        self.assertIsNone(reopen_session(self.root, 'alice', 'web', 'deleted'))
-
-    def test_idle_threshold_does_not_extend_empty_session_grace(self):
-        self.seed('empty-threshold')
-        self.seed_data('data-threshold')
-        result = inspect_stale_web_sessions(
-            self.root,
-            'alice',
-            now=self.now,
-            idle_seconds=7200,
-        )
-        self.assertEqual(result['deleted_sessions'], ['empty-threshold'])
-        self.assertEqual(result['queued_memory'], [])
-        self.assertEqual(find_record(self.root, 'alice', 'web', 'data-threshold')['lifecycle'], 'open')
-
-    def test_data_and_claims_protected_even_with_zero_registry_rounds(self):
-        for sid, field in [('running', 'run_state'), ('memory', 'memory_status'), ('summary', 'summary_status')]:
-            self.seed(sid)
-            with connection(self.root, 'alice', write=True) as db:
-                db.execute(f'UPDATE history_sessions SET {field}=? WHERE session_id=?',
-                           ('running' if field == 'run_state' else 'processing', sid))
-        for sid, rounds in [('partial', 0), ('completed', 1)]:
-            window = empty_window('alice', 'web', sid)
-            window['data']['rounds'] = rounds
-            window['text']['messages'] = [{'role': 'user', 'content': 'keep me'}]
-            path = self.root / 'users/alice/history' / ('conv_' + sid)
-            commit_terminal_windows(path, window, runtime_window_path(path), copy.deepcopy(window))
-            self.age(sid)
-            # Even an inconsistent registry is not sufficient evidence to delete.
-            with connection(self.root, 'alice', write=True) as db:
-                db.execute('UPDATE history_sessions SET rounds=0 WHERE session_id=?', (sid,))
-        self.assertEqual(self.clean()['deleted_sessions'], [])
-
-    def test_empty_physical_windows_cleaned_and_busy_lock_skipped(self):
-        sid = 'blank-window'
-        path = self.root / 'users/alice/history/conv_blank'
-        window = empty_window('alice', 'web', sid)
-        commit_terminal_windows(path, window, runtime_window_path(path), copy.deepcopy(window))
-        self.age(sid)
-        held, release = threading.Event(), threading.Event()
-        def hold():
-            with session_lock(self.root, 'alice', 'web', sid):
-                held.set()
-                release.wait(3)
-        thread = threading.Thread(target=hold)
-        thread.start()
-        try:
-            self.assertTrue(held.wait(2))
-            self.assertEqual(self.clean()['skipped_busy'], 1)
-        finally:
-            release.set(); thread.join(3)
-        self.assertEqual(self.clean()['deleted_sessions'], [sid])
-        with connection(self.root, 'alice') as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM history_windows').fetchone()[0], 0)
-
-    def test_transaction_rechecks_new_lease_and_rolls_back_on_failure(self):
-        self.seed()
-        original = connection
-        renewed = False
-        @contextmanager
-        def renew_before_write(*args, **kwargs):
-            nonlocal renewed
-            if kwargs.get('write') and not renewed:
-                renewed = True
-                with original(self.root, 'alice', write=True) as db:
-                    db.execute('INSERT INTO history_web_leases(session_id,client_id,expires_at) VALUES(?, ?, ?)', ('empty', 'racer', self.now + 90))
-            with original(*args, **kwargs) as db:
-                yield db
-        with patch.object(web_lifecycle, 'connection', side_effect=renew_before_write):
-            self.assertEqual(self.clean()['deleted_sessions'], [])
-        with connection(self.root, 'alice', write=True) as db:
-            db.execute('DELETE FROM history_web_leases')
-        original_delete = web_lifecycle._delete_session_windows
-        def fail(*args):
-            original_delete(*args)
-            raise RuntimeError('test rollback')
-        with patch.object(web_lifecycle, '_delete_session_windows', side_effect=fail):
-            with self.assertRaises(RuntimeError):
-                self.clean()
-        self.assertIsNotNone(find_record(self.root, 'alice', 'web', 'empty'))
-        with connection(self.root, 'alice') as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM history_deleted_sessions').fetchone()[0], 0)
-
-    def test_no_database_creation_and_bounded_batch(self):
-        self.assertEqual(self.clean()['deleted_sessions'], [])
-        self.assertFalse((self.root / 'users/alice/history/history.sqlite3').exists())
-        for index in range(4):
-            self.seed(f'empty-{index}')
-        self.assertEqual(len(self.clean(limit=2)['deleted_sessions']), 2)
-        self.assertEqual(len(self.clean()['deleted_sessions']), 2)
-
-    def test_new_page_reserves_independent_session_without_changing_original(self):
-        service = WebRunService(self.root)
-        first = service.create_session('alice', 'original_client')
-        other = service.create_session('alice', 'newtab_client')
-        self.assertNotEqual(first['session']['session_id'], other['session']['session_id'])
-        self.assertEqual(service.active_session('alice', 'original_client')['session']['session_id'], first['session']['session_id'])
-
-    def test_v5_migration_adds_leases_without_changing_existing_sessions(self):
-        self.seed()
-        with connection(self.root, 'alice', write=True) as db:
-            db.execute('DROP TABLE history_web_leases')
-            db.execute("UPDATE history_meta SET value='5' WHERE key='schema_version'")
-        with patch.object(store_core, '_READY_DATABASES', set()):
-            with connection(self.root, 'alice') as db:
-                self.assertEqual(db.execute("SELECT value FROM history_meta WHERE key='schema_version'").fetchone()[0], str(store_core.HISTORY_SCHEMA_VERSION))
-                self.assertEqual(db.execute('SELECT COUNT(*) FROM history_web_leases').fetchone()[0], 0)
-                self.assertEqual(db.execute('SELECT COUNT(*) FROM history_sessions').fetchone()[0], 1)
 
     def test_cleanup_worker_owned_by_app_lifespan(self):
         app = create_app(root=self.root)
@@ -278,144 +248,6 @@ class WebSessionLifecycleTests(unittest.TestCase):
                 self.assertEqual(len(workers), 1)
             self.assertFalse(workers[0].is_alive())
         asyncio.run(check())
-
-    def test_startup_inspection_queues_data_closes_binding_and_deletes_empty(self):
-        data_path = self.seed_data()
-        self.seed('empty-startup')
-        self.seed_data('already-remembered', processed=1)
-        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now, batch_size=1)
-        self.assertEqual(result['deleted_sessions'], ['empty-startup'])
-        self.assertEqual(result['queued_memory'], ['data'])
-        self.assertEqual(result['errors'], [])
-        record = find_record(self.root, 'alice', 'web', 'data')
-        self.assertEqual(record['lifecycle'], 'closed')
-        self.assertEqual(record['memory_status'], 'queued')
-        self.assertEqual(record['memory_queue_reason'], 'startup_offline_session')
-        self.assertEqual(record['memory_target_round'], 1)
-        self.assertEqual(record['summary_status'], 'queued')
-        self.assertEqual(record['summary_target_round'], 1)
-        self.assertTrue(data_path)
-        remembered = find_record(self.root, 'alice', 'web', 'already-remembered')
-        self.assertEqual(remembered['lifecycle'], 'closed')
-        self.assertEqual(remembered['memory_status'], 'completed')
-        self.assertEqual(remembered['summary_status'], 'queued')
-        with connection(self.root, 'alice') as db:
-            self.assertIsNone(db.execute("SELECT 1 FROM history_active_sessions WHERE session_id='data'").fetchone())
-        self.assertFalse(touch_web_session_lease(self.root, 'alice', 'empty-startup', 'old_page', now=self.now))
-        replacement = WebRunService(self.root).create_session('alice', 'new_page')['session']['session_id']
-        self.assertNotEqual(replacement, 'empty-startup')
-
-    def test_periodic_offline_inspection_uses_distinct_memory_reason(self):
-        self.seed_data('periodic-offline')
-        result = inspect_stale_web_sessions(
-            self.root, 'alice', now=self.now,
-            queue_reason='offline_session_expired',
-        )
-        self.assertEqual(result['queued_memory'], ['periodic-offline'])
-        record = find_record(self.root, 'alice', 'web', 'periodic-offline')
-        self.assertEqual(record['lifecycle'], 'closed')
-        self.assertEqual(record['memory_queue_reason'], 'offline_session_expired')
-
-    def test_startup_inspection_protects_online_new_busy_and_partial_data(self):
-        self.seed_data('online')
-        touch_web_session_lease(self.root, 'alice', 'online', 'live_page', now=self.now)
-        self.seed_data('running')
-        update_run_state(self.root, 'alice', 'web', 'running', run_state='running')
-        reserve_session(self.root, 'alice', 'web', 'new-session')
-        partial = empty_window('alice', 'web', 'partial-data')
-        partial['text']['messages'] = [{'role': 'user', 'content': '未形成完整轮'}]
-        path = self.root / 'users/alice/history/conv_partial'
-        commit_terminal_windows(path, partial, runtime_window_path(path), copy.deepcopy(partial))
-        self.age('partial-data')
-        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now)
-        self.assertEqual(result['queued_memory'], [])
-        self.assertEqual(result['deleted_sessions'], [])
-        self.assertEqual(result['preserved_sessions'], [
-            {'session_id': 'partial-data', 'reason': 'no_pending_rounds'},
-        ])
-        self.assertEqual(find_record(self.root, 'alice', 'web', 'partial-data')['lifecycle'], 'closed')
-        self.assertEqual(find_record(self.root, 'alice', 'web', 'online')['lifecycle'], 'open')
-        self.assertEqual(find_record(self.root, 'alice', 'web', 'running')['run_state'], 'running')
-        self.assertEqual(find_record(self.root, 'alice', 'web', 'new-session')['lifecycle'], 'open')
-
-    def test_startup_inspection_rechecks_racing_lease_and_reports_queue_failure(self):
-        self.seed_data('race')
-        self.seed_data('queue-failure')
-        original = connection
-        renewed = False
-        @contextmanager
-        def renew_before_write(*args, **kwargs):
-            nonlocal renewed
-            if kwargs.get('write') and not renewed:
-                renewed = True
-                with original(self.root, 'alice', write=True) as db:
-                    db.execute('INSERT INTO history_web_leases(session_id,client_id,expires_at) VALUES(?, ?, ?)',
-                               ('race', 'arriving_page', self.now + 90))
-            with original(*args, **kwargs) as db:
-                yield db
-        failed_queue = Mock(side_effect=RuntimeError('must stay private'))
-        with patch.object(web_lifecycle, 'connection', side_effect=renew_before_write):
-            result = inspect_stale_web_sessions(
-                self.root, 'alice', now=self.now, queue_memory=failed_queue,
-            )
-        self.assertEqual(find_record(self.root, 'alice', 'web', 'race')['lifecycle'], 'open')
-        self.assertEqual(result['errors'], [
-            {'session_id': 'queue-failure', 'exception_type': 'RuntimeError'},
-        ])
-        self.assertNotIn('must stay private', json.dumps(result))
-
-    def test_service_startup_pass_all_users_wakes_memory_once(self):
-        self.seed_data('alice-data')
-        self.seed_data('bob-data', user='bob')
-        wake = Mock()
-        summary_wake = Mock()
-        service = WebRunService(
-            self.root,
-            memory_waker=wake,
-            summary_waker=summary_wake,
-        )
-        result = service.inspect_conversation_spaces_on_startup()
-        self.assertEqual(result['state'], 'completed')
-        self.assertEqual(result['queued_memory'], 2)
-        self.assertEqual(result['queued_summary'], 2)
-        self.assertEqual(set(result['users']), {'alice', 'bob'})
-        wake.assert_called_once_with()
-        summary_wake.assert_called_once_with()
-        # Durable queue registration is idempotent and does not wake twice.
-        again = service.inspect_conversation_spaces_on_startup()
-        self.assertEqual(again['queued_memory'], 0)
-        self.assertEqual(again['queued_summary'], 0)
-        wake.assert_called_once_with()
-        summary_wake.assert_called_once_with()
-
-    def test_service_inspection_retires_offline_app_data_but_keeps_live_app(self):
-        offline = empty_window('alice', 'app', 'app-offline')
-        offline['text']['messages'] = [
-            {'role': 'user', 'content': 'app fact'},
-            {'role': 'assistant', 'content': 'saved'},
-        ]
-        offline['data'].update(rounds=1, memory_status='deferred', memory_processed_round=0)
-        path = self.root / 'users/alice/history/conv_app_offline'
-        commit_terminal_windows(path, offline, runtime_window_path(path), copy.deepcopy(offline))
-        self.age('app-offline', source='app')
-
-        service = WebRunService(self.root)
-        reserve_session(
-            self.root, 'alice', 'app', 'app-live',
-            active_key='app:alice:app_live_client',
-        )
-        live = service.active_session('alice', 'app_live_client', source='app')
-        live_id = live['session']['session_id']
-        self.age(live_id, source='app')
-
-        result = service.inspect_conversation_spaces_on_startup()
-        self.assertEqual(result['queued_memory'], 1)
-        self.assertEqual(find_record(self.root, 'alice', 'app', 'app-offline')['lifecycle'], 'closed')
-        self.assertEqual(
-            find_record(self.root, 'alice', 'app', 'app-offline')['memory_queue_reason'],
-            'startup_offline_app_session',
-        )
-        self.assertEqual(find_record(self.root, 'alice', 'app', live_id)['lifecycle'], 'open')
 
     def test_app_lifespan_runs_one_delayed_startup_pass(self):
         service = WebRunService(self.root)
@@ -450,34 +282,3 @@ class WebSessionLifecycleTests(unittest.TestCase):
             self.assertEqual(calls, [1, 2])
         finally:
             scheduler.stop(timeout=2)
-
-    def test_startup_inspection_does_not_create_missing_history_database(self):
-        fresh = self.root / 'users' / 'alice' / 'history' / 'history.sqlite3'
-        self.assertFalse(fresh.exists())
-        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now)
-        self.assertEqual(result['inspected'], 0)
-        self.assertFalse(fresh.exists())
-
-    def test_startup_queue_respects_disabled_memory_and_bounds_result_samples(self):
-        (self.root / 'config/global_config.json').write_text(
-            json.dumps({'memory': {'extraction_mode': 'disabled'}}), encoding='utf-8'
-        )
-        self.seed_data('disabled-memory')
-        for index in range(25):
-            self.seed(f'empty-sample-{index:02d}')
-        result = inspect_stale_web_sessions(self.root, 'alice', now=self.now)
-        self.assertEqual(result['queued_memory_count'], 0)
-        self.assertIn(
-            {'session_id': 'disabled-memory', 'reason': 'memory_extraction_disabled'},
-            result['preserved_sessions'],
-        )
-        self.assertEqual(result['deleted_count'], 25)
-        self.assertEqual(len(result['deleted_sessions']), 20)
-        self.assertEqual(
-            find_record(self.root, 'alice', 'web', 'disabled-memory')['lifecycle'],
-            'closed',
-        )
-
-
-if __name__ == '__main__':
-    unittest.main()

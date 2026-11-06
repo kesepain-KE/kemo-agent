@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,13 +8,11 @@ import time
 import unittest
 from unittest.mock import patch
 
+from run.cards import CardStore, IntegrationStore, session_key
 from run.history import (
-    commit_terminal_windows,
-    empty_window,
+    close_session,
     find_record,
     reserve_session,
-    runtime_window_path,
-    update_run_state,
     touch_session_lease,
 )
 from run.history.store import connection
@@ -28,42 +25,28 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / "config").mkdir()
-        (self.root / "config" / "global_config.json").write_text(
+        (self.root / "config" / "global_config.yaml").write_text(
             json.dumps({"memory": {"extraction_mode": "compression_only"}}),
             encoding="utf-8",
         )
         user_dir = self.root / "users" / "alice"
         user_dir.mkdir(parents=True)
-        (user_dir / "user_config.json").write_text("{}", encoding="utf-8")
+        (user_dir / "user_config.yaml").write_text("{}", encoding="utf-8")
         self.now = time.time()
 
     def seed(self, session_id: str, *, source: str = "web", rounds: int = 1) -> None:
         reserve_session(self.root, "alice", source, session_id)
-        window = empty_window("alice", source, session_id)
-        window["text"]["messages"] = [
-            {"role": "user", "content": "old request"},
-            {"role": "assistant", "content": "old response"},
-        ]
-        window["data"]["rounds"] = rounds
-        path = self.root / "users" / "alice" / "history" / f"conv_{session_id}"
-        commit_terminal_windows(
-            path,
-            window,
-            runtime_window_path(path),
-            copy.deepcopy(window),
-        )
+        store = CardStore(self.root, "alice")
+        for index in range(rounds):
+            integration_id = f"i_{session_id}_{index}"
+            store.append(source, session_id, integration_id, "user_text",
+                         {"text": "old request"}, level="initial")
+            store.append(source, session_id, integration_id, "agent_text",
+                         {"text": "old response"}, level="final")
         old = datetime.fromtimestamp(self.now - 25 * 3600, timezone.utc).isoformat()
         with connection(self.root, "alice", write=True) as db:
-            row = db.execute(
-                "SELECT record_json FROM history_sessions WHERE source=? AND session_id=?",
-                (source, session_id),
-            ).fetchone()
-            record = json.loads(row["record_json"])
-            record["updated_at"] = old
-            db.execute(
-                "UPDATE history_sessions SET updated_at=?, record_json=? WHERE source=? AND session_id=?",
-                (old, json.dumps(record, ensure_ascii=False), source, session_id),
-            )
+            db.execute("UPDATE card_sessions SET updated_at=? WHERE session_key=?",
+                       (old, session_key(source, session_id)))
 
     def test_idle_session_is_queued_and_closed(self) -> None:
         self.seed("stale")
@@ -74,59 +57,52 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         self.assertEqual(record["memory_status"], "queued")
         self.assertEqual(record["memory_queue_reason"], "idle_session_sweep")
         self.assertEqual(record["summary_status"], "queued")
-        self.assertEqual(record["summary_target_round"], 1)
+        self.assertEqual(record["summary_target_seq"], 2)
 
     def test_recent_session_is_not_closed(self) -> None:
         self.seed("recent")
         fresh = datetime.fromtimestamp(self.now - 3600, timezone.utc).isoformat()
         with connection(self.root, "alice", write=True) as db:
-            row = db.execute(
-                "SELECT record_json FROM history_sessions WHERE session_id=?",
-                ("recent",),
-            ).fetchone()
-            record = json.loads(row["record_json"])
-            record["updated_at"] = fresh
-            db.execute(
-                "UPDATE history_sessions SET updated_at=?, record_json=? WHERE session_id=?",
-                (fresh, json.dumps(record, ensure_ascii=False), "recent"),
-            )
+            db.execute("UPDATE card_sessions SET updated_at=? WHERE session_key=?",
+                       (fresh, session_key("web", "recent")))
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
         self.assertEqual(find_record(self.root, "alice", "web", "recent")["lifecycle"], "open")
 
     def test_closed_session_with_unqueued_rounds_is_recovered(self) -> None:
         self.seed("closed")
-        with connection(self.root, "alice", write=True) as db:
-            row = db.execute(
-                "SELECT record_json FROM history_sessions WHERE session_id=?",
-                ("closed",),
-            ).fetchone()
-            record = json.loads(row["record_json"])
-            record["lifecycle"] = "closed"
-            db.execute(
-                "UPDATE history_sessions SET lifecycle='closed', record_json=? WHERE session_id=?",
-                (json.dumps(record, ensure_ascii=False), "closed"),
-            )
+        close_session(self.root, "alice", "web", "closed")
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
         self.assertEqual(result["requeued_closed"], 1)
         self.assertEqual(find_record(self.root, "alice", "web", "closed")["memory_status"], "queued")
         self.assertEqual(find_record(self.root, "alice", "web", "closed")["summary_status"], "queued")
 
+    def test_closed_legacy_session_with_first_message_title_is_requeued(self) -> None:
+        self.seed("legacy-title")
+        CardStore(self.root, "alice").update_record(
+            "web", "legacy-title", {"title": "旧版直接复制的用户首句"}
+        )
+        close_session(self.root, "alice", "web", "legacy-title")
+
+        result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
+
+        record = find_record(self.root, "alice", "web", "legacy-title")
+        self.assertEqual(result["requeued_closed"], 1)
+        self.assertEqual(record["summary_status"], "queued")
+        self.assertEqual(record["summary_target_seq"], 2)
+
     def test_running_session_is_skipped(self) -> None:
         self.seed("running")
-        update_run_state(self.root, "alice", "web", "running", run_state="running")
+        IntegrationStore(CardStore(self.root, "alice"), "web", "running", "i_running").start()
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
         self.assertGreaterEqual(result["skipped_active"], 1)
 
     def test_online_web_lease_is_skipped(self) -> None:
         self.seed("leased")
-        with connection(self.root, "alice", write=True) as db:
-            db.execute(
-                "INSERT INTO history_web_leases(session_id, client_id, expires_at) VALUES(?, ?, ?)",
-                ("leased", "browser", self.now + 3600),
-            )
+        from run.history.lease_presence import update_presence
+        update_presence(self.root, "alice", "web", "leased", "browser", 1, now=self.now)
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
         self.assertEqual(find_record(self.root, "alice", "web", "leased")["lifecycle"], "open")

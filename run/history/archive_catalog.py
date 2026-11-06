@@ -1,72 +1,49 @@
-"""SQL-side physical archive/date directory without loading message bodies."""
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Any
-
+"""Session/date catalog over CardStream metadata, without loading RAW bodies."""
 from run.history.archive_query_common import (
-    DATE_BASIS, FROM_ARCHIVES, METADATA, TIMEZONE, VISIBLE,
-    archive_database, metadata_entry, serialized_size,
+    DATE_BASIS, TIMEZONE, VISIBLE, archive_database, metadata_entry, serialized_size,
 )
 
 
-def query_archives(
-    root: Path, user: str, *, action: str, date: str, since: str, until: str,
-    source: str, session_id: str, limit: int, offset: int, page_char_limit: int,
-) -> dict[str, Any]:
-    clauses, params = [VISIBLE], []
+def query_archives(root, user, *, action, date="", since="", until="", source="",
+                   session_id="", limit=50, offset=0, page_char_limit=80000):
+    clauses, args = [VISIBLE], []
     for column, value in (("source", source), ("session_id", session_id)):
         if value:
-            clauses.append(f"w.{column}=?")
-            params.append(value)
-    day = "archive_day(w.updated_at, w.created_at, w.window_name)"
-    for operator, value in (("=", date), (">=", since), ("<=", until)):
+            clauses.append(f"s.{column}=?")
+            args.append(value)
+    day = "date(s.created_at,'+8 hours')"
+    for op, value in (("=", date), (">=", since), ("<=", until)):
         if value:
-            clauses.append(f"{day}{operator}?")
-            params.append(value)
+            clauses.append(f"{day}{op}?")
+            args.append(value)
     where = " AND ".join(clauses)
-    is_dates = action == "dates"
-    key = "dates" if is_dates else "archives"
-    result: dict[str, Any] = {
-        "action": action, key: [], "total": 0, "offset": offset,
-        "next_offset": None, "has_more": False, "page_char_limit": page_char_limit,
-        "page_limited_by_chars": False, "date_basis": DATE_BASIS, "timezone": TIMEZONE,
-        "filters": {"source": source or None, "session_id": session_id or None,
-                    "date": date or None, "since": since or None, "until": until or None},
-    }
-    with archive_database(root, user) as database:
-        if database is None:
+    key = "dates" if action == "dates" else "archives"
+    result = {"action": action, key: [], "total": 0, "offset": offset, "next_offset": None,
+              "has_more": False, "page_char_limit": page_char_limit, "page_limited_by_chars": False,
+              "date_basis": DATE_BASIS, "timezone": TIMEZONE,
+              "filters": {"source": source or None, "session_id": session_id or None,
+                          "date": date or None, "since": since or None, "until": until or None}}
+    with archive_database(root, user) as db:
+        if db is None:
             return result
-        if is_dates:
-            base = f"SELECT {day} AS date, COUNT(*) AS archive_count {FROM_ARCHIVES} WHERE {where} GROUP BY {day}"
-            result["total"] = database.execute(f"SELECT COUNT(*) FROM ({base})", params).fetchone()[0]
-            rows = database.execute(
-                base + " ORDER BY date DESC LIMIT ? OFFSET ?", [*params, limit, offset]
-            ).fetchall()
-            entries = [dict(row) for row in rows]
+        if action == "dates":
+            base = f"SELECT {day} AS date,count(*) AS archive_count FROM card_sessions s WHERE {where} GROUP BY {day}"
+            result["total"] = db.execute(f"SELECT count(*) FROM ({base})", args).fetchone()[0]
+            entries = [dict(row) for row in db.execute(base + " ORDER BY date DESC LIMIT ? OFFSET ?",
+                                                      (*args, min(100, limit), offset))]
         else:
-            result["total"] = database.execute(
-                f"SELECT COUNT(*) {FROM_ARCHIVES} WHERE {where}", params
-            ).fetchone()[0]
-            rows = database.execute(
-                f"""SELECT {METADATA} {FROM_ARCHIVES} WHERE {where}
-                    ORDER BY archive_time(w.updated_at, w.created_at, w.window_name) DESC,
-                        w.window_name DESC LIMIT ? OFFSET ?""",
-                [*params, limit, offset],
-            ).fetchall()
-            entries = [metadata_entry(root, user, row) for row in rows]
-        selected: list[dict[str, Any]] = []
-        used = 0
+            result["total"] = db.execute(f"SELECT count(*) FROM card_sessions s WHERE {where}", args).fetchone()[0]
+            entries = [metadata_entry(root, user, row) for row in db.execute(
+                f"SELECT s.* FROM card_sessions s WHERE {where} ORDER BY s.updated_at DESC,s.session_key DESC "
+                "LIMIT ? OFFSET ?", (*args, min(100, limit), offset))]
         for entry in entries:
-            size = serialized_size(entry)
-            if used + size > page_char_limit:
-                if not selected:
-                    raise ValueError("单项归档元数据超过 page_char_limit，请增大字符预算")
+            candidate = {**result, key: [*result[key], entry]}
+            if serialized_size(candidate) + 128 > page_char_limit:
+                if not result[key]:
+                    raise ValueError("单项元数据超过 page_char_limit，请增加预算")
                 result["page_limited_by_chars"] = True
                 break
-            selected.append(entry)
-            used += size
-        result[key] = selected
-        result["has_more"] = offset + len(selected) < result["total"]
-        result["next_offset"] = offset + len(selected) if result["has_more"] else None
+            result[key].append(entry)
+    end = offset + len(result[key])
+    result.update(has_more=end < result["total"], next_offset=end if end < result["total"] else None)
     return result

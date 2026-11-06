@@ -1,681 +1,228 @@
+"""Session metadata and maintenance claims over immutable CardStream RAW."""
 from __future__ import annotations
 
-from tests.type_assertions import require_present
+import pytest
 
-import tempfile
-import unittest
-from pathlib import Path
+from run.cards import CardSessionClosedError, CardStore, IntegrationStore
 from run.history import (
-    commit_window,
-    empty_window,
-    find_window,
-    list_sessions,
-    load_window,
-    patch_archive_metadata,
-    prepare_window,
+    claim_pending_memory, claim_pending_summary, close_session, delete_session,
+    defer_memory_claim, find_record, finish_memory_claim, finish_summary_claim,
+    get_active, get_or_reserve_active, list_sessions, mutate_registry_record,
+    queue_summary, reserve_session, retry_summary, session_page_cursor, update_title,
 )
-from run.history import (
-    claim_pending_memory,
-    defer_memory_claim,
-    claim_pending_summary,
-    close_session,
-    delete_session,
-    find_record,
-    finish_memory_claim,
-    finish_summary_claim,
-    get_active,
-    load_index,
-    new_conversation_id,
-    remove_session,
-    queue_summary,
-    reserve_session,
-    retry_summary,
-    session_key,
-    update_run_state,
-    update_title,
-)
-from run.history import (
-    connection,
-    database_path,
-    delete_window,
-    query_session_records,
-    read_registry,
-    session_page_cursor,
-    write_registry,
-    window_exists,
-)
+from run.history.session_listing import query_session_records
+from tests.card_history_support import seed_history
 
 
-class HistoryIndexTests(unittest.TestCase):
-    def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        return temporary, root
+@pytest.fixture
+def root(tmp_path):
+    (tmp_path / "users/alice").mkdir(parents=True)
+    return tmp_path
 
-    def commit_archive(
-        self,
-        root: Path,
-        *,
-        source: str,
-        session_id: str,
-        directory_name: str,
-        memory_status: str | None = None,
-    ) -> Path:
-        directory = root / "users" / "alice" / "history" / directory_name
-        window = empty_window("alice", source, session_id)
-        window["text"]["messages"] = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "world"},
-        ]
-        window["think"]["rounds"] = [{"round": 1, "content": "reason"}]
-        window["tool"]["rounds"] = [{"round": 1, "calls": []}]
-        window["data"]["rounds"] = 1
-        if memory_status is not None:
-            window["data"]["memory_processed_round"] = 0
-            window["data"]["memory_status"] = memory_status
-        commit_window(directory, window)
-        return directory
 
-    def test_history_is_stored_in_sqlite_without_archive_json_directories(self) -> None:
-        _, root = self.make_root()
-        directory = self.commit_archive(
-            root,
-            source="web",
-            session_id="sqlite-session",
-            directory_name="conv_sqlite",
+def seed(root, session="s1", *, source="web", count=1, metadata=None):
+    return seed_history(root, "alice", source, session, [
+        message for number in range(count) for message in (
+            {"role": "user", "content": f"question {number}"},
+            {"role": "assistant", "content": f"answer {number}"},
         )
+    ], metadata=metadata)
 
-        self.assertTrue(database_path(root, "alice").is_file())
-        self.assertFalse(directory.exists())
-        self.assertTrue(window_exists(directory))
-        self.assertEqual(load_window(directory)["data"]["rounds"], 1)
 
-    def test_repeated_history_reads_use_query_only_connections(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="query-only-session",
-            directory_name="conv_query_only",
-        )
-        with connection(root, "alice") as database:
-            before = database.execute(
-                "SELECT rowid FROM history_meta WHERE key='schema_version'"
-            ).fetchone()[0]
-            self.assertEqual(database.execute("PRAGMA query_only").fetchone()[0], 1)
+def test_history_uses_cards_database_without_window_directories(root):
+    history = seed(root)
+    assert history.store.path == root / "users/alice/cards.sqlite3"
+    assert history.store.path.is_file()
+    assert not (root / "users/alice/history").exists()
+    assert [card.raw_kind for card in history.cards] == ["user_text", "agent_text"]
 
-        query_session_records(root, "alice", source="web")
 
-        with connection(root, "alice") as database:
-            after = database.execute(
-                "SELECT rowid FROM history_meta WHERE key='schema_version'"
-            ).fetchone()[0]
-        self.assertEqual(after, before)
+def test_repeated_reads_are_query_only_and_do_not_change_metadata(root):
+    history = seed(root)
+    before = find_record(root, "alice", "web", "s1")
+    with history.store.db() as db:
+        assert db.execute("PRAGMA query_only").fetchone()[0] == 1
+        with pytest.raises(Exception, match="readonly"):
+            db.execute("UPDATE card_sessions SET updated_at='modified'")
+    for _ in range(3):
+        assert query_session_records(root, "alice", source="web")[0][0] == before
+    assert find_record(root, "alice", "web", "s1") == before
 
-    def test_session_cursor_does_not_skip_equal_timestamps(self) -> None:
-        _, root = self.make_root()
-        timestamp = "2026-08-02T00:00:00+00:00"
-        sessions = {
-            session_key("web", f"same-{index}"): {
-                "conversation_id": f"same-{index}",
-                "session_id": f"same-{index}",
-                "source": "web",
-                "title": f"same {index}",
-                "lifecycle": "open",
-                "run_state": "idle",
-                "updated_at": timestamp,
-            }
-            for index in range(5)
-        }
-        write_registry(root, "alice", sessions, {})
 
-        collected: list[str] = []
-        cursor = ""
-        while True:
-            page, has_more = query_session_records(
-                root,
-                "alice",
-                source="web",
-                limit=2,
-                before_updated_at=cursor,
-            )
-            collected.extend(str(record["session_id"]) for record in page)
-            if not has_more:
-                break
-            cursor = session_page_cursor(page[-1])
+@pytest.mark.parametrize("identities", [
+    [("web", f"same-{index}") for index in range(5)],
+    [(source, "same") for source in ("web", "cli", "message:telegram")],
+])
+def test_keyset_cursor_does_not_skip_equal_timestamps_or_cross_source_identities(root, identities):
+    stamp = "2026-08-02T00:00:00+00:00"
+    for source, identity in identities:
+        reserve_session(root, "alice", source, identity)
+        mutate_registry_record(root, "alice", source, identity, lambda value: value, updated_at=stamp)
+    collected, cursor = [], ""
+    while True:
+        page, more = query_session_records(root, "alice", limit=1, before_updated_at=cursor)
+        collected.extend((row["source"], row["session_id"]) for row in page)
+        if not more:
+            break
+        cursor = session_page_cursor(page[-1])
+    assert collected == sorted(identities, key=lambda value: (value[1], value[0]), reverse=True)
+    assert len(set(collected)) == len(identities)
 
-        self.assertEqual(
-            collected,
-            ["same-4", "same-3", "same-2", "same-1", "same-0"],
-        )
 
-    def test_cross_source_cursor_does_not_skip_same_session_and_timestamp(self) -> None:
-        _, root = self.make_root()
-        timestamp = "2026-08-08T00:00:00+00:00"
-        sessions = {
-            session_key(source, "same-session"): {
-                "conversation_id": f"{source}-conversation",
-                "session_id": "same-session",
-                "source": source,
-                "title": source,
-                "lifecycle": "closed",
-                "run_state": "idle",
-                "updated_at": timestamp,
-            }
-            for source in ("web", "cli", "message:telegram")
-        }
-        write_registry(root, "alice", sessions, {})
+def test_same_session_id_is_isolated_by_user_and_source(root):
+    (root / "users/bob").mkdir()
+    for user, source in (("alice", "web"), ("alice", "app"), ("bob", "web")):
+        seed_history(root, user, source, "same", [{"role": "user", "content": f"{user}/{source}"}])
+    for user, source in (("alice", "web"), ("alice", "app"), ("bob", "web")):
+        card = CardStore(root, user).raw_page(source, "same")[0]
+        assert card.raw_payload["text"] == f"{user}/{source}"
 
-        collected: list[tuple[str, str]] = []
-        cursor = ""
-        while True:
-            page, has_more = query_session_records(
-                root,
-                "alice",
-                source=None,
-                limit=1,
-                before_updated_at=cursor,
-            )
-            collected.extend(
-                (str(record["source"]), str(record["session_id"]))
-                for record in page
-            )
-            if not has_more:
-                break
-            cursor = session_page_cursor(page[-1])
 
-        self.assertEqual(
-            collected,
-            [
-                ("web", "same-session"),
-                ("message:telegram", "same-session"),
-                ("cli", "same-session"),
-            ],
-        )
+def test_reserved_identity_can_close_and_hide_without_raw(root):
+    reserve_session(root, "alice", "web", "empty", active_key="browser")
+    assert get_active(root, "alice", "browser")["session_id"] == "empty"
+    assert close_session(root, "alice", "web", "empty")["lifecycle"] == "closed"
+    assert get_active(root, "alice", "browser") is None
+    assert delete_session(root, "alice", "web", "empty") == 1
+    assert find_record(root, "alice", "web", "empty") is None
+    assert CardStore(root, "alice").session("web", "empty")["lifecycle"] == "deleted"
 
-    def test_missing_registry_rebuilds_from_sqlite_windows(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="rebuild-session",
-            directory_name="conv_rebuild",
-        )
-        with connection(root, "alice", write=True) as database:
-            database.execute("DELETE FROM history_sessions")
 
-        rebuilt = load_index(root, "alice")
+def test_hidden_identity_and_raw_cannot_be_reused_by_late_writers(root):
+    history = seed(root)
+    original = [(card.card_id, card.raw_payload_json) for card in history.cards]
+    delete_session(root, "alice", "web", "s1")
+    with pytest.raises(CardSessionClosedError):
+        reserve_session(root, "alice", "web", "s1")
+    with pytest.raises(CardSessionClosedError):
+        history.store.append("web", "s1", "late", "user_text", {"text": "late"})
+    new, created = get_or_reserve_active(root, "alice", "web", "browser", preferred_session_id="s1")
+    assert created and new["session_id"] != "s1"
+    assert [(card.card_id, card.raw_payload_json) for card in history.cards] == original
 
-        record = rebuilt["sessions"][session_key("web", "rebuild-session")]
-        self.assertEqual(rebuilt["schema_version"], 3)
-        self.assertEqual(record["archive_window"], "conv_rebuild")
 
-    def test_find_window_uses_sqlite_registry_without_directory_scan(self) -> None:
-        _, root = self.make_root()
-        expected = self.commit_archive(
-            root,
-            source="web",
-            session_id="target-session",
-            directory_name="conv_target",
-        )
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="other-session",
-            directory_name="conv_other",
-        )
+def test_active_bindings_do_not_collide_across_sources(root):
+    reserve_session(root, "alice", "web", "same", active_key="browser")
+    reserve_session(root, "alice", "message:telegram", "same", active_key="telegram")
+    close_session(root, "alice", "web", "same")
+    assert get_active(root, "alice", "browser") is None
+    assert get_active(root, "alice", "telegram")["source"] == "message:telegram"
 
-        self.assertEqual(find_window(root, "alice", "web", "target-session"), expected)
 
-    def test_new_windows_isolate_sources_with_the_same_session_id(self) -> None:
-        from run.history import get_or_create_window
+def test_memory_claim_is_exclusive_and_advances_only_its_contiguous_raw_range(root):
+    seed(root, count=3)
+    first = claim_pending_memory(root, "alice", input_tokens=1)
+    assert (first["memory_claim_start_seq"], first["memory_claim_end_seq"]) == (1, 2)
+    assert claim_pending_memory(root, "alice") is None
+    assert finish_memory_claim(root, "alice", "web", "s1", claim_id="wrong") is None
+    done = finish_memory_claim(root, "alice", "web", "s1", claim_id=first["memory_claim_id"])
+    assert done["memory_processed_seq"] == 2 and done["memory_status"] == "pending"
+    second = claim_pending_memory(root, "alice", input_tokens=1)
+    assert (second["memory_claim_start_seq"], second["memory_claim_end_seq"]) == (3, 4)
+    done = finish_memory_claim(root, "alice", "web", "s1", claim_id=second["memory_claim_id"])
+    assert done["memory_processed_seq"] == 4 and done["memory_status"] == "pending"
+    third = claim_pending_memory(root, "alice", input_tokens=1)
+    assert (third["memory_claim_start_seq"], third["memory_claim_end_seq"]) == (5, 6)
+    done = finish_memory_claim(root, "alice", "web", "s1", claim_id=third["memory_claim_id"])
+    assert done["memory_processed_seq"] == 6 and done["memory_status"] == "completed"
+    assert claim_pending_memory(root, "alice") is None
 
-        _, root = self.make_root()
-        session_id = "conv_shared_session"
-        web_path, web_window = get_or_create_window(
-            root, "alice", "web", session_id
-        )
-        app_path, app_window = get_or_create_window(
-            root, "alice", "app", session_id
-        )
 
-        self.assertNotEqual(web_path, app_path)
-        web_window["text"]["messages"] = [{"role": "user", "content": "web"}]
-        app_window["text"]["messages"] = [{"role": "user", "content": "app"}]
-        commit_window(web_path, web_window)
-        commit_window(app_path, app_window)
+def test_memory_defer_persists_backoff_without_advancing_or_consuming_attempt(root):
+    seed(root, metadata={"memory_attempt_count": 2})
+    claim = claim_pending_memory(root, "alice")
+    deferred = defer_memory_claim(root, "alice", "web", "s1",
+                                 claim_id=claim["memory_claim_id"], memory_queue_reason="execution_capacity")
+    assert deferred["memory_status"] == "queued"
+    assert deferred["memory_attempt_count"] == 2
+    assert deferred["memory_processed_seq"] == 0
+    assert deferred["memory_retry_at"]
+    assert claim_pending_memory(root, "alice") is None
+    mutate_registry_record(root, "alice", "web", "s1", lambda value: {**value, "memory_retry_at": ""})
+    assert claim_pending_memory(root, "alice") is not None
 
-        self.assertEqual(
-            load_window(require_present(find_window(root, "alice", "web", session_id)))["text"][
-                "messages"
-            ][0]["content"],
-            "web",
-        )
-        self.assertEqual(
-            load_window(require_present(find_window(root, "alice", "app", session_id)))["text"][
-                "messages"
-            ][0]["content"],
-            "app",
-        )
 
-    def test_deleting_a_window_is_a_database_operation(self) -> None:
-        _, root = self.make_root()
-        archive = self.commit_archive(
-            root,
-            source="web",
-            session_id="removed-session",
-            directory_name="conv_removed",
-        )
-        self.assertTrue(delete_window(archive))
-        self.assertFalse(window_exists(archive))
+def test_new_raw_after_completed_memory_is_claimable_again(root):
+    history = seed(root)
+    claim = claim_pending_memory(root, "alice")
+    finish_memory_claim(root, "alice", "web", "s1", claim_id=claim["memory_claim_id"])
+    history.store.append("web", "s1", "next", "user_text", {"text": "new fact"}, level="initial")
+    claim = claim_pending_memory(root, "alice", statuses={"pending"})
+    assert (claim["memory_claim_start_seq"], claim["memory_claim_end_seq"]) == (3, 3)
 
-    def test_reserved_active_session_can_close_and_remove_without_archive(self) -> None:
-        _, root = self.make_root()
-        session_id = new_conversation_id()
-        reserve_session(
-            root,
-            "alice",
-            "web",
-            session_id,
-            active_key="interactive:alice",
-        )
 
-        self.assertEqual(
-            get_active(root, "alice", "interactive:alice")["session_id"],
-            session_id,
-        )
-        self.assertEqual(
-            close_session(root, "alice", "web", session_id)["lifecycle"],
-            "closed",
-        )
-        self.assertIsNone(get_active(root, "alice", "interactive:alice"))
-        remove_session(root, "alice", "web", session_id)
-        self.assertIsNone(find_record(root, "alice", "web", session_id))
+def test_explicit_memory_queue_drains_to_target_and_leaves_new_tail_pending(root):
+    from run.history import queue_memory_extraction
+    (root / "config").mkdir()
+    (root / "config/global_config.yaml").write_text('{"memory":{"extraction_mode":"compression_only"}}')
+    history = seed(root, count=3)
+    queue_memory_extraction(root, "alice", "web", "s1", target_seq=4)
+    first = claim_pending_memory(root, "alice", input_tokens=1, statuses={"queued"})
+    done = finish_memory_claim(root, "alice", "web", "s1", claim_id=first["memory_claim_id"])
+    assert done["memory_status"] == "queued" and done["memory_processed_seq"] == 2
+    second = claim_pending_memory(root, "alice", input_tokens=1, statuses={"queued"})
+    done = finish_memory_claim(root, "alice", "web", "s1", claim_id=second["memory_claim_id"])
+    assert done["memory_processed_seq"] == 4 and done["memory_status"] == "pending"
+    assert "memory_target_seq" not in done
+    assert claim_pending_memory(root, "alice", statuses={"queued"}) is None
+    assert len(history.cards) == 6
 
-    def test_reused_session_rejects_late_commit_from_previous_generation(self) -> None:
-        _, root = self.make_root()
-        session_id = "reused-session"
-        old_directory = self.commit_archive(
-            root,
-            source="web",
-            session_id=session_id,
-            directory_name="conv_old_generation",
-        )
-        old_window = load_window(old_directory)
-        old_generation = find_record(root, "alice", "web", session_id)[
-            "session_generation"
-        ]
 
-        delete_session(root, "alice", "web", session_id)
-        replacement = reserve_session(root, "alice", "web", session_id)
+def test_memory_is_not_claimed_until_integration_and_live_execution_exit(root):
+    history = seed(root)
+    integration = IntegrationStore(history.store, "web", "s1", "active")
+    integration.start()
+    execution, _ = integration.register_tool("call_live", {"name": "work", "arguments": {}})
+    assert claim_pending_memory(root, "alice") is None
+    integration.finish("cancelled")
+    assert claim_pending_memory(root, "alice") is None
+    integration.tool_result(execution["execution_id"], {"ok": True}, status="completed", duration_ms=1)
+    assert claim_pending_memory(root, "alice") is not None
 
-        self.assertNotEqual(
-            replacement["session_generation"],
-            old_generation,
-        )
 
-        # Simulate a terminal writer that was already holding the old window in
-        # memory when the user deleted and recreated the logical session.
-        with self.assertRaisesRegex(RuntimeError, "已删除|冲突"):
-            commit_window(old_directory, old_window)
+def test_summary_claim_is_exclusive_idempotent_and_keeps_raw(root):
+    history = seed(root)
+    close_session(root, "alice", "web", "s1")
+    assert queue_summary(root, "alice", "web", "s1")["status"] == "queued"
+    claim = claim_pending_summary(root, "alice")
+    assert claim_pending_summary(root, "alice") is None
+    done = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
+                                title="Title", summary="Synopsis")
+    assert done["summary_completed_seq"] == 2
+    assert done["summary_status"] == "completed"
+    assert done["title_source"] == "summary"
+    assert queue_summary(root, "alice", "web", "s1")["status"] == "completed"
+    assert claim_pending_summary(root, "alice") is None
+    assert len(history.cards) == 2
 
-        self.assertFalse(window_exists(old_directory))
-        current = find_record(root, "alice", "web", session_id)
-        self.assertIsNotNone(current)
-        self.assertEqual(
-            current["session_generation"],
-            replacement["session_generation"],
-        )
 
-    def test_reused_session_rejects_late_commit_of_unpersisted_window(self) -> None:
-        _, root = self.make_root()
-        session_id = "unpersisted-reused-session"
-        reserve_session(root, "alice", "web", session_id)
-        old_directory, old_window, is_new = prepare_window(
-            root, "alice", "web", session_id
-        )
-        self.assertTrue(is_new)
-        old_window["text"]["messages"] = [
-            {"role": "user", "content": "stale"},
-        ]
+def test_manual_title_wins_over_background_summary(root):
+    seed(root)
+    queue_summary(root, "alice", "web", "s1")
+    claim = claim_pending_summary(root, "alice")
+    update_title(root, "alice", "web", "s1", "Manual")
+    done = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
+                                title="Generated", summary="Synopsis")
+    assert done["title"] == "Manual" and done["title_source"] == "manual"
+    assert done["summary"] == "Synopsis"
 
-        delete_session(root, "alice", "web", session_id)
-        replacement = reserve_session(root, "alice", "web", session_id)
-        self.assertTrue(replacement["session_generation"])
 
-        # The old run had only prepared this physical window in memory.  There
-        # is no deleted-window tombstone to catch it, so the session generation
-        # fence must reject the late commit after the logical id is reused.
-        with self.assertRaisesRegex(RuntimeError, "已删除|冲突"):
-            commit_window(old_directory, old_window)
-
-        self.assertFalse(window_exists(old_directory))
-        self.assertIsNone(find_window(root, "alice", "web", session_id))
-        current = find_record(root, "alice", "web", session_id)
-        self.assertIsNotNone(current)
-        self.assertEqual(
-            current["session_generation"],
-            replacement["session_generation"],
-        )
-
-    def test_active_references_do_not_collide_across_sources(self) -> None:
-        _, root = self.make_root()
-        session_id = "same-session-id"
-        reserve_session(
-            root,
-            "alice",
-            "web",
-            session_id,
-            active_key="interactive:alice",
-        )
-        reserve_session(
-            root,
-            "alice",
-            "message:telegram",
-            session_id,
-            active_key="message:telegram:private:42",
-        )
-
-        self.assertEqual(
-            get_active(root, "alice", "interactive:alice")["source"], "web"
-        )
-        self.assertEqual(
-            get_active(root, "alice", "message:telegram:private:42")["source"],
-            "message:telegram",
-        )
-        close_session(root, "alice", "web", session_id)
-        self.assertIsNone(get_active(root, "alice", "interactive:alice"))
-        self.assertEqual(
-            get_active(root, "alice", "message:telegram:private:42")["source"],
-            "message:telegram",
-        )
-
-    def test_memory_claim_is_exclusive_and_advances_cursor(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="memory-session",
-            directory_name="conv_memory",
-            memory_status="pending",
-        )
-
-        claim = claim_pending_memory(root, "alice")
-
-        self.assertIsNotNone(claim)
-        self.assertEqual(claim["memory_claim_round"], 1)
-        self.assertIsNone(claim_pending_memory(root, "alice"))
-        finished = finish_memory_claim(
-            root,
-            "alice",
-            "web",
-            "memory-session",
-            claim_id=claim["memory_claim_id"],
-            processed_round=1,
-        )
-        self.assertEqual(finished["memory_processed_round"], 1)
-        self.assertEqual(finished["memory_status"], "completed")
-        self.assertNotIn("memory_claim_id", finished)
-
-    def test_memory_claim_can_be_deferred_without_consuming_a_retry(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="message:nya_desk_pet",
-            session_id="capacity-session",
-            directory_name="conv_capacity",
-            memory_status="pending",
-        )
-        claim = claim_pending_memory(root, "alice")
-        self.assertIsNotNone(claim)
-
-        deferred = defer_memory_claim(
-            root,
-            "alice",
-            "message:nya_desk_pet",
-            "capacity-session",
-            claim_id=claim["memory_claim_id"],
-        )
-        self.assertIsNotNone(deferred)
-        self.assertEqual(deferred["memory_status"], "queued")
-        self.assertEqual(deferred["memory_queue_reason"], "execution_capacity")
-        self.assertNotIn("memory_error", deferred)
-        self.assertNotIn("memory_claim_id", deferred)
-
-        # The scheduler mirrors the deferred state into the archive.  The
-        # retry lease must survive that metadata round-trip even when there is
-        # no bounded memory_target_round; otherwise the next scan can claim it
-        # immediately instead of honoring the back-off timestamp.
-        archive = root / "users" / "alice" / "history" / "conv_capacity"
-        window = load_window(archive)
-        patch_archive_metadata(
-            archive,
-            window,
-            updates={
-                "memory_status": "queued",
-                "memory_queue_reason": deferred["memory_queue_reason"],
-                "memory_queued_at": deferred["memory_queued_at"],
-                "memory_retry_at": deferred["memory_retry_at"],
-            },
-            removals=("memory_error",),
-        )
-        persisted = find_record(root, "alice", "message:nya_desk_pet", "capacity-session")
-        self.assertEqual(persisted["memory_status"], "queued")
-        self.assertEqual(persisted["memory_retry_at"], deferred["memory_retry_at"])
-        self.assertIsNone(claim_pending_memory(root, "alice"))
-
-    def test_memory_claim_can_lease_a_contiguous_round_range(self) -> None:
-        _, root = self.make_root()
-        archive = self.commit_archive(
-            root,
-            source="web",
-            session_id="memory-batch",
-            directory_name="conv_memory_batch",
-            memory_status="pending",
-        )
-        window = load_window(archive)
-        window["text"]["messages"] = [
-            item
-            for round_number in range(1, 6)
-            for item in (
-                {"role": "user", "content": f"问题 {round_number}"},
-                {"role": "assistant", "content": f"回答 {round_number}"},
-            )
-        ]
-        window["data"]["rounds"] = 5
-        window["data"]["memory_processed_round"] = 0
-        commit_window(archive, window)
-
-        claim = claim_pending_memory(root, "alice", max_rounds=5)
-
-        self.assertEqual(claim["memory_claim_round"], 1)
-        self.assertEqual(claim["memory_claim_start_round"], 1)
-        self.assertEqual(claim["memory_claim_end_round"], 5)
-        finished = finish_memory_claim(
-            root,
-            "alice",
-            "web",
-            "memory-batch",
-            claim_id=claim["memory_claim_id"],
-            processed_round=5,
-        )
-        self.assertEqual(finished["memory_processed_round"], 5)
-        self.assertEqual(finished["memory_status"], "completed")
-
-    def test_pending_memory_is_not_claimed_while_session_is_running(self) -> None:
-        _, root = self.make_root()
-        archive = self.commit_archive(
-            root,
-            source="web",
-            session_id="running-session",
-            directory_name="conv_running",
-            memory_status="pending",
-        )
-        update_run_state(
-            root,
-            "alice",
-            "web",
-            "running-session",
-            run_state="running",
-            directory=archive,
-        )
-
-        self.assertIsNone(claim_pending_memory(root, "alice"))
-        update_run_state(
-            root,
-            "alice",
-            "web",
-            "running-session",
-            run_state="idle",
-        )
-        self.assertIsNotNone(claim_pending_memory(root, "alice"))
-
-    def test_closed_session_summary_claim_is_idempotent_and_exclusive(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="summary-session",
-            directory_name="conv_summary",
-        )
-        self.assertEqual(
-            queue_summary(root, "alice", "web", "summary-session")["reason"],
-            "session_not_closed",
-        )
-        close_session(root, "alice", "web", "summary-session")
-        queued = queue_summary(root, "alice", "web", "summary-session")
-        self.assertEqual(queued["status"], "queued")
+def test_summary_failure_is_visible_and_manual_retry_resets_exhaustion(root):
+    seed(root)
+    queue_summary(root, "alice", "web", "s1")
+    for attempt in range(1, 6):
         claim = claim_pending_summary(root, "alice")
-        self.assertIsNotNone(claim)
-        self.assertIsNone(claim_pending_summary(root, "alice"))
-        finished = finish_summary_claim(
-            root,
-            "alice",
-            "web",
-            "summary-session",
-            claim_id=claim["summary_claim_id"],
-            title="历史会话后台摘要功能",
-            summary="关闭会话后由后台线程生成标题和摘要，并原子写回历史索引。",
-            completed_round=1,
-        )
-        self.assertEqual(finished["summary_status"], "completed")
-        self.assertEqual(finished["summary_completed_round"], 1)
-        self.assertEqual(
-            queue_summary(root, "alice", "web", "summary-session")["reason"],
-            "already_current",
-        )
-
-    def test_manual_title_is_not_overwritten_by_automatic_summary(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="manual-title",
-            directory_name="conv_manual_title",
-        )
-        close_session(root, "alice", "web", "manual-title")
-        update_title(root, "alice", "web", "manual-title", "用户手动命名")
-        queue_summary(root, "alice", "web", "manual-title")
-        claim = claim_pending_summary(root, "alice")
-        finished = finish_summary_claim(
-            root,
-            "alice",
-            "web",
-            "manual-title",
-            claim_id=claim["summary_claim_id"],
-            title="模型自动生成标题内容",
-            summary="后台可以更新摘要内容，但不得覆盖用户已经手动设置的标题。",
-            completed_round=1,
-        )
-        self.assertEqual(finished["title"], "用户手动命名")
-        self.assertEqual(finished["title_source"], "manual")
-        self.assertIn("不得覆盖", finished["summary"])
-
-    def test_failed_summary_retry_metadata_is_exposed_to_session_list(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="retry-summary",
-            directory_name="conv_retry_summary",
-        )
-        close_session(root, "alice", "web", "retry-summary")
-        queue_summary(root, "alice", "web", "retry-summary")
-        claim = claim_pending_summary(root, "alice")
-        failed = finish_summary_claim(
-            root,
-            "alice",
-            "web",
-            "retry-summary",
-            claim_id=claim["summary_claim_id"],
-            error={"message": "摘要格式错误", "exception_type": "AgentOutputError"},
-        )
-
-        self.assertEqual(failed["summary_status"], "retry_wait")
-        self.assertEqual(failed["summary_retry_count"], 1)
-        self.assertEqual(failed["summary_attempt_count"], 1)
-        self.assertEqual(failed["summary_consecutive_failures"], 1)
-        self.assertEqual(failed["summary_max_attempts"], 5)
-        self.assertEqual(failed["summary_last_error"]["message"], "摘要格式错误")
-        self.assertTrue(failed["summary_retry_at"])
+        assert claim is not None
+        failed = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
+                                      error={"message": f"failure {attempt}"})
+        assert failed["summary_attempt_count"] == attempt
         listed = list_sessions(root, "alice", "web")[0]
-        self.assertEqual(listed["summary_retry_count"], 1)
-        self.assertEqual(listed["summary_retry_at"], failed["summary_retry_at"])
-
-    def test_summary_exhaustion_manual_retry_and_recovery(self) -> None:
-        _, root = self.make_root()
-        self.commit_archive(
-            root,
-            source="web",
-            session_id="exhausted-summary",
-            directory_name="conv_exhausted_summary",
-        )
-        close_session(root, "alice", "web", "exhausted-summary")
-        queue_summary(root, "alice", "web", "exhausted-summary")
-
-        failed = {}
-        for attempt in range(1, 4):
-            claim = claim_pending_summary(root, "alice")
-            self.assertIsNotNone(claim)
-            failed = finish_summary_claim(
-                root,
-                "alice",
-                "web",
-                "exhausted-summary",
-                claim_id=claim["summary_claim_id"],
-                error={"message": f"失败 {attempt}"},
-                max_attempts=3,
-                retry_delays=(1,),
-            )
-            if attempt < 3:
-                sessions, active = read_registry(root, "alice")
-                record = sessions[session_key("web", "exhausted-summary")]
-                record["summary_retry_at"] = "2000-01-01T00:00:00+00:00"
-                write_registry(root, "alice", sessions, active)
-
-        self.assertEqual(failed["summary_status"], "exhausted")
-        self.assertNotIn("summary_retry_at", failed)
-        requeued = retry_summary(root, "alice", "web", "exhausted-summary")
-        self.assertEqual(requeued["summary_status"], "queued")
-        self.assertEqual(requeued["summary_retry_count"], 0)
-
-        claim = claim_pending_summary(root, "alice")
-        recovered = finish_summary_claim(
-            root,
-            "alice",
-            "web",
-            "exhausted-summary",
-            claim_id=claim["summary_claim_id"],
-            title="历史摘要重试恢复成功",
-            summary="自动重试耗尽后，用户可以手动重新排队并成功生成历史摘要内容。",
-            completed_round=1,
-        )
-        self.assertEqual(recovered["summary_status"], "completed")
-        self.assertTrue(recovered["summary_recovered_at"])
-        self.assertEqual(recovered["summary_consecutive_failures"], 0)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert listed["summary_last_error"] == {"message": f"failure {attempt}"}
+        mutate_registry_record(root, "alice", "web", "s1", lambda value: {**value, "summary_retry_at": ""})
+    assert claim_pending_summary(root, "alice") is None
+    assert retry_summary(root, "alice", "web", "s1")["summary_status"] == "queued"
+    claim = claim_pending_summary(root, "alice")
+    assert claim["summary_attempt_count"] == 1
+    done = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
+                                title="Recovered", summary="Ready")
+    assert done["summary_status"] == "completed" and done["summary_last_error"] is None

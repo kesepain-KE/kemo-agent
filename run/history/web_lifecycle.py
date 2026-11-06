@@ -1,418 +1,192 @@
-"""Cross-process interactive presence, Web offline inspection, and empty cleanup."""
+"""Cross-process presence and lifecycle in CardStream session metadata."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
-import threading
 import time
-from typing import Any, Callable, Collection
 
-from run.history.store_core import _object, connection, database_path
-from run.history.registry_store import _upsert_session_row
-from run.history.window_store import _delete_session_windows
-from run.history.session_leases import (
-    lease_client_key as _lease_client_key,
-    lease_scope_sql as _lease_scope_sql,
-)
+from run.cards import CardConflictError, CardStore, json_text, session_key
+from run.history.registry_store import mutate_registry_record, session_record
+from run.history.memory_claims import maintenance_claim_active
+from run.history.session_api import _hide
 
 WEB_LEASE_SECONDS = 90
 WEB_LEASE_CHECKPOINT_SECONDS = 30
 WEB_EMPTY_GRACE_SECONDS = 90
 WEB_STARTUP_INSPECTION_DELAY_SECONDS = 90
-WEB_INSPECTION_RESULT_SAMPLE_LIMIT = 20
-_LEASE_SCOPE_SEPARATOR = '\x1f'
 
 
-_HAS_DATA = """(
-    s.rounds>0
-    OR EXISTS (SELECT 1 FROM history_messages m WHERE m.source='web' AND m.session_id=s.session_id)
-    OR EXISTS (SELECT 1 FROM history_windows w WHERE w.source='web' AND w.session_id=s.session_id
-        AND (w.rounds!=0 OR json_array_length(w.text_json, '$.messages')>0
-             OR json_array_length(w.think_json, '$.rounds')>0
-             OR json_array_length(w.tool_json, '$.rounds')>0
-             OR json_array_length(w.items_json, '$.items')>0
-             OR EXISTS (SELECT 1 FROM history_rounds r WHERE r.window_kind=w.window_kind AND r.window_name=w.window_name)))
-    OR EXISTS (SELECT 1 FROM history_context_summaries c WHERE c.source='web' AND c.session_id=s.session_id)
-)"""
-
-def _stale_offline_sql(cutoff_placeholder: str = "?") -> str:
-    return f"""s.source='web' AND s.lifecycle!='deleted'
-    AND s.run_state NOT IN ('running', 'queued', 'pending')
-    AND s.memory_status!='processing' AND s.summary_status!='processing'
-    AND julianday(s.updated_at)<=julianday({cutoff_placeholder})
-    AND NOT EXISTS (SELECT 1 FROM history_web_leases l WHERE l.session_id=s.session_id
-        AND l.expires_at>? AND l.released=0 AND instr(l.client_id, char(31))=0)
-"""
-
-
-def _startup_needs_review_sql(cutoff_placeholder: str = "?") -> str:
-    return f"""{_stale_offline_sql(cutoff_placeholder)} AND (
-    s.lifecycle!='closed'
-    OR NOT {_HAS_DATA}
-    OR (
-        s.memory_status NOT IN ('queued', 'processing')
-        AND COALESCE(CAST(json_extract(s.record_json, '$.memory_processed_round') AS INTEGER), 0)
-            < MAX(s.rounds, COALESCE(CAST(json_extract(s.record_json, '$.last_committed_round') AS INTEGER), 0))
-    )
-    OR (
-        s.lifecycle='closed'
-        AND COALESCE(s.summary_status, 'none')='none'
-        AND COALESCE(s.title, '')=''
-        AND COALESCE(s.archive_window, '')!=''
-        AND MAX(s.rounds, COALESCE(CAST(json_extract(s.record_json, '$.last_committed_round') AS INTEGER), 0))>0
-    )
-)"""
-
-
-_STALE_OFFLINE = _stale_offline_sql()
-_STARTUP_NEEDS_REVIEW = _startup_needs_review_sql()
-
-
-def recover_expired_processing(root: Path, user: str, *, now: float) -> int:
-    """Recycle expired worker leases, never a live/fresh processing claim."""
-    from run.history.index_core import MEMORY_CLAIM_STALE_SECONDS, SUMMARY_CLAIM_STALE_SECONDS
-    recovered = 0
-    candidate_sql = """SELECT s.record_json FROM history_sessions s
-        WHERE s.source='web' AND s.lifecycle!='deleted'
-          AND s.run_state NOT IN ('running','queued','pending','stopping')
-          AND NOT EXISTS(SELECT 1 FROM history_web_leases l
-              WHERE l.session_id=s.session_id AND l.expires_at>? AND l.released=0
-                  AND instr(l.client_id, char(31))=0)
-          AND (
-            (s.memory_status='processing' AND julianday(COALESCE(
-              NULLIF(json_extract(s.record_json,'$.memory_claimed_at'),''),
-              NULLIF(json_extract(s.record_json,'$.memory_state_updated_at'),''),s.updated_at))
-              <=julianday(?,'unixepoch'))
-            OR (s.summary_status='processing' AND julianday(COALESCE(
-              NULLIF(json_extract(s.record_json,'$.summary_claimed_at'),''),
-              NULLIF(json_extract(s.record_json,'$.summary_state_updated_at'),''),s.updated_at))
-              <=julianday(?,'unixepoch'))
-          ) ORDER BY s.updated_at,s.session_id LIMIT 100"""
-    params = (now, now - MEMORY_CLAIM_STALE_SECONDS, now - SUMMARY_CLAIM_STALE_SECONDS)
-    with connection(root, user) as db:
-        if db.execute(candidate_sql, params).fetchone() is None:
+def touch_session_lease(root, user, source, session_id, client_id, *, now=None):
+    store, key = CardStore(root, user), session_key(source, session_id)
+    if not client_id or not store.path.is_file():
+        return 0
+    current = time.time() if now is None else float(now)
+    with store.db(write=True) as db:
+        if not db.execute("SELECT 1 FROM card_sessions WHERE session_key=? AND lifecycle='open'",
+                          (key,)).fetchone():
             return 0
-    with connection(root, user, write=True) as db:
-        # Recheck under the write lease; a worker may have renewed its claim.
-        rows = db.execute(candidate_sql, params).fetchall()
-        for row in rows:
-            record = _object(row["record_json"], {})
-            changed = False
-            for kind, seconds in (("memory", MEMORY_CLAIM_STALE_SECONDS),
-                                  ("summary", SUMMARY_CLAIM_STALE_SECONDS)):
-                if record.get(f"{kind}_status") != "processing":
-                    continue
-                raw = record.get(f"{kind}_claimed_at") or record.get(f"{kind}_state_updated_at") or record.get("updated_at")
-                try:
-                    started = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-                    if started.tzinfo is None:
-                        started = started.replace(tzinfo=timezone.utc)
-                    expired = now - started.timestamp() >= seconds
-                except (TypeError, ValueError, OverflowError):
-                    expired = False  # corrupt/unknown is not proof of expiry
-                if not expired:
-                    continue
-                record[f"{kind}_status"] = "queued"
-                record[f"{kind}_lease_recovered_at"] = datetime.fromtimestamp(now, timezone.utc).isoformat()
-                for key in list(record):
-                    if key.startswith(f"{kind}_claim"):
-                        record.pop(key, None)
-                changed = True
-            if changed:
-                _upsert_session_row(db, record)
-                recovered += 1
-        if recovered:
-            _bump_registry(db, datetime.fromtimestamp(now, timezone.utc).isoformat())
-    return recovered
+        old = db.execute("SELECT * FROM card_leases WHERE session_key=? AND client_id=?",
+                         (key, client_id)).fetchone()
+        # Unordered old clients cannot undo a sequenced release fence.
+        if old is None:
+            db.execute("INSERT INTO card_leases(session_key,client_id,expires_at) VALUES(?,?,?)",
+                       (key, client_id, current + WEB_LEASE_SECONDS))
+        elif old["sequence"] == 0 and (
+                old["released"] or old["expires_at"] <= current + WEB_LEASE_SECONDS - WEB_LEASE_CHECKPOINT_SECONDS):
+            db.execute("UPDATE card_leases SET expires_at=?,released=0 WHERE session_key=? AND client_id=?",
+                       (current + WEB_LEASE_SECONDS, key, client_id))
+        return db.execute("SELECT count(*) FROM card_leases WHERE session_key=? "
+                          "AND expires_at>? AND released=0", (key, current)).fetchone()[0]
 
 
-def touch_session_lease(root: Path, user: str, source: str, session_id: str,
-                        client_id: str, *, now: float | None = None) -> bool:
-    """Small durable presence checkpoint; a late heartbeat never recreates history.
-
-    Read-only fast path avoids a write transaction for each 15-second heartbeat.
-    All processes still recheck session existence inside any renewal transaction.
-    """
-    current = time.time() if now is None else now
-    stored_client_id = _lease_client_key(source, client_id)
-    with connection(root, user) as db:
-        row = db.execute("""SELECT l.expires_at, l.released FROM history_sessions s
-            LEFT JOIN history_web_leases l ON l.session_id=s.session_id AND l.client_id=?
-            WHERE s.source=? AND s.session_id=? AND s.lifecycle='open'""",
-            (stored_client_id, source, session_id)).fetchone()
-        if row is None:
-            return False
-        if row['released']:
-            return False
-        if row['expires_at'] is not None and row['expires_at'] > current + WEB_LEASE_SECONDS - WEB_LEASE_CHECKPOINT_SECONDS:
-            return True
-    with connection(root, user, write=True) as db:
-        if db.execute("SELECT 1 FROM history_sessions WHERE source=? AND session_id=? AND lifecycle='open'",
-                      (source, session_id)).fetchone() is None:
-            return False
-        changed = db.execute("""INSERT INTO history_web_leases(session_id, client_id, expires_at) VALUES(?, ?, ?)
-            ON CONFLICT(session_id, client_id) DO UPDATE SET expires_at=MAX(expires_at, excluded.expires_at)
-            WHERE released=0""",
-            (session_id, stored_client_id, current + WEB_LEASE_SECONDS))
-        return bool(changed.rowcount)
+def touch_web_session_lease(root, user, session_id, client_id, *, now=None):
+    return touch_session_lease(root, user, "web", session_id, client_id, now=now)
 
 
-def touch_web_session_lease(root: Path, user: str, session_id: str, client_id: str,
-                            *, now: float | None = None) -> bool:
-    """Compatibility wrapper for browser callers."""
-    return touch_session_lease(root, user, 'web', session_id, client_id, now=now)
-
-
-def active_session_lease_clients(root: Path, user: str, source: str, session_id: str,
-                                 *, exclude_client_id: str = '',
-                                 now: float | None = None) -> list[str]:
-    """Return durable live clients without creating a missing history database."""
-    if not database_path(root, user).is_file():
+def active_session_lease_clients(root, user, source, session_id, *, now=None,
+                                 exclude_client_id=""):
+    store = CardStore(root, user)
+    if not store.path.is_file():
         return []
-    current = time.time() if now is None else now
-    scope_sql, scope_value = _lease_scope_sql(source)
-    excluded = _lease_client_key(source, exclude_client_id) if exclude_client_id else ''
-    with connection(root, user) as db:
-        rows = db.execute(
-            """SELECT l.client_id FROM history_web_leases l
-               JOIN history_sessions s ON s.session_id=l.session_id
-               WHERE s.source=? AND s.session_id=? AND s.lifecycle='open'
-                 AND l.expires_at>? AND l.released=0 AND l.client_id!=? AND """ + scope_sql + """
-               ORDER BY l.client_id""",
-            (source, session_id, current, excluded, scope_value),
-        ).fetchall()
-    prefix = f'{source}{_LEASE_SCOPE_SEPARATOR}'
-    return [str(row['client_id'])[len(prefix):] if source != 'web' else str(row['client_id'])
-            for row in rows]
+    current = time.time() if now is None else float(now)
+    with store.db() as db:
+        return [row[0] for row in db.execute("SELECT client_id FROM card_leases "
+            "WHERE session_key=? AND expires_at>? AND released=0 AND client_id!=? "
+            "ORDER BY client_id",
+            (session_key(source, session_id), current, exclude_client_id))]
 
 
-def release_durable_session_lease(root: Path, user: str, source: str,
-                                  session_id: str, client_id: str) -> bool:
-    """Release an explicitly closed client; ordered pagehide uses lease_presence."""
-    if not database_path(root, user).is_file():
+def release_durable_session_lease(root, user, source, session_id, client_id, *, now=None):
+    store = CardStore(root, user)
+    if not store.path.is_file():
         return False
-    with connection(root, user, write=True) as db:
-        exists = db.execute(
-            "SELECT 1 FROM history_sessions WHERE source=? AND session_id=?",
-            (source, session_id),
-        ).fetchone()
-        if exists is None:
-            return False
-        changed = db.execute(
-            "DELETE FROM history_web_leases WHERE session_id=? AND client_id=?",
-            (session_id, _lease_client_key(source, client_id)),
-        ).rowcount
-    return bool(changed)
+    with store.db(write=True) as db:
+        return bool(db.execute("UPDATE card_leases SET released=1 WHERE session_key=? AND client_id=? "
+                               "AND sequence=0", (session_key(source, session_id), client_id)).rowcount)
 
 
-_EMPTY = f"{_STALE_OFFLINE} AND NOT {_HAS_DATA}"
+def _candidates(root, user, *, now, idle_seconds, limit, after=None, empty_only=False):
+    store = CardStore(root, user)
+    if not store.path.is_file():
+        return []
+    cutoff = datetime.fromtimestamp(now - idle_seconds, timezone.utc).isoformat()
+    empty_cutoff = datetime.fromtimestamp(now - WEB_EMPTY_GRACE_SECONDS, timezone.utc).isoformat()
+    clauses, args = [
+        "source='web'",
+        "(lifecycle='open' OR lifecycle='closed' AND json_extract(record_json,'$.offline_inspection_pending')=1)",
+        "((last_seq=0 AND updated_at<=?) OR (last_seq>0 AND updated_at<=?))",
+        "NOT EXISTS(SELECT 1 FROM card_leases l WHERE l.session_key=s.session_key "
+        "AND l.expires_at>? AND l.released=0)",
+    ], [empty_cutoff, cutoff, now]
+    if empty_only:
+        clauses.append("last_seq=0")
+    if after:
+        clauses.append("(updated_at,session_key)>(?,?)")
+        args.extend(after)
+    with store.db() as db:
+        return [dict(row) for row in db.execute(
+            f"SELECT * FROM card_sessions s WHERE {' AND '.join(clauses)} "
+            "ORDER BY updated_at,session_key LIMIT ?", (*args, max(1, min(500, limit))))]
 
 
-def _bump_registry(database, timestamp: str) -> None:
-    database.execute("""INSERT INTO history_meta(key, value) VALUES('registry_revision', '1')
-        ON CONFLICT(key) DO UPDATE SET value=CAST(COALESCE(NULLIF(history_meta.value, ''), '0') AS INTEGER) + 1""")
-    database.execute("INSERT OR REPLACE INTO history_meta(key, value) VALUES('registry_updated_at', ?)",
-                     (timestamp,))
-
-
-def inspect_stale_web_sessions(
-    root: Path,
-    user: str,
-    *,
-    now: float | None = None,
-    protected_sessions: Collection[str] = (),
-    stop: threading.Event | None = None,
-    batch_size: int = 100,
-    idle_seconds: int | float = WEB_STARTUP_INSPECTION_DELAY_SECONDS,
-    queue_memory: Callable[..., dict[str, Any]] | None = None,
-    queue_summary: Callable[..., dict[str, Any]] | None = None,
-    queue_reason: str = 'startup_offline_session',
-) -> dict[str, Any]:
-    """One startup pass: retire offline data sessions and delete empty ones.
-
-    Candidate pages are read in bounded batches. Every session is rechecked
-    under SQLite's write lease before it is closed or deleted. Memory work is
-    only registered here; the maintenance worker owns model execution.
-    """
-    result: dict[str, Any] = {
-        'inspected': 0, 'closed_sessions': [], 'queued_memory': [],
-        'queued_summary': [],
-        'deleted_sessions': [], 'preserved_sessions': [], 'skipped_busy': 0,
-        'closed_count': 0, 'queued_memory_count': 0, 'queued_summary_count': 0,
-        'deleted_count': 0,
-        'preserved_count': 0, 'error_count': 0, 'errors': [],
-    }
-
-    def sample(name: str, value: Any) -> None:
-        values = result[name]
-        if len(values) < WEB_INSPECTION_RESULT_SAMPLE_LIMIT:
-            values.append(value)
-    if not database_path(root, user).is_file():
-        return result
-    if queue_memory is None:
-        from run.history.session_api import queue_memory_extraction
-        queue_memory = queue_memory_extraction
-    if queue_summary is None:
-        from run.history.session_ops import queue_summary
+def _retire(root, user, candidate, *, now, protected, empty_only=False):
     from run.conversation import session_lock
-
-    current = time.time() if now is None else now
-    timestamp = datetime.fromtimestamp(current, timezone.utc).isoformat()
-    recover_expired_processing(root, user, now=current)
-    idle_cutoff = datetime.fromtimestamp(
-        current - max(1.0, float(idle_seconds)), timezone.utc
-    ).isoformat()
-    empty_cutoff = datetime.fromtimestamp(
-        current - WEB_EMPTY_GRACE_SECONDS, timezone.utc
-    ).isoformat()
-    review_sql = _startup_needs_review_sql()
-    empty_sql = f"{_stale_offline_sql()} AND NOT {_HAS_DATA}"
-    candidate_sql = f"(({review_sql}) OR ({empty_sql}))"
-    protected = set(protected_sessions)
-    cursor: tuple[str, str] | None = None
-    page_size = max(1, min(500, int(batch_size)))
-    while stop is None or not stop.is_set():
-        cursor_sql = ''
-        params: list[Any] = [idle_cutoff, current, empty_cutoff, current]
-        if cursor is not None:
-            cursor_sql = ' AND (s.updated_at>? OR (s.updated_at=? AND s.session_id>?))'
-            params.extend((cursor[0], cursor[0], cursor[1]))
-        with connection(root, user) as database:
-            rows = database.execute(
-                f"SELECT s.updated_at, s.session_id FROM history_sessions s WHERE {candidate_sql}{cursor_sql} "
-                "ORDER BY s.updated_at, s.session_id LIMIT ?",
-                (*params, page_size),
-            ).fetchall()
-        if not rows:
-            break
-        for candidate in rows:
-            if stop is not None and stop.is_set():
-                break
-            session_id = str(candidate['session_id'])
-            cursor = (str(candidate['updated_at']), session_id)
-            if session_id in protected:
-                continue
-            lock = session_lock(root, user, 'web', session_id)
-            if not lock.acquire(blocking=False):
-                result['skipped_busy'] += 1
-                continue
-            action = ''
+    store, key = CardStore(root, user), candidate["session_key"]
+    if candidate["session_id"] in protected:
+        return "preserved"
+    lock = session_lock(root, user, "web", candidate["session_id"])
+    if not lock.acquire(blocking=False):
+        return "busy"
+    try:
+        with store.db(write=True) as db:
+            row = db.execute("SELECT * FROM card_sessions WHERE session_key=?", (key,)).fetchone()
+            if row is None or row["lifecycle"] == "deleted" or row["updated_at"] != candidate["updated_at"]:
+                return "preserved"
+            if db.execute("SELECT 1 FROM card_leases WHERE session_key=? AND expires_at>? AND released=0",
+                          (key, now)).fetchone():
+                return "busy"
             try:
-                with connection(root, user, write=True) as database:
-                    row = database.execute(
-                        f"SELECT s.record_json, s.lifecycle, CASE WHEN {_HAS_DATA} THEN 1 ELSE 0 END AS has_data "
-                        f"FROM history_sessions s WHERE s.session_id=? AND {candidate_sql}",
-                        (session_id, idle_cutoff, current, empty_cutoff, current),
-                    ).fetchone()
-                    if row is None:
-                        continue
-                    result['inspected'] += 1
-                    if not bool(row['has_data']):
-                        _delete_session_windows(database, 'web', session_id)
-                        database.execute("DELETE FROM history_active_sessions WHERE source='web' AND session_id=?", (session_id,))
-                        database.execute("DELETE FROM history_sessions WHERE source='web' AND session_id=?", (session_id,))
-                        _bump_registry(database, timestamp)
-                        action = 'deleted'
-                    else:
-                        record = _object(row['record_json'], {})
-                        if not isinstance(record, dict):
-                            raise ValueError('历史会话索引不是有效对象')
-                        changed = (
-                            str(row['lifecycle']) != 'closed'
-                            or str(record.get('lifecycle') or '') != 'closed'
-                            or str(record.get('run_state') or '') != 'idle'
-                        )
-                        if changed:
-                            record['lifecycle'] = 'closed'
-                            record['run_state'] = 'idle'
-                            record['startup_offline_closed_at'] = timestamp
-                            _upsert_session_row(database, record)
-                        unbound = database.execute(
-                            "DELETE FROM history_active_sessions WHERE source='web' AND session_id=?", (session_id,)
-                        ).rowcount > 0
-                        if changed or unbound:
-                            _bump_registry(database, timestamp)
-                        action = 'data'
-                if action == 'deleted':
-                    result['deleted_count'] += 1
-                    sample('deleted_sessions', session_id)
-                    continue
-                if action == 'data':
-                    original_record = _object(row['record_json'], {})
-                    if (
-                        str(row['lifecycle']) != 'closed'
-                        or not isinstance(original_record, dict)
-                        or str(original_record.get('lifecycle') or '') != 'closed'
-                    ):
-                        result['closed_count'] += 1
-                        sample('closed_sessions', session_id)
-                    queued = queue_memory(
-                        root, user, 'web', session_id,
-                        reason=queue_reason,
-                    )
-                    status = str((queued or {}).get('status') or 'unknown')
-                    if status == 'queued':
-                        result['queued_memory_count'] += 1
-                        sample('queued_memory', session_id)
-                    else:
-                        result['preserved_count'] += 1
-                        sample('preserved_sessions', {
-                            'session_id': session_id,
-                            'reason': str((queued or {}).get('reason') or status),
-                        })
-                    summary = queue_summary(root, user, 'web', session_id)
-                    if str((summary or {}).get('status') or '') == 'queued':
-                        result['queued_summary_count'] += 1
-                        sample('queued_summary', session_id)
-            except Exception as exc:
-                result['error_count'] += 1
-                sample('errors', {
-                    'session_id': session_id,
-                    'exception_type': type(exc).__name__,
-                })
-            finally:
-                lock.release()
-        if len(rows) < page_size:
-            break
+                CardStore.require_idle(db, key)
+            except CardConflictError:
+                return "busy"
+            record = session_record(db, row)
+            if maintenance_claim_active(record, datetime.fromtimestamp(now, timezone.utc)):
+                return "busy"
+            if not row["last_seq"]:
+                _hide(db, key)
+                return "deleted"
+            if empty_only:
+                return "preserved"
+            import json
+            metadata = {**json.loads(row["record_json"]), "offline_inspection_pending": True}
+            db.execute("UPDATE card_sessions SET lifecycle='closed',record_json=? WHERE session_key=?",
+                       (json_text(metadata), key))
+            db.execute("DELETE FROM card_bindings WHERE session_key=?", (key,))
+            return "closed"
+    finally:
+        lock.release()
+
+
+def cleanup_empty_web_sessions(root, user, *, now=None, protected_sessions=(), limit=100):
+    current = time.time() if now is None else float(now)
+    result = {"deleted_sessions": [], "skipped_busy": 0}
+    for candidate in _candidates(root, user, now=current, idle_seconds=WEB_EMPTY_GRACE_SECONDS,
+                                 limit=limit, empty_only=True):
+        status = _retire(root, user, candidate, now=current, protected=protected_sessions, empty_only=True)
+        if status == "deleted":
+            result["deleted_sessions"].append(candidate["session_id"])
+        elif status == "busy":
+            result["skipped_busy"] += 1
     return result
 
 
-def cleanup_empty_web_sessions(root: Path, user: str, *, now: float | None = None,
-                               protected_sessions: Collection[str] = (), limit: int = 100) -> dict[str, Any]:
-    from run.conversation import session_lock
-
-    result: dict[str, Any] = {'deleted_sessions': [], 'skipped_busy': 0}
-    if not database_path(root, user).is_file():
-        return result
-    current = time.time() if now is None else now
-    cutoff = datetime.fromtimestamp(current - WEB_EMPTY_GRACE_SECONDS, timezone.utc).isoformat()
-    args = (cutoff, current)
-    with connection(root, user) as db:
-        candidates = db.execute(f"SELECT s.session_id FROM history_sessions s WHERE {_EMPTY} ORDER BY s.updated_at, s.session_id LIMIT ?",
-                                (*args, max(1, min(500, limit)))).fetchall()
-        expired = db.execute('SELECT 1 FROM history_web_leases WHERE expires_at<=? LIMIT 1', (current,)).fetchone()
-    for row in candidates:
-        sid = row['session_id']
-        if sid in protected_sessions:
-            continue
-        lock = session_lock(root, user, 'web', sid)
-        if not lock.acquire(blocking=False):
-            result['skipped_busy'] += 1
-            continue
-        try:
-            with connection(root, user, write=True) as db:
-                # Serialize with heartbeat, a new round, memory/summary claims,
-                # another cleanup process and registry changes before deleting.
-                if db.execute(f"SELECT 1 FROM history_sessions s WHERE s.session_id=? AND {_EMPTY}", (sid, *args)).fetchone() is None:
+def inspect_stale_web_sessions(root, user, *, now=None, protected_sessions=(), stop=None,
+                               batch_size=100, idle_seconds=90, queue_memory=None,
+                               queue_summary=None, queue_reason="startup_offline_session"):
+    from run.history.session_api import queue_memory_extraction
+    from run.history.session_ops import queue_summary as default_summary
+    memory, summary = queue_memory or queue_memory_extraction, queue_summary or default_summary
+    current = time.time() if now is None else float(now)
+    result = {key: [] for key in ("closed_sessions", "queued_memory", "queued_summary",
+                                  "deleted_sessions", "preserved_sessions", "errors")}
+    result.update(inspected=0, skipped_busy=0, error_count=0)
+    for key in ("closed", "deleted", "preserved", "queued_memory", "queued_summary"):
+        result[f"{key}_count"] = 0
+    def sample(key, value, counter):
+        result[counter] += 1
+        if len(result[key]) < 20:
+            result[key].append(value)
+    after = None
+    while stop is None or not stop.is_set():
+        candidates = _candidates(root, user, now=current, idle_seconds=idle_seconds,
+                                  limit=batch_size, after=after)
+        if not candidates:
+            break
+        for candidate in candidates:
+            if stop is not None and stop.is_set():
+                break
+            after = candidate["updated_at"], candidate["session_key"]
+            sid = candidate["session_id"]
+            result["inspected"] += 1
+            try:
+                status = _retire(root, user, candidate, now=current, protected=protected_sessions)
+                if status == "busy":
+                    result["skipped_busy"] += 1
                     continue
-                _delete_session_windows(db, 'web', sid)
-                db.execute("DELETE FROM history_active_sessions WHERE source='web' AND session_id=?", (sid,))
-                db.execute("DELETE FROM history_sessions WHERE source='web' AND session_id=?", (sid,))
-                _bump_registry(db, datetime.fromtimestamp(current, timezone.utc).isoformat())
-            result['deleted_sessions'].append(sid)
-        finally:
-            lock.release()
-    if expired is not None:
-        with connection(root, user, write=True) as db:
-            db.execute('DELETE FROM history_web_leases WHERE rowid IN (SELECT rowid FROM history_web_leases WHERE expires_at<=? LIMIT 1000)', (current,))
+                if status == "preserved":
+                    sample("preserved_sessions", {"session_id": sid, "reason": "protected_or_changed"}, "preserved_count")
+                    continue
+                sample(f"{status}_sessions", sid, f"{status}_count")
+                if status == "closed":
+                    queued = memory(root, user, "web", sid, reason=queue_reason)
+                    if queued.get("status") == "queued":
+                        sample("queued_memory", sid, "queued_memory_count")
+                    elif queued.get("reason"):
+                        sample("preserved_sessions", {"session_id": sid, "reason": queued["reason"]}, "preserved_count")
+                    queued = summary(root, user, "web", sid)
+                    if queued and queued.get("summary_status") == "queued":
+                        sample("queued_summary", sid, "queued_summary_count")
+                    mutate_registry_record(root, user, "web", sid,
+                        lambda record: {**record, "offline_inspection_pending": False})
+            except Exception as error:
+                sample("errors", {"session_id": sid, "exception_type": type(error).__name__}, "error_count")
     return result

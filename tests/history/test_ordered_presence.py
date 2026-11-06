@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 
 import pytest
 
+from run.cards import card_connection, session_key
 from run.history import reserve_session
-from run.history import store_core
 from run.history.lease_presence import other_presence, update_presence
 from run.history.web_lifecycle import active_session_lease_clients, touch_session_lease
 from web.service import WebRunService
@@ -18,10 +17,10 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def root(tmp_path):
     (tmp_path / "config").mkdir()
-    (tmp_path / "config/global_config.json").write_text(
+    (tmp_path / "config/global_config.yaml").write_text(
         json.dumps({"memory": {"extraction_mode": "compression_only"}}), "utf-8")
     (tmp_path / "users/alice").mkdir(parents=True)
-    (tmp_path / "users/alice/user_config.json").write_text("{}", "utf-8")
+    (tmp_path / "users/alice/user_config.yaml").write_text("{}", "utf-8")
     reserve_session(tmp_path, "alice", "web", "conversation")
     return tmp_path
 
@@ -62,9 +61,10 @@ def test_release_before_first_heartbeat_fences_pending_acquire(root):
     assert result == {"exists": True, "accepted": False, "active": False}
     assert not touch_session_lease(root, "alice", "web", "conversation", "web_pending")
     assert other_presence(root, "alice", "web", "conversation")["active_clients"] == 0
-    with store_core.connection(root, "alice") as db:
+    with card_connection(root, "alice") as db:
         assert tuple(db.execute(
-            "SELECT sequence,released FROM history_web_leases WHERE client_id='web_pending'"
+            "SELECT sequence,released FROM card_leases WHERE session_key=? AND client_id='web_pending'",
+            (session_key("web", "conversation"),),
         ).fetchone()) == (2, 1)
 
 
@@ -101,10 +101,12 @@ def test_tombstone_is_not_scheduler_presence_and_closed_session_cannot_revive(ro
 
 def test_released_fence_expires_under_existing_bounded_cleanup(root):
     from run.history import cleanup_empty_web_sessions
-    update_presence(root, "alice", "web", "conversation", "web_document", 1, release=True, now=100)
-    cleanup_empty_web_sessions(root, "alice", now=191)
-    with store_core.connection(root, "alice") as db:
-        assert db.execute("SELECT COUNT(*) FROM history_web_leases").fetchone()[0] == 0
+    import time
+    now = time.time()
+    update_presence(root, "alice", "web", "conversation", "web_document", 1, release=True, now=now)
+    cleanup_empty_web_sessions(root, "alice", now=now + 91)
+    with card_connection(root, "alice") as db:
+        assert db.execute("SELECT COUNT(*) FROM card_leases").fetchone()[0] == 0
 
 
 def test_single_delete_ignores_released_cross_worker_memory(root):
@@ -120,12 +122,12 @@ def test_bulk_delete_ignores_released_rows_but_protects_live_app(root):
     reserve_session(root, "alice", "app", "conversation")
     update_presence(root, "alice", "web", "conversation", "web_document", 1, release=True)
     update_presence(root, "alice", "app", "conversation", "app_device", 1)
-    with pytest.raises(HistoryError, match="其他页面或设备"):
+    with pytest.raises(HistoryError, match="未删除任何会话"):
         delete_all_sessions(root, "alice", None)
     update_presence(root, "alice", "app", "conversation", "app_device", 2, release=True)
     assert delete_all_sessions(root, "alice", None)[0] == 2
-    with store_core.connection(root, "alice") as db:
-        assert db.execute("SELECT COUNT(*) FROM history_web_leases").fetchone()[0] == 0
+    with card_connection(root, "alice") as db:
+        assert db.execute("SELECT COUNT(*) FROM card_leases").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "3", 9_007_199_254_740_992])
@@ -147,32 +149,3 @@ def test_http_ignores_stale_request_without_reporting_missing_session(root):
         response = client.post(base, json={"client_id": "web_document", "lease_sequence": 1})
         assert response.status_code == 200
         assert response.json()["ignored"] and not response.json()["leased"]
-
-
-@pytest.mark.parametrize("fail", [False, True])
-def test_v7_migration_backs_up_lease_rows_and_rolls_back_atomically(tmp_path, monkeypatch, fail):
-    path = tmp_path / "users/alice/history/history.sqlite3"
-    path.parent.mkdir(parents=True)
-    with sqlite3.connect(path) as db:
-        db.execute("CREATE TABLE history_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-        db.execute("INSERT INTO history_meta VALUES('schema_version','7')")
-        db.execute("CREATE TABLE history_web_leases(session_id TEXT NOT NULL,client_id TEXT NOT NULL,"
-                   "expires_at REAL NOT NULL,PRIMARY KEY(session_id,client_id))")
-        db.execute("INSERT INTO history_web_leases VALUES('keep','legacy',1234567890)")
-    if fail:
-        def broken(*args):
-            raise RuntimeError("injected migration failure")
-        monkeypatch.setattr(store_core, "_initialize_schema", broken)
-        with pytest.raises(RuntimeError, match="injected"):
-            store_core._ensure_database(path)
-    else:
-        store_core._ensure_database(path)
-    with sqlite3.connect(path) as db:
-        row = db.execute("SELECT * FROM history_web_leases").fetchone()
-        assert row == (("keep", "legacy", 1234567890.0) if fail
-                       else ("keep", "legacy", 1234567890.0, 0, 0))
-        assert db.execute("SELECT value FROM history_meta WHERE key='schema_version'").fetchone()[0] == ("7" if fail else "8")
-    backups = list(path.parent.glob(path.name + ".bak.*"))
-    assert backups
-    with sqlite3.connect(backups[0]) as db:
-        assert db.execute("SELECT * FROM history_web_leases").fetchone() == ("keep", "legacy", 1234567890.0)

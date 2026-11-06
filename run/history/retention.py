@@ -1,70 +1,52 @@
-"""Bounded, transactional retention of finished Cron conversation history only."""
-from __future__ import annotations
-
+"""Cron list retention hides terminal sessions; RAW and old files stay intact."""
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any
+from run.cards import CardConflictError, CardStore, session_key
+from run.history.index_core import _timestamp
+from run.history.memory_claims import maintenance_claim_active
+from run.history.registry_store import session_record
+from run.history.session_api import _hide
+from run.history.session_ops import list_records
 
-from run.history.store_core import connection, database_path
-from run.history.window_store import _delete_session_windows
 
-
-def cleanup_cron_history(
-    root: Path, user: str, *, retention_days: int = 7,
-    now: datetime | None = None, limit: int = 100,
-) -> dict[str, Any]:
-    """Keep running/claimed sessions; recheck expiry under SQLite's write lease.
-
-    New records use execution completion time, not metadata edits. Legacy rows
-    without that timestamp conservatively use their last registry update.
-    """
-    from run.config import cron_history_retention_days
-    from run.conversation import session_lock
-
-    days = cron_history_retention_days({"cron": {"history_retention_days": retention_days}})
-    result = {"retention_days": days, "deleted_sessions": 0, "deleted_windows": 0, "skipped_busy": 0}
-    if days == 0 or not database_path(root, user).is_file():
+def cleanup_cron_history(root, user, *, retention_days=7, now=None, limit=100):
+    if type(retention_days) is not int or retention_days < 0:
+        raise ValueError("retention_days must be a non-negative integer")
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    result = {"deleted_sessions": 0, "skipped_busy": 0, "raw_preserved": True}
+    if retention_days == 0:
         return result
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    cutoff = (current.astimezone(timezone.utc) - timedelta(days=days)).isoformat()
-    # Glob is case-sensitive and requires a nonempty task id; other background
-    # sources, interactive sessions and message sessions cannot match.
-    eligible = """source GLOB 'background:cron:?*'
-        AND run_state != 'running' AND memory_status != 'processing'
-        AND summary_status != 'processing'
-        AND julianday(COALESCE(json_extract(record_json, '$.cron_finished_at'), updated_at)) <= julianday(?)"""
-    with connection(root, user) as database:
-        candidates = database.execute(
-            f"SELECT source, session_id FROM history_sessions WHERE {eligible} ORDER BY updated_at, source, session_id LIMIT ?",
-            (cutoff, max(1, min(500, int(limit)))),
-        ).fetchall()
-    for candidate in candidates:
-        source, session_id = candidate['source'], candidate['session_id']
-        lock = session_lock(root, user, source, session_id)
+    current = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    current = current.replace(tzinfo=timezone.utc) if current.tzinfo is None else current
+    cutoff, store = current - timedelta(days=retention_days), CardStore(root, user)
+    from run.conversation import session_lock
+    for record in list_records(root, user, limit=None):
+        source = record["source"]
+        finished = _timestamp(record.get("cron_finished_at", record["updated_at"]))
+        if (not source.startswith("background:cron:") or not source.removeprefix("background:cron:")
+                or record["lifecycle"] != "closed" or finished is None or finished > cutoff):
+            continue
+        lock = session_lock(root, user, source, record["session_id"])
         if not lock.acquire(blocking=False):
-            result['skipped_busy'] += 1
+            result["skipped_busy"] += 1
             continue
         try:
-            with connection(root, user, write=True) as database:
-                # Protect against another process starting a run, renewing the
-                # conversation, or claiming its memory/summary after selection.
-                exists = database.execute(
-                    f"SELECT 1 FROM history_sessions WHERE source=? AND session_id=? AND {eligible}",
-                    (source, session_id, cutoff),
-                ).fetchone()
-                if exists is None:
-                    result['skipped_busy'] += 1
+            with store.db(write=True) as db:
+                key = session_key(source, record["session_id"])
+                row = db.execute("SELECT * FROM card_sessions WHERE session_key=?", (key,)).fetchone()
+                fresh = session_record(db, row)
+                finished = _timestamp(fresh.get("cron_finished_at", fresh["updated_at"]))
+                if row["lifecycle"] != "closed" or finished is None or finished > cutoff:
                     continue
-                windows = _delete_session_windows(database, source, session_id)
-                database.execute('DELETE FROM history_active_sessions WHERE source=? AND session_id=?', (source, session_id))
-                database.execute('DELETE FROM history_sessions WHERE source=? AND session_id=?', (source, session_id))
-                database.execute("""INSERT INTO history_meta(key, value) VALUES('registry_revision', '1')
-                    ON CONFLICT(key) DO UPDATE SET value=CAST(COALESCE(NULLIF(history_meta.value, ''), '0') AS INTEGER) + 1""")
-                database.execute("INSERT OR REPLACE INTO history_meta(key, value) VALUES('registry_updated_at', ?)", (current.isoformat(),))
-            result['deleted_sessions'] += 1
-            result['deleted_windows'] += windows
+                if fresh["run_state"] != "idle" or maintenance_claim_active(fresh, current):
+                    result["skipped_busy"] += 1
+                    continue
+                _hide(db, key)
+                result["deleted_sessions"] += 1
+        except CardConflictError:
+            result["skipped_busy"] += 1
         finally:
             lock.release()
+        if result["deleted_sessions"] >= limit:
+            break
     return result

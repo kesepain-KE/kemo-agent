@@ -1,355 +1,188 @@
-"""Conversation discovery, memory queueing, and user-facing session operations."""
-
+"""User-facing CardStream session operations; never fabricate an old window."""
 from __future__ import annotations
 
-import copy
-from pathlib import Path
-import shutil
-from typing import Any
-
-from run.config import user_dir
-from run.history import runtime_cache
-from run.history.commit_ops import commit_window, patch_archive_metadata
-from run.history.history_models import HistoryError, _lock, _now, _window_name, empty_window
-from run.history.index import (
-    find_record as find_index_record,
-    list_records as list_index_records,
-    list_records_page as list_index_records_page,
-    remove_all_sessions as remove_all_index_sessions,
-    remove_session as remove_index_session,
-    update_title as update_index_title,
-)
-from run.history.runtime_window import load_window, runtime_window_path
+import json
+from run.cards import CardConflictError, CardStore, json_text, session_key
+from run.config import load_config
+from run.history.index_core import find_record, new_conversation_id, reserve_session, _now
+from run.history.registry_store import mutate_registry_record
+from run.history.session_listing import query_session_records
+from run.history.session_ops import close_session, update_title
 from run.history.session_payload import session_payload
-from run.history.store import (
-    connection,
-    database_path,
-    find_window_name,
-    list_windows as list_stored_windows,
-    load_window_data,
-    rename_windows,
-    window_exists,
-)
+
+HistoryError = CardConflictError
 
 
-def find_window(root: Path, user: str, source: str, session_id: str) -> Path | None:
-    history_dir = user_dir(user, root) / "history"
-    # The registry normally knows the exact logical window identifier.
-    indexed = find_index_record(root, user, source, session_id)
-    archive_window = str((indexed or {}).get("archive_window") or "")
-    if archive_window and Path(archive_window).name == archive_window:
-        indexed_directory = history_dir / archive_window
-        if window_exists(indexed_directory):
-            return indexed_directory
-    stored_name = find_window_name(root, user, source, session_id)
-    return history_dir / stored_name if stored_name else None
+def ensure_session_appendable(root, user, source, session_id):
+    record = CardStore(root, user).session(source, session_id) if CardStore(root, user).path.is_file() else None
+    if record and record["lifecycle"] != "open":
+        raise HistoryError("对话已经结束或删除，请创建新对话")
 
 
-def ensure_session_appendable(root: Path, user: str, source: str, session_id: str) -> None:
-    """Reject terminal identities before Provider/tool work can start."""
-    indexed = find_index_record(root, user, source, session_id)
-    if isinstance(indexed, dict) and str(indexed.get("lifecycle") or "") in {"closed", "deleted"}:
-        raise HistoryError("对话已经结束，不能继续追加；请创建新对话")
-    if indexed is None and database_path(root, user).is_file():
-        with connection(root, user) as database:
-            deleted = database.execute(
-                "SELECT 1 FROM history_deleted_sessions WHERE source=? AND session_id=?",
-                (source, session_id),
-            ).fetchone()
-        if deleted is not None:
-            raise HistoryError("对话已经删除，不能用旧链接继续；请创建新对话")
-
-
-def queue_memory_extraction(
-    root: Path,
-    user: str,
-    source: str,
-    session_id: str,
-    *,
-    target_round: int | None = None,
-    reason: str = "session_closed",
-) -> dict[str, Any]:
-    """Durably queue a bounded set of committed rounds for memory extraction."""
-
-    directory = find_window(root, user, source, session_id)
-    if directory is None:
-        return {
-            "status": "skipped",
-            "reason": "no_archive",
-            "rounds": 0,
-            "processed_round": 0,
-        }
-    data = load_window_data(directory)
-    if not isinstance(data, dict) or not data.get("complete"):
-        raise HistoryError(f"历史窗口尚未完成提交：{directory}")
-    window = {"data": data}
-    rounds = max(0, int(data.get("rounds") or 0))
-    processed_round = max(0, int(data.get("memory_processed_round") or 0))
-    requested_target = rounds if target_round is None else max(0, int(target_round))
-    requested_target = min(rounds, requested_target)
-    existing_target = max(0, int(data.get("memory_target_round") or 0))
-    bounded_target = max(requested_target, existing_target)
-    if rounds < 1 or processed_round >= bounded_target:
-        return {
-            "status": "skipped",
-            "reason": (
-                "already_processed"
-                if reason == "manual_compression"
-                else "no_pending_rounds"
-            ),
-            "rounds": rounds,
-            "processed_round": processed_round,
-            "target_round": bounded_target,
-            "pending_rounds": 0,
-        }
-    from run.config import load_config
+def queue_memory_extraction(root, user, source, session_id, *, target_seq=None, reason="session_closed"):
+    record = find_record(root, user, source, session_id)
+    if record is None:
+        return {"status": "skipped", "reason": "no_history"}
+    target = min(record["last_seq"], target_seq if target_seq is not None else record["last_seq"])
+    if target <= record["memory_processed_seq"]:
+        return {"status": "skipped", "reason": "already_processed", "target_seq": target}
     from run.memory import memory_extraction_mode
-
     if memory_extraction_mode(load_config(user, root)) == "disabled":
-        return {
-            "status": "skipped",
-            "reason": "memory_extraction_disabled",
-            "rounds": rounds,
-            "processed_round": processed_round,
-            "target_round": bounded_target,
-            "pending_rounds": 0,
-        }
-    data["memory_status"] = "queued"
-    data["memory_queue_reason"] = str(reason or "session_closed")
-    data["memory_target_round"] = bounded_target
-    data["memory_queued_at"] = _now()
-    data.pop("memory_error", None)
-    patch_archive_metadata(
-        directory,
-        window,
-        updates={
-            "memory_status": "queued",
-            "memory_queue_reason": data["memory_queue_reason"],
-            "memory_target_round": bounded_target,
-            "memory_queued_at": data["memory_queued_at"],
-        },
-        removals=("memory_error",),
-        metadata_only=True,
-    )
-    indexed = find_index_record(root, user, source, session_id)
-    if (
-        not isinstance(indexed, dict)
-        or str(indexed.get("memory_status") or "") not in {"queued", "processing"}
-        or int(indexed.get("memory_target_round") or 0) != bounded_target
-        or int(indexed.get("memory_processed_round") or 0) != processed_round
-    ):
-        raise HistoryError("记忆后台队列未能同步写入历史索引")
-    return {
-        "status": "queued",
-        "reason": data["memory_queue_reason"],
-        "rounds": rounds,
-        "processed_round": processed_round,
-        "target_round": bounded_target,
-        "pending_rounds": bounded_target - processed_round,
-    }
+        return {"status": "skipped", "reason": "memory_extraction_disabled"}
+    def queue(current):
+        current.update(memory_target_seq=max(target, int(current.get("memory_target_seq") or 0)),
+                       memory_queue_reason=reason, memory_queued_at=_now(), memory_retry_at="")
+        if not current.get("memory_claim_id"):
+            current["memory_status"] = "queued"
+        return current
+    updated = mutate_registry_record(root, user, source, session_id, queue)
+    return {"status": updated["memory_status"], "target_seq": updated["memory_target_seq"],
+            "processed_seq": updated["memory_processed_seq"]}
 
 
-def prepare_window(
-    root: Path, user: str, source: str, session_id: str
-) -> tuple[Path, dict[str, Any], bool]:
-    """Load a committed window or prepare a new in-memory window.
-
-    A new directory is not written until ``commit_window`` succeeds after the
-    provider response.  This prevents failed requests from creating empty
-    conversation windows.
-    """
-
-    ensure_session_appendable(root, user, source, session_id)
-    indexed = find_index_record(root, user, source, session_id)
-    existing = find_window(root, user, source, session_id)
-    if existing is not None:
-        window = load_window(existing)
-        generation = str((indexed or {}).get("session_generation") or "").strip()
-        if generation:
-            data = window.get("data")
-            if isinstance(data, dict) and not str(
-                data.get("session_generation") or ""
-            ).strip():
-                data["session_generation"] = generation
-        return existing, window, False
-    history_dir = user_dir(user, root) / "history"
-    generation = str((indexed or {}).get("session_generation") or "").strip()
-    return (
-        history_dir / _window_name(session_id),
-        empty_window(
-            user,
-            source,
-            session_id,
-            session_generation=generation,
-        ),
-        True,
-    )
+def list_sessions(root, user, source=None, **filters):
+    return [session_payload(record) for record in query_session_records(
+        root, user, source=source, **filters)[0]]
 
 
-def get_or_create_window(
-    root: Path, user: str, source: str, session_id: str
-) -> tuple[Path, dict[str, Any]]:
-    directory, window, is_new = prepare_window(root, user, source, session_id)
-    if is_new:
-        commit_window(directory, window)
-        runtime_cache.store(
-            runtime_window_path(directory),
-            copy.deepcopy(window),
-            version=runtime_cache.archive_version(window),
-        )
-    return directory, window
+def list_sessions_page(root, user, source=None, **filters):
+    records, more = query_session_records(root, user, source=source, **filters)
+    return [session_payload(record) for record in records], more
 
 
-def list_sessions(
-    root: Path,
-    user: str,
-    source: str | None,
-    *,
-    query: str = "",
-    archive_date: str = "",
-) -> list[dict[str, Any]]:
-    return [
-        session_payload(record)
-        for record in list_index_records(
-            root,
-            user,
-            source=source,
-            query=query,
-            archive_date=archive_date,
-        )
-    ]
+def rename_session(root, user, source, session_id, title):
+    return int(update_title(root, user, source, session_id, title) is not None)
 
 
-def list_sessions_page(
-    root: Path,
-    user: str,
-    source: str | None,
-    *,
-    query: str = "",
-    limit: int = 50,
-    before_updated_at: str = "",
-    archive_date: str = "",
-    favorites_only: bool = False,
-) -> tuple[list[dict[str, Any]], bool]:
-    records, has_more = list_index_records_page(
-        root,
-        user,
-        source=source,
-        query=query,
-        limit=limit,
-        before_updated_at=before_updated_at,
-        archive_date=archive_date,
-        favorites_only=favorites_only,
-    )
-    return [session_payload(record) for record in records], has_more
+def _hide(db, key):
+    CardStore.require_idle(db, key)
+    db.execute("UPDATE card_sessions SET lifecycle='deleted',updated_at=? WHERE session_key=?",
+               (_now(), key))
+    db.execute("DELETE FROM card_bindings WHERE session_key=?", (key,))
+    db.execute("DELETE FROM card_leases WHERE session_key=?", (key,))
 
 
-def _source_windows(root: Path, user: str, source: str | None) -> list[tuple[Path, str]]:
-    """Return committed logical windows for one user, optionally by source."""
-
-    history_dir = user_dir(user, root) / "history"
-    return [
-        (history_dir / str(item["window_name"]), str(item["session_id"]))
-        for item in list_stored_windows(root, user, source=source)
-        if str(item.get("session_id") or "")
-    ]
-
-
-def _matching_windows(
-    root: Path, user: str, source: str, session_id: str
-) -> list[Path]:
-    """Return only committed windows whose stored identity matches exactly."""
-
-    return [
-        directory
-        for directory, stored_session_id in _source_windows(root, user, source)
-        if stored_session_id == session_id
-    ]
+def delete_session(root, user, source, session_id):
+    store = CardStore(root, user)
+    if not store.path.is_file():
+        return 0
+    key = session_key(source, session_id)
+    with store.db(write=True) as db:
+        if not db.execute("SELECT 1 FROM card_sessions WHERE session_key=? AND lifecycle!='deleted'",
+                          (key,)).fetchone():
+            return 0
+        _hide(db, key)
+    return 1
 
 
-def rename_session(
-    root: Path, user: str, source: str, session_id: str, title: str
-) -> int:
-    """Persist a display title without changing chronological ordering."""
-
-    directories = _matching_windows(root, user, source, session_id)
-    changed_windows = rename_windows(root, user, source, session_id, title)
-    for directory in directories:
-        runtime_cache.drop(runtime_window_path(directory))
-    indexed = update_index_title(root, user, source, session_id, title)
-    return max(changed_windows, 1 if indexed is not None else 0)
-
-
-def _remove_window_cache(directory: Path) -> None:
-    runtime_cache.drop(runtime_window_path(directory))
-    for candidate in (runtime_window_path(directory), directory):
-        if candidate.is_dir():
-            with _lock(candidate):
-                shutil.rmtree(candidate)
-
-
-def delete_session(root: Path, user: str, source: str, session_id: str) -> int:
-    """Delete every verified history window belonging to a session."""
-
-    from run.history.delete_orchestrator import delete_history_sessions
-    directories = _matching_windows(root, user, source, session_id)
-    sessions, windows = delete_history_sessions(root, user, source, session_id)
-    for directory in directories:
-        _remove_window_cache(directory)
-    return max(sessions, windows)
-
-
-def delete_all_sessions(
-    root: Path, user: str, source: str | None, *, client_id: str = ""
-) -> tuple[int, int]:
-    """Delete one source, or all user history when source is explicitly None."""
-
-    if not database_path(root, user).is_file():
+def delete_all_sessions(root, user, source=None, *, client_id=""):
+    import time
+    store = CardStore(root, user)
+    if not store.path.is_file():
         return 0, 0
-    directories = [directory for directory, _ in _source_windows(root, user, source)]
-    if source is None:
-        from run.history.bulk_deletion import delete_user_history
-
-        result = delete_user_history(root, user, client_id=client_id)
-        for directory in directories:
-            _remove_window_cache(directory)
-        return result
-    from run.history.delete_orchestrator import delete_history_sessions
-    deleted_sessions, deleted_windows = delete_history_sessions(root, user, source)
-    for directory in directories:
-        _remove_window_cache(directory)
-    return deleted_sessions, deleted_windows
-
-
-def clear_session(root: Path, user: str, source: str, session_id: str) -> Path:
-    existing = find_window(root, user, source, session_id)
-    directory = existing or user_dir(user, root) / "history" / _window_name(session_id)
-    indexed = find_index_record(root, user, source, session_id)
-    window = empty_window(
-        user,
-        source,
-        session_id,
-        session_generation=str((indexed or {}).get("session_generation") or ""),
-    )
-    runtime_cache.drop(runtime_window_path(directory))
-    commit_window(directory, window)
-    runtime_cache.store(
-        runtime_window_path(directory),
-        copy.deepcopy(window),
-        version=runtime_cache.archive_version(window),
-    )
-    return directory
+    with store.db(write=True) as db:
+        sql, args = "SELECT session_key FROM card_sessions WHERE lifecycle!='deleted'", []
+        if source is not None:
+            sql += " AND source=?"
+            args.append(source)
+        keys = [row[0] for row in db.execute(sql, args)]
+        for key in keys:
+            others = db.execute("SELECT 1 FROM card_leases WHERE session_key=? AND released=0 "
+                                "AND expires_at>? AND client_id!=?", (key, time.time(), client_id)).fetchone()
+            if others:
+                raise HistoryError("仍有其他页面占用会话，未删除任何会话")
+            CardStore.require_idle(db, key)
+        for key in keys:
+            _hide(db, key)
+        # No physical historical records or old user files are removed.
+        return len(keys), 0
 
 
-def session_messages(
-    root: Path, user: str, source: str, session_id: str
-) -> list[dict[str, Any]]:
-    directory = find_window(root, user, source, session_id)
-    if directory is None:
+def clear_session(root, user, source, session_id):
+    """End this identity and create a fresh one; RAW is never erased/reused."""
+    close_session(root, user, source, session_id)
+    identity = new_conversation_id()
+    active_key = f"{source}:{user}" if source == "cli" else None
+    reserve_session(root, user, source, identity, active_key=active_key)
+    return identity
+
+
+def session_messages(root, user, source, session_id, *, limit=500):
+    store = CardStore(root, user)
+    if not store.path.is_file():
         return []
-    window = load_window(directory)
-    return [
-        dict(message)
-        for message in window["text"].get("messages", [])
-        if isinstance(message, dict)
-    ]
+    return [{"role": "user" if card.raw_kind == "user_text" else "assistant",
+             "content": card.raw_payload.get("text", ""), "seq": card.seq,
+             "integration_id": card.integration_id, "level": card.raw_level}
+            for card in store.raw_page(source, session_id, limit=limit)
+            if card.raw_kind in {"user_text", "agent_text"}]
+
+
+def session_statistics(root, user, source, session_id):
+    from run.infra import merge_usage_dict, new_usage_total
+    store = CardStore(root, user)
+    if not store.path.is_file():
+        return {"integration_count": 0, "tool_calls": 0, "usage": new_usage_total()}
+    key, usage = session_key(source, session_id), new_usage_total()
+    with store.db() as db:
+        integrations = db.execute("SELECT record_json FROM card_integrations WHERE session_key=?",
+                                  (key,)).fetchall()
+        for row in integrations:
+            merge_usage_dict(usage, json.loads(row[0]).get("usage", {}))
+        calls = db.execute("SELECT count(*) FROM card_tool_executions t JOIN card_integrations i "
+                           "USING(integration_id) WHERE i.session_key=?", (key,)).fetchone()[0]
+    return {"integration_count": len(integrations), "tool_calls": calls, "usage": usage}
+
+
+def integration_usage_rows(root, user):
+    """Aggregates retain their integration timestamp; callers mark daily estimates."""
+    store = CardStore(root, user)
+    if not store.path.is_file():
+        return
+    with store.db() as db:
+        for row in db.execute("SELECT i.updated_at,i.record_json FROM card_integrations i "
+                              "JOIN card_sessions s USING(session_key) WHERE s.lifecycle!='deleted'"):
+            yield {"occurred_at": row["updated_at"], "usage": json.loads(row["record_json"]).get("usage", {})}
+
+
+def withdraw_last_integration(root, user, source, session_id, *, expected_integration_count, expected_prompt):
+    """UI resend withdraws VIEW only; the original integration stays in RAW."""
+    store = CardStore(root, user)
+    key = session_key(source, session_id)
+    with store.db(write=True) as db:
+        CardStore.require_idle(db, key)
+        state = db.execute("SELECT * FROM card_sessions WHERE session_key=? AND lifecycle='open'",
+                           (key,)).fetchone()
+        integrations = db.execute("SELECT * FROM card_integrations WHERE session_key=? "
+                                  "ORDER BY created_at,integration_id", (key,)).fetchall()
+        if state is None or not integrations or expected_integration_count != len(integrations):
+            raise HistoryError("整合列表已改变，请刷新后重试")
+        last = next(
+            (row for row in reversed(integrations)
+             if not json.loads(row["record_json"]).get("withdrawn")),
+            None,
+        )
+        if last is None:
+            raise HistoryError("该整合已经撤回，不能重复撤回")
+        first = db.execute("SELECT raw_payload FROM context_cards WHERE integration_id=? "
+                           "AND raw_kind='user_text' AND raw_level='initial' ORDER BY seq LIMIT 1",
+                           (last["integration_id"],)).fetchone()
+        if first is None or json.loads(first[0]).get("text") != expected_prompt:
+            raise HistoryError("原始输入不匹配，不修改前台")
+        # A separate suffix can be withdrawn without changing the earlier summary.
+        if db.execute("SELECT 1 FROM context_cards WHERE session_key=? AND integration_id=? "
+                      "AND (view_kind='summary' OR absorbed_by IS NOT NULL) LIMIT 1",
+                      (key, last["integration_id"])).fetchone():
+            raise HistoryError("该轮内容已合并进压缩摘要，无法单独撤回；可发送新消息修正")
+        tokens = db.execute("SELECT coalesce(sum(view_tokens),0) FROM context_cards "
+                            "WHERE integration_id=? AND token_active=1", (last["integration_id"],)).fetchone()[0]
+        db.execute("UPDATE context_cards SET token_active=0,view_revision=view_revision+1 "
+                   "WHERE integration_id=? AND token_active=1", (last["integration_id"],))
+        db.execute("UPDATE card_sessions SET active_tokens=active_tokens-?,view_epoch=view_epoch+1,updated_at=? "
+                   "WHERE session_key=?", (tokens, _now(), key))
+        record = {**json.loads(last["record_json"]), "withdrawn": True}
+        db.execute("UPDATE card_integrations SET record_json=? WHERE integration_id=?",
+                   (json_text(record), last["integration_id"]))
+        return {"withdrawn": True, "integration_id": last["integration_id"],
+                "raw_preserved": True, "integration_count": len(integrations),
+                "prompt": expected_prompt, "content": json.loads(first[0]).get("content") or []}

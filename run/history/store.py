@@ -1,85 +1,15 @@
-"""Single storage entry point for conversation-history persistence."""
+"""Session control-plane persistence in cards.sqlite3, never the retired DB."""
+from __future__ import annotations
 
-from run.history.store_core import (
-    HISTORY_DB_FILENAME,
-    HISTORY_SCHEMA_VERSION,
-    _configure,
-    _ensure_schema,
-    clear_session_delete_fence,
-    connection,
-    database_path,
-)
-from run.history.window_store import (
-    _save_window_on_connection,
-    delete_session_windows,
-    delete_source_windows,
-    delete_window,
-    find_window_name,
-    list_windows,
-    load_window_data,
-    load_window,
-    patch_window_data,
-    rename_windows,
-    save_window,
-    save_window_bundle,
-    window_exists,
-    window_location,
-    window_path,
-)
-from run.history.message_store import _sync_archive_messages
-from run.history.summary_store import (
-    context_summary_exists,
-    read_context_summary,
-    write_context_summary,
-)
+from pathlib import Path
+
+from run.cards import CardStore, card_connection as connection
 from run.history.registry_store import (
-    claim_registry_record,
-    message_windows,
-    mutate_registry_record,
-    query_session_records,
-    read_active_binding,
-    read_latest_registry_record,
-    read_registry,
-    read_registry_metadata,
-    read_registry_record,
-    session_page_cursor,
+    mutate_registry_record, read_active_binding, read_registry_record,
     upsert_registry_record,
-    write_registry,
 )
+from run.history.session_listing import query_session_records, session_page_cursor
 
-__all__ = [
-    "HISTORY_DB_FILENAME",
-    "HISTORY_SCHEMA_VERSION",
-    "claim_registry_record",
-    "clear_session_delete_fence",
-    "connection",
-    "context_summary_exists",
-    "database_path",
-    "delete_session_windows",
-    "delete_source_windows",
-    "delete_window",
-    "find_window_name",
-    "list_windows",
-    "load_window",
-    "load_window_data",
-    "message_windows",
-    "mutate_registry_record",
-    "patch_window_data",
-    "query_session_records",
-    "read_active_binding",
-    "read_context_summary",
-    "read_latest_registry_record",
-    "read_registry",
-    "read_registry_metadata",
-    "read_registry_record",
-    "rename_windows",
-    "save_window",
-    "save_window_bundle",
-    "session_page_cursor",
-    "upsert_registry_record",
-    "window_exists",
-    "window_location",
-    "window_path",
-    "write_context_summary",
-    "write_registry",
-]
+
+def database_path(root: Path, user: str) -> Path:
+    return CardStore(root, user).path

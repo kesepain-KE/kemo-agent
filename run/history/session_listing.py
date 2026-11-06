@@ -1,75 +1,58 @@
-"""SQL-side history filters and stable pin-aware keyset pagination."""
+"""Pin-aware session keyset pagination over CardStream metadata and RAW."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any
 
-from run.history.session_marks import marked_record
-from run.history.store_core import _json, _object, connection
+from run.cards import CardStore, json_text
+from run.history.registry_store import session_record
 
-PIN = "COALESCE(m.pinned_at, '')"
+PIN = "coalesce(json_extract(s.record_json,'$.pinned_at'),'')"
 
 
-def query_session_records(
-    root: Path, user: str, *, source: str | None = None, query: str = "",
-    limit: int | None = None, before_updated_at: str = "", archive_date: str = "",
-    favorites_only: bool = False,
-) -> tuple[list[dict[str, Any]], bool]:
-    clauses = ["s.lifecycle != 'deleted'"]
-    params: list[Any] = []
+def query_session_records(root: Path, user: str, *, source: str | None = None,
+                          query: str = "", limit: int | None = None,
+                          before_updated_at: str = "", archive_date: str = "",
+                          favorites_only: bool = False) -> tuple[list[dict], bool]:
+    store = CardStore(root, user)
+    if not store.path.is_file():
+        return [], False
+    clauses, args = ["s.lifecycle!='deleted'"], []
     if source is not None:
         clauses.append("s.source=?")
-        params.append(source)
+        args.append(source)
     if favorites_only:
-        clauses.append("m.favorite=1")
+        clauses.append("json_extract(s.record_json,'$.favorite')=1")
     if query.strip():
-        clauses.append("""(
-            lower(s.title) LIKE ? OR lower(s.summary) LIKE ? OR lower(s.session_id) LIKE ?
-            OR EXISTS (SELECT 1 FROM history_messages AS message
-                WHERE message.source=s.source AND message.session_id=s.session_id
-                AND lower(message.content_text) LIKE ?))""")
-        needle = f"%{query.strip().casefold()}%"
-        params.extend([needle] * 4)
+        clauses.append("(instr(lower(s.record_json),lower(?))>0 OR instr(lower(s.session_id),lower(?))>0 "
+                       "OR EXISTS(SELECT 1 FROM context_cards c WHERE c.session_key=s.session_key "
+                       "AND instr(lower(c.raw_payload),lower(?))>0))")
+        args.extend([query.strip()] * 3)
     if archive_date:
-        clauses.append("date(s.updated_at, '+8 hours')=?")
-        params.append(archive_date)
+        clauses.append("date(s.updated_at,'+8 hours')=?")
+        args.append(archive_date)
     if before_updated_at:
-        parsed = _object(before_updated_at, None)
-        if isinstance(parsed, list) and len(parsed) == 5 and parsed[0] == "marks-v1" and all(
-            isinstance(item, str) for item in parsed
-        ):
-            clauses.append(f"({PIN}, s.updated_at, s.session_id, s.source) < (?, ?, ?, ?)")
-            params.extend(parsed[1:])
-        else:
-            # Old clients used 2/3 string tuples or a bare timestamp.
-            if isinstance(parsed, list) and len(parsed) in {2, 3} and all(
-                isinstance(item, str) for item in parsed
-            ):
-                columns = ["s.updated_at", "s.session_id", "s.source"][:len(parsed)]
-                clauses.append(f"({', '.join(columns)}) < ({', '.join('?' for _ in parsed)})")
-                params.extend(parsed)
-            else:
-                clauses.append("s.updated_at < ?")
-                params.append(before_updated_at)
-    requested = None if limit is None else max(1, int(limit))
-    sql = f"""SELECT s.record_json, {PIN} AS pinned_at, COALESCE(m.favorite, 0) AS favorite
-        FROM history_sessions AS s LEFT JOIN history_session_marks AS m USING(source, session_id)
-        WHERE {' AND '.join(clauses)}
-        ORDER BY {PIN} DESC, s.updated_at DESC, s.session_id DESC, s.source DESC"""
+        try:
+            cursor = json.loads(before_updated_at)
+        except ValueError:
+            cursor = None
+        if not (isinstance(cursor, list) and len(cursor) == 5 and cursor[0] == "cards-v1"
+                and all(isinstance(value, str) for value in cursor)):
+            raise ValueError("Invalid CardStream session cursor")
+        clauses.append(f"({PIN},s.updated_at,s.session_id,s.source)<(?,?,?,?)")
+        args.extend(cursor[1:])
+    requested = None if limit is None else max(1, min(500, int(limit)))
+    sql = (f"SELECT s.* FROM card_sessions s WHERE {' AND '.join(clauses)} "
+           f"ORDER BY {PIN} DESC,s.updated_at DESC,s.session_id DESC,s.source DESC")
     if requested is not None:
         sql += " LIMIT ?"
-        params.append(requested + 1)
-    with connection(root, user) as database:
-        rows = database.execute(sql, params).fetchall()
-    has_more = requested is not None and len(rows) > requested
-    selected = rows[:requested] if requested is not None else rows
-    return [marked_record(row) for row in selected], has_more
+        args.append(requested + 1)
+    with store.db() as db:
+        rows = db.execute(sql, args).fetchall()
+        selected = rows if requested is None else rows[:requested]
+        return [session_record(db, row) for row in selected], requested is not None and len(rows) > requested
 
 
-def session_page_cursor(record: dict[str, Any]) -> str:
-    updated_at = str(record.get("updated_at") or "")
-    session_id = str(record.get("session_id") or "")
-    source = str(record.get("source") or "")
-    if not updated_at or not session_id:
-        return ""
-    return _json(["marks-v1", str(record.get("pinned_at") or ""), updated_at, session_id, source])
+def session_page_cursor(record: dict) -> str:
+    return json_text(["cards-v1", str(record.get("pinned_at") or ""), record["updated_at"],
+                      record["session_id"], record["source"]])
