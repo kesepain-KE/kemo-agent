@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "1.5.2"
+VERSION = "2.0.0"
 DEFAULT_SOURCE = "cli"
 DEFAULT_SESSION = "default"
 
@@ -91,9 +91,9 @@ def _project_root() -> Path:
 
 def discover_user(explicit_user: str | None, root: Path | None = None, *, interactive: bool = False) -> str:
     try:
-        from run.config import load_dotenv
+        from run.config import load_kemo_yaml
 
-        load_dotenv((root or _project_root()) / ".env")
+        load_kemo_yaml((root or _project_root()) / "kemo.yaml")
     except ModuleNotFoundError:
         pass
     if explicit_user and explicit_user.strip():

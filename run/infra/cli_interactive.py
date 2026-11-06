@@ -63,12 +63,12 @@ def _interactive_command(
             print("暂无已提交会话。", file=stdout)
         for item in sessions:
             marker = "*" if item["session_id"] == session_id else " "
-            print(f"{marker} {item['session_id']} | rounds={item['rounds']} | {item['updated_at']}", file=stdout)
+            print(f"{marker} {item['session_id']} | integrations={item['integration_count']} | seq={item['last_seq']} | {item['updated_at']}", file=stdout)
         return True, session_id
     if command == "/clear":
-        clear_session(root, user, source, session_id)
-        print(f"已清空会话：{session_id}", file=stdout)
-        return True, session_id
+        new_session = clear_session(root, user, source, session_id)
+        print(f"已切换到空白会话：{new_session}；原始历史保留。", file=stdout)
+        return True, new_session
     if command == "/history":
         messages = session_messages(root, user, source, session_id)
         if not messages:
@@ -96,9 +96,9 @@ def _interactive_command(
         context = status["context"]
         print(
             f"user={user} | source={source} | session={session_id} | "
-            f"rounds={status['rounds']} | context≈{context['estimated_tokens_before']}/"
-            f"{context['input_budget']} | kept={context['rounds_kept']} | "
-            f"removed={context['rounds_removed']} | summary={status['summary_cache_exists']}",
+            f"seq={context['last_seq']} | context≈{context['estimated_tokens_before']}/"
+            f"{context['input_budget']} | cards={context['cards_active']} | "
+            f"summary={context['summary']['exists']}",
             file=stdout,
         )
         return True, session_id
@@ -107,11 +107,10 @@ def _interactive_command(
             {"user": user, "source": source, "session_id": session_id}, root=root
         )
         context = result["context"]
-        summary = context["summary"]
         print(
-            f"上下文整理完成：removed={context['rounds_removed']} | "
-            f"kept={context['rounds_kept']} | cache_hit={summary['cache_hit']} | "
-            f"generated={summary['generated']} | failed={summary['failed']}",
+            f"CardStream 整理完成：compressed={result['compressed']} | "
+            f"absorbed={context.get('absorbed_cards', 0)} | "
+            f"active={context['cards_active']} | tokens={context['history_tokens']}",
             file=stdout,
         )
         return True, session_id
@@ -448,20 +447,28 @@ def _interactive_command(
         return True, session_id
     if command == "/cron-start":
         from cron.scheduler import CronScheduler
+        from cron.collector import COLLECTION_ACTIONS, CollectorSupervisor
                 # 使用模块级单例
         if not hasattr(run_interactive, '_cron_scheduler'):
-            setattr(run_interactive, "_cron_scheduler", CronScheduler(root))
+            setattr(run_interactive, "_cron_scheduler", CronScheduler(
+                root, excluded_system_actions=COLLECTION_ACTIONS,
+            ))
+            setattr(run_interactive, "_collector_supervisor", CollectorSupervisor(root))
         sched = getattr(run_interactive, "_cron_scheduler")
         if sched.running:
             print("调度器已在运行。", file=stdout)
         else:
             sched.start()
+            getattr(run_interactive, "_collector_supervisor").start()
             print("调度器已启动。", file=stdout)
         return True, session_id
     if command == "/cron-stop":
         if hasattr(run_interactive, '_cron_scheduler'):
             sched = getattr(run_interactive, "_cron_scheduler")
             sched.stop()
+            collector = getattr(run_interactive, "_collector_supervisor", None)
+            if collector is not None:
+                collector.stop()
             print("调度器已停止。", file=stdout)
         else:
             print("调度器未运行。", file=stdout)

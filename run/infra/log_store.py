@@ -12,6 +12,7 @@ import sqlite3
 import threading
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
+import yaml
 
 from run.infra.runtime_diagnostics import diagnostic_identifier, invalidate_runtime_log_cache
 from run.infra.message_log_projection import message_log_exchanges
@@ -73,17 +74,31 @@ class LogStore:
         self.root = root.resolve()
         self.path = self.root / LOG_DB_RELATIVE
         self._lock = _store_lock(self.path)
-        self.retention_days = self._configured_retention(retention_days)
+        self._retention_override = retention_days
 
-    @staticmethod
-    def _configured_retention(value: int | None) -> int:
+    @property
+    def retention_days(self) -> int:
+        return self._configured_retention(self._retention_override)
+
+    def _configured_retention(self, value: int | None) -> int:
         if value is not None:
             return max(0, int(value))
-        raw = os.environ.get("KEMO_LOG_RETENTION_DAYS", "90")
+        raw = os.environ.get("KEMO_LOG_RETENTION_DAYS")
         try:
-            return max(0, int(raw))
+            if raw is not None:
+                return max(0, int(raw))
         except (TypeError, ValueError):
-            return DEFAULT_RETENTION_DAYS
+            pass
+        try:
+            document = yaml.safe_load(
+                (self.root / "config/global_config.yaml").read_text("utf-8")
+            )
+            configured = document.get("cron", {}).get("log_retention_days")
+            if type(configured) is int and configured >= 0:
+                return configured
+        except (OSError, ValueError, AttributeError, yaml.YAMLError):
+            pass
+        return DEFAULT_RETENTION_DAYS
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -213,15 +228,20 @@ class LogStore:
                 pass
 
     def _prune(self, connection: sqlite3.Connection) -> int:
-        if self.retention_days <= 0:
+        retention_days = self.retention_days
+        if retention_days <= 0:
             return 0
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         last = connection.execute(
             "SELECT value FROM log_meta WHERE key = 'last_pruned_ms'"
         ).fetchone()
-        if last is not None and now_ms - int(last[0] or 0) < 86_400_000:
+        last_policy = connection.execute(
+            "SELECT value FROM log_meta WHERE key = 'last_pruned_retention_days'"
+        ).fetchone()
+        if (last is not None and last_policy is not None
+                and last_policy[0] == str(retention_days) and now_ms - int(last[0] or 0) < 86_400_000):
             return 0
-        cutoff = int((datetime.now(timezone.utc) - timedelta(days=self.retention_days)).timestamp() * 1000)
+        cutoff = int((datetime.now(timezone.utc) - timedelta(days=retention_days)).timestamp() * 1000)
         before = connection.total_changes
         for table in ("cron_execution_logs", "message_route_logs"):
             connection.execute(f"DELETE FROM {table} WHERE rowid IN "
@@ -237,6 +257,11 @@ class LogStore:
             "INSERT INTO log_meta(key, value) VALUES('last_pruned_ms', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(now_ms),),
+        )
+        connection.execute(
+            "INSERT INTO log_meta(key, value) VALUES('last_pruned_retention_days', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(retention_days),),
         )
         return max(0, deleted)
 

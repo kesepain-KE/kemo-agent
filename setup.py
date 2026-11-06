@@ -92,20 +92,20 @@ def _install_deps() -> bool:
 
 
 def _setup_env(assume_yes: bool) -> bool:
-    """创建 .env（不存在时从 .env.example 复制），可选引导填写 API Key"""
-    env_path = ROOT / ".env"
-    example_path = ROOT / ".env.example"
+    """创建 kemo.yaml（不存在时从示例复制），可选引导填写 API Key"""
+    env_path = ROOT / "kemo.yaml"
+    example_path = ROOT / "kemo.yaml.example"
 
     if env_path.is_file():
-        _ok(".env 已存在，跳过")
+        _ok("kemo.yaml 已存在，跳过")
         return True
 
     if not example_path.is_file():
-        _warn(".env.example 不存在，请手动创建 .env")
+        _warn("kemo.yaml.example 不存在，请手动创建 kemo.yaml")
         return True
 
     shutil.copy(example_path, env_path)
-    _ok(".env 已从 .env.example 创建")
+    _ok("kemo.yaml 已从 kemo.yaml.example 创建")
 
     if assume_yes:
         return True
@@ -127,27 +127,35 @@ def _setup_env(assume_yes: bool) -> bool:
         print()
         key = ""
     if key:
-        _replace_env(env_path, "KEMO_API_KEY", key, "your-kemo-api-key")
+        _replace_yaml_value(env_path, "KEMO_API_KEY", key)
 
     # KEMO_BASE_URL
     url = input("  KEMO_BASE_URL (留空默认 127.0.0.1:8741): ").strip()
     if url:
-        _replace_env(env_path, "KEMO_BASE_URL", url, "http://127.0.0.1:8741/v1")
+        _replace_yaml_value(env_path, "KEMO_BASE_URL", url)
 
-    _ok("配置已写入 .env")
+    _ok("配置已写入 kemo.yaml")
     return True
 
 
-def _replace_env(path: Path, key: str, value: str, default: str) -> None:
-    """替换 .env 中指定 key 的值"""
+def _replace_yaml_value(path: Path, key: str, value: str) -> None:
+    """Update a scalar while retaining the example's explanatory comments."""
+    import json
+
     lines = path.read_text("utf-8").splitlines(keepends=True)
     new_lines = []
+    found = False
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith(f"{key}=") or stripped.startswith(f"# {key}="):
-            new_lines.append(f"{key}={value}\n")
+        if stripped.startswith(f"{key}:"):
+            new_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}\n")
+            found = True
         else:
             new_lines.append(line)
+    if not found:
+        if new_lines and not new_lines[-1].endswith(("\n", "\r")):
+            new_lines[-1] += "\n"
+        new_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}\n")
     path.write_text("".join(new_lines), "utf-8")
 
 

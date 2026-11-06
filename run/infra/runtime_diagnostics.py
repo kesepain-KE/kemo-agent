@@ -30,7 +30,7 @@ _terminal_capture_lock = threading.RLock()
 _terminal_capture: tuple[Path, Any, Any, Any, Any] | None = None
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _TERMINAL_SECRET_RE = re.compile(
-    r"(?i)(\b(?:api[_-]?key|token|secret|password|authorization|cookie)\b\s*(?:=|:|\s+)\s*)([^\s,;]+)"
+    r"(?i)(\b(?:api(?:[_-]|\s+)?key|token|secret|password|authorization|cookie)\b\s*(?:=|:|\s+)\s*)([^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
 _URL_CREDENTIAL_RE = re.compile(r"(://[^\s/:@]+:)([^\s@/]+)(@)")
@@ -186,6 +186,8 @@ def restore_terminal_capture() -> None:
 def record_runtime_event(
     root: Path, user: str, *, category: str, name: str, status: str,
     duration_ms: int = 0, error_type: str = "", exit_code: int | None = None,
+    session_id: str = "", window_id: str = "", error_message: str = "",
+    tool_name: str = "",
 ) -> None:
     """Best-effort observation must never change a tool's execution outcome."""
     try:
@@ -200,6 +202,16 @@ def record_runtime_event(
             "detail": ("错误类型：" + diagnostic_identifier(error_type)) if error_type else "",
             "source": "memory", "exit_code": exit_code if type(exit_code) is int else None,
         }
+        if tool_name:
+            entry["tool_name"] = diagnostic_identifier(tool_name)
+        if session_id or window_id:
+            entry.update({
+                "user": diagnostic_identifier(user),
+                "session_id": diagnostic_identifier(session_id),
+                "window_id": diagnostic_identifier(window_id),
+            })
+        if error_message:
+            entry["detail"] += " · " + diagnostic_text(error_message)[:500]
         with _event_lock:
             _events.append((time.monotonic(), _root_key(root), user, entry))
     except Exception:

@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import json
 import re
 import shutil
 import sys
 from pathlib import Path
+import yaml
 
 # ── 常量 ──
 
@@ -52,17 +52,20 @@ def _list_users(root: Path) -> list[str]:
     )
 
 
-def _read_json(path: Path) -> dict:
+def _read_yaml(path: Path) -> dict:
     try:
-        data = json.loads(path.read_text("utf-8"))
+        data = yaml.safe_load(path.read_text("utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, yaml.YAMLError):
         return {}
 
 
-def _write_json(path: Path, data: dict) -> None:
+def _write_yaml(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        "utf-8",
+    )
 
 
 # ── 核心：创建用户 ──
@@ -218,9 +221,9 @@ def _apply_api_config(
     api_key: str,
     model: str,
 ) -> None:
-    """将 API 配置写入 user_config.json"""
-    config_path = root / "users" / name / "user_config.json"
-    config = _read_json(config_path)
+    """将 API 配置写入 user_config.yaml"""
+    config_path = root / "users" / name / "user_config.yaml"
+    config = _read_yaml(config_path)
     provider = config.setdefault("provider", {})
     provider["type"] = provider_type
     if base_url:
@@ -229,7 +232,7 @@ def _apply_api_config(
         provider["api_key"] = api_key
     if model:
         provider["model"] = model
-    _write_json(config_path, config)
+    _write_yaml(config_path, config)
     print("  ✓ 配置已写入\n")
 
 
@@ -259,12 +262,12 @@ def edit_user_api_config(root: Path | None = None, name: str = "") -> None:
         name = selected_name
 
     _validate_name(name)
-    config_path = root / "users" / name / "user_config.json"
+    config_path = root / "users" / name / "user_config.yaml"
     if not config_path.is_file():
         print(f"  用户 {name} 的配置文件不存在\n")
         return
 
-    config = _read_json(config_path)
+    config = _read_yaml(config_path)
     provider = config.get("provider", {})
 
     print(f"\n  当前配置 ({name}):")
@@ -460,7 +463,7 @@ def _menu_create(root: Path) -> None:
     print(f"  ✅ 用户 {name} 创建成功")
     print(f"  路径: {dest}")
     print("")
-    print(f"  配置文件:  users/{name}/user_config.json")
+    print(f"  配置文件:  users/{name}/user_config.yaml")
     print(f"  人格文件:  users/{name}/user_soul.md")
     print(f"  知识库:    users/{name}/knowledge/")
     print(f"  记忆目录:  users/{name}/improve/")

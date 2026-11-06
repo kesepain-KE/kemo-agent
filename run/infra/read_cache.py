@@ -175,7 +175,7 @@ def cached_read_text(path: Path, encoding: str = "utf-8") -> str:
     """
     path = Path(os.path.abspath(path))
     key = (os.path.normcase(str(path)), encoding)
-    if path.name == ".env":
+    if path.name == "kemo.yaml":
         return path.read_text(encoding)
     for _ in range(2):
         try:

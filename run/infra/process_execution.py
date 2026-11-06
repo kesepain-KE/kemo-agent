@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from run.infra.async_utils import run_awaitable
+from run.infra.runtime_diagnostics import diagnostic_text
 
 
 def _windows_pythonw_executable() -> str | None:
@@ -81,7 +82,7 @@ def _load_callable(module_path: str, function_name: str):
 
 def _safe_error(exc: BaseException) -> dict[str, Any]:
     detail: dict[str, Any] = {
-        "message": str(exc),
+        "message": diagnostic_text(exc),
         "exception_type": type(exc).__name__,
     }
     for field in (
@@ -95,7 +96,11 @@ def _safe_error(exc: BaseException) -> dict[str, Any]:
         if isinstance(value, (bool, int, float)):
             detail[field] = value
         elif isinstance(value, str) and value.strip():
-            detail[field] = value.strip()[:160]
+            detail[field] = diagnostic_text(value.strip())[:160]
+    for field in ("path", "url"):
+        value = getattr(exc, field, None)
+        if isinstance(value, str) and value.strip():
+            detail[field] = diagnostic_text(value.partition("?")[0])[:512]
     return detail
 
 

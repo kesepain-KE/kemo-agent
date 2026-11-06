@@ -15,7 +15,6 @@ EventType = Literal[
     "media_input_update",
     "guidance_applied",
     "context_compression",
-    "long_task_update",
     "subagent_progress",
     "background_job_progress",
     "usage",
@@ -87,7 +86,6 @@ class RunEvent:
             "media_input_update",
             "guidance_applied",
             "context_compression",
-            "long_task_update",
             "subagent_progress",
             "background_job_progress",
             "usage",
@@ -128,7 +126,7 @@ class RunEvent:
 def error_event(exc: BaseException, *, phase: str = "run") -> RunEvent:
     detail: dict[str, Any] = {
         "message": str(exc),
-        "exception_type": type(exc).__name__,
+        "exception_type": getattr(exc, "provider_exception_type", None) or type(exc).__name__,
         "phase": phase,
     }
     for field in (
@@ -141,6 +139,8 @@ def error_event(exc: BaseException, *, phase: str = "run") -> RunEvent:
         "retry_exhausted",
         "retry_attempts",
         "retry_max_attempts",
+        "stop_reason",
+        "cancelled",
     ):
         value = getattr(exc, field, None)
         if isinstance(value, bool) or isinstance(value, (int, float)):
@@ -148,6 +148,9 @@ def error_event(exc: BaseException, *, phase: str = "run") -> RunEvent:
         elif isinstance(value, str) and value.strip():
             detail[field] = value.strip()[:160]
     retryable = getattr(exc, "retryable", None)
+    incomplete = getattr(exc, "incomplete_details", None)
+    if isinstance(incomplete, dict):
+        detail["incomplete_details"] = incomplete
     if (
         isinstance(retryable, bool)
         and getattr(exc, "retryable_declared", True)

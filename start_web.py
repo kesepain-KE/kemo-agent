@@ -5,7 +5,7 @@
     python start_web.py --port=8080  # 自定义端口
     python start_web.py --host=0.0.0.0 --port=1357  # 开放局域网访问
 
-启动时自动加载 .env、打印版本信息、检查用户，然后拉起 RuntimeHost（Cron + 消息路由）
+启动时自动加载 kemo.yaml、打印版本信息、检查用户，然后拉起 RuntimeHost（Cron + 消息路由）
 和 Web 后端，一站式运行。
 """
 
@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from run.config import load_dotenv, project_root
+from run.config import load_kemo_yaml, project_root
 from run.infra import install_terminal_capture, restore_terminal_capture
 from run.scheduler import build_host
 from run.config import ensure_user, list_users, user_template_dir
@@ -384,8 +384,8 @@ def main(argv: list[str] | None = None) -> int:
 def _run_main(argv: list[str] | None, root: Path) -> int:
     args = build_parser().parse_args(argv)
 
-        # 1. 加载 .env 并打印版本信息
-    load_dotenv(root / ".env")
+    # 1. 加载实例环境配置并打印版本信息
+    load_kemo_yaml(root / "kemo.yaml")
 
     try:
         web_host = _resolve_web_host(args.host)
