@@ -1,25 +1,34 @@
-"""SSE chat stream orchestration extracted from :mod:`web.service`.
-
-The implementation keeps the WebRunService method as the compatibility entry point
-and resolves module globals lazily so existing dependency injection and monkeypatches
-remain effective.
-"""
+"""SSE chat stream orchestration and active-run state."""
 
 from __future__ import annotations
 
-import queue as _Annotationqueue
-
-from events import RunEvent
-from events import RunEvent as _RunEventType
-
+import copy
+import queue
 import threading
-
-from typing import Iterator
-
+import time
+import uuid
+from dataclasses import dataclass, field
 from typing import Any
+from events import RunEvent
+from run.conversation import GuidanceMailbox, guidance_failure_details
+from web.constants import _WORKER_DONE
+from web.errors import ConflictError, InvalidRequestError, TooManyChatsError
 
 from web.services.run_orchestration import run_source as _run_source_impl
 from web.services.event_stream import QueueEventStream
+
+
+@dataclass(slots=True)
+class ActiveRun:
+    run_id: str
+    user: str
+    session_id: str
+    source: str = "web"
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    cancel_subagents_event: threading.Event = field(default_factory=threading.Event)
+    guidance: GuidanceMailbox = field(default_factory=lambda: GuidanceMailbox(maxsize=8))
+    started_at: float = field(default_factory=time.monotonic)
+
 
 def stream_chat(
     service,
@@ -36,31 +45,6 @@ def stream_chat(
     source: Any = "web",
     client_id: Any = "",
 ) -> QueueEventStream:
-    import importlib
-    _service = importlib.import_module("web.service")
-    ActiveRun = _service.ActiveRun
-    ConflictError = _service.ConflictError
-    GuidanceMailbox = _service.GuidanceMailbox
-    InvalidRequestError = _service.InvalidRequestError
-    LONG_TASK_ACTIVE_STATUSES = _service.LONG_TASK_ACTIVE_STATUSES
-    MAX_LONG_TASK_RUNS = _service.MAX_LONG_TASK_RUNS
-    RunEvent: type[_RunEventType] = _service.RunEvent
-    TooManyChatsError = _service.TooManyChatsError
-    _WORKER_DONE = _service._WORKER_DONE
-    activate_long_task = _service.activate_long_task
-    continuation_request = _service.continuation_request
-    copy = _service.copy
-    finish_long_task = _service.finish_long_task
-    get_long_task_state = _service.get_long_task_state
-    is_continuable_terminal = _service.is_continuable_terminal
-    long_task_event_metadata = _service.long_task_event_metadata
-    queue = _service.queue
-    record_long_task_run = _service.record_long_task_run
-    session_lock = _service.session_lock
-    set_long_task_current_run = _service.set_long_task_current_run
-    terminal_run_stats = _service.terminal_run_stats
-    threading = _service.threading
-    uuid = _service.uuid
     name = service.require_user(user)
     normalized_source = service.require_source(source)
     normalized_session = service.require_session_id(session_id)
@@ -108,6 +92,7 @@ def stream_chat(
         "stream": True,
         "run_id": normalized_run_id,
         "_guidance_queue": active.guidance,
+        "_cancel_subagents_event": active.cancel_subagents_event,
         "_history_active_key": service._interactive_active_key(
             name, normalized_client, source=normalized_source
         ),
@@ -122,7 +107,7 @@ def stream_chat(
             # Run 生成器拥有线程仿射 RLock。  它的 next()/close()
             # 因此，调用必须保留在一个专用工作线程上
             # 在 asyncio.to_thread 工作线程之间跳转。
-    output: _Annotationqueue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
+    output: queue.Queue[RunEvent | BaseException | object] = queue.Queue(maxsize=32)
     consumer_closed = threading.Event()
     progress_closed = threading.Event()
 
@@ -137,8 +122,7 @@ def stream_chat(
                 "source": normalized_source,
                 "session_id": normalized_session,
                 # Provider/tool metadata is diagnostic input as well; the
-                # run object owns the identifier used by the stream,
-                # including after a long-task continuation hand-off.
+                # run object owns the identifier used by the stream.
                 "run_id": active.run_id,
             }
             value = scoped
@@ -164,10 +148,17 @@ def stream_chat(
             # SSE event could be acknowledged as accepted and then be
             # silently discarded by the worker's cleanup.
             with service._active_runs_lock:
-                active.guidance.close()
+                pending = active.guidance.close_and_drain()
+            if pending and isinstance(value, RunEvent):
+                value.metadata["guidance_details"] = [
+                    *value.metadata.get("guidance_details", []),
+                    *guidance_failure_details(pending, "web_run_ended"),
+                ]
         while True:
             if consumer_closed.is_set():
-                return False
+                # A detached HTTP consumer does not cancel the Run. Drain
+                # the source so its normal terminal and persistence logic runs.
+                return True
             if cancel_event.is_set() and not terminal_value:
                 return False
             try:
@@ -204,12 +195,10 @@ def stream_chat(
             "service": service,
             "request": request,
             "active": active,
-            "normalized_prompt": normalized_prompt,
             "normalized_run_id": normalized_run_id,
             "normalized_source": normalized_source,
             "normalized_session": normalized_session,
             "name": name,
-            "task_plan_id": task_plan_id,
             "cancel_event": cancel_event,
             "put": put,
         },

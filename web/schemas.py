@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, StrictBool, model_validator
+from pydantic import BaseModel, Field, StrictBool, StrictStr, model_validator
 
 
 class ChatBody(BaseModel):
@@ -62,6 +62,12 @@ class RunCancelBody(BaseModel):
     user: str
     source: str = Field(default="web", pattern="^(web|app)$")
     session_id: str = Field(min_length=1, max_length=128)
+    cancel_subagents: StrictBool = False
+
+
+class WorkspaceAgentGuideBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    guidance: StrictStr = Field(min_length=1, max_length=8000)
 
 
 class SessionRenameBody(BaseModel):
@@ -87,13 +93,11 @@ class SessionClientBody(BaseModel):
     lease_sequence: int | None = Field(default=None, strict=True, ge=1, le=9_007_199_254_740_991)
 
 
-class SessionUndoLastRoundBody(BaseModel):
-    expected_round: int = Field(ge=1)
+class SessionWithdrawIntegrationBody(BaseModel):
+    expected_integration_count: int = Field(ge=1)
     prompt: str = Field(min_length=1, max_length=1_000_000)
 
 
-class LongTaskPreferenceBody(BaseModel):
-    enabled: StrictBool
 
 
 class SoulBody(BaseModel):

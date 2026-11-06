@@ -1,13 +1,15 @@
-"""Authenticated, read-only workspace endpoints. Closing a view never stops work."""
+"""Authenticated workspace projections and explicit controls for owned agent work."""
 from typing import Any
 
 from fastapi import FastAPI, Query, Response
 
 from web.services.workspace_jobs import job_detail, list_jobs
-from web.services.workspace_agents import task, tasks
+from web.services.workspace_agents import cancel, guide, task, tasks
 from web.operation_contracts import (
-    WorkspaceAgentsResponse, WorkspaceAgentResponse, WorkspaceJobsResponse, WorkspaceJobDetailResponse,
+    WorkspaceAgentCancelResponse, WorkspaceAgentGuideResponse, WorkspaceAgentsResponse,
+    WorkspaceAgentResponse, WorkspaceJobsResponse, WorkspaceJobDetailResponse,
 )
+from web.schemas import WorkspaceAgentGuideBody
 
 _HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
 
@@ -26,6 +28,38 @@ def register_workspace_routes(app: FastAPI, backend: Any) -> None:
     def workspace_agent(user: str, task_id: str, response: Response, source: str = "", session_id: str = ""):
         response.headers.update(_HEADERS)
         return task(backend, user, task_id, source=source, session_id=session_id)
+
+    @app.post(
+        "/api/users/{user}/workspace/agents/{task_id}/guide",
+        response_model=WorkspaceAgentGuideResponse,
+    )
+    def guide_workspace_agent(
+        user: str,
+        task_id: str,
+        body: WorkspaceAgentGuideBody,
+        response: Response,
+        source: str = Query(..., min_length=1, max_length=32),
+        session_id: str = Query(..., min_length=1, max_length=128),
+    ):
+        response.headers.update(_HEADERS)
+        return guide(
+            backend, user, task_id, source=source, session_id=session_id,
+            guidance=body.guidance,
+        )
+
+    @app.post(
+        "/api/users/{user}/workspace/agents/{task_id}/cancel",
+        response_model=WorkspaceAgentCancelResponse,
+    )
+    def cancel_workspace_agent(
+        user: str,
+        task_id: str,
+        response: Response,
+        source: str = Query(..., min_length=1, max_length=32),
+        session_id: str = Query(..., min_length=1, max_length=128),
+    ):
+        response.headers.update(_HEADERS)
+        return cancel(backend, user, task_id, source=source, session_id=session_id)
 
     @app.get("/api/users/{user}/workspace/jobs", response_model=WorkspaceJobsResponse,
              response_model_exclude_unset=True)

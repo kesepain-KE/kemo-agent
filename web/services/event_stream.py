@@ -59,7 +59,6 @@ class QueueEventStream(Iterator[RunEvent]):
             if self._closed.is_set():
                 return
             self._closed.set()
-            self._cancel_event.set()
             self._on_close()
 
 

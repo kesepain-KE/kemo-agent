@@ -372,6 +372,7 @@ def create_app(
             run_id,
             source=body.source,
             session_id=body.session_id,
+            cancel_subagents=body.cancel_subagents,
         )
 
     @app.post("/api/chat")
@@ -443,7 +444,6 @@ def create_app(
 
         async def close_stream():
             nonlocal cleanup_started
-            cancel_event.set()
             if not cleanup_started:
                 cleanup_started = True
                 await stream_cleanup.close(iterator, pending)
@@ -454,7 +454,6 @@ def create_app(
             try:
                 while True:
                     if await request.is_disconnected():
-                        cancel_event.set()
                         break
                     if pending is None:
                         pending = asyncio.create_task(
@@ -464,7 +463,6 @@ def create_app(
                     done, _ = await asyncio.wait({pending}, timeout=interval)
                     if not done:
                         if await request.is_disconnected():
-                            cancel_event.set()
                             break
                         yield HEARTBEAT_FRAME
                         continue
@@ -497,7 +495,6 @@ def create_app(
                         )
                     )
             except asyncio.CancelledError:
-                cancel_event.set()
                 raise
             except Exception:
                 if not cancel_event.is_set():

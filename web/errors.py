@@ -47,6 +47,10 @@ class ConflictError(WebServiceError):
     status = 409
 
 
+class PlanRevisionConflictError(ConflictError):
+    code = "plan_revision_conflict"
+
+
 class TooManyChatsError(WebServiceError):
     code = "too_many_chats"
     status = 503

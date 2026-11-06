@@ -36,7 +36,7 @@ class DeleteSessionsResponse(ResponseObject):
     source: str
     deleted: bool
     deleted_sessions: int = Field(ge=0)
-    deleted_windows: int = Field(ge=0)
+    raw_preserved: bool
 
 
 class PlanMutationResponse(ResponseObject):
@@ -111,6 +111,8 @@ class WorkspaceAgentSummary(ResponseObject):
     created_at: str
     updated_at: str
     submission_order: int | None = Field(default=None, ge=1)
+    guidance_pending: int = Field(default=0, ge=0)
+    guidance_delivered: int = Field(default=0, ge=0)
     children: list["WorkspaceAgentSummary"] | None = None
     children_total: int | None = Field(default=None, ge=0)
 
@@ -134,14 +136,36 @@ class AgentArtifactResponse(ResponseObject):
     size: int = Field(ge=0)
 
 
+class WorkspaceAgentControls(ResponseObject):
+    guide: bool
+    cancel: bool
+
+
 class WorkspaceAgentDetail(WorkspaceAgentSummary):
     events: list[AgentEventResponse] | None = None
     artifacts: list[AgentArtifactResponse]
+    controls: WorkspaceAgentControls
     result: Any = None
 
 
 class WorkspaceAgentResponse(ResponseObject):
     task: WorkspaceAgentDetail
+
+
+class WorkspaceAgentGuideResponse(ResponseObject):
+    ok: bool
+    task_id: str
+    status: Literal["guidance_queued"]
+    pending: int = Field(ge=0)
+    message: str
+
+
+class WorkspaceAgentCancelResponse(ResponseObject):
+    ok: bool
+    task_id: str
+    status: str
+    cancel_requested: bool
+    process_terminated: bool
 
 
 class WorkspaceJobResponse(ResponseObject):

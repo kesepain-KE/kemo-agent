@@ -5,13 +5,10 @@ from __future__ import annotations
 import math
 import copy
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
-import queue
 import threading
 import time
 from typing import Any, Callable, Iterator
-import uuid
 
 from pydantic import ValidationError
 
@@ -31,8 +28,6 @@ from run.config import (
 )
 from run.engine import compress_context, iter_request_events
 from run.history import (
-    find_window,
-    load_window,
     queue_memory_extraction,
     touch_session_lease,
     cleanup_empty_web_sessions as cleanup_empty_history_sessions,
@@ -47,32 +42,12 @@ from run.history import (
     queue_summary as queue_history_summary,
     find_record as find_index_record,
 )
-from run.long_task import (
-    LONG_TASK_ACTIVE_STATUSES,
-    activate_long_task,
-    finish_long_task,
-    get_long_task_state,
-    reconcile_orphaned_long_task,
-    record_long_task_run,
-    request_long_task_cancel,
-    set_long_task_current_run,
-    set_long_task_enabled as update_long_task_enabled,
-)
-from run.long_task import (
-    MAX_LONG_TASK_RUNS,
-    continuation_request,
-    is_continuable_terminal,
-    long_task_event_metadata,
-    terminal_run_stats,
-)
 from run.tasks import (
     PlanError,
     PlanNotFoundError,
     PlanStore,
 )
-from run.memory import extract_memory_backlog
-from run.conversation import session_lock
-from run.conversation import GuidanceInput, GuidanceMailbox
+from run.memory import extract_card_memory
 from run.config import list_users
 from web.constants import (
     AUDIO_PREVIEW_MAX_BYTES,
@@ -91,7 +66,6 @@ from web.constants import (
     _RUN_ID_RE,
     _SESSION_RE,
     _SESSION_TITLE_RE,
-    _WORKER_DONE,
 )
 from web.errors import (
     ConflictError,
@@ -102,7 +76,7 @@ from web.errors import (
     WebServiceError,
 )
 from web.services.artifact_resolver import DownloadArtifactResolver
-from web.services.chat_stream import stream_chat as _stream_chat
+from web.services.chat_stream import ActiveRun, stream_chat as _stream_chat
 from web.services.chat_gate import _UserChatGate
 from web.services.event_stream import FinalizingEventStream, QueueEventStream
 from web.services.files import FileServiceMixin
@@ -141,17 +115,6 @@ __all__ = [
     "WebServiceError",
     "_usage_cache_tokens",
 ]
-
-
-@dataclass(slots=True)
-class ActiveRun:
-    run_id: str
-    user: str
-    session_id: str
-    source: str = "web"
-    cancel_event: threading.Event = field(default_factory=threading.Event)
-    guidance: GuidanceMailbox = field(default_factory=lambda: GuidanceMailbox(maxsize=8))
-    started_at: float = field(default_factory=time.monotonic)
 
 
 class WebRunService(

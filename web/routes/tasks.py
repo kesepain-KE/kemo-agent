@@ -45,17 +45,6 @@ def register_task_routes(app: FastAPI, backend: WebRunService) -> None:
         payload = body.model_dump(exclude_unset=True)
         return backend.create_plan(user, payload, session_id, source)
 
-    @app.put("/api/users/{user}/tasks/plans/{plan_id}", response_model=PlanMutationResponse)
-    async def update_plan(
-        user: str,
-        plan_id: str,
-        body: PlanBody,
-        session_id: str = Query("", max_length=256),
-        source: str = Query("web", max_length=32),
-    ) -> dict[str, Any]:
-        payload = body.model_dump(exclude_unset=True)
-        return backend.update_plan(user, plan_id, payload, session_id, source)
-
     @app.patch("/api/users/{user}/tasks/plans/{plan_id}/edit", response_model=PlanMutationResponse)
     async def edit_plan(
         user: str,
