@@ -1,0 +1,60 @@
+# 这是该用户的服务连接与使用设置，不是个人履历或工程手册。
+# 相处偏好写入 user_soul.md；留空的连接参数沿用实例默认值。
+schema_version: 1
+memory:
+  # companion 让记忆覆盖事实偏好、关系语境和近期状态；work 仅保留事实。
+  profile: companion
+web_ui:
+  language: zh-CN
+  background:
+    enabled: false
+    overlay_opacity: 0.65
+    blur: 0
+    ui_opacity: 0.94
+    ui_blur: 0
+provider:
+  type: kemo
+  base_url: ''
+  api_key: ''
+  api_key_env: ''
+  model: ''
+  stream: true
+  reasoning_effort: medium
+  input_modalities:
+  - text
+agent_models:
+  default: ''
+  cheap: ''
+  reasoning: ''
+multimodal_models:
+  vision: ''
+  image_generation: ''
+  image_edit: ''
+  audio_transcription: ''
+  speech_generation: ''
+  speech_to_speech: ''
+  video_understanding: ''
+  video_generation: ''
+multimodal_routing:
+  vision: auto
+task_plan:
+  auto_accept: false
+skills:
+  shared_whitelist: []
+expand:
+  shared_whitelist: []
+  global_whitelist: []
+  prompt_injection: true
+perception:
+  global_whitelist: []
+  prompt_injection: true
+knowledge:
+  use_shared: true
+  use_global: true
+plugins:
+  whitelist: []
+  permissions:
+  - read
+  - write
+  - delete
+  - external

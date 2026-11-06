@@ -1,72 +1,74 @@
-# kemo-agent 环境变量示例
-# 复制为 .env 后填写本机值；本示例不得包含真实密钥。
+# Kemo 本机连接与启动设置
+# 复制为 kemo.yaml 后填写本机值；本示例不得包含真实密钥。
+# 实例默认见 config/global_config.yaml，用户覆盖见 users/<name>/user_config.yaml，
+# 相处偏好见 user_soul.md；本文件仅配置启动和外部连接。
 
-# ── Provider 密钥（兜底，user_config.json 中 provider.api_key 优先）──
+# ── Provider 密钥（兜底，user_config.yaml 中 provider.api_key 优先）──
 
 # Kemo 网关 API Key（provider.type=kemo 时使用）
-KEMO_API_KEY=your-kemo-api-key
+KEMO_API_KEY: "your-kemo-api-key"
 
 # Kemo Provider 协议根地址（provider.type=kemo 时使用，留空默认 127.0.0.1:8741）
-KEMO_BASE_URL=http://127.0.0.1:8741
+KEMO_BASE_URL: "http://127.0.0.1:8741"
 
 # 可选：仅当 provider.model 为空时使用
-KEMO_MODEL=
+KEMO_MODEL: ""
 
 # Chat Completions 兼容模式配置（provider.type=chat 时使用）
-OPENAI_API_KEY=your-openai-api-key
-OPENAI_MODEL=
-OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY: "your-openai-api-key"
+OPENAI_MODEL: ""
+OPENAI_BASE_URL: "https://api.openai.com/v1"
 
 # ── 网络代理（provider 请求外部 API 时使用，如需加速网络）──
 
 # HTTP/HTTPS 代理地址，留空则直连
-HTTP_PROXY=
-HTTPS_PROXY=
+HTTP_PROXY: ""
+HTTPS_PROXY: ""
 
 # ── 工具插件 ──
 
 # web_search 插件使用的 Tavily API Key；留空时工具仍可被发现，调用会提示配置
-TAVILY_API_KEY=
+TAVILY_API_KEY: ""
 
 # ── 结构化运行日志 ──
 
 # Cron 与外部消息 SQLite 日志保留天数（默认 90；0 表示不自动清理）
-KEMO_LOG_RETENTION_DAYS=90
+KEMO_LOG_RETENTION_DAYS: "90"
 
 # ── Web 服务 ──
 
 # Web 监听地址（127.0.0.1 = 仅本机，0.0.0.0 = 暴露局域网）
-WEB_HOST=127.0.0.1
+WEB_HOST: "127.0.0.1"
 
 # Web 监听端口（默认 1357，冲突自动轮询最多 10 次）
-WEB_PORT=1357
+WEB_PORT: "1357"
 
 # Web 访问令牌（非空时在登录页通过 POST 请求体验证；不会写入 URL、Cookie 或浏览器存储）
-WEB_ACCESS_TOKEN=
+WEB_ACCESS_TOKEN: ""
 
 # Web 登录用户名（该智能体使用者的用户名，与智能体内部的多用户设计无关）
-WEB_USERNAME=
+WEB_USERNAME: ""
 
 # Web 登录密码（该智能体使用者的用户密码，与智能体内部的多用户设计无关）
-WEB_PASSWORD=
+WEB_PASSWORD: ""
 
 # Session 签名密钥（留空时自动生成，浏览器记录登录状态，默认有效期 2 小时）
-WEB_SESSION_SECRET=
+WEB_SESSION_SECRET: ""
 
 # Session Cookie 名称（浏览器会话级；多实例使用不同名称避免冲突）
-WEB_SESSION_COOKIE_NAME=kemo_agent_session
-WEB_SESSION_COOKIE_SECURE=false
+WEB_SESSION_COOKIE_NAME: "kemo_agent_session"
+WEB_SESSION_COOKIE_SECURE: "false"
 
 # 单个 IP 在同一认证阶段允许的失败次数（留空或 0 表示不限次数）
-WEB_AUTH_IP_MAX_FAILURES=
+WEB_AUTH_IP_MAX_FAILURES: ""
 
 # 失败次数统计窗口，单位秒（默认 600）
-WEB_AUTH_IP_WINDOW_SECONDS=600
+WEB_AUTH_IP_WINDOW_SECONDS: "600"
 
 # 达到失败上限后的锁定时间，单位秒（默认 900）
-WEB_AUTH_IP_LOCK_SECONDS=900
+WEB_AUTH_IP_LOCK_SECONDS: "900"
 
 # 可信反向代理 IP/CIDR，多个值用逗号分隔；留空时不信任 X-Forwarded-For
-WEB_AUTH_TRUSTED_PROXIES=
+WEB_AUTH_TRUSTED_PROXIES: ""
 
 # 同时配置 Token 与用户名密码时，登录页会强制先验证 Token，再验证用户名密码。

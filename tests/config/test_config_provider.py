@@ -30,11 +30,11 @@ from run.config import (
     ConfigError,
     cron_session_idle_close_seconds,
     load_config,
-    load_dotenv,
+    load_kemo_yaml,
     provider_runtime_config,
     resolve_capability_model,
 )
-from run.history import commit_window, get_or_create_window, load_window
+from run.cards import CardStore
 from run.extensions.model_capabilities import (
     clear_model_capability_cache,
     declared_input_token_limit,
@@ -286,7 +286,7 @@ class ConfigAndHistoryTests(unittest.TestCase):
         (root / "config").mkdir()
         (root / "users" / "alice" / "history").mkdir(parents=True)
         (root / "users" / "bob" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "provider": {"type": "kemo", "model": "global-model"},
@@ -296,7 +296,7 @@ class ConfigAndHistoryTests(unittest.TestCase):
             ),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "provider": {"type": "chat", "model": "user-model"},
@@ -306,7 +306,7 @@ class ConfigAndHistoryTests(unittest.TestCase):
             ),
             "utf-8",
         )
-        (root / "users" / "bob" / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / "bob" / "user_config.yaml").write_text("{}", "utf-8")
         return temporary, root
 
     def test_deep_user_override(self) -> None:
@@ -332,10 +332,10 @@ class ConfigAndHistoryTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             provider_runtime_config(config)
 
-    def test_dotenv_is_loaded_without_overriding_process_environment(self) -> None:
+    def test_kemo_yaml_is_loaded_without_overriding_process_environment(self) -> None:
         _, root = self.make_root()
-        (root / ".env").write_text(
-            "# comment\nTEST_DOTENV_VALUE=from-file\nTEST_DOTENV_KEEP=from-file\n",
+        (root / "kemo.yaml").write_text(
+            "# comment\nTEST_DOTENV_VALUE: from-file\nTEST_DOTENV_KEEP: from-file\n",
             "utf-8",
         )
         with patch.dict(os.environ, {"TEST_DOTENV_KEEP": "from-process"}, clear=False):
@@ -344,24 +344,72 @@ class ConfigAndHistoryTests(unittest.TestCase):
             self.assertEqual(os.environ["TEST_DOTENV_KEEP"], "from-process")
         os.environ.pop("TEST_DOTENV_VALUE", None)
 
-    def test_dotenv_duplicate_order_preserves_override_contract(self) -> None:
+    def test_kemo_yaml_rejects_duplicate_variables(self) -> None:
         _, root = self.make_root()
-        path = root / ".env"
+        path = root / "kemo.yaml"
         path.write_text(
-            "TEST_DUPLICATE_VALUE=first\nTEST_DUPLICATE_VALUE=last\n",
+            "TEST_DUPLICATE_VALUE: first\nTEST_DUPLICATE_VALUE: last\n",
             "utf-8",
         )
         with patch.dict(os.environ, {}, clear=True):
-            load_dotenv(path)
-            self.assertEqual(os.environ["TEST_DUPLICATE_VALUE"], "first")
-            load_dotenv(path, override=True)
-            self.assertEqual(os.environ["TEST_DUPLICATE_VALUE"], "last")
+            with self.assertRaises(ConfigError):
+                load_kemo_yaml(path)
+            self.assertNotIn("TEST_DUPLICATE_VALUE", os.environ)
+
+    def test_kemo_yaml_stringifies_scalars_and_can_override_environment(self) -> None:
+        _, root = self.make_root()
+        path = root / "kemo.yaml"
+        path.write_text(
+            'TEST_KEMO_QUOTED: "on"\n'
+            "TEST_KEMO_INTEGER: 1357\n"
+            "TEST_KEMO_BOOLEAN: false\n"
+            "TEST_KEMO_EMPTY:\n"
+            "TEST_KEMO_EXISTING: from-file\n",
+            "utf-8",
+        )
+        with patch.dict(os.environ, {"TEST_KEMO_EXISTING": "from-process"}, clear=False):
+            load_kemo_yaml(path)
+            self.assertEqual(os.environ["TEST_KEMO_QUOTED"], "on")
+            self.assertEqual(os.environ["TEST_KEMO_INTEGER"], "1357")
+            self.assertEqual(os.environ["TEST_KEMO_BOOLEAN"], "false")
+            self.assertEqual(os.environ["TEST_KEMO_EMPTY"], "")
+            self.assertEqual(os.environ["TEST_KEMO_EXISTING"], "from-process")
+            load_kemo_yaml(path, override=True)
+            self.assertEqual(os.environ["TEST_KEMO_EXISTING"], "from-file")
+        for name in (
+            "TEST_KEMO_QUOTED",
+            "TEST_KEMO_INTEGER",
+            "TEST_KEMO_BOOLEAN",
+            "TEST_KEMO_EMPTY",
+        ):
+            os.environ.pop(name, None)
+
+    def test_kemo_yaml_rejects_invalid_values_before_mutating_environment(self) -> None:
+        _, root = self.make_root()
+        path = root / "kemo.yaml"
+        path.write_text(
+            "TEST_KEMO_ATOMIC: from-file\n"
+            "TEST_KEMO_INVALID:\n"
+            "  nested: value\n",
+            "utf-8",
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(ConfigError):
+                load_kemo_yaml(path)
+            self.assertNotIn("TEST_KEMO_ATOMIC", os.environ)
+
+    def test_root_dotenv_is_not_loaded(self) -> None:
+        _, root = self.make_root()
+        (root / ".env").write_text("TEST_LEGACY_ROOT_DOTENV=legacy\n", "utf-8")
+        with patch.dict(os.environ, {}, clear=True):
+            load_config("alice", root)
+            self.assertNotIn("TEST_LEGACY_ROOT_DOTENV", os.environ)
 
     def test_runtime_secret_from_environment(self) -> None:
         config = {
-            "provider": {"type": "chat", "model": "test", "api_key_env": "UNIT_KEY"}
+            "provider": {"type": "chat", "model": "test", "api_key_env": "OPENAI_API_KEY"}
         }
-        with patch.dict(os.environ, {"UNIT_KEY": "runtime-secret"}, clear=False):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "runtime-secret"}, clear=False):
             provider = provider_runtime_config(config)
         self.assertEqual(provider["api_key"], "runtime-secret")
         self.assertEqual(provider["base_url"], "https://api.openai.com/v1")
@@ -430,14 +478,14 @@ class ConfigAndHistoryTests(unittest.TestCase):
                 "type": "kemo",
                 "model": "chat-model",
                 "api_key": "inline-key",
-                "api_key_env": "UNIT_KEY",
+                "api_key_env": "OPENAI_API_KEY",
             },
             "multimodal_models": {
                 "vision": "vision-model",
                 "image_generation": "",
             },
         }
-        with patch.dict(os.environ, {"UNIT_KEY": "environment-key"}, clear=False):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "environment-key"}, clear=False):
             provider = provider_runtime_config(config)
         self.assertEqual(provider["api_key"], "inline-key")
         self.assertEqual(resolve_capability_model(config, "vision"), "vision-model")
@@ -450,53 +498,53 @@ class ConfigAndHistoryTests(unittest.TestCase):
         self,
     ) -> None:
         env = {
-            "KEMO_BASE_URL": "http://kemo-env.test/gateway/",
+            "KEMO_BASE_URL": "https://kemo-env.test/gateway/",
             "OPENAI_BASE_URL": "https://openai-env.test/v1/",
         }
         with patch.dict(os.environ, env, clear=False):
+            policy = {"provider_security": {"allowed_hosts": ["kemo-env.test", "openai-env.test", "explicit.test"]}}
             kemo = provider_runtime_config(
-                {"provider": {"type": "kemo", "model": "test", "api_key": "key"}}
+                {**policy, "provider": {"type": "kemo", "model": "test", "api_key": "key"}}
             )
             chat = provider_runtime_config(
-                {"provider": {"type": "chat", "model": "test", "api_key": "key"}}
+                {**policy, "provider": {"type": "chat", "model": "test", "api_key": "key"}}
             )
             explicit = provider_runtime_config(
                 {
+                    **policy,
                     "provider": {
                         "type": "kemo",
-                        "base_url": "http://explicit.test/v1/",
+                        "base_url": "https://explicit.test/v1/",
                         "model": "test",
                         "api_key": "key",
                     }
                 }
             )
-        self.assertEqual(kemo["base_url"], "http://kemo-env.test/gateway")
+        self.assertEqual(kemo["base_url"], "https://kemo-env.test/gateway")
         self.assertEqual(chat["base_url"], "https://openai-env.test/v1")
-        self.assertEqual(explicit["base_url"], "http://explicit.test/v1")
+        self.assertEqual(explicit["base_url"], "https://explicit.test/v1")
 
     def test_history_isolates_users_sources_and_sessions(self) -> None:
         _, root = self.make_root()
-        alice_cli_path, alice_cli = get_or_create_window(
-            root, "alice", "cli", "default"
-        )
-        alice_qq_path, _ = get_or_create_window(root, "alice", "qq", "default")
-        bob_cli_path, _ = get_or_create_window(root, "bob", "cli", "default")
-        self.assertNotEqual(alice_cli_path, alice_qq_path)
-        self.assertNotEqual(alice_cli_path, bob_cli_path)
-        alice_cli["text"]["messages"].append({"role": "user", "content": "private"})
-        commit_window(alice_cli_path, alice_cli)
-        self.assertEqual(
-            load_window(alice_cli_path)["text"]["messages"][0]["content"], "private"
-        )
-        self.assertEqual(load_window(alice_qq_path)["text"]["messages"], [])
+        alice, bob = CardStore(root, "alice"), CardStore(root, "bob")
+        for store, source in ((alice, "cli"), (alice, "qq"), (bob, "cli")):
+            store.ensure_session(source, "default")
+        alice.append("cli", "default", "fixture", "user_text", {"text": "private"})
+        self.assertNotEqual(alice.path, bob.path)
+        self.assertEqual(alice.raw_page("cli", "default")[0].raw_payload["text"], "private")
+        self.assertEqual(alice.raw_page("qq", "default"), ())
+        self.assertEqual(bob.raw_page("cli", "default"), ())
 
-    def test_sqlite_window_is_committed_as_one_complete_transaction(self) -> None:
+    def test_sqlite_card_append_updates_event_and_counter_in_one_transaction(self) -> None:
         _, root = self.make_root()
-        path, _ = get_or_create_window(root, "alice", "cli", "complete")
-        loaded = load_window(path)
-        self.assertTrue(loaded["data"]["complete"])
-        self.assertEqual(loaded["tool"]["rounds"], [])
-        self.assertFalse(path.exists())
+        store = CardStore(root, "alice")
+        store.ensure_session("cli", "complete")
+        card = store.append("cli", "complete", "fixture", "user_text", {"text": "complete"})
+        snapshot = store.snapshot("cli", "complete")
+        self.assertEqual(snapshot.cards, (card,))
+        self.assertEqual(snapshot.last_seq, 1)
+        self.assertEqual(snapshot.history_tokens, card.view_tokens)
+        self.assertTrue(store.path.is_file())
 
 
 class ProviderTests(ServerMixin, unittest.TestCase):
@@ -560,7 +608,7 @@ class ProviderTests(ServerMixin, unittest.TestCase):
         self.assertTrue(chat.capabilities(request.model).reasoning.supported)
         self.assertEqual(
             chat.capabilities(request.model).reasoning.efforts,
-            ["minimal", "low", "medium", "high", "max"],
+            ["minimal", "low", "medium", "high", "max", "xhigh", "ultra"],
         )
         chat_selection = resolve_reasoning_selection(
             {},

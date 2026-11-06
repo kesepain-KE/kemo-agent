@@ -139,8 +139,8 @@ class CLITests(unittest.TestCase):
         value = stdout.getvalue()
         self.assertIn("已新建并切换会话：alpha", value)
         self.assertIn("session=alpha", value)
-        self.assertIn("已清空会话：alpha", value)
-        self.assertIn("* alpha", value)
+        self.assertIn("原始历史保留", value)
+        self.assertIn("* conv_", value)
         self.assertIn("当前会话暂无历史", value)
         self.assertIn("已切换会话：beta", value)
         self.assertIn("session=beta", value)
@@ -148,13 +148,13 @@ class CLITests(unittest.TestCase):
     def test_interactive_memory_commands(self) -> None:
         root = Path(self.make_root("kesepain").name)
         (root / "config").mkdir()
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "provider": {
                         "type": "kemo",
                         "base_url": "http://127.0.0.1:1/v1",
-                        "api_key_env": "UNUSED",
+                        "api_key_env": "KEMO_API_KEY",
                         "model": "mock",
                     },
                     "memory": {
@@ -168,7 +168,7 @@ class CLITests(unittest.TestCase):
             ),
             "utf-8",
         )
-        (root / "users" / "kesepain" / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / "kesepain" / "user_config.yaml").write_text("{}", "utf-8")
         stdout = io.StringIO()
         code = cli.main(
             ["--interactive"],

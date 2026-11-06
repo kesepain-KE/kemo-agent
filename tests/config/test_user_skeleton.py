@@ -16,7 +16,7 @@ from update.migrations import migrate_user_skeletons
 def test_existing_user_skeleton_is_repaired_idempotently(tmp_path: Path) -> None:
     user_dir = tmp_path / "users" / "alice"
     user_dir.mkdir(parents=True)
-    (user_dir / "user_config.json").write_text("{}\n", encoding="utf-8")
+    (user_dir / "user_config.yaml").write_text("{}\n", encoding="utf-8")
     (user_dir / "knowledge").mkdir()
 
     created = ensure_user_skeleton(user_dir)
@@ -55,10 +55,10 @@ def test_ensure_user_repairs_an_existing_user(tmp_path: Path) -> None:
     root = tmp_path
     user_dir = root / "users" / "alice"
     user_dir.mkdir(parents=True)
-    (user_dir / "user_config.json").write_text("{}\n", encoding="utf-8")
+    (user_dir / "user_config.yaml").write_text("{}\n", encoding="utf-8")
     template = root / "template" / "user"
     template.mkdir(parents=True)
-    (template / "user_config.json").write_text("{}\n", encoding="utf-8")
+    (template / "user_config.yaml").write_text("{}\n", encoding="utf-8")
 
     assert ensure_user("alice", root) == user_dir
     assert all((user_dir / relative).is_dir() for relative in REQUIRED_USER_DIRS)
@@ -79,7 +79,7 @@ def test_skeleton_repair_never_mutates_template_user(tmp_path: Path) -> None:
 def test_update_migration_repairs_missing_directories(tmp_path: Path, capsys) -> None:
     user_dir = tmp_path / "users" / "alice"
     user_dir.mkdir(parents=True)
-    (user_dir / "user_config.json").write_text("{}\n", encoding="utf-8")
+    (user_dir / "user_config.yaml").write_text("{}\n", encoding="utf-8")
 
     migrate_user_skeletons(root=tmp_path, dry_run=False)
 
@@ -93,7 +93,7 @@ def test_update_migration_dry_run_reports_missing_without_mutating(
 ) -> None:
     user_dir = tmp_path / "users" / "alice"
     user_dir.mkdir(parents=True)
-    (user_dir / "user_config.json").write_text("{}\n", encoding="utf-8")
+    (user_dir / "user_config.yaml").write_text("{}\n", encoding="utf-8")
 
     migrate_user_skeletons(root=tmp_path, dry_run=True)
 
