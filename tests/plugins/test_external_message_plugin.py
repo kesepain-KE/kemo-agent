@@ -43,10 +43,11 @@ class CapturingTransport:
         del on_message, on_error
         self._running = True
 
-    def send(self, message: OutboundMessage) -> None:
+    def send(self, message: OutboundMessage) -> bool:
         if not self._running:
             raise RuntimeError("transport stopped")
         self.sent.append(message)
+        return True
 
     def stop(self) -> None:
         self._running = False
@@ -94,7 +95,8 @@ class ExternalMessageToolTests(unittest.TestCase):
         self.assertEqual(outbound.reply_to, "")
 
     def test_send_file_validates_and_resolves_path(self) -> None:
-        source = self.root / "report.txt"
+        source = self.root / "users" / "alice" / "download" / "report.txt"
+        source.parent.mkdir(parents=True)
         source.write_text("payload", "utf-8")
 
         result = external_message(
@@ -117,7 +119,7 @@ class ExternalMessageToolTests(unittest.TestCase):
                 "demo",
                 "target",
                 "private",
-                file_path=str(self.root / "missing.txt"),
+                file_path=str(self.root / "users" / "alice" / "download" / "missing.txt"),
                 context=self.context,
             )
 
@@ -220,6 +222,7 @@ class ExternalMessageIntegrationTests(unittest.TestCase):
             TransportPolicy(
                 capabilities=transport.capabilities,
                 bound_user="alice",
+                allowed_sender_ids=frozenset({"external-1"}),
             ),
         )
         transport.start(lambda envelope: None, lambda component, exc: None)

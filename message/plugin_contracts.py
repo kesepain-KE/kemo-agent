@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from message.transport import TransportPolicy
+from message.transport import TransportPolicy, TransportRegistrationError
 from run.config import user_dir
 
 _CONFIG_FIELDS = frozenset(
@@ -30,6 +30,8 @@ _CONFIG_FIELDS = frozenset(
         "modules",
         "capabilities",
         "allowed_tools",
+        "allowed_chat_ids",
+        "allowed_sender_ids",
         "message_buffer",
         "files_dir",
     }
@@ -103,6 +105,10 @@ class MessagePluginConfig:
         display_name = _required_text(value.get("display_name"), "display_name")
         bound_user = _required_text(value.get("bound_user"), "bound_user")
         user_dir(bound_user, root)
+        try:
+            transport_policy = TransportPolicy.from_dict(value)
+        except TransportRegistrationError as exc:
+            raise MessagePluginError(str(exc)) from exc
 
         modules = value.get("modules")
         if not isinstance(modules, dict) or set(modules) != _MODULE_FIELDS:
@@ -129,15 +135,7 @@ class MessagePluginConfig:
         if not required_capabilities.issubset(normalized_capabilities):
             raise MessagePluginError("capabilities 必须包含 receive_text 和 send_text")
 
-        raw_allowed = value.get("allowed_tools")
-        if raw_allowed is None:
-            allowed_tools = None
-        elif isinstance(raw_allowed, list) and all(
-            isinstance(item, str) and item.strip() for item in raw_allowed
-        ):
-            allowed_tools = frozenset(item.strip() for item in raw_allowed)
-        else:
-            raise MessagePluginError("allowed_tools 必须是非空字符串数组或 null")
+        allowed_tools = transport_policy.allowed_tools
 
         message_buffer = _relative_path(
             value.get("message_buffer"), "message_buffer"
@@ -178,11 +176,7 @@ class MessagePluginConfig:
         return _resolve_within(self.directory, self.modules[name])
 
     def policy(self) -> TransportPolicy:
-        return TransportPolicy(
-            allowed_tools=self.allowed_tools,
-            capabilities=self.capabilities,
-            bound_user=self.bound_user,
-        )
+        return TransportPolicy.from_dict(self.raw)
 
 
 @dataclass(frozen=True, slots=True)

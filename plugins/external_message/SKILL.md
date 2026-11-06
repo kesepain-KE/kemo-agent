@@ -5,8 +5,9 @@
 ### 发送消息
 
 - `send_message`：向指定平台、会话类型和目标 ID 发送非空文本。
-- `send_file`：向指定平台、会话类型和目标 ID 发送本地文件。
+- `send_file`：只发送本安装当前用户 `download/`、`file_upload/` 或项目 `tmp/` 中的普通文件，使用绝对路径；拒绝其他路径及含符号链接/目录联接的父路径。
 - 发送前必须确认平台已经在 `message/out/` 配置、绑定当前用户并处于运行状态。
+- 只有显式成功回执才返回 `ok=true`；未确认或发送异常返回 `send_unconfirmed`、`retryable=false`，可能已送达，必须先核对目标会话，不能自动重复发送。
 
 ### 创建外部消息平台模块：四步流程
 
@@ -41,27 +42,11 @@
         "enum": ["send_message", "send_file"],
         "description": "send_message=发送文本，send_file=发送文件"
       },
-      "platform": {
-        "type": "string",
-        "description": "目标平台名"
-      },
-      "target": {
-        "type": "string",
-        "description": "目标用户、群聊或会话 ID"
-      },
-      "chat_type": {
-        "type": "string",
-        "enum": ["private", "group"],
-        "description": "private=私聊，group=群聊"
-      },
-      "message": {
-        "type": "string",
-        "description": "send_message 要发送的非空文本"
-      },
-      "file_path": {
-        "type": "string",
-        "description": "send_file 要发送的本地文件绝对路径"
-      }
+      "platform": {"type": "string", "description": "目标平台名"},
+      "target": {"type": "string", "description": "目标用户、群聊或会话 ID"},
+      "chat_type": {"type": "string", "enum": ["private", "group"], "description": "private=私聊，group=群聊"},
+      "message": {"type": "string", "description": "send_message 要发送的非空文本"},
+      "file_path": {"type": "string", "description": "当前用户 download/file_upload 或项目 tmp 内普通文件的绝对路径，禁止链接和目录联接"}
     },
     "required": ["action", "platform", "target", "chat_type"],
     "additionalProperties": false
@@ -69,6 +54,7 @@
   "version": "1.0.0",
   "enabled": true,
   "entrypoint": "tool.py:run",
-  "execution_mode": "thread"
+  "execution_mode": "process",
+  "permission": "external"
 }
 ```

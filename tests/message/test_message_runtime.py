@@ -37,7 +37,8 @@ from message.transport import (
     TransportRegistrationError,
     TransportRegistry,
 )
-from run.history import commit_window, empty_window, session_messages
+from run.history import session_messages
+from tests.card_history_support import seed_history
 from run.history import find_record, get_active, get_or_reserve_active
 from run.history import connection as history_connection
 from run.extensions import RunAssetResolver
@@ -88,7 +89,7 @@ def _root(*users: str) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     (root / "config").mkdir()
     for user in users:
         (root / "users" / user).mkdir(parents=True)
-        (root / "users" / user / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / user / "user_config.yaml").write_text("{}", "utf-8")
     return temporary, root
 
 
@@ -156,6 +157,7 @@ def _write_file_plugin(
                     "send_file",
                 ],
                 "allowed_tools": [],
+                "allowed_sender_ids": ["external", "ext-1"],
                 "message_buffer": "message.md",
                 "files_dir": "files/",
             }
@@ -541,7 +543,7 @@ timestamp: 2026-07-18T14:32:25+08:00
         transport = MockTransport()
         registry.register(
             transport,
-            TransportPolicy(bound_user="alice"),
+            TransportPolicy(bound_user="alice", allowed_sender_ids=frozenset({"ext-1"})),
         )
         transport.start(lambda envelope: None, lambda component, exc: None)
         router = MessageRouter(
@@ -676,8 +678,11 @@ class RouterTests(unittest.TestCase):
 
         router = self._router(source)
         router.route(_envelope("m1", chat_type="private", chat_id="u1"))
-        router.route(_envelope("m2", chat_type="group", chat_id="g1"))
-        self.assertEqual([item[:2] for item in seen], [("alice", "message:mock")] * 2)
+        router.route(_envelope("m2", user_id="ext-2", chat_type="private", chat_id="u2"))
+        self.assertEqual(
+            [item[:2] for item in seen],
+            [("alice", "message:mock"), ("bob", "message:mock")],
+        )
         self.assertTrue(all(item[2].startswith("conv_") for item in seen))
         self.assertNotEqual(seen[0][2], seen[1][2])
 
@@ -690,7 +695,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(second.session_id, first.session_id)
 
     def test_new_command_saves_current_session_and_queues_memory_without_model(self) -> None:
-        (self.root / "config" / "global_config.json").write_text(
+        (self.root / "config" / "global_config.yaml").write_text(
             json.dumps({"memory": {"extraction_mode": "compression_only"}}),
             "utf-8",
         )
@@ -704,20 +709,10 @@ class RouterTests(unittest.TestCase):
             title="mock · private",
         )
         previous_session_id = str(active["session_id"])
-        archive = self.root / "users" / "alice" / "history" / previous_session_id
-        window = empty_window("alice", source, previous_session_id)
-        window["text"]["messages"] = [
+        seed_history(self.root, "alice", source, previous_session_id, [
             {"role": "user", "content": "保存这轮"},
             {"role": "assistant", "content": "好的"},
-        ]
-        window["data"].update(
-            {
-                "rounds": 1,
-                "memory_processed_round": 0,
-                "memory_status": "deferred",
-            }
-        )
-        commit_window(archive, window)
+        ], metadata={"memory_status": "deferred"})
         model_calls = 0
 
         def source_events(request, **kwargs):
@@ -773,11 +768,8 @@ class RouterTests(unittest.TestCase):
         )
         for record, content in ((first, "first message"), (second, "second message")):
             session_id = str(record["session_id"])
-            archive = self.root / "users" / "alice" / "history" / session_id
-            window = empty_window("alice", source, session_id)
-            window["text"]["messages"] = [{"role": "user", "content": content}]
-            window["data"]["rounds"] = 1
-            commit_window(archive, window)
+            seed_history(self.root, "alice", source, session_id,
+                         [{"role": "user", "content": content}])
         model_calls = 0
 
         def source_events(request, **kwargs):
@@ -785,20 +777,30 @@ class RouterTests(unittest.TestCase):
             model_calls += 1
             yield from _done_events(request, **kwargs)
 
-        result = self._router(source_events).route(
+        router = self._router(source_events)
+        challenge = router.route(
             _envelope("m-clear", chat_id="chat-1", text="/clear@kesepain_bot")
         )
+        self.assertIn("尚未清空", challenge.text)
+        self.assertEqual(
+            session_messages(self.root, "alice", source, first["session_id"])[0]["content"],
+            "first message",
+        )
+        command = challenge.text.split("发送 ", 1)[1].split(" 确认", 1)[0]
+        result = router.route(_envelope("m-clear-confirm", chat_id="chat-1", text=command))
 
         self.assertEqual(result.status, "completed")
-        self.assertEqual(result.session_id, first["session_id"])
-        self.assertEqual(result.text, "当前对话已清空。")
+        self.assertNotEqual(result.session_id, first["session_id"])
+        self.assertEqual(result.text, "已切换到空白对话；原始历史完整保留。")
         self.assertEqual(model_calls, 0)
-        self.assertEqual(session_messages(self.root, "alice", source, first["session_id"]), [])
+        self.assertEqual(session_messages(self.root, "alice", source, result.session_id), [])
+        self.assertEqual(session_messages(self.root, "alice", source, first["session_id"])[0]["content"],
+                         "first message")
         self.assertEqual(
             session_messages(self.root, "alice", source, second["session_id"])[0]["content"],
             "second message",
         )
-        self.assertEqual(get_active(self.root, "alice", first_key)["session_id"], first["session_id"])
+        self.assertEqual(get_active(self.root, "alice", first_key)["session_id"], result.session_id)
 
     def test_unknown_slash_command_returns_help_without_model(self) -> None:
         model_calls = 0
@@ -944,11 +946,11 @@ class HostTests(unittest.TestCase):
             [{"platform": "mock", "external_user_id": "ext-1", "internal_user": "alice"}],
             cron=cron,
         )
-        (self.root / "config" / "global_config.json").write_text(
+        (self.root / "config" / "global_config.yaml").write_text(
             json.dumps(config),
             "utf-8",
         )
-        (self.root / "users" / "alice" / "user_config.json").write_text(
+        (self.root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1}),
             "utf-8",
         )
@@ -1174,9 +1176,9 @@ hello plugin
                 ("""---
 machine_id: msg_filedemo
 message_id: integrated
-chat_type: group
+chat_type: private
 external_user_id: "external"
-external_chat_id: "group"
+external_chat_id: "chat"
 timestamp: 2026-07-18T14:31:25+08:00
 ---
 
@@ -1185,9 +1187,9 @@ duplicate body
 ---
 machine_id: msg_filedemo
 message_id: fresh
-chat_type: group
+chat_type: private
 external_user_id: "external"
-external_chat_id: "group"
+external_chat_id: "chat"
 timestamp: 2026-07-18T14:32:25+08:00
 ---
 
@@ -1206,6 +1208,32 @@ fresh body
             )
             self.assertEqual(len(getattr(transport, "_output").SENT), 2)
             self.assertEqual(getattr(transport, "_output").SENT[1]["text"], "reply:fresh body")
+            (self.root / "message" / "out" / "filedemo" / "message.md").write_text(
+                """---
+machine_id: msg_filedemo
+message_id: ignored-group
+chat_type: group
+external_user_id: "external"
+external_chat_id: "group"
+timestamp: 2026-07-18T14:33:25+08:00
+---
+
+group must not trigger
+""",
+                "utf-8",
+            )
+            _wait_until(
+                lambda: any(
+                    "direct_only" in item["content"]
+                    for item in LogStore(self.root).list_messages("msg_filedemo")
+                ),
+                description="the group policy decision without an outbound reply",
+                interval=0.05,
+            )
+            self.assertEqual(len(getattr(transport, "_output").SENT), 2)
+            self.assertIsNone(get_active(
+                self.root, "alice", "message:filedemo:group:group",
+            ))
         finally:
             host.stop()
         self.assertFalse(registry.get("filedemo").transport.running)

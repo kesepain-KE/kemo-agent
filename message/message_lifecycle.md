@@ -70,7 +70,11 @@ input.py 收到平台消息并写入 message.md / files/
 
 可选 `chat_type` 和 `external_chat_id` 用于更精确绑定。匹配按“精确字段更多者优先”。未绑定身份直接拒绝，不猜内部用户。
 
-文件夹插件不逐个绑定外部账号，而是使用 `message.json.bound_user` 将该平台实例整体绑定到一个内部用户。
+文件夹插件使用 `message.json.bound_user` 选择内部归属，仍需通过 `allowed_sender_ids` 或既有身份映射校验发送者。
+发送者不匹配返回 `rejected`，不预留会话、不进入 Run。无法提供发送者的传统入口必须显式警告且
+`sender_verified=false`，不得以已验证身份展示。可选 `allowed_chat_ids` 只约束私聊，空列表兼容放行。
+框架触发模式当前只有 `direct`：群聊及 channel 返回 `ignored`，只落一次策略日志，不触发模型或回复。
+`mention/prefix` 仅预留，不实现群触发。
 
 内部用户必须存在于 `users/<name>/`。
 
@@ -88,18 +92,18 @@ session_id= <chat_type>:<external_chat_id>
 效果：
 
 - 同一内部用户跨入口共享记忆；
-- 不同平台的历史窗口隔离；
-- 同平台私聊、群聊隔离；
+- 不同平台的 CardStream 会话隔离；
+- 当前仅私聊进入 Run，不同私聊 ID 隔离，群聊只记未触发日志；
 - 不同聊天 ID 隔离；
 - 同一 `(user, source, session_id)` 由 Run 核心现有锁串行；
 - 不同会话可由 MessageRouter 工作线程并发。
 
 ## 幂等去重
 
-处理记录保存于每用户历史库：
+消息模块通过 ProcessedMessageStore 管理幂等记录，当前表位于每用户 CardStream 数据库，独立于历史 RAW/VIEW：
 
 ```text
-users/<user>/history/history.sqlite3
+users/<user>/cards.sqlite3
 └── message_processed_messages
 ```
 
@@ -113,7 +117,8 @@ users/<user>/history/history.sqlite3
 用户发现到且已启用的工具 ∩ TransportPolicy.allowed_tools
 ```
 
-- `allowed_tools = null`：Transport 不额外限制；
+- 省略 `allowed_tools`：仅 `history_search`；`file`、`memory_manage` 无动作级只读授权，不默认开放；
+- 显式 `allowed_tools = null`：Transport 不额外限制；
 - `allowed_tools = []`：Transport 不允许任何工具；
 - 具体列表：仅保留同名工具。
 
@@ -141,11 +146,13 @@ Transport 必须提供：
 - `name`
 - `capabilities`
 - `start(on_message, on_error)`
-- `send(message)`
+- `send(message)`：必须返回 `True` 或含布尔 `ok=true` 的对象，缺显式成功不能写成功终态；
 - `stop()`
 - `running`
 
 注册表拒绝空名称和同名注册。单个 Transport 启动、运行或发送失败只标记该组件错误，不终止其他组件。
+
+主动发送与回复发送未获确认（含发送超时）时标记 `send_unconfirmed`、`retryable=false`，提示先核对目标聊天，保留入站幂等记录，绝不自动重放；原始远端异常不进入错误回执或异常通知。已完成的会话变更不会因回复失败回滚。`/clear` 必须先申请一次性令牌，再由同一发送者在同聊天同会话60秒内确认，过期或进程重启需重申请。
 
 ## RuntimeHost 状态
 

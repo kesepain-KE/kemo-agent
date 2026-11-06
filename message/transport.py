@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Literal, Protocol, runtime_checkable
 
 from message.schema import MessageEnvelope, OutboundMessage
 
@@ -19,6 +19,10 @@ class TransportRegistrationError(TransportError):
 
 InboundCallback = Callable[[MessageEnvelope], Any]
 ErrorCallback = Callable[[str, BaseException], None]
+MessageTrigger = Literal["direct", "mention", "prefix"]
+# file/memory_manage mix reads with writes under one tool name. Until an
+# explicit entry grants them, expose only the intrinsically read-only tool.
+DEFAULT_MESSAGE_TOOLS = frozenset({"history_search"})
 
 
 @runtime_checkable
@@ -27,7 +31,7 @@ class Transport(Protocol):
     capabilities: frozenset[str]
 
     def start(self, on_message: InboundCallback, on_error: ErrorCallback) -> None: ...
-    def send(self, message: OutboundMessage) -> None: ...
+    def send(self, message: OutboundMessage) -> bool | dict[str, Any]: ...
     def stop(self) -> None: ...
 
     @property
@@ -36,14 +40,17 @@ class Transport(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class TransportPolicy:
-    allowed_tools: frozenset[str] | None = None
+    allowed_tools: frozenset[str] | None = DEFAULT_MESSAGE_TOOLS
     capabilities: frozenset[str] = frozenset({"receive_text", "send_text"})
     bound_user: str | None = None
+    allowed_chat_ids: frozenset[str] = frozenset()
+    allowed_sender_ids: frozenset[str] = frozenset()
+    trigger: MessageTrigger = "direct"  # mention/prefix are reserved, not implemented.
 
     @classmethod
     def from_dict(cls, value: dict | None) -> "TransportPolicy":
         raw = value or {}
-        allowed = raw.get("allowed_tools")
+        allowed = raw.get("allowed_tools", list(DEFAULT_MESSAGE_TOOLS))
         if allowed is None:
             normalized = None
         elif isinstance(allowed, list) and all(isinstance(item, str) for item in allowed):
@@ -55,10 +62,22 @@ class TransportPolicy:
             isinstance(item, str) for item in capabilities
         ):
             raise TransportRegistrationError("capabilities 必须是字符串数组")
+        allowlists: dict[str, frozenset[str]] = {}
+        for field_name in ("allowed_chat_ids", "allowed_sender_ids"):
+            values = raw.get(field_name, [])
+            if values is None:
+                values = []
+            if not isinstance(values, list) or not all(
+                isinstance(item, str) and item.strip() for item in values
+            ):
+                raise TransportRegistrationError(f"{field_name} 必须是非空字符串组成的数组")
+            allowlists[field_name] = frozenset(item.strip() for item in values)
         return cls(
             allowed_tools=normalized,
             capabilities=frozenset(item.strip() for item in capabilities if item.strip()),
             bound_user=(str(raw.get("bound_user") or "").strip() or None),
+            allowed_chat_ids=allowlists["allowed_chat_ids"],
+            allowed_sender_ids=allowlists["allowed_sender_ids"],
         )
 
 
@@ -162,13 +181,14 @@ class MockTransport:
             raise TransportError("MockTransport 未运行")
         callback(envelope)
 
-    def send(self, message: OutboundMessage) -> None:
+    def send(self, message: OutboundMessage) -> bool:
         with self._lock:
             if not self._running:
                 raise TransportError("MockTransport 未运行")
             if self.fail_send:
                 raise TransportError("MockTransport send failure")
             self.sent.append(message)
+            return True
 
     def stop(self) -> None:
         with self._lock:

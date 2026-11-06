@@ -23,6 +23,7 @@ from message.transport import (
 )
 from run.extensions import describe_message_asset
 from run.infra import LogStore
+from run.retry import raise_if_host_exception
 
 if TYPE_CHECKING:
     from message.router import RouteResult
@@ -166,7 +167,7 @@ class FileMessageTransport:
                 self._poll_thread = None
                 self._input_supervisor_thread = None
 
-    def send(self, message: OutboundMessage) -> None:
+    def send(self, message: OutboundMessage) -> bool:
         token = str(message.metadata.get("message_queue_token") or "")
         pending = self._pending.get(token)
         reply_to = (
@@ -184,8 +185,7 @@ class FileMessageTransport:
         try:
             sent = self._output.send(payload)
         except BaseException as exc:
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                raise
+            raise_if_host_exception(exc)
             raise TransportError(f"{self.name} output.send() 失败：{exc}") from exc
         if sent is not True:
             raise TransportError(f"{self.name} output.send() 返回 False")
@@ -194,6 +194,7 @@ class FileMessageTransport:
                 "messages_sent_today", state["messages_sent_today"] + 1
             )
         )
+        return True
 
     def request_payload(self, envelope: MessageEnvelope) -> dict[str, Any]:
         """Build Engine prompt and Run assets from validated local attachments."""
@@ -302,8 +303,7 @@ class FileMessageTransport:
                     )
                 )
             except BaseException as exc:
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    raise
+                raise_if_host_exception(exc)
                 failed = claim.with_suffix(claim.suffix + ".failed")
                 try:
                     os.replace(claim, failed)
@@ -331,8 +331,7 @@ class FileMessageTransport:
                 self._write_state(state)
                 return state
             except BaseException as exc:
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    raise
+                raise_if_host_exception(exc)
                 current["health"] = "dead"
                 current["last_check"] = datetime.now().astimezone().isoformat()
                 current["error"] = str(exc)
@@ -356,8 +355,8 @@ class FileMessageTransport:
                 str(self.config.files_path),
             )
         except BaseException as exc:
-            if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                self._report_error(exc)
+            raise_if_host_exception(exc)
+            self._report_error(exc)
 
     def _input_is_alive(self) -> bool:
         probe = getattr(self._input, "is_alive", None)
@@ -414,8 +413,7 @@ class FileMessageTransport:
             try:
                 alive = self._input_is_alive()
             except BaseException as exc:
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    return
+                raise_if_host_exception(exc)
                 alive = False
                 probe_error = exc
 
@@ -436,8 +434,7 @@ class FileMessageTransport:
                     try:
                         module_error = self._input_last_error()
                     except BaseException as exc:
-                        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                            return
+                        raise_if_host_exception(exc)
                         probe_error = probe_error or exc
                     reason = module_error or (
                         str(probe_error) if probe_error is not None else "输入模块已停止"
@@ -450,8 +447,7 @@ class FileMessageTransport:
                         if not restarted:
                             return
                     except BaseException as exc:
-                        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                            return
+                        raise_if_host_exception(exc)
                         self._set_input_state("restarting", error=str(exc))
                         self._report_error(exc)
                     exponent = min(restart_attempts - 1, 16)
@@ -473,8 +469,7 @@ class FileMessageTransport:
                     next_health = now + self.health_interval
                 self.poll_once()
             except BaseException as exc:
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    return
+                raise_if_host_exception(exc)
                 self._report_error(exc)
             self._stop_event.wait(self.poll_interval)
 
@@ -653,6 +648,10 @@ class FileMessageTransport:
     def _write_log(
         self, messages: tuple[BufferedMessage, ...], result: "RouteResult"
     ) -> None:
+        if result.status in {"ignored", "rejected"}:
+            # The router already persisted one policy decision. No Run or
+            # outbound send occurred, so do not invent a send/failure record.
+            return
         if result.status in {"completed", "waiting_confirmation"}:
             outbound = result.text
         elif result.status == "duplicate":
@@ -736,9 +735,9 @@ class FileMessageTransport:
                 )
         try:
             store.append_message_entries(entries)
-        except Exception:
+        except Exception as exc:
             # Observability persistence must not replay an already-routed message.
-            pass
+            raise_if_host_exception(exc)
 
     def _report_error(self, exc: BaseException) -> None:
         try:
@@ -748,14 +747,14 @@ class FileMessageTransport:
                     state["health"] = "degraded"
                 state["error"] = str(exc)
                 self._write_state(state)
-        except Exception:
-            pass
+        except Exception as error:
+            raise_if_host_exception(error)
         callback = self._on_error
         if callback is not None:
             try:
                 callback(self.name, exc)
-            except Exception:
-                pass
+            except Exception as error:
+                raise_if_host_exception(error)
 
 
 def discover_message_plugins(
@@ -784,7 +783,6 @@ def discover_message_plugins(
             machine_ids.add(config.machine_id)
             platforms.add(config.platform)
         except BaseException as exc:
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                raise
+            raise_if_host_exception(exc)
             issues.append(MessagePluginIssue(directory.name, directory, str(exc)))
     return transports, issues
