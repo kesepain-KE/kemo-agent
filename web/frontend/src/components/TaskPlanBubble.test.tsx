@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { TaskPlanBubble } from './TaskPlanBubble'
 
@@ -11,14 +11,20 @@ describe('TaskPlanBubble', () => {
       title="测试任务计划"
       status="pending"
       autoAccept={false}
-      steps={[{ id: 'step_1', title: '获取当前时间', status: 'pending' }, { id: 'step_2', title: '检查目录', dependency: 'step_1', status: 'pending' }]}
+      steps={[{ id: 'step_1', title: '获取当前时间', status: 'pending' }, { id: 'step_2', title: '检查目录', description: '检查本地目录的执行结果。', dependency: 'step_1', status: 'pending' }]}
       onReject={onReject}
       onModify={onModify}
       onApprove={onApprove}
     />)
     expect(screen.getByText('等待批准')).toBeInTheDocument()
-    expect(screen.getByText('步骤数：2 步')).toBeInTheDocument()
-    expect(screen.getByText('依赖 step_1')).toBeInTheDocument()
+    expect(screen.getByText('2 步')).toBeInTheDocument()
+    expect(screen.getByText('依赖 step_1')).not.toBeVisible()
+    expect(screen.getByText('检查本地目录的执行结果。')).not.toBeVisible()
+    fireEvent.click(screen.getByText('检查目录'))
+    expect(screen.getByText('依赖 step_1')).toBeVisible()
+    expect(screen.getByText('检查本地目录的执行结果。')).toBeVisible()
+    expect(screen.queryByText(/^step_\d+$/)).not.toBeInTheDocument()
+    expect(screen.queryByText('已创建任务计划，请确认后执行以下步骤')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /拒绝/ }))
     fireEvent.click(screen.getByRole('button', { name: /修改/ }))
     fireEvent.click(screen.getByRole('button', { name: /批准执行/ }))
@@ -27,25 +33,29 @@ describe('TaskPlanBubble', () => {
     expect(onApprove).toHaveBeenCalledOnce()
   })
 
-  it('运行状态显示当前进度', () => {
+  it('运行状态显示当前进度，暂停前先弹出应用内确认', () => {
     const onPause = vi.fn()
-    const confirm = vi.spyOn(window, 'confirm')
-    confirm.mockReturnValueOnce(false).mockReturnValueOnce(true)
     render(<TaskPlanBubble title="运行计划" status="running" steps={[{ id: 'step_1', title: '完成项', status: 'completed' }, { id: 'step_2', title: '执行项', status: 'running' }]} onPause={onPause} />)
     expect(screen.getByText('执行进度 1/2')).toBeInTheDocument()
     expect(screen.getByText('50%')).toBeInTheDocument()
-    expect(screen.getByText('正在执行：执行项')).toBeInTheDocument()
+    expect(screen.getByText('执行项')).toBeVisible()
+    expect(screen.queryByText('正在执行：执行项')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /停止任务/ })).not.toBeInTheDocument()
-    const pauseButton = screen.getByRole('button', { name: /暂停任务/ })
-    fireEvent.click(pauseButton)
+    fireEvent.click(screen.getByRole('button', { name: /暂停任务/ }))
     expect(onPause).not.toHaveBeenCalled()
-    fireEvent.click(pauseButton)
+
+    const dialog = screen.getByRole('alertdialog', { name: '暂停任务？' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '继续执行' }))
+    expect(onPause).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /暂停任务/ }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '暂停任务' }))
     expect(onPause).toHaveBeenCalledOnce()
-    expect(confirm).toHaveBeenCalledWith('确定要暂停此任务吗？任务将在当前步骤结束后暂停。')
-    confirm.mockRestore()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 
-  it('长计划保留全部步骤并保持运行提示位于卡片内', () => {
+  it('长计划保留全部步骤和卡片内的暂停入口', () => {
     render(<TaskPlanBubble
       title="长计划"
       status="running"
@@ -60,7 +70,7 @@ describe('TaskPlanBubble', () => {
     const stepList = screen.getByRole('list', { name: '任务计划步骤' })
     expect(plan.contains(stepList)).toBe(true)
     expect(screen.getAllByRole('listitem')).toHaveLength(12)
-    expect(plan.contains(screen.getByText('正在执行：步骤 11'))).toBe(true)
+    expect(plan.contains(screen.getByRole('button', { name: /暂停任务/ }))).toBe(true)
   })
 
   it('长标题和描述保留原文，折叠再展开后仍能批准计划', () => {

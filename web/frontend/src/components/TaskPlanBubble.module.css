@@ -1,52 +1,218 @@
-.taskPlanBubble{--accent:var(--text-secondary);--text:var(--text-primary);position:relative;width:min(100%,900px);box-sizing:border-box;padding:18px 20px 15px;background:rgba(255,255,255,.98);border:1px solid rgba(114, 114, 114, .48);border-radius:20px;box-shadow:0 14px 34px rgba(54, 54, 54, .11),0 0 0 3px rgba(108, 108, 108, .045);color:var(--text);animation:taskPlanEnter 180ms ease-out}.header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.headerIdentity{display:flex;align-items:center;min-width:0;gap:13px}.planIcon{display:flex;align-items:center;justify-content:center;width:45px;height:45px;flex:0 0 45px;color:var(--accent);background:#f2f2f2;border-radius:15px}.headerText{min-width:0}.title{margin:0;overflow:hidden;font-size:18px;font-weight:700;line-height:1.35;text-overflow:ellipsis;white-space:nowrap}.description{margin:4px 0 0;color:#7b7b7b;font-size:13px;line-height:1.45}.headerMeta{display:flex;align-items:center;flex-shrink:0;gap:8px}.statusPill,.stepCountPill{display:inline-flex;align-items:center;justify-content:center;min-height:34px;box-sizing:border-box;padding:0 12px;border-radius:11px;color:#717171;background:#f4f4f4;font-size:13px;line-height:1;white-space:nowrap}.statusPill span{margin-right:6px;color:#8c8c8c}.statusPill_pending{color:var(--accent);background:#f2f2f2}.statusPill_running{color:#737373;background:#f4f4f4}.statusPill_completed{color:#737373;background:#f5f5f5}.statusPill_failed{color:#666666;background:#f3f3f3}.statusPill_rejected,.statusPill_cancelled{color:#8b8b8b;background:#f2f2f2}.iconButton{display:flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;color:#7a7a7a;background:#f6f6f6;border:0;border-radius:11px;cursor:pointer}.progressSection{margin-top:15px;padding:12px 14px;background:#fafafa;border:1px solid #e7e7e7;border-radius:13px}.progressHeader{display:flex;justify-content:space-between;margin-bottom:8px;color:#797979;font-size:12px}.progressTrack{height:6px;overflow:hidden;background:#e7e7e7;border-radius:99px}.progressBar{height:100%;background:linear-gradient(90deg,#797979,#606060);border-radius:inherit;transition:width 240ms ease}.stepList{display:flex;flex-direction:column;gap:7px;margin-top:15px}.stepRow{display:grid;grid-template-columns:34px minmax(58px,82px) minmax(0,1fr) auto;align-items:center;min-height:43px;box-sizing:border-box;gap:10px;padding:6px 12px 6px 8px;background:#fff;border:1px solid #e4e4e4;border-radius:12px}.stepNumber{display:flex;align-items:center;justify-content:center;width:27px;height:27px;color:var(--accent);background:#f0f0f0;border-radius:10px;font-size:12px;font-weight:700}.stepId{overflow:hidden;font-size:13px;font-weight:650;text-overflow:ellipsis;white-space:nowrap}.stepContent{min-width:0}.stepTitle{overflow:hidden;color:#6a6a6a;font-size:13px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}.stepDescription{margin-top:3px;overflow:hidden;color:#a1a1a1;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.stepMeta{display:flex;justify-content:flex-end;gap:8px;white-space:nowrap}.dependency,.stepStatusLabel{padding:5px 8px;color:#8b8b8b;background:#f5f5f5;border-radius:8px;font-size:11px}.stepStatus_running{background:#fafafa;border-color:rgba(102, 102, 102, .28)}.stepStatus_completed .stepNumber{color:#6e6e6e;background:#f3f3f3}.stepStatus_completed .stepTitle,.stepStatus_completed .stepId{color:#848484}.stepStatus_failed{background:#fbfbfb;border-color:rgba(106, 106, 106, .24)}.stepStatus_failed .stepNumber{color:#696969;background:#f3f3f3}.notice{display:flex;align-items:center;gap:9px;min-height:42px;box-sizing:border-box;margin-top:14px;padding:9px 13px;color:var(--accent);background:#f1f1f1;border-radius:11px;font-size:12px;line-height:1.45}.notice_running{color:#737373;background:#f4f4f4}.notice_completed{color:#6f6f6f;background:#f5f5f5}.notice_failed{color:#636363;background:#f3f3f3}.notice_rejected,.notice_cancelled{color:#7b7b7b;background:#f3f3f3}.actionBar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px}.actionButton{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:40px;padding:0 18px;border-radius:11px;font:inherit;font-size:13px;font-weight:650;cursor:pointer}.rejectButton{color:#626262;background:#fbfbfb;border:1px solid #a0a0a0}.modifyButton{color:#666666;background:#fff;border:1px solid #e2e2e2}.approveButton{color:#fff;background:linear-gradient(135deg,#747474,#5b5b5b);border:1px solid #636363}.stopButton{color:#666666;background:#f7f7f7;border:1px solid #9f9f9f}.collapsedSummary{display:flex;align-items:center;gap:9px;margin-top:13px;padding:10px 12px;color:#717171;background:#fafafa;border:1px solid #e8e8e8;border-radius:11px;font-size:13px}.collapsedSummary strong{margin-left:auto}.loadingIcon{animation:taskSpin 1s linear infinite}.bottomPointer{position:absolute;bottom:-10px;left:50%;width:18px;height:18px;background:#fff;border-right:1px solid rgba(114, 114, 114, .48);border-bottom:1px solid rgba(114, 114, 114, .48);transform:translateX(-50%) rotate(45deg)}.collapsed .bottomPointer{display:none}@keyframes taskPlanEnter{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}@keyframes taskSpin{to{transform:rotate(360deg)}}@media(max-width:820px){.header{flex-direction:column}.headerMeta{width:100%;flex-wrap:wrap}.stepRow{grid-template-columns:32px minmax(56px,76px) minmax(0,1fr)}.stepMeta{grid-column:3;justify-content:flex-start}.actionBar{grid-template-columns:1fr}.bottomPointer{left:26%}}@media(prefers-reduced-motion:reduce){.taskPlanBubble{animation:none}.loadingIcon,.progressBar{animation:none;transition:none}}
+/* ============================================================================
+   任务计划卡（对话内气泡 / 左侧悬浮层）
+   所有表面、边框、正文与状态色都取自当前主题令牌；语义状态由
+   brand / green / red 派生，不再写死浅色纸白与中性灰，
+   因此高级白与高级黑共用同一套结构，不会出现"浅色贴片"。
+   ========================================================================= */
 
-.noticeCopy {
-  min-width: 0;
-  flex: 1;
+.taskPlanBubble {
+  --accent: var(--text-secondary);
+  --text: var(--text-primary);
+  position: relative;
+  width: min(100%, 900px);
+  box-sizing: border-box;
+  padding: 18px 20px 15px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--brand-line);
+  border-radius: 20px;
+  box-shadow: var(--shadow-soft);
+  color: var(--text);
+  animation: taskPlanEnter 180ms var(--ease, ease-out);
 }
 
-.headerIdentity { flex: 1; }
-.headerText { flex: 1; }
-.headerIdentity,
-.headerText { max-width: 100%; }
-.title,
-.description,
-.stepTitle,
-.stepDescription,
-.noticeCopy,
-.collapsedSummary > span {
-  min-width: 0;
-  overflow: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  text-overflow: clip;
-}
-.title { max-height: min(3.5rem, 8dvh); }
-.description { max-height: min(4.5rem, 10dvh); }
-.stepTitle { max-height: 3.5em; }
-.stepDescription { max-height: 4.5em; }
-.noticeCopy,
-.collapsedSummary > span { max-height: min(3rem, 8dvh); }
-.notice > svg,
-.collapsedSummary > svg,
-.collapsedSummary > strong { flex-shrink: 0; }
-.stepRow { flex-shrink: 0; align-items: start; }
-.stepMeta { min-width: 0; max-width: 12rem; flex-wrap: wrap; }
-.dependency { min-width: 0; max-width: 100%; max-height: 3.5em; overflow: auto; }
+.header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.headerIdentity { display: flex; align-items: center; min-width: 0; gap: 13px; }
 
-/* Keep long plans inside the card. The composer dock must not become a
-   second scroll container: only this step viewport scrolls, while the
-   header, progress, running notice and controls remain in normal flow. */
+.planIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 45px;
+  height: 45px;
+  flex: 0 0 45px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border-radius: 15px;
+}
+
+.headerText { min-width: 0; }
+.title {
+  margin: 0;
+  overflow: hidden;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.description { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.headerMeta { display: flex; align-items: center; flex-shrink: 0; gap: 8px; }
+
+.statusPill,
+.stepCountPill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border-radius: 11px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.statusPill_pending { color: var(--brand); background: var(--brand-soft); }
+.statusPill_running { color: var(--text-2); background: color-mix(in srgb, var(--brand) 9%, var(--surface)); }
+.statusPill_completed { color: var(--green); background: color-mix(in srgb, var(--green) 13%, var(--surface)); }
+.statusPill_failed { color: var(--red); background: color-mix(in srgb, var(--red) 12%, var(--surface)); }
+.statusPill_rejected,
+.statusPill_cancelled { color: var(--muted); background: var(--surface-3); }
+
+.iconButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 0;
+  border-radius: 11px;
+  cursor: pointer;
+  transition: color var(--dur-fast, 110ms) var(--ease, ease),
+    background var(--dur-fast, 110ms) var(--ease, ease);
+}
+.iconButton:hover { color: var(--text); background: var(--surface-hover); }
+.iconButton:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.progressSection {
+  margin-top: 15px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+}
+.progressHeader { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+.progressTrack { height: 6px; overflow: hidden; background: var(--surface-3); border-radius: 99px; }
+.progressBar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand), color-mix(in srgb, var(--brand) 62%, var(--surface)));
+  border-radius: inherit;
+  transition: width 240ms var(--ease, ease);
+}
+
 .stepList {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
   min-height: 0;
   max-height: min(26dvh, 250px);
-  padding-right: 4px;
+  margin-top: 15px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  scrollbar-width: none;
 }
+.stepList::-webkit-scrollbar { display: none; }
+.stepList:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+
+.stepRow {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  min-height: 43px;
+  box-sizing: border-box;
+  gap: 10px;
+  padding: 6px 12px 6px 8px;
+  color: var(--text-2);
+  background: var(--surface);
+  border-color: var(--line);
+  border-style: solid;
+  border-width: 1px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  transition: border-color var(--dur-fast, 110ms) var(--ease, ease),
+    background var(--dur-fast, 110ms) var(--ease, ease);
+}
+.stepRow:hover { border-color: var(--line-strong); }
+
+.stepNumber {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.stepContent { min-width: 0; }
+.stepTitle { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 13px; font-weight: 500; line-height: 1.5; }
+summary.stepTitle { cursor: pointer; list-style: none; }
+summary.stepTitle::-webkit-details-marker { display: none; }
+.stepTitle > span { min-width: 0; flex: 1; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.stepTitle > svg { flex-shrink: 0; color: var(--muted); }
+details[open] > .stepTitle > span { -webkit-line-clamp: unset; }
+details[open] > .stepTitle > svg { transform: rotate(180deg); }
+.stepDescription { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.dependency { margin-top: 6px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+
+.stepStatus_running { background: var(--brand-soft); border-color: var(--brand-line); }
+.stepStatus_running .stepNumber { animation: taskStepBreath 1.9s var(--ease, ease) infinite; }
+.stepStatus_completed .stepNumber { color: var(--green); background: color-mix(in srgb, var(--green) 13%, var(--surface)); }
+.stepStatus_completed .stepTitle { color: var(--muted); }
+.stepStatus_failed { background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-color: color-mix(in srgb, var(--red) 28%, var(--line)); }
+.stepStatus_failed .stepNumber { color: var(--red); background: color-mix(in srgb, var(--red) 13%, var(--surface)); }
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  box-sizing: border-box;
+  margin-top: 14px;
+  padding: 9px 13px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border-radius: 11px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.notice_completed { color: var(--green); background: color-mix(in srgb, var(--green) 11%, var(--surface)); }
+.notice_failed { color: var(--red); background: color-mix(in srgb, var(--red) 10%, var(--surface)); }
+.notice_rejected,
+.notice_cancelled { color: var(--muted); background: var(--surface-3); }
+
+.actionBar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.actionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 11px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background var(--dur-fast, 110ms) var(--ease, ease),
+    border-color var(--dur-fast, 110ms) var(--ease, ease),
+    color var(--dur-fast, 110ms) var(--ease, ease);
+}
+.rejectButton { color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line)); }
+.rejectButton:hover { background: color-mix(in srgb, var(--red) 11%, var(--surface)); }
+.modifyButton { color: var(--text-2); background: var(--surface); border: 1px solid var(--line); }
+.modifyButton:hover { color: var(--brand); background: var(--surface-hover); border-color: var(--brand-line); }
+.approveButton { color: var(--accent-contrast, #fff); background: var(--brand); border: 1px solid var(--brand); }
+.approveButton:hover { background: var(--brand-2, var(--brand)); }
+.runningControls { display: flex; justify-content: flex-end; margin-top: 10px; }
 
 .pauseButton {
   min-height: 30px;
@@ -56,96 +222,187 @@
   justify-content: center;
   gap: 6px;
   flex: 0 0 auto;
-  border: 1px solid #8b8b8b;
+  color: var(--red);
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line));
   border-radius: 9px;
-  background: rgba(255, 255, 255, .72);
-  color: #5d5d5d;
   font: inherit;
   font-size: 12px;
   font-weight: 650;
   white-space: nowrap;
   cursor: pointer;
+  transition: background var(--dur-fast, 110ms) var(--ease, ease),
+    border-color var(--dur-fast, 110ms) var(--ease, ease);
+}
+.pauseButton:hover { color: var(--accent-contrast, #fff); background: var(--red); border-color: var(--red); }
+.pauseButton:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.collapsedSummary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 13px;
+  padding: 10px 12px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-color: var(--line);
+  border-style: solid;
+  border-width: 1px;
+  border-radius: 11px;
+  font-size: 13px;
+}
+.collapsedSummary strong { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+.loadingIcon { animation: taskSpin 1s linear infinite; }
+
+.bottomPointer {
+  position: absolute;
+  bottom: -10px;
+  left: 50%;
+  width: 18px;
+  height: 18px;
+  background: var(--surface-elevated);
+  border-color: var(--brand-line);
+  border-style: solid;
+  border-width: 0 1px 1px 0;
+  transform: translateX(-50%) rotate(45deg);
+}
+.collapsed .bottomPointer { display: none; }
+
+/* ------------------------- 文本折行与截断合同 ------------------------- */
+.noticeCopy { min-width: 0; flex: 1; }
+.headerIdentity,
+.headerText {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+.description,
+.stepTitle,
+.stepDescription,
+.noticeCopy,
+.collapsedSummary > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.description,
+.noticeCopy,
+.collapsedSummary > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.notice > svg,
+.collapsedSummary > svg,
+.collapsedSummary > strong { flex-shrink: 0; }
+
+/* ---------------------------- 左侧计划悬浮层 ---------------------------- */
+.sideDock {
+  position: absolute;
+  z-index: 20;
+  top: var(--s-6);
+  left: var(--chat-edge-space);
+  width: clamp(220px, 24vw, 360px);
+  max-width: calc(100% - 2 * var(--chat-edge-space));
+  max-height: calc(100% - 2 * var(--s-6));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  container: task-plan-side / inline-size;
+}
+.sideDock::-webkit-scrollbar { display: none; }
+
+:global([data-workspace-open="true"]) .sideDock { display: none; }
+
+@media (min-width: 901px) {
+  :global(.app-shell:not(.sidebar-collapsed)) .sideDock {
+    max-width: calc((100cqw - var(--chat-column-width)) / 2 - var(--chat-avatar-gap) - var(--chat-edge-space));
+  }
 }
 
-.pauseButton:hover {
-  border-color: #696969;
-  background: #fff;
+.taskPlanBubble.sideCard {
+  width: 100%;
+  max-width: none;
+  padding: 14px;
 }
 
-.pauseButton:focus-visible {
-  outline: 3px solid rgba(102, 102, 102, .18);
-  outline-offset: 2px;
+.sideCard .planIcon { width: 32px; height: 32px; flex-basis: 32px; border-radius: 10px; }
+.sideCard .title { font-size: 15px; }
+.sideCard .progressSection { margin-top: 10px; padding: 8px 10px; }
+.sideCard .notice { margin-top: 10px; padding: 8px 10px; }
+.sideCard .actionBar { display: flex; gap: 6px; }
+.sideCard .actionButton { flex: 1; min-width: 0; min-height: 32px; padding: 0 8px; font-size: 12px; }
+.sideCard .stepList { margin-top: 10px; }
+/* 侧卡独立于消息流，不需要气泡指针。 */
+.sideCard .bottomPointer { display: none; }
+
+@container task-plan-side (max-width: 420px) {
+  .sideCard .header { flex-direction: column; gap: 10px; }
+  .sideCard .headerIdentity { width: 100%; }
+  .sideCard .headerMeta { width: 100%; flex-wrap: wrap; }
+  .sideCard .stepRow { grid-template-columns: 27px minmax(0, 1fr); gap: 6px 8px; }
+  /* 360px 的侧卡里，提示文字与"暂停任务"并排会互相挤压，
+     改为上下两段：文字独占一行，按钮靠右换行。 */
+  .sideCard .notice { flex-wrap: wrap; row-gap: 8px; }
+  .sideCard .noticeCopy { min-width: calc(100% - 26px); }
+  .sideCard .pauseButton { margin-left: auto; }
+  .sideCard .actionBar { flex-wrap: wrap; }
+  .sideCard .actionButton { flex: 1 1 calc(50% - 6px); }
+}
+
+@container task-plan-side (max-width: 220px) {
+  .taskPlanBubble.sideCard { padding: 8px; }
+  .sideCard .planIcon,
+  .sideCard .description,
+  .sideCard .stepCountPill { display: none; }
+  .sideCard .title { white-space: normal; overflow-wrap: anywhere; }
+  .sideCard .headerMeta { gap: 4px; }
+  .sideCard .statusPill { padding-inline: 6px; font-size: 11px; }
+  .sideCard .stepRow { grid-template-columns: 20px minmax(0, 1fr); gap: 6px; padding: 6px; }
+  .sideCard .stepNumber { width: 20px; height: 20px; font-size: 11px; }
+  .sideCard .actionButton { padding-inline: 3px; gap: 4px; font-size: 11px; }
+  .sideCard .actionButton > svg { width: 12px; height: 12px; }
+}
+
+@media (max-width: 820px) {
+  .header { flex-direction: column; }
+  .headerMeta { width: 100%; flex-wrap: wrap; }
+  .stepRow { grid-template-columns: 32px minmax(0, 1fr); }
+  .actionBar { grid-template-columns: 1fr; }
+  .bottomPointer { left: 26%; }
 }
 
 @media (max-width: 560px) {
   .stepRow { grid-template-columns: 27px minmax(0, 1fr); gap: 6px 8px; }
-  .stepNumber { grid-column: 1; grid-row: 1 / span 3; }
-  .stepId { grid-column: 2; grid-row: 1; }
-  .stepContent { grid-column: 2; grid-row: 2; }
-  .stepMeta { grid-column: 2; grid-row: 3; max-width: 100%; }
-
-  .notice_running {
-    flex-wrap: wrap;
-  }
-
-  .notice_running .noticeCopy {
-    min-width: calc(100% - 28px);
-  }
-
-  .notice_running .pauseButton {
-    margin-left: auto;
-  }
 }
 
-/* Theme compatibility. The original task-plan prototype used an entirely
-   fixed light palette, which produced a white card and low-contrast text in
-   the dark theme. Keep semantic status colors while deriving every surface,
-   border and ordinary text color from the active application theme. */
-.taskPlanBubble {
-  background: var(--surface-elevated);
-  border-color: var(--brand-line);
-  color: var(--text);
-  box-shadow: var(--shadow-soft);
+@keyframes taskPlanEnter {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
 }
-.planIcon { color: var(--brand); background: var(--brand-soft); }
-.description { color: var(--muted); }
-.statusPill,
-.stepCountPill { color: var(--text-2); background: var(--surface-2); }
-.statusPill span { color: var(--muted); }
-.statusPill_pending { color: var(--brand); background: var(--brand-soft); }
-.statusPill_running { color: #8d8d8d; background: color-mix(in srgb, #737373 13%, var(--surface)); }
-.statusPill_completed { color: var(--green); background: color-mix(in srgb, var(--green) 13%, var(--surface)); }
-.statusPill_failed { color: var(--red); background: color-mix(in srgb, var(--red) 12%, var(--surface)); }
-.statusPill_rejected,
-.statusPill_cancelled { color: var(--muted); background: var(--surface-3); }
-.iconButton { color: var(--muted); background: var(--surface-2); }
-.iconButton:hover { color: var(--text); background: var(--surface-hover); }
-.progressSection { background: var(--surface-2); border-color: var(--line); }
-.progressHeader { color: var(--muted); }
-.progressTrack { background: var(--surface-3); }
-.stepRow { color: var(--text-2); background: var(--surface); border-color: var(--line); }
-.stepNumber { color: var(--brand); background: var(--brand-soft); }
-.stepTitle { color: var(--text-2); }
-.stepDescription { color: var(--muted); }
-.dependency,
-.stepStatusLabel { color: var(--muted); background: var(--surface-3); }
-.stepStatus_running { background: var(--brand-soft); border-color: var(--brand-line); }
-.stepStatus_completed .stepNumber { color: var(--green); background: color-mix(in srgb, var(--green) 13%, var(--surface)); }
-.stepStatus_completed .stepTitle,
-.stepStatus_completed .stepId { color: var(--muted); }
-.stepStatus_failed { background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-color: color-mix(in srgb, var(--red) 28%, var(--line)); }
-.stepStatus_failed .stepNumber { color: var(--red); background: color-mix(in srgb, var(--red) 13%, var(--surface)); }
-.notice { color: var(--brand); background: var(--brand-soft); }
-.notice_running { color: #8d8d8d; background: color-mix(in srgb, #737373 11%, var(--surface)); }
-.notice_completed { color: var(--green); background: color-mix(in srgb, var(--green) 11%, var(--surface)); }
-.notice_failed { color: var(--red); background: color-mix(in srgb, var(--red) 10%, var(--surface)); }
-.notice_rejected,
-.notice_cancelled { color: var(--muted); background: var(--surface-3); }
-.rejectButton,
-.stopButton { color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-color: color-mix(in srgb, var(--red) 38%, var(--line)); }
-.modifyButton { color: var(--text-2); background: var(--surface); border-color: var(--line); }
-.modifyButton:hover { color: var(--brand); background: var(--surface-hover); border-color: var(--brand-line); }
-.collapsedSummary { color: var(--text-2); background: var(--surface-2); border-color: var(--line); }
-.bottomPointer { background: var(--surface-elevated); border-color: var(--brand-line); }
-.pauseButton { color: var(--red); background: var(--surface); border-color: color-mix(in srgb, var(--red) 38%, var(--line)); }
-.pauseButton:hover { color: #fff; background: var(--red); border-color: var(--red); }
+@keyframes taskSpin { to { transform: rotate(360deg); } }
+@keyframes taskStepBreath {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 30%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 0%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taskPlanBubble { animation: none; }
+  .loadingIcon,
+  .progressBar { animation: none; transition: none; }
+  .stepStatus_running .stepNumber { animation: none; }
+}
+
+/* 整卡状态保留轻量描边提示。 */
+.taskPlanBubble.planStatus_pending { border-color: var(--brand-line); }
+.taskPlanBubble.planStatus_running {
+  border-color: color-mix(in srgb, var(--brand) 30%, var(--brand-line));
+  box-shadow: var(--shadow-soft), 0 0 0 1px color-mix(in srgb, var(--brand) 8%, transparent);
+}
+.taskPlanBubble.planStatus_paused { border-color: var(--line-strong); }
+.taskPlanBubble.planStatus_completed { border-color: color-mix(in srgb, var(--green) 26%, var(--brand-line)); }
+.taskPlanBubble.planStatus_failed,
+.taskPlanBubble.planStatus_rejected,
+.taskPlanBubble.planStatus_cancelled { border-color: color-mix(in srgb, var(--red) 26%, var(--brand-line)); }

@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useRef } from 'react'
 import { ArrowDown, ArrowUp, GripVertical } from 'lucide-react'
 import type { PendingNextTurnMessage } from '../components/appShellTypes'
@@ -16,6 +17,7 @@ export function FollowUpQueue({ user, messages, canGuide, onGuide, onRemove, onR
   onReorder: (id: string, targetId: string) => void
   embedded?: boolean
 }) {
+  useLanguage()
   // A message that is being submitted as current-round guidance is no longer
   // a follow-up item.  Keep it in the state queue until the request settles
   // so a failed submission can be restored, but do not render it here.
@@ -43,8 +45,8 @@ export function FollowUpQueue({ user, messages, canGuide, onGuide, onRemove, onR
                 event.dataTransfer.setData('application/x-kemo-follow-up', message.id)
                 event.dataTransfer.effectAllowed = 'move'
               }}><GripVertical aria-hidden="true" /></button>
-            <strong>消息跟进 {index + 1}</strong>
-            <span role="status">{message.status === 'guiding' ? '正在提交本轮引导' : message.status === 'sending' ? '正在发送' : message.status === 'error' ? '自动发送失败' : '已排队到下一轮'}</span>
+            <strong>{tr("消息跟进")}{index + 1}</strong>
+            <span role="status">{message.status === 'guiding' ? '正在提交本轮引导' : message.status === 'sending' ? '正在发送' : message.status === 'error' ? tr('自动发送失败') : tr('已排队到下一轮')}</span>
           </div>
           <OverflowPeek
             className={styles.body}
@@ -62,8 +64,8 @@ export function FollowUpQueue({ user, messages, canGuide, onGuide, onRemove, onR
             <button type="button" onClick={() => onReorder(message.id, visibleMessages[index + 1].id)} disabled={locked(message) || index === visibleMessages.length - 1 || locked(visibleMessages[index + 1])} aria-label={`下移消息跟进 ${index + 1}`}><ArrowDown aria-hidden="true" />下移</button>
             <span className={styles.spacer} />
             {canGuide ? <button type="button" className={styles.guide} disabled={locked(message)} onClick={() => onGuide(message)}>本轮引导</button> : null}
-            {message.status === 'error' ? <button type="button" onClick={() => onRetry(message.id)}>重新发送</button> : null}
-            <button type="button" onClick={() => onRemove(message.id)} disabled={locked(message)}>取消</button>
+            {message.status === 'error' ? <button type="button" onClick={() => onRetry(message.id)}>{tr("重新发送")}</button> : null}
+            <button type="button" onClick={() => onRemove(message.id)} disabled={locked(message)}>{tr("取消")}</button>
           </div>
         </article>
       </li>)}
