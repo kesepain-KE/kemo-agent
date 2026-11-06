@@ -99,3 +99,6 @@ skills/*
 message/out/*
 !message/out/.gitkeep
 *.bak.*
+
+# Local dev tooling (graph builder etc.) — local only, never published
+tools/
