@@ -12,6 +12,16 @@ from run.agents.task_ledger import TaskLedger, _OPEN_PARENT, _OWNER, now
 from run.agents.budgets import BUDGET_STOPS, effective_limit, SegmentBudget, legacy_tool_stop, upgrade_legacy_budget
 
 
+def _output_truncation_stop(record):
+    error = record.get("error") or {}
+    return (
+        record.get("status") == "failed"
+        and error.get("code") == "output_truncated"
+        and error.get("process_terminated") is not False
+        and not record.get("execution_live")
+    )
+
+
 def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=None,
                 ownership=None, config=None, event_callback=None, max_tool_calls=None) -> str:
     from run.agents.queue import AgentQueueError, AgentTaskNotFoundError, AgentQueueClosedError
@@ -36,7 +46,10 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
         old_task = scheduler._tasks.get(task_id)
         if old_task is not None:
             scheduler._require_task_scope_locked(old_task, source=source, session_id=session_id)
-            if ((old_task.status not in BUDGET_STOPS and not legacy_tool_stop(old_task.snapshot()))
+            old_snapshot = old_task.snapshot()
+            if ((old_task.status not in BUDGET_STOPS
+                 and not legacy_tool_stop(old_snapshot)
+                 and not _output_truncation_stop(old_snapshot))
                     or (old_task.error or {}).get("process_terminated") is False):
                 raise AgentQueueError("子代理尚未超时停止或仍有执行存活，不能续跑")
         task: AgentTask | None = None
@@ -49,9 +62,11 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                 if record is None:
                     raise AgentTaskNotFoundError(f"未知子代理任务：{task_id}")
                 legacy = legacy_tool_stop(record)
-                if ((record["status"] not in BUDGET_STOPS and not legacy) or record.get("execution_live")
-                        or (not record.get("resumable") and not legacy)):
-                    raise AgentQueueError("任务不是可续跑的预算停止状态")
+                truncated = _output_truncation_stop(record)
+                if ((record["status"] not in BUDGET_STOPS and not legacy and not truncated)
+                        or record.get("execution_live")
+                        or (not record.get("resumable") and not legacy and not truncated)):
+                    raise AgentQueueError("任务不是可续跑的预算停止或输出截断状态")
                 round_number = record.get("run_count", 1)
                 if not isinstance(round_number, int) or round_number >= MAX_RESUME_ROUNDS:
                     raise AgentQueueError("子代理续跑轮次已达安全上限")

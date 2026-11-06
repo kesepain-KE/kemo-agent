@@ -292,7 +292,7 @@ class TaskLedger:
         return self._reconciled(row)
 
     def records(self, source: str = "", session_id: str = "", *, parent: str | None = None,
-                offset: int = 0, limit: int = 50):
+                with_children: bool = False, offset: int = 0, limit: int = 50):
         clauses, args = [], []
         for column, value in (("source", source), ("session", session_id)):
             if value:
@@ -301,6 +301,10 @@ class TaskLedger:
         if parent is not None:
             clauses.append("parent=?")
             args.append(parent)
+        if with_children:
+            clauses.append("EXISTS (SELECT 1 FROM agent_tasks child "
+                           "WHERE child.parent=agent_tasks.id AND child.source=agent_tasks.source "
+                           "AND child.session=agent_tasks.session)")
         where = " AND ".join(clauses) or "1=1"
         with self.db() as db:
             total = db.execute(f"SELECT count(*) FROM agent_tasks WHERE {where}", args).fetchone()[0]

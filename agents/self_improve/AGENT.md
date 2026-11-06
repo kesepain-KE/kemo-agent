@@ -204,7 +204,7 @@ VIEW 压缩后排队，`background` 由 Maintenance 领取新增 RAW，`on_commi
 - 新碎片首次证据创建权重为 0，并登记该日为 creation（占日锁、不加分）；后续独立日期各 +1。例如一次补提取四天的证据，初建后可累计到 3。
 - 缺少可信时间戳的旧轮次可保存正文，但跳过历史加权并报告 missing_evidence_date；不得用窗口创建时间或今天补造证据。
 - 普通晋升清空本档位事件，新档位进入日之前的旧证据不能再次加分；拆分子片按继承的进入日期判断；last_weight_date 仅为最新已加权证据日期，不是唯一去重依据。
-- 手动审阅更新仍需检索绑定，用户主动编辑/审阅按执行日登记；只读检索不加权。细节见 `knowledge/global/storage-and-persistence.md`。
+- 手动审阅更新仍需检索绑定，用户主动编辑/审阅按执行日登记；只读检索不加权。细节见 `knowledge/global/runtime/storage-and-persistence.md`。
 
 ---
 

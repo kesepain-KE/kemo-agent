@@ -91,7 +91,7 @@ class TaskCoordinator:
             root_task_id=self.id,
         ).pending(owned_task_ids=owned_task_ids)
 
-    def _pending_dependencies(self):
+    def pending_dependencies(self):
         children = self.pending()
         shell_jobs = self._pending_shell_jobs()
         return [
@@ -175,16 +175,23 @@ class TaskCoordinator:
                    and not r.get("handled") and r["id"] not in self.delivered for r in children):
                 self.ledger.update(self.id, status="merging")
                 return True
-            children_pending = any(r["status"] not in _FINAL or r.get("execution_live") for r in children)
-            external_pending = bool(pending()) if callable(pending) else False
-            if not children_pending and not external_pending:
+            dependencies = [
+                *(r for r in children if r["status"] not in _FINAL or r.get("execution_live")),
+                *self._pending_shell_jobs(),
+                *(pending() if callable(pending) else []),
+            ]
+            if not dependencies:
                 return True
             if callable(wake) and wake():
                 if self.started:
                     self.ledger.update(self.id, status="running")
                 return True
-            if time.monotonic() >= self._deadline():
-                self._overdue_tasks = self._pending_dependencies()
+            # Healthy work owns its own execution budget. Only bound the
+            # drain after every remaining dependency has stopped cooperating.
+            if any(r["status"] in {"queued", "starting", "running"} for r in dependencies):
+                self._completion_deadline = None
+            elif time.monotonic() >= self._deadline():
+                self._overdue_tasks = dependencies
                 return False
             with _SIGNAL:
                 _SIGNAL.wait(.2)
@@ -253,7 +260,7 @@ class TaskCoordinator:
             and self._cancel_subagents_event is not None
             and not self._cancel_subagents_event.is_set()
         ):
-            unfinished = self._pending_dependencies()
+            unfinished = self.pending_dependencies()
             self._overdue_tasks = unfinished
             receipt = {
                 "status": "partial",
@@ -279,7 +286,7 @@ class TaskCoordinator:
                 logging.getLogger(__name__).exception("子任务取消请求失败：%s", child["id"])
                 self.ledger.update(self.id, cancel_request_failed=True)
         # One response deadline; scheduler truth alone releases execution protection.
-        while pending := self._pending_dependencies():
+        while pending := self.pending_dependencies():
             if time.monotonic() >= deadline:
                 self._overdue_tasks = pending
                 break

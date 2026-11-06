@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agents._runtime.schema import AgentDefinition
-from run.config import MainAgentSourcePolicy, select_knowledge_index
+from run.config import MainAgentSourcePolicy
 from run.config import SkillDescriptor, load_prompt_source_registry, truncate_chars
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
@@ -27,7 +27,7 @@ def effective_knowledge_scopes(
     definition: AgentDefinition,
     config: dict[str, Any],
 ) -> tuple[str, ...]:
-    """Return the capability scopes still allowed by the user's policy.
+    """Return knowledge paths allowed by both agent and user policy.
 
     A subagent manifest is an upper bound, not a way to bypass the user's
     disabled global/shared knowledge settings.  Preserve manifest order so
@@ -35,7 +35,7 @@ def effective_knowledge_scopes(
     """
 
     capabilities = definition.capabilities
-    if not capabilities.knowledge_index_enabled:
+    if not capabilities.knowledge_scopes:
         return ()
     allowed = set(MainAgentSourcePolicy.from_config(config).direct_knowledge_scopes())
     return tuple(scope for scope in capabilities.knowledge_scopes if scope in allowed)
@@ -75,18 +75,11 @@ def build_agent_prompt_bundle(
     )
     skill_text = _descriptor_text(skills, skill_limit)
     knowledge_scopes = effective_knowledge_scopes(definition, config)
-    knowledge = select_knowledge_index(
-        root,
-        user,
-        scopes=knowledge_scopes,
-    )
     sections: list[tuple[str, str]] = [("agent_instruction", definition.instruction)]
     if definition.trigger_registration:
         sections.append(("trigger_registration", definition.trigger_registration))
     if skill_text:
         sections.append(("skills", skill_text))
-    if knowledge.text:
-        sections.append(("knowledge_index", knowledge.text))
     contract = (
         "只处理调用方显式传入的数据，不假设拥有主对话上下文。\n"
         "必须只返回符合调用方提供的 JSON Schema 的 JSON 对象，不使用 Markdown。"
@@ -98,10 +91,6 @@ def build_agent_prompt_bundle(
         "total_chars": len(text),
         "skills": [item.relative_path for item in skills],
         "trigger_file": definition.trigger_file,
-        "knowledge_indexes": [
-            {"scope": item.scope, "path": item.relative_path}
-            for item in knowledge.documents
-        ],
         "knowledge_scopes": list(knowledge_scopes),
     }
     return AgentPromptBundle(text, tuple(name for name, _ in sections), diagnostics)

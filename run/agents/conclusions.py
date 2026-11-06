@@ -34,7 +34,11 @@ def delivery(snapshot: dict[str, Any]) -> dict[str, Any]:
         "agent": snapshot.get("agent", ""),
         "status": snapshot.get("status", ""),
         "run_count": snapshot.get("run_count", 1),
-        "resumable": bool(snapshot.get("resumable")) and snapshot.get("status") in {"timed_out", "tool_limit"},
+        "resumable": bool(snapshot.get("resumable")) and (
+            snapshot.get("status") in {"timed_out", "tool_limit"}
+            or (snapshot.get("status") == "failed"
+                and (snapshot.get("error") or {}).get("code") == "output_truncated")
+        ),
         "data": conclusion_data(result),
     }
     for key in ("submission_order", "usage", "error", "budget", "progress", "stop_reason", "background_jobs", "origin_task_id"):

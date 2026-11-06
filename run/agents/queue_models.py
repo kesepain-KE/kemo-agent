@@ -64,6 +64,12 @@ class AgentTask:
 
     def snapshot(self) -> dict[str, Any]:
         result = self.result
+        error = self.error or {}
+        resumable_status = self.status in {"timed_out", "tool_limit"} or (
+            self.status == "failed"
+            and error.get("code") == "output_truncated"
+            and error.get("process_terminated") is True
+        )
         if isinstance(result, AgentRunResult):
             result_snapshot: Any = {
                 "agent": result.agent,
@@ -93,7 +99,7 @@ class AgentTask:
             "result": result_snapshot,
             "error": copy.deepcopy(self.error),
             "run_count": self.run_count,
-            "resumable": self.resumable and self.status in {"timed_out", "tool_limit"},
+            "resumable": self.resumable and resumable_status,
             "budget": copy.deepcopy((result.metadata if isinstance(result, AgentRunResult) else {}).get("budget") or self.progress.get("budget") or {}),
             "progress": copy.deepcopy(self.progress),
             "origin_task_id": self.origin_task_id,

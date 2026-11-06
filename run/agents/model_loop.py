@@ -444,7 +444,7 @@ def run_model(
                 )
             if response.status == ResponseStatus.INCOMPLETE:
                 incomplete = incomplete_retry_metadata(response.incomplete_details)
-                raise AgentProviderError(
+                error = AgentProviderError(
                     f"子代理 Provider 响应未完整结束：{incomplete['reason']}",
                     category=str(
                         incomplete.get("category") or "provider_incomplete"
@@ -454,6 +454,11 @@ def run_model(
                     retryable=incomplete["retryable"],
                     retry_after_ms=incomplete.get("retry_after_ms"),
                 )
+                if incomplete["reason"] == "output_truncated" and continuation is not None:
+                    error.continuation = continuation
+                    error.partial_result = continuation.partial(definition.name, final_model)
+                    error.process_terminated = True
+                raise error
             raise AgentProviderError(
                 f"子代理 Provider 响应失败：{response.status}",
                 category="provider_error",

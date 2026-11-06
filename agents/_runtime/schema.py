@@ -82,7 +82,6 @@ class AgentCapabilities:
     shared_expand: tuple[str, ...] = ()
     user_expand: tuple[str, ...] = ()
     knowledge_scopes: tuple[str, ...] = ()
-    knowledge_index_enabled: bool = False
     knowledge_body_access: str = "none"
     inherit_main_history: bool = False
     inherit_current_request: bool = False
@@ -259,7 +258,6 @@ def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabi
         shared_expand=_allow_list(expand, "shared", field="prompt_sources.expand", path=path),
         user_expand=_allow_list(expand, "user", field="prompt_sources.expand", path=path),
         knowledge_scopes=scopes,
-        knowledge_index_enabled=bool(knowledge.get("index_enabled", False)),
         knowledge_body_access="none",
         inherit_main_history=inherit_history,
         inherit_current_request=inherit_request,
@@ -346,7 +344,6 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         shared_expand=(),
         user_expand=(),
         knowledge_scopes=scopes,
-        knowledge_index_enabled=bool(scopes),
         knowledge_body_access="none",
         inherit_main_history=inherit_main_history,
         inherit_current_request=inherit_main_history,

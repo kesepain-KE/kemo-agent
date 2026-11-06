@@ -26,7 +26,12 @@ from run.agents.task_ledger import register_owned_task, task_progress
 from run.agents.queue_models import AgentTask, TaskStatus
 from run.agents.ready_queue import ReadyTaskQueue
 from run.agents.budgets import effective_limit, SegmentBudget
-from run.agents.contracts import AgentToolLimitError, AgentInputError, bounded_schema_hint
+from run.agents.contracts import (
+    AgentProviderError,
+    AgentToolLimitError,
+    AgentInputError,
+    bounded_schema_hint,
+)
 from run.retry import HOST_CONTROL_EXCEPTIONS
 
 
@@ -743,6 +748,17 @@ class AgentScheduler:
                             "process_terminated": exc.process_terminated,
                         }
                     )
+                elif (
+                    task.status == "failed"
+                    and not task.cancel_event.is_set()
+                    and isinstance(exc, AgentProviderError)
+                    and exc.code == "output_truncated"
+                    and getattr(exc, "process_terminated", False)
+                    and getattr(exc, "continuation", None) is not None
+                    and exc.continuation.available
+                    and exc.partial_result is not None
+                ):
+                    task.resumable = True
                 elif isinstance(exc, AgentCancelledError):
                     task.error.update(
                         {
