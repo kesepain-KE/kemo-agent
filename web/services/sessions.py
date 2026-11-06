@@ -31,7 +31,7 @@ from run.history import (
     list_sessions_page,
     rename_session as rename_history_session,
     session_payload,
-    undo_last_round as undo_history_last_round,
+    withdraw_last_integration as withdraw_history_integration,
 )
 from run.history import (
     retry_summary as retry_history_summary,
@@ -248,7 +248,7 @@ class SessionServiceMixin:
             active_key,
             preferred_session_id=app_session_id,
             new_session_id=app_session_id,
-            reuse_latest=True,
+            reuse_latest=False,
         )
         if normalized_source in {"web", "app"}:
             with self._active_runs_lock:
@@ -309,6 +309,8 @@ class SessionServiceMixin:
         )
         if existing is None:
             raise NotFoundError(f"会话不存在：{normalized_session}")
+        if existing["lifecycle"] != "closed":
+            raise ConflictError("请先结束会话，再重新生成历史摘要")
         record = retry_history_summary(
             self.root,
             name,
@@ -422,11 +424,11 @@ class SessionServiceMixin:
             "deleted": True,
         }
 
-    def undo_last_round(
+    def withdraw_integration(
         self,
         user: Any,
         session_id: Any,
-        expected_round: Any,
+        expected_integration_count: Any,
         prompt: Any,
         *,
         source: Any = "web",
@@ -434,10 +436,10 @@ class SessionServiceMixin:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
         normalized_session = self.require_session_id(session_id)
-        if isinstance(expected_round, bool) or not isinstance(expected_round, int):
-            raise InvalidRequestError("expected_round 必须是正整数")
-        if expected_round < 1:
-            raise InvalidRequestError("expected_round 必须是正整数")
+        if isinstance(expected_integration_count, bool) or not isinstance(expected_integration_count, int):
+            raise InvalidRequestError("expected_integration_count 必须是正整数")
+        if expected_integration_count < 1:
+            raise InvalidRequestError("expected_integration_count 必须是正整数")
         if not isinstance(prompt, str) or not prompt.strip():
             raise InvalidRequestError("prompt 不能为空")
         with self._active_runs_lock:
@@ -449,12 +451,12 @@ class SessionServiceMixin:
             ):
                 raise ConflictError("会话仍在运行，确认上一轮结束后再重新发送")
             try:
-                result = undo_history_last_round(
+                result = withdraw_history_integration(
                     self.root,
                     name,
                     normalized_source,
                     normalized_session,
-                    expected_round=expected_round,
+                    expected_integration_count=expected_integration_count,
                     expected_prompt=prompt,
                 )
             except HistoryError as exc:
@@ -486,7 +488,7 @@ class SessionServiceMixin:
             ):
                 raise ConflictError("存在正在运行的会话，结束当前响应后再全部删除")
             try:
-                deleted_sessions, deleted_windows = delete_all_history_sessions(
+                deleted_sessions, _ = delete_all_history_sessions(
                     self.root,
                     name,
                     normalized_source,
@@ -502,7 +504,7 @@ class SessionServiceMixin:
             "source": normalized_source or "all",
             "deleted": True,
             "deleted_sessions": deleted_sessions,
-            "deleted_windows": deleted_windows,
+            "raw_preserved": True,
         }
 
     def history(

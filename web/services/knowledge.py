@@ -50,8 +50,8 @@ class KnowledgeServiceMixin:
         classification_errors: list[str] = []
         for scope, base in (
             ("user", self.root / "users" / name / "knowledge"),
-            ("shared", self.root / "shared_knowledge"),
-            ("global", self.root / "global_knowledge"),
+            ("shared", self.root / "knowledge" / "share"),
+            ("global", self.root / "knowledge" / "global"),
         ):
             try:
                 ensure_classification_file(base)
@@ -142,8 +142,8 @@ class KnowledgeServiceMixin:
             raise InvalidRequestError("scope 只允许 user、shared 或 global")
         roots = {
             "user": self.root / "users" / name / "knowledge",
-            "shared": self.root / "shared_knowledge",
-            "global": self.root / "global_knowledge",
+            "shared": self.root / "knowledge" / "share",
+            "global": self.root / "knowledge" / "global",
         }
         return name, roots[scope]
 

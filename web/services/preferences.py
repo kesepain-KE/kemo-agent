@@ -1,4 +1,4 @@
-"""Web appearance transport; locale belongs exclusively to user_config.json."""
+"""Web appearance transport; locale belongs exclusively to user_config.yaml."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from run.config import read_json_object, web_background, web_language
+from run.config import read_json_object, read_yaml_object, web_background, web_language
 from web.errors import InvalidRequestError
 from web.services._io import atomic_write
 
@@ -16,7 +16,7 @@ def read_preferences(root: Path, user: str) -> dict[str, Any]:
     value = read_json_object(base / "web_preferences.json", allow_empty=True)
     appearance = value.get("appearance")
     appearance = appearance if isinstance(appearance, dict) else {}
-    config = read_json_object(base / "user_config.json", allow_empty=True)
+    config = read_yaml_object(base / "user_config.yaml", allow_empty=True)
     return {
         "user": user,
         "appearance": {

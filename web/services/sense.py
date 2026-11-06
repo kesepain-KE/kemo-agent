@@ -16,7 +16,7 @@ import sys
 from typing import Any
 import uuid
 
-from run.config import load_config, read_json_object, system_update_rate
+from run.config import load_config, read_yaml_object, system_update_rate
 from run.context import estimate_text_tokens
 from run.extensions import ModuleRuntimeError, module_subprocess_environment
 from run.infra import hidden_subprocess_kwargs
@@ -41,13 +41,13 @@ class SenseServiceMixin:
     def sense(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
-        global_config = read_json_object(self.root / "config" / "global_config.json")
+        global_config = read_yaml_object(self.root / "config" / "global_config.yaml")
         update_interval_seconds = system_update_rate(
             global_config,
             "sense_update_rate",
         )
         source_policy = MainAgentSourcePolicy.from_config(config)
-        core_dir = self.root / "global_sense"
+        core_dir = self.root / "sense"
         registry_available = (core_dir / "register.py").is_file()
         registry = load_prompt_source_registry(self.root, name)
         inventory = registry.perception_inventory(
@@ -169,8 +169,8 @@ class SenseServiceMixin:
             or "\x00" in logical_name
             or ":" in logical_name
         ):
-            raise InvalidRequestError("感知模块名称必须是 global_sense 下的直接目录名")
-        base = (self.root / "global_sense").resolve()
+            raise InvalidRequestError("感知模块名称必须是 sense 下的直接目录名")
+        base = (self.root / "sense").resolve()
         target = base / logical_name
         if not target.is_dir():
             raise NotFoundError(f"感知模块不存在：{logical_name}")
@@ -179,7 +179,7 @@ class SenseServiceMixin:
         try:
             target.resolve().relative_to(base)
         except ValueError:
-            raise InvalidRequestError("感知模块路径越出 global_sense") from None
+            raise InvalidRequestError("感知模块路径越出 sense") from None
         return name, logical_name, target
 
     def refresh_sense_module(self, user: Any, module_name: Any) -> dict[str, Any]:

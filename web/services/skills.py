@@ -84,7 +84,7 @@ class SkillServiceMixin:
         prompt_sources = load_prompt_source_registry(self.root, name)
         for descriptor in prompt_sources.select_skills(include_stale=True):
             base = (
-                self.root / "shared_skills"
+                self.root / "skills"
                 if descriptor.scope == "shared"
                 else self.root / "users" / name / "user_skills"
             )
@@ -193,7 +193,7 @@ class SkillServiceMixin:
             root = self.root / "plugins"
         else:
             root = (
-                self.root / "shared_skills"
+                self.root / "skills"
                 if normalized_category == "shared"
                 else self.root / "users" / name / "user_skills"
             )

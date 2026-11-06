@@ -7,7 +7,7 @@ from typing import Any, TYPE_CHECKING
 import logging
 import uuid
 
-from run.config import read_json_object, _contains_reparse_point, web_background
+from run.config import read_yaml_object, _contains_reparse_point, web_background
 from run.infra import BoundedReadCache
 from web.errors import InvalidRequestError, NotFoundError
 from web.services._config_lock import config_lock
@@ -58,7 +58,7 @@ class BackgroundServiceMixin:
         directory = self.root / "users" / name
         if _contains_reparse_point(directory, self.root):
             raise InvalidRequestError("背景不允许符号链接或目录联接用户路径")
-        config = directory / "user_config.json"
+        config = directory / "user_config.yaml"
         if _contains_reparse_point(config, self.root):
             raise InvalidRequestError("背景配置不允许符号链接或目录联接")
         return name, directory
@@ -114,14 +114,14 @@ class BackgroundServiceMixin:
 
     def background_status(self, user: Any) -> dict[str, Any]:
         name, directory = self._background_root(user)
-        with config_lock(directory / "user_config.json"):
+        with config_lock(directory / "user_config.yaml"):
             _, metadata = self._background_metadata(directory)
-            config = read_json_object(directory / "user_config.json", allow_empty=True)
+            config = read_yaml_object(directory / "user_config.yaml", allow_empty=True)
             return {"user": name, **metadata, "settings": web_background(config)}
 
     def background_media(self, user: Any) -> tuple[Path, str]:
         _, directory = self._background_root(user)
-        with config_lock(directory / "user_config.json"):
+        with config_lock(directory / "user_config.yaml"):
             target, metadata = self._background_metadata(directory)
             if target is None:
                 raise NotFoundError("未设置可用的网页背景")
@@ -130,7 +130,7 @@ class BackgroundServiceMixin:
     def save_background(self, user: Any, data: bytes) -> dict[str, Any]:
         _, directory = self._background_root(user)
         suffix, _ = validate_background(data)
-        with config_lock(directory / "user_config.json"):
+        with config_lock(directory / "user_config.yaml"):
             candidates = self._background_candidates(directory)
             target = directory / f"background{suffix}"
             # Validate everything before writing; failed uploads keep the old asset.
@@ -139,7 +139,7 @@ class BackgroundServiceMixin:
 
     def delete_background(self, user: Any) -> dict[str, Any]:
         _, directory = self._background_root(user)
-        with config_lock(directory / "user_config.json"):
+        with config_lock(directory / "user_config.yaml"):
             candidates = self._background_candidates(directory)
             _replace_backgrounds(directory, candidates, None)
             return {"deleted": bool(candidates), **self.background_status(user)}

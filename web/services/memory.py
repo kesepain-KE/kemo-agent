@@ -189,6 +189,7 @@ class MemoryServiceMixin:
             }
         lifecycle["prompt_eligible"] = bool(
             lifecycle["is_current"]
+            and (config.get("memory") or {}).get("prompt_injection", True)
             and int((config.get("memory") or {}).get("important_memory_max_chars", 20000)) > 0
         )
         return {

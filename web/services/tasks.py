@@ -39,7 +39,7 @@ from run.tasks import (
     PlanStore,
     normalize_plan,
 )
-from web.errors import ConflictError, InvalidRequestError, NotFoundError
+from web.errors import ConflictError, InvalidRequestError, NotFoundError, PlanRevisionConflictError
 from web.services.cron_validation import validate_cron_input
 from web.services.task_cleanup import TaskCleanupServiceMixin, visible_executions
 
@@ -202,6 +202,8 @@ class TaskServiceMixin(TaskCleanupServiceMixin):
         for field in ("start_date", "end_date", "max_runs", "successful_runs"):
             if task.get(field) not in (None, ""):
                 summary[field] = task[field]
+        if task.get("last_stop_reason"):
+            summary["last_stop_reason"] = str(task["last_stop_reason"])
         summary["last_state"] = (
             "never" if not task.get("latest_run_at") else str(task.get("status") or "completed")
         )
@@ -361,60 +363,6 @@ class TaskServiceMixin(TaskCleanupServiceMixin):
             self.plan_waker()
         return {"user": name, "plan": self._plan_summary(stored), "updated": True}
 
-    def update_plan(
-        self,
-        user: Any,
-        plan_id: Any,
-        payload: Any,
-        session_id: Any = "",
-        source: Any = "web",
-    ) -> dict[str, Any]:
-        name = self.require_user(user)
-        if not isinstance(payload, dict):
-            raise InvalidRequestError("计划更新必须是对象")
-        normalized_source = self.require_source(source)
-        normalized_session = self.require_session_id(session_id)
-        store = PlanStore(self.root, name)
-        expected = payload.get("revision")
-
-        def mutate(current: dict[str, Any]) -> dict[str, Any]:
-            if expected is not None and expected != current.get("revision"):
-                raise PlanConflictError("计划版本已变化，请重新读取后再保存")
-            updated = dict(current)
-            for key in (
-                "title",
-                "description",
-                "status",
-                "auto_accept",
-                "reminder",
-                "current_step",
-                "steps",
-            ):
-                if key in payload:
-                    if key == "steps":
-                        ensure_completed_steps_preserved(current, payload[key])
-                    updated[key] = payload[key]
-            updated["user"] = name
-            return updated
-
-        try:
-            self._require_plan_session(
-                store,
-                str(plan_id),
-                normalized_session,
-                normalized_source,
-            )
-            stored = store.update(str(plan_id), mutate)
-        except PlanNotFoundError as exc:
-            raise NotFoundError(str(exc)) from None
-        except PlanConflictError as exc:
-            raise ConflictError(str(exc)) from None
-        except (PlanError, KeyError, TypeError, ValueError) as exc:
-            raise InvalidRequestError(f"计划校验失败：{exc}") from None
-        if stored.get("status") == "approved" and self.plan_waker is not None:
-            self.plan_waker()
-        return {"user": name, "plan": self._plan_summary(stored), "updated": True}
-
     def edit_plan(
         self,
         user: Any,
@@ -449,7 +397,7 @@ class TaskServiceMixin(TaskCleanupServiceMixin):
         except PlanNotFoundError as exc:
             raise NotFoundError(str(exc)) from None
         except PlanConflictError as exc:
-            raise ConflictError(str(exc)) from None
+            raise PlanRevisionConflictError(str(exc)) from None
         except (PlanError, KeyError, TypeError, ValueError) as exc:
             raise InvalidRequestError(f"计划修改失败：{exc}") from None
         if stored.get("status") == "approved" and self.plan_waker is not None:
@@ -498,7 +446,7 @@ class TaskServiceMixin(TaskCleanupServiceMixin):
         except PlanNotFoundError as exc:
             raise NotFoundError(str(exc)) from None
         except PlanConflictError as exc:
-            raise ConflictError(str(exc)) from None
+            raise PlanRevisionConflictError(str(exc)) from None
         except (PlanError, KeyError, TypeError, ValueError) as exc:
             raise InvalidRequestError(f"步骤重试失败：{exc}") from None
         if stored.get("status") == "approved" and self.plan_waker is not None:
@@ -599,7 +547,7 @@ class TaskServiceMixin(TaskCleanupServiceMixin):
         except PlanNotFoundError as exc:
             raise NotFoundError(str(exc)) from None
         except PlanConflictError as exc:
-            raise ConflictError(str(exc)) from None
+            raise PlanRevisionConflictError(str(exc)) from None
         except InvalidRequestError:
             raise
         except (PlanError, TypeError, ValueError) as exc:

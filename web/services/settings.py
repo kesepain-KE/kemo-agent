@@ -6,6 +6,7 @@ import threading
 from typing import Callable, Iterator
 from events import RunEvent
 from run.infra import BoundedReadCache
+from run.cards import CARD_SCHEMA_VERSION
 from web.services.artifact_resolver import DownloadArtifactResolver
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any
+import yaml
 
 from provider.adapters.gateway import KemoGatewayAdapter
 from provider.protocol.models import (
@@ -35,10 +37,9 @@ from run.config import (
     USER_ONLY_SECTIONS,
     load_config,
     provider_runtime_config,
-    read_json_object,
+    read_yaml_object,
     cron_history_retention_days,
 )
-from run.context import mid_context_compression_enabled
 from run.extensions import (
     clear_model_capability_cache,
     lookup_model_capabilities,
@@ -46,8 +47,6 @@ from run.extensions import (
 )
 from run.config import (
     DEFAULT_IMPORTANT_MEMORY_MAX_CHARS,
-    PROMPT_SECTION_ORDER,
-    build_prompt_bundle,
 )
 from run.config import MainAgentSourcePolicy
 from update._utils import UpdateError, compare_versions, parse_version
@@ -67,6 +66,7 @@ from web.errors import (
 )
 from web.services._io import atomic_write as _atomic_write
 from web.services.provider_models import discover_chat_models
+from web.services.prompt_diagnostics import prompt_sections
 from web.services.preferences import read_preferences, write_preferences
 from web.services.settings_support import (
     _VersionCheckFailure,
@@ -84,10 +84,10 @@ _CONFIG_SOURCE_PATHS = (
     "provider.model",
     "provider.stream",
     "tools.enabled",
-    "tools.max_iterations",
     "tools.consecutive_identical_call_limit",
     "tools.invalid_tool_arguments_retries",
     "tools.timeout",
+    "memory.prompt_injection",
     "memory.extraction_mode",
     "memory.history_read_enabled",
     "memory.temporary_injection_limits.half_year",
@@ -112,19 +112,18 @@ _CONFIG_SOURCE_PATHS = (
     "cron.avoid_congestion",
     "cron.congestion_threshold_ratio",
     "runtime_host.enable_background_scheduler",
-    "agents.enable_mid_context_compression",
-    "agents.max_rounds",
+    "agents.output_reserve",
+    "provider_runtime.max_retries",
     "agents.token_limit",
     "agents.token_compression_ratio",
     "skills.shared_whitelist",
     "plugins.whitelist",
+    "plugins.permissions",
     "expand.global_whitelist",
     "expand.shared_whitelist",
     "expand.prompt_injection",
-    "expand.realtime_injection",
     "perception.global_whitelist",
     "perception.prompt_injection",
-    "perception.realtime_injection",
 )
 
 
@@ -151,7 +150,7 @@ class SettingsServiceMixin:
         return heartbeat_seconds(value)
 
     def _config_path(self, user: str) -> Path:
-        return self.root / "users" / user / "user_config.json"
+        return self.root / "users" / user / "user_config.yaml"
 
     @staticmethod
     def _has_path(value: dict[str, Any], dotted: str) -> bool:
@@ -163,12 +162,13 @@ class SettingsServiceMixin:
         return True
 
     def _config_provenance(self, user: str) -> dict[str, str]:
-        global_config = read_json_object(self.root / "config" / "global_config.json")
-        user_config = read_json_object(self._config_path(user), allow_empty=True)
+        global_config = read_yaml_object(self.root / "config" / "global_config.yaml")
+        user_config = read_yaml_object(self._config_path(user), allow_empty=True)
         return {
             dotted: (
                 "user"
-                if dotted != "cron.history_retention_days" and self._has_path(user_config, dotted)
+                if dotted not in {"cron.history_retention_days", "memory.prompt_injection"}
+                and self._has_path(user_config, dotted)
                 else "global"
                 if (
                     dotted.split(".", 1)[0] not in USER_ONLY_SECTIONS
@@ -182,7 +182,7 @@ class SettingsServiceMixin:
     def user_config(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         path = self._config_path(name)
-        config = read_json_object(path, allow_empty=True)
+        config = read_yaml_object(path, allow_empty=True)
         redacted, redacted_paths = _redact_config(config)
         return {
             "user": name,
@@ -191,8 +191,8 @@ class SettingsServiceMixin:
         }
 
     def global_config(self) -> dict[str, Any]:
-        path = self.root / "config" / "global_config.json"
-        config = read_json_object(path)
+        path = self.root / "config" / "global_config.yaml"
+        config = read_yaml_object(path)
         config.setdefault("cron", {})["history_retention_days"] = cron_history_retention_days(config)
         redacted, redacted_paths = _redact_config(config)
         return {
@@ -224,26 +224,50 @@ class SettingsServiceMixin:
             raise InvalidRequestError("changes 必须是非空对象")
         if _contains_redacted_placeholder(changes):
             raise InvalidRequestError("不能把脱敏占位符 *** 写回配置")
+        if isinstance(changes.get("tools"), dict) and "max_iterations" in changes["tools"]:
+            raise InvalidRequestError("tools.max_iterations 已移除；主智能体默认持续执行到最终回复")
+        retired = {
+            "agents": {"context_engine", "max_rounds", "conserved_rounds", "rounds_after_compression",
+                       "enable_mid_context_compression", "compression_max_attempts"},
+            "history": {"schema_version", "recent_full_rounds"},
+            "memory": {"recovery_max_rounds_per_scan", "extraction_batch_rounds"},
+            "expand": {"realtime_injection"},
+            "perception": {"realtime_injection"},
+        }
+        for section, keys in retired.items():
+            patch = changes.get(section)
+            if isinstance(patch, dict) and keys.intersection(patch):
+                raise InvalidRequestError("CardStream 已移除旧轮级上下文配置；请使用卡片/Token 设置")
         if user is None and "web_ui" in changes:
             raise InvalidRequestError("web_ui 仅支持用户配置")
-        current = read_json_object(path, allow_empty=user is not None)
+        current = read_yaml_object(path, allow_empty=user is not None)
         updated = _merge_patch(current, changes)
         if user is not None:
             from web.services.web_ui_config import validate_web_ui_patch
 
             validate_web_ui_patch(updated, changes, path, self.root)
+        from provider.retry import RetryManager
+        from run.config import validate_cardstream_settings
         try:
-            mid_context_compression_enabled(updated)
+            validate_cardstream_settings(updated)
+            RetryManager(max_retries=(updated.get("provider_runtime") or {}).get("max_retries", 3))
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from None
+        if user is not None and isinstance(changes.get("memory"), dict) and "prompt_injection" in changes["memory"]:
+            raise InvalidRequestError("记忆注入开关仅支持全局配置")
         if user is None:
+            from run.config import memory_prompt_injection
+
             try:
+                memory_prompt_injection(updated)
                 cron_history_retention_days(updated)
             except ConfigError as exc:
                 raise InvalidRequestError(str(exc)) from None
         elif isinstance(changes.get("cron"), dict) and "history_retention_days" in changes["cron"]:
             raise InvalidRequestError("定时任务历史保留天数仅支持全局配置")
-        encoded = (json.dumps(updated, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        encoded = yaml.safe_dump(
+            updated, allow_unicode=True, sort_keys=False, default_flow_style=False
+        ).encode("utf-8")
         previous = path.read_bytes() if path.is_file() else None
         _atomic_write(path, encoded)
         try:
@@ -288,7 +312,7 @@ class SettingsServiceMixin:
 
     def patch_global_config(self, changes: Any) -> dict[str, Any]:
         return self._patch_config_document(
-            self.root / "config" / "global_config.json",
+            self.root / "config" / "global_config.yaml",
             changes,
             user=None,
         )
@@ -473,8 +497,8 @@ class SettingsServiceMixin:
     def settings(self, user: Any) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
-        global_config = read_json_object(
-            self.root / "config" / "global_config.json"
+        global_config = read_yaml_object(
+            self.root / "config" / "global_config.yaml"
         )
         global_history = global_config.get("history") or {}
         global_memory = global_config.get("memory") or {}
@@ -499,13 +523,12 @@ class SettingsServiceMixin:
             provider.get("timeout"),
             120.0,
         )
-        mid_compression_enabled = mid_context_compression_enabled(config)
         return {
             "user": name,
             "schema_version": int(config.get("schema_version") or 1),
             "schema_versions": {
                 "config_schema": int(global_config.get("schema_version") or 1),
-                "history_schema": int(global_history.get("schema_version") or 1),
+                "card_schema": CARD_SCHEMA_VERSION,
                 "memory_storage_schema": int(
                     global_memory.get("storage_schema_version") or 1
                 ),
@@ -528,34 +551,27 @@ class SettingsServiceMixin:
                 "tools": bool(tools.get("enabled", True)),
                 "knowledge": True,
                 "history_read": bool(memory.get("history_read_enabled", True)),
-                "memory_injection": True,
+                "memory_injection": memory["prompt_injection"],
                 "task_plan_auto_accept": bool(task_plan.get("auto_accept", False)),
                 "cron": bool(cron.get("enabled", False)),
                 "background_scheduler": bool(
                     runtime_host.get("enable_background_scheduler", True)
                 ),
-                "perception_realtime_injection": (
-                    source_policy.perception_realtime_injection
-                ),
                 "perception_prompt_injection": (
                     source_policy.perception_prompt_injection
-                ),
-                "expand_realtime_injection": (
-                    source_policy.expand_realtime_injection
                 ),
                 "expand_prompt_injection": (
                     source_policy.expand_prompt_injection
                 ),
             },
             "limits": {
-                "context_rounds": int(agents.get("max_rounds") or 30),
+                "context_engine": "cardstream",
+                "output_reserve": int(agents.get("output_reserve") or 8192),
                 "context_tokens": int(agents.get("token_limit") or 120000),
                 "compression_ratio": float(
                     agents.get("token_compression_ratio") or 0.6
                 ),
-                "mid_context_compression_enabled": mid_compression_enabled,
                 "task_plan_steps": int(task_plan.get("max_steps") or 10),
-                "tool_iterations": int(tools.get("max_iterations") or 80),
                 "tool_timeout": float(tools.get("timeout") or 60),
                 "tool_argument_retries": int(
                     tools.get("invalid_tool_arguments_retries", 2)
@@ -758,38 +774,4 @@ class SettingsServiceMixin:
             return result
 
     def prompt_sections(self, user: Any) -> dict[str, Any]:
-        name = self.require_user(user)
-        config = load_config(name, self.root)
-        bundle = build_prompt_bundle(self.root, name, config)
-        selected = bundle.diagnostics.get("sections") or {}
-        sections = []
-        for section_name in PROMPT_SECTION_ORDER:
-            detail = selected.get(section_name)
-            status = (
-                "disabled"
-                if isinstance(detail, dict) and detail.get("mode") == "disabled"
-                else "injected"
-                if isinstance(detail, dict)
-                else "omitted"
-            )
-            sections.append(
-                {
-                    "name": section_name,
-                    "status": status,
-                    "original_items": int((detail or {}).get("original_items") or 0),
-                    "injected_items": int((detail or {}).get("injected_items") or 0),
-                    "original_chars": int((detail or {}).get("original_chars") or 0),
-                    "injected_chars": int((detail or {}).get("injected_chars") or 0),
-                    "truncated": bool((detail or {}).get("truncated", False)),
-                    "source_files": list((detail or {}).get("source_files") or []),
-                }
-            )
-        source_selection = bundle.diagnostics.get("source_selection") or {}
-        return {
-            "user": name,
-            "total_chars": int(bundle.diagnostics.get("total_chars") or 0),
-            "sections": sections,
-            "source_policy": bundle.diagnostics.get("source_policy") or {},
-            "source_selection": source_selection,
-            "expand": source_selection.get("expand") or {},
-        }
+        return prompt_sections(self, user)

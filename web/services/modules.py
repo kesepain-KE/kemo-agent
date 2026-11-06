@@ -266,10 +266,7 @@ class MessageExpandServiceMixin:
         name, logical_name, _, config = self._message_module_directory(user, module_name)
         try:
             if self.message_health_checker is not None:
-                try:
-                    state = self.message_health_checker(config.platform, name)
-                except Exception:
-                    state = FileMessageTransport(config).check_health()
+                state = self.message_health_checker(config.platform, name)
             else:
                 state = FileMessageTransport(config).check_health()
         except Exception as exc:
@@ -338,8 +335,8 @@ class MessageExpandServiceMixin:
         )
         diagnostics = registry.selection_diagnostics().get("expand") or {}
         scope_roots = {
-            "global": self.root / "global_expand",
-            "shared": self.root / "shared_expand",
+            "global": self.root / "expand" / "global",
+            "shared": self.root / "expand" / "share",
             "user": self.root / "users" / name / "expand",
         }
         expands: list[dict[str, Any]] = []
@@ -531,8 +528,8 @@ class MessageExpandServiceMixin:
         ):
             raise InvalidRequestError("拓展模块名称必须是对应拓展层的直接目录名")
         base = {
-            "global": self.root / "global_expand",
-            "shared": self.root / "shared_expand",
+            "global": self.root / "expand" / "global",
+            "shared": self.root / "expand" / "share",
             "user": self.root / "users" / name / "expand",
         }[scope].resolve()
         target = base / logical_name
