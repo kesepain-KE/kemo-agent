@@ -6,6 +6,7 @@ import copy
 import difflib
 import json
 from pathlib import Path
+import yaml
 
 from ._utils import (
     UpdateError,
@@ -15,9 +16,11 @@ from ._utils import (
     paths_differ,
     redact_json,
     read_json,
+    read_yaml,
     sync_directory,
     sync_directory_except,
     write_json_atomic,
+    write_yaml_atomic,
     yellow,
 )
 
@@ -41,12 +44,12 @@ CRON_RUNTIME_FIELDS = {
 }
 
 RUNTIME_PRESERVING_DIRECTORIES = {
-    "global_knowledge": (
+    "knowledge/global": (
         "kemo-graph-storage/",
         "classify.sqlite3",
         "classify.sql",
     ),
-    "shared_knowledge": (
+    "knowledge/share": (
         "classify.sqlite3",
         "classify.sql",
     ),
@@ -60,7 +63,7 @@ FILES = (
     "requirements.txt",
     "requirements-dev.txt",
     "config/global_soul.md",
-    ".env.example",
+    "kemo.yaml.example",
     "LICENSE",
     "kemo-agent.ico",
     "kemo-agent.jpg",
@@ -73,13 +76,13 @@ FILES = (
 )
 
 REGISTER_FILES = (
-    "global_expand/register.py",
-    "global_sense/register.py",
-    "shared_expand/register.py",
-    "shared_skills/register.py",
+    "expand/global/register.py",
+    "sense/register.py",
+    "expand/share/register.py",
+    "skills/register.py",
 )
 
-GATEWAY_STATUS_EXPAND = "global_expand/kemo_gateway_status"
+GATEWAY_STATUS_EXPAND = "expand/global/kemo_gateway_status"
 GATEWAY_STATUS_EXPAND_FILES = (
     ".gitignore",
     "README.md",
@@ -92,7 +95,7 @@ GATEWAY_STATUS_EXPAND_FILES = (
     "module/panel.json",
 )
 
-KEMO_GRAPH_EXPAND = "global_expand/kemo_graph"
+KEMO_GRAPH_EXPAND = "expand/global/kemo_graph"
 KEMO_GRAPH_EXPAND_FILES = (
     ".gitignore",
     "graph_config.example.json",
@@ -126,7 +129,7 @@ KEMO_GRAPH_OBSOLETE_FILES = (
     "artifacts/kemo_graph_status.png",
 )
 
-KEMO_APP_EXPAND = "global_expand/kemo_app"
+KEMO_APP_EXPAND = "expand/global/kemo_app"
 KEMO_APP_EXPAND_FILES = (
     ".gitignore",
     "README.md",
@@ -191,25 +194,23 @@ def _preserved_directory_differs(
     return snapshot(source) != snapshot(target)
 
 
-def _json_diff(source: Path, target: Path) -> str:
-    source_text = json.dumps(
-        redact_json(read_json(source)),
-        ensure_ascii=False,
-        indent=2,
+def _yaml_diff(source: Path, target: Path) -> str:
+    source_text = yaml.safe_dump(
+        redact_json(read_yaml(source)),
+        allow_unicode=True,
         sort_keys=True,
     ).splitlines()
-    target_text = json.dumps(
-        redact_json(read_json(target)),
-        ensure_ascii=False,
-        indent=2,
+    target_text = yaml.safe_dump(
+        redact_json(read_yaml(target)),
+        allow_unicode=True,
         sort_keys=True,
     ).splitlines()
     return "\n".join(
         difflib.unified_diff(
             target_text,
             source_text,
-            fromfile="本地 config/global_config.json",
-            tofile="远程 config/global_config.json",
+            fromfile="本地 config/global_config.yaml",
+            tofile="远程 config/global_config.yaml",
             lineterm="",
         )
     )
@@ -283,23 +284,23 @@ def _update_global_config(
     assume_yes: bool,
     replace_global_config: bool,
 ) -> tuple[bool, str]:
-    source = source_root / "config" / "global_config.json"
-    target = target_root / "config" / "global_config.json"
+    source = source_root / "config" / "global_config.yaml"
+    target = target_root / "config" / "global_config.yaml"
     if not source.is_file():
-        return False, "源缺少 config/global_config.json"
+        return False, "源缺少 config/global_config.yaml"
     if not target.is_file():
         changed = copy_file_safe(source, target, dry_run=dry_run)
-        return changed, "安装 config/global_config.json"
+        return changed, "安装 config/global_config.yaml"
     if not paths_differ(source, target):
-        return False, "config/global_config.json 无变化"
+        return False, "config/global_config.yaml 无变化"
 
-    source_json = read_json(source)
-    target_json = read_json(target)
+    source_json = read_yaml(source)
+    target_json = read_yaml(target)
     source_schema = source_json.get("schema_version")
     target_schema = target_json.get("schema_version")
     if source_schema != target_schema:
         print(yellow(
-            "global_config.json schema 版本不同: "
+            "global_config.yaml schema 版本不同: "
             f"本地={target_schema!r}, 远程={source_schema!r}"
         ))
         source_only = sorted(set(source_json) - set(target_json))
@@ -309,17 +310,17 @@ def _update_global_config(
         print(f"  本地独有顶层字段: {', '.join(target_only) if target_only else '无'}")
         if not replace_global_config:
             raise UpdateError(
-                "global_config.json schema 版本不同，无法安全自动合并。"
+                "global_config.yaml schema 版本不同，无法安全自动合并。"
                 "本轮更新已停止；请先审查差异，或在确认可以丢弃本地全局配置后使用 "
                 "--replace-global-config。"
             )
 
     if replace_global_config:
         changed = copy_file_safe(source, target, dry_run=dry_run)
-        return changed, "更新 config/global_config.json（已明确允许覆盖）"
+        return changed, "更新 config/global_config.yaml（已明确允许覆盖）"
 
     choice = ask_choice(
-        "global_config.json 需要更新，请选择:",
+        "global_config.yaml 需要更新，请选择:",
         {
             "m": "合并远程新增默认值并保留本地值",
             "o": "覆盖为最新版本",
@@ -330,7 +331,7 @@ def _update_global_config(
         assume_yes=assume_yes,
     )
     if choice == "d":
-        print(_json_diff(source, target) or "文件内容无可显示差异")
+        print(_yaml_diff(source, target) or "文件内容无可显示差异")
         choice = ask_choice(
             "查看差异后请选择:",
             {
@@ -342,7 +343,7 @@ def _update_global_config(
             assume_yes=assume_yes,
         )
     if choice == "k":
-        return False, "保留本地 config/global_config.json"
+        return False, "保留本地 config/global_config.yaml"
     if choice == "m":
         merged = _merge_remote_defaults(source_json, target_json)
         if not isinstance(merged, dict):
@@ -355,14 +356,14 @@ def _update_global_config(
             target_version=_root_version(target_root),
         )
         if merged == target_json:
-            return False, "config/global_config.json 无需补充默认值"
+            return False, "config/global_config.yaml 无需补充默认值"
         if dry_run:
-            print("[dry-run]  合并  config/global_config.json")
+            print("[dry-run]  合并  config/global_config.yaml")
         else:
-            write_json_atomic(target, merged)
-        return True, "合并 config/global_config.json（保留本地值）"
+            write_yaml_atomic(target, merged)
+        return True, "合并 config/global_config.yaml（保留本地值）"
     changed = copy_file_safe(source, target, dry_run=dry_run)
-    return changed, "更新 config/global_config.json"
+    return changed, "更新 config/global_config.yaml"
 
 
 def _sync_cron_directory(

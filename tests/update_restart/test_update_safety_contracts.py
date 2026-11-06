@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import ast
+import yaml
 import json
 import shutil
 import subprocess
@@ -137,6 +138,18 @@ def _run_updater(
 
 
 class UpdateSafetyContractTests(unittest.TestCase):
+    def test_invalid_yaml_error_does_not_echo_configuration_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "global_config.yaml"
+            path.write_text(
+                'provider:\n  api_key: "private-config-sentinel\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(UpdateError) as caught:
+                update_utils.read_yaml(path)
+            self.assertNotIn("private-config-sentinel", str(caught.exception))
+            self.assertIn("global_config.yaml", str(caught.exception))
+
     def test_updater_command_logs_redact_credentials(self) -> None:
         rendered = format_command(
             [
@@ -320,7 +333,7 @@ class UpdateSafetyContractTests(unittest.TestCase):
     def test_builtin_expand_source_timestamp_is_not_installed_on_fresh_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = root / "source" / "global_expand" / "kemo_gateway_status"
+            source = root / "source" / "expand" / "global" / "kemo_gateway_status"
             target_root = root / "target"
             _write_json(
                 source / "expand.json",
@@ -343,7 +356,7 @@ class UpdateSafetyContractTests(unittest.TestCase):
             core_update._update_builtin_global_expand(
                 root / "source",
                 target_root,
-                relative="global_expand/kemo_gateway_status",
+                relative="expand/global/kemo_gateway_status",
                 source_files=(),
                 config_file="gateway_config.json",
                 obsolete_files=(),
@@ -355,7 +368,7 @@ class UpdateSafetyContractTests(unittest.TestCase):
             installed = json.loads(
                 (
                     target_root
-                    / "global_expand"
+                    / "expand" / "global"
                     / "kemo_gateway_status"
                     / "expand.json"
                 ).read_text(encoding="utf-8")
@@ -370,7 +383,7 @@ class UpdateSafetyContractTests(unittest.TestCase):
             source = root / "source"
             target = root / "target"
             _write_json(
-                source / "config" / "global_config.json",
+                source / "config" / "global_config.yaml",
                 {
                     "schema_version": 1,
                     "runtime": {"max_workers": 8},
@@ -378,7 +391,7 @@ class UpdateSafetyContractTests(unittest.TestCase):
                 },
             )
             _write_json(
-                target / "config" / "global_config.json",
+                target / "config" / "global_config.yaml",
                 {
                     "schema_version": 1,
                     "runtime": {"max_workers": 2},
@@ -387,8 +400,8 @@ class UpdateSafetyContractTests(unittest.TestCase):
             )
 
             core_update.update(source, target, assume_yes=True)
-            stored = json.loads(
-                (target / "config" / "global_config.json").read_text(encoding="utf-8")
+            stored = yaml.safe_load(
+                (target / "config" / "global_config.yaml").read_text(encoding="utf-8")
             )
 
             self.assertEqual(stored["runtime"]["max_workers"], 2)
@@ -404,14 +417,14 @@ class UpdateSafetyContractTests(unittest.TestCase):
                 _write_json(source / "version.json", _version_document("1.3.2"))
                 _write_json(target / "version.json", _version_document("1.3.1"))
                 _write_json(
-                    source / "config" / "global_config.json",
+                    source / "config" / "global_config.yaml",
                     {
                         "schema_version": 1,
                         "cron": {"session_idle_close_seconds": 5400},
                     },
                 )
                 _write_json(
-                    target / "config" / "global_config.json",
+                    target / "config" / "global_config.yaml",
                     {
                         "schema_version": 1,
                         "cron": {"session_idle_close_seconds": local_value},
@@ -419,8 +432,8 @@ class UpdateSafetyContractTests(unittest.TestCase):
                 )
 
                 core_update.update(source, target, assume_yes=True)
-                stored = json.loads(
-                    (target / "config" / "global_config.json").read_text(encoding="utf-8")
+                stored = yaml.safe_load(
+                    (target / "config" / "global_config.yaml").read_text(encoding="utf-8")
                 )
 
                 self.assertEqual(stored["cron"]["session_idle_close_seconds"], expected)
@@ -431,19 +444,19 @@ class UpdateSafetyContractTests(unittest.TestCase):
             source = root / "source"
             target = root / "target"
             _write_json(
-                source / "config" / "global_config.json",
+                source / "config" / "global_config.yaml",
                 {"schema_version": 2, "runtime": {"max_workers": 8}},
             )
             _write_json(
-                target / "config" / "global_config.json",
+                target / "config" / "global_config.yaml",
                 {"schema_version": 1, "runtime": {"max_workers": 2}},
             )
 
             with self.assertRaises(UpdateError):
                 core_update.update(source, target, assume_yes=True)
 
-            stored = json.loads(
-                (target / "config" / "global_config.json").read_text(encoding="utf-8")
+            stored = yaml.safe_load(
+                (target / "config" / "global_config.yaml").read_text(encoding="utf-8")
             )
             self.assertEqual(stored["schema_version"], 1)
             self.assertEqual(stored["runtime"]["max_workers"], 2)
@@ -454,11 +467,11 @@ class UpdateSafetyContractTests(unittest.TestCase):
             source = root / "source"
             target = root / "target"
             _write_json(
-                source / "config" / "global_config.json",
+                source / "config" / "global_config.yaml",
                 {"schema_version": 1, "runtime": {"max_workers": 8}},
             )
             _write_json(
-                target / "config" / "global_config.json",
+                target / "config" / "global_config.yaml",
                 {"schema_version": 1, "runtime": {"max_workers": 2}},
             )
 
@@ -468,8 +481,8 @@ class UpdateSafetyContractTests(unittest.TestCase):
                 assume_yes=True,
                 replace_global_config=True,
             )
-            stored = json.loads(
-                (target / "config" / "global_config.json").read_text(encoding="utf-8")
+            stored = yaml.safe_load(
+                (target / "config" / "global_config.yaml").read_text(encoding="utf-8")
             )
             self.assertEqual(stored["runtime"]["max_workers"], 8)
 

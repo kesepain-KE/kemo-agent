@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import yaml
 import json
 import sqlite3
 import tempfile
@@ -55,8 +56,8 @@ class UpdateModuleTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source"
             target = root / "target"
-            write(source / "shared_expand" / "demo" / ".module.execution.lock", "locked")
-            write(source / "shared_expand" / "demo" / "config.json", "{}")
+            write(source / "expand" / "share" / "demo" / ".module.execution.lock", "locked")
+            write(source / "expand" / "share" / "demo" / "config.json", "{}")
 
             sync_directory(
                 source,
@@ -65,10 +66,10 @@ class UpdateModuleTests(unittest.TestCase):
             )
 
             self.assertFalse(
-                (target / "shared_expand" / "demo" / ".module.execution.lock").exists()
+                (target / "expand" / "share" / "demo" / ".module.execution.lock").exists()
             )
             self.assertTrue(
-                (target / "shared_expand" / "demo" / "config.json").is_file()
+                (target / "expand" / "share" / "demo" / "config.json").is_file()
             )
 
     def test_backup_excludes_live_module_execution_locks(self) -> None:
@@ -209,6 +210,36 @@ class UpdateModuleTests(unittest.TestCase):
                 [],
             )
 
+    def test_rollback_restores_shared_expand_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root / "expand" / "share" / "register.py", "old register")
+            write(root / "expand" / "share" / "weather" / "expand.json", "old manifest")
+            write(root / "expand" / "share" / "weather" / "module.py", "old module")
+            write(root / "operator-note.txt", "keep")
+
+            backup = backup_update.make_backup(root=root)
+            assert backup is not None
+
+            write(root / "expand" / "share" / "register.py", "new register")
+            write(root / "expand" / "share" / "weather" / "module.py", "new module")
+            write(root / "expand" / "share" / "weather" / "new.py", "failed update")
+            write(root / "expand" / "share" / "new_module" / "expand.json", "failed update")
+
+            backup_update.restore_backup(backup_dir=backup, root=root)
+
+            self.assertEqual(
+                (root / "expand" / "share" / "register.py").read_text("utf-8"),
+                "old register",
+            )
+            self.assertEqual(
+                (root / "expand" / "share" / "weather" / "module.py").read_text("utf-8"),
+                "old module",
+            )
+            self.assertFalse((root / "expand" / "share" / "weather" / "new.py").exists())
+            self.assertFalse((root / "expand" / "share" / "new_module").exists())
+            self.assertEqual((root / "operator-note.txt").read_text("utf-8"), "keep")
+
     def test_write_json_atomic_replaces_manifest_without_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "version.json"
@@ -223,7 +254,7 @@ class UpdateModuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             user_dir = root / "users" / "alice"
-            write_json(user_dir / "user_config.json", {})
+            write_json(user_dir / "user_config.yaml", {})
 
             migrations_update.initialize_runtime_state_databases(root=root, dry_run=False)
 
@@ -232,10 +263,10 @@ class UpdateModuleTests(unittest.TestCase):
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM task_plans").fetchone()[0], 0)
             finally:
                 database.close()
-            database = sqlite3.connect(user_dir / "history" / "history.sqlite3")
+            database = sqlite3.connect(user_dir / "cards.sqlite3")
             try:
                 self.assertEqual(
-                    database.execute("SELECT COUNT(*) FROM message_processed_messages").fetchone()[0],
+                    database.execute("SELECT COUNT(*) FROM context_cards").fetchone()[0],
                     0,
                 )
             finally:
@@ -268,8 +299,8 @@ class UpdateModuleTests(unittest.TestCase):
                 write(source / relative, f"new {relative}")
                 write(target / relative, f"old {relative}")
                 write((target / relative).parent / "local-data.md", "preserve")
-            write_json(source / "config" / "global_config.json", {"schema_version": 1, "new": True})
-            write_json(target / "config" / "global_config.json", {"schema_version": 1, "local": True})
+            write_json(source / "config" / "global_config.yaml", {"schema_version": 1, "new": True})
+            write_json(target / "config" / "global_config.yaml", {"schema_version": 1, "local": True})
 
             result = core_update.update(source, target, assume_yes=True)
 
@@ -280,7 +311,7 @@ class UpdateModuleTests(unittest.TestCase):
             for relative in core_update.REGISTER_FILES:
                 self.assertEqual((target / relative).read_text(encoding="utf-8"), f"new {relative}")
                 self.assertTrue(((target / relative).parent / "local-data.md").is_file())
-            self.assertEqual(json.loads((target / "config" / "global_config.json").read_text(encoding="utf-8"))["schema_version"], 1)
+            self.assertEqual(yaml.safe_load((target / "config" / "global_config.yaml").read_text(encoding="utf-8"))["schema_version"], 1)
             self.assertEqual(result["module"], "core")
             self.assertEqual(result["status"], "partial")
 
@@ -309,32 +340,32 @@ class UpdateModuleTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source"
             target = root / "target"
-            write(source / "global_knowledge" / "current.md", "new knowledge")
-            write(target / "global_knowledge" / "obsolete.md", "remove me")
+            write(source / "knowledge" / "global" / "current.md", "new knowledge")
+            write(target / "knowledge" / "global" / "obsolete.md", "remove me")
             write(
-                target / "global_knowledge" / "kemo-graph-storage" / "sources.db",
+                target / "knowledge" / "global" / "kemo-graph-storage" / "sources.db",
                 "runtime database",
             )
             write(
-                target / "global_knowledge" / "nested" / "kemo-graph-storage" / "index.faiss",
+                target / "knowledge" / "global" / "nested" / "kemo-graph-storage" / "index.faiss",
                 "runtime index",
             )
 
             core_update.update(source, target, assume_yes=True)
 
             self.assertEqual(
-                (target / "global_knowledge" / "current.md").read_text("utf-8"),
+                (target / "knowledge" / "global" / "current.md").read_text("utf-8"),
                 "new knowledge",
             )
-            self.assertFalse((target / "global_knowledge" / "obsolete.md").exists())
+            self.assertFalse((target / "knowledge" / "global" / "obsolete.md").exists())
             self.assertEqual(
-                (target / "global_knowledge" / "kemo-graph-storage" / "sources.db").read_text("utf-8"),
+                (target / "knowledge" / "global" / "kemo-graph-storage" / "sources.db").read_text("utf-8"),
                 "runtime database",
             )
             self.assertEqual(
                 (
                     target
-                    / "global_knowledge"
+                    / "knowledge" / "global"
                     / "nested"
                     / "kemo-graph-storage"
                     / "index.faiss"
@@ -892,6 +923,7 @@ class UpdateModuleTests(unittest.TestCase):
                 mock.patch.object(cli_update, "load_remote_version_document", return_value=version),
                 mock.patch.object(cli_update, "should_update", return_value=True),
                 mock.patch.object(cli_update, "require_commands"),
+                mock.patch.object(cli_update, "require_stopped_runtime"),
                 mock.patch.object(cli_update, "clone_latest", return_value=ROOT),
                 mock.patch.object(cli_update, "load_source_version_document", return_value=version),
                 mock.patch.object(cli_update, "source_revision", return_value="test"),
@@ -943,6 +975,7 @@ class UpdateModuleTests(unittest.TestCase):
                 mock.patch.object(cli_update, "load_remote_version_document", return_value=remote),
                 mock.patch.object(cli_update, "should_update", return_value=True),
                 mock.patch.object(cli_update, "require_commands"),
+                mock.patch.object(cli_update, "require_stopped_runtime"),
                 mock.patch.object(cli_update, "clone_latest", return_value=ROOT),
                 mock.patch.object(cli_update, "load_source_version_document", return_value=remote),
                 mock.patch.object(cli_update, "source_revision", return_value="test"),

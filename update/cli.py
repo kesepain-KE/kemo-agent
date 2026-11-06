@@ -54,6 +54,7 @@ from .migrations import (
     migrate_user_skeletons,
 )
 from .source import clone_latest, source_revision
+from .runtime_safety import require_stopped_runtime
 from .transaction import update_transaction
 
 
@@ -127,7 +128,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--replace-global-config",
         action="store_true",
-        help="明确允许用远程版本覆盖 config/global_config.json",
+        help="明确允许用远程版本覆盖 config/global_config.yaml",
     )
     parser.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="Git 仓库 URL")
     parser.add_argument("--branch", default=DEFAULT_BRANCH, help="Git 分支")
@@ -249,6 +250,7 @@ def main(argv: list[str] | None = None, *, root: Path = ROOT) -> int:
             verify_source_manifest(remote_document, source_document)
             print(green(f"已锁定远程源码提交: {source_revision(source)}"))
 
+            require_stopped_runtime(root=root, dry_run=args.dry_run)
             with update_transaction(root=root, dry_run=args.dry_run) as created_backup:
                 backup_dir = created_backup
                 results = run_modules(
@@ -276,6 +278,7 @@ def main(argv: list[str] | None = None, *, root: Path = ROOT) -> int:
                 # when an earlier build step fails and the transaction needs
                 # to restore the source tree.
                 if "core" in selected_modules:
+                    require_stopped_runtime(root=root, dry_run=args.dry_run)
                     database_backups = backup_runtime_databases(root=root, dry_run=args.dry_run)
                     migrate_user_skeletons(root=root, dry_run=args.dry_run)
                     initialize_user_memory_databases(

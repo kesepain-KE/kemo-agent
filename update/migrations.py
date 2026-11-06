@@ -22,7 +22,7 @@ def _user_directories(root: Path) -> list[Path]:
         for path in sorted(users_dir.iterdir())
         if path.is_dir()
         and not path.name.startswith("_")
-        and (path / "user_config.json").is_file()
+        and (path / "user_config.yaml").is_file()
     ]
 
 
@@ -51,7 +51,7 @@ def backup_runtime_databases(*, root: Path = ROOT, dry_run: bool) -> DatabaseBac
         user / relative
         for user in _user_directories(root)
         for relative in (
-            "history/history.sqlite3", "improve/memory.sqlite3",
+            "cards.sqlite3", "improve/memory.sqlite3",
             "task_plan/task_plans.sqlite3",
         )
         if (user / relative).is_file()
@@ -114,7 +114,7 @@ def _recovery_hint(backups: DatabaseBackups | None) -> str:
         f"；更新前数据库备份：{backups.directory}。恢复前停止所有框架进程，"
         "保留现有数据库及 WAL/SHM，按 manifest.json 对应路径使用 SQLite backup API 恢复；"
         "源码自动回滚不等于数据库已经恢复。单库恢复命令示例见 "
-        "global_knowledge/storage-and-persistence.md 的“手工恢复单库”"
+        "knowledge/global/storage-and-persistence.md 的“手工恢复单库”"
     )
 
 

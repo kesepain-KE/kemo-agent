@@ -246,6 +246,47 @@ def read_json(path: Path) -> dict:
     return data
 
 
+def read_yaml(path: Path) -> dict:
+    import yaml
+
+    try:
+        text = path.read_text("utf-8-sig")
+    except (OSError, UnicodeError):
+        raise UpdateError(f"无法读取 YAML 文件 {path}") from None
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f"第 {mark.line + 1} 行、第 {mark.column + 1} 列" if mark else "语法错误"
+        raise UpdateError(f"YAML 文件无效：{path}（{location}）") from None
+    except ValueError:
+        raise UpdateError(f"YAML 文件无效：{path}") from None
+    if not isinstance(data, dict):
+        raise UpdateError(f"{path} 不是 YAML 映射")
+    return data
+
+
+def write_yaml_atomic(path: Path, data: dict) -> None:
+    import yaml
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_name = handle.name
+            yaml.safe_dump(data, handle, allow_unicode=True, sort_keys=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        if temporary_name:
+            Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
 def write_json_atomic(path: Path, data: dict) -> None:
     """Write a JSON object atomically without exposing a partial manifest."""
     path.parent.mkdir(parents=True, exist_ok=True)

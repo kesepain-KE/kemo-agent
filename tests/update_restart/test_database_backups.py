@@ -17,7 +17,7 @@ from update._utils import UpdateError
 
 
 def setup_databases(root: Path) -> dict[str, tuple[str, str]]:
-    config = root / "users/alice/user_config.json"
+    config = root / "users/alice/user_config.yaml"
     config.parent.mkdir(parents=True)
     config.write_text("{}", encoding="utf-8")
     return {kind: snapshot(seed_version(root, kind, 0)) for kind in KINDS}
@@ -80,6 +80,7 @@ def test_core_cli_completes_database_backups_before_all_initializers(tmp_path):
             load_remote_version_document=Mock(return_value=version),
             should_update=Mock(return_value=True),
             require_commands=Mock(),
+            require_stopped_runtime=Mock(),
             clone_latest=Mock(return_value=Path(__file__).resolve().parents[2]),
             load_source_version_document=Mock(return_value=version),
             source_revision=Mock(return_value="offline-test"),
@@ -193,7 +194,7 @@ def test_missing_backup_manifest_prevents_database_initialization(tmp_path):
 
 
 def test_backup_helper_cannot_overwrite_existing_backup(tmp_path):
-    path = seed_version(tmp_path, "history", 0)
+    path = seed_version(tmp_path, "cards", 0)
     target = tmp_path / "saved.sqlite3"
     sqlite_migrations.backup_database(path, target)
     before = target.read_bytes()
@@ -203,7 +204,7 @@ def test_backup_helper_cannot_overwrite_existing_backup(tmp_path):
 
 
 def test_backup_helper_times_out_without_publishing_partial_copy(tmp_path):
-    path = seed_version(tmp_path, "history", 0)
+    path = seed_version(tmp_path, "cards", 0)
     target = tmp_path / "saved.sqlite3"
     with closing(sqlite3.connect(path)) as locked:
         locked.execute("BEGIN EXCLUSIVE")
