@@ -4,13 +4,13 @@ import unittest
 
 from events import RunEvent
 from provider.schema import ProviderError
-from run.conversation.round_finalizer import _safe_failure_detail
 from run.retry import (
     MAX_ATTEMPTS,
     MAX_RETRIES,
     attempt_budget,
     must_commit_now,
     retrying_event,
+    retry_reason,
     should_retry,
     view_from_event,
     view_from_exception,
@@ -63,8 +63,9 @@ class RetryPolicyTests(unittest.TestCase):
         cancelled = view_from_event(
             RunEvent(type="error", error={"cancelled": True})
         )
-        self.assertTrue(should_retry(auth))
-        self.assertTrue(should_retry(deterministic))
+        # R1 3.3 replaces the legacy retry-everything expectation.
+        self.assertFalse(should_retry(auth))
+        self.assertFalse(should_retry(deterministic))
         self.assertFalse(should_retry(cancelled))
 
     def test_lower_layer_budget_exhaustion_stops_outer_retry(self) -> None:
@@ -79,11 +80,10 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertFalse(should_retry(view))
         self.assertTrue(must_commit_now(view))
 
-    def test_exception_code_survives_safe_failure_projection(self) -> None:
+    def test_exception_code_survives_retry_projection(self) -> None:
         error = ProviderError("protocol failure", category="protocol_error")
         error.code = "INVALID_EVENT_SEQUENCE"
-        detail = _safe_failure_detail(error)
-        self.assertEqual(detail["code"], "INVALID_EVENT_SEQUENCE")
+        self.assertEqual(retry_reason(view_from_exception(error)), "INVALID_EVENT_SEQUENCE")
 
     def test_retrying_event_exposes_six_attempt_denominator(self) -> None:
         event = retrying_event(
@@ -109,14 +109,16 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertEqual(ledger.consecutive_failures, 6)
         self.assertEqual(ledger.attempts, 6)
 
-    def test_ledger_starts_a_new_episode_after_progress(self) -> None:
+    def test_progress_never_resets_the_total_attempt_budget(self) -> None:
         ledger = RetryLedger(max_attempts=6)
-        for _ in range(50):
+        for attempt in range(1, 7):
             ledger.begin_attempt()
             ledger.record_failure(progress=True)
-            self.assertTrue(ledger.can_retry())
+            self.assertEqual(ledger.can_retry(), attempt < 6)
             self.assertEqual(ledger.consecutive_failures, 1)
-        self.assertEqual(ledger.attempts, 50)
+        self.assertEqual(ledger.attempts, 6)
+        with self.assertRaises(RuntimeError):
+            ledger.begin_attempt()
 
     def test_would_allow_retry_matches_record_failure(self) -> None:
         for progress in (False, True):
@@ -135,7 +137,7 @@ class RetryPolicyTests(unittest.TestCase):
         ledger.record_failure(progress=True)
         self.assertFalse(ledger.can_retry())
 
-    def test_exhaustion_reports_total_attempts_after_progress_resets_streak(self) -> None:
+    def test_exhaustion_reports_total_attempts_even_with_progress(self) -> None:
         """Retry metadata must describe the run, not only its last streak."""
 
         ledger = RetryLedger(max_attempts=3)
@@ -145,9 +147,8 @@ class RetryPolicyTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             error = RuntimeError("transient")
-            # Two successful-progress failures start fresh episodes.  The
-            # final two failures exhaust the configured consecutive budget
-            # (``max_attempts`` includes the initial attempt).
+            # A successful response can reset the diagnostic streak while
+            # the same run still consumes its total attempt budget.
             setattr(error, "retry_progress", calls <= 2)
             raise error
 
@@ -158,9 +159,9 @@ class RetryPolicyTests(unittest.TestCase):
                 should_retry_error=lambda _error: True,
             )
 
-        self.assertEqual(calls, 4)
-        self.assertEqual(ledger.attempts, 4)
-        self.assertEqual(getattr(raised.exception, "retry_attempts"), 4)
+        self.assertEqual(calls, 3)
+        self.assertEqual(ledger.attempts, 3)
+        self.assertEqual(getattr(raised.exception, "retry_attempts"), 3)
         self.assertEqual(getattr(raised.exception, "retry_max_attempts"), 3)
 
 

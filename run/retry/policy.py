@@ -14,6 +14,27 @@ BUDGET_EXHAUSTED = "retry_budget_exhausted"
 PROGRESS_SIGNAL_EVENT_TYPES = frozenset({"tool_call_result"})
 # Process control and resource exhaustion are not recoverable business failures.
 HOST_CONTROL_EXCEPTIONS = (SystemExit, KeyboardInterrupt, GeneratorExit, MemoryError)
+_INTERNAL_ERRORS = frozenset({
+    "keyerror", "typeerror", "attributeerror", "assertionerror",
+    "valueerror", "indexerror", "notimplementederror",
+})
+_DETERMINISTIC_CATEGORIES = frozenset({
+    "internal_error", "auth_error", "authentication_error", "validation_error",
+    "request_validation_error", "protocol_error", "gateway_protocol_error",
+    "invalid_tool_arguments", "input_error",
+})
+_TRANSIENT_CATEGORIES = frozenset({
+    "connection_error", "transport_error", "timeout", "upstream_error",
+    "gateway_error", "execution_capacity", "tool_error",
+})
+_TRANSIENT_ERRORS = frozenset({
+    "timeouterror", "providertimeouterror", "connectionerror",
+    "connectionreseterror", "connectionrefusederror", "connectionabortederror",
+    "brokenpipeerror", "clienterror", "clientconnectionerror",
+    "serverdisconnectederror", "urlerror", "remotedisconnected",
+    "incompleteread", "providercongestionerror", "providerconnectionerror", "missingterminalevent",
+    "agenttoolretryerror", "agentexecutioncapacityerror",
+})
 
 
 def raise_if_host_exception(error: BaseException) -> None:
@@ -181,9 +202,24 @@ def attempt_budget(request: dict[str, Any] | None) -> int:
 
 
 def should_retry(view: FailureView, *, cancelled: bool = False) -> bool:
-    """Retry every failed attempt except explicit cancellation or exhausted L1 budget."""
+    """Only transient failures retry; remote flags may restrict, never expand."""
 
-    return not (cancelled or view.cancelled or view.budget_exhausted)
+    if cancelled or view.cancelled or view.budget_exhausted:
+        return False
+    if view.exception_type.casefold() in _INTERNAL_ERRORS:
+        return False
+    if view.category.casefold() in _DETERMINISTIC_CATEGORIES:
+        return False
+    if view.status_code is not None and 400 <= view.status_code < 500 and view.status_code not in {408, 429}:
+        return False
+    if view.retryable is False:
+        return False
+    if view.status_code is not None:
+        return view.status_code in {408, 429} or 500 <= view.status_code < 600
+    return (
+        view.category.casefold() in _TRANSIENT_CATEGORIES
+        or view.exception_type.casefold() in _TRANSIENT_ERRORS
+    )
 
 
 def must_commit_now(view: FailureView, *, cancelled: bool = False) -> bool:

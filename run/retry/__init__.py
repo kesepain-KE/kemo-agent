@@ -12,6 +12,7 @@ budgets; when they fail, their terminal error flows into this package.
 """
 
 from run.retry.loop import RetryLedger, RunAttemptContext, run_attempts
+from run.retry.tool_dedup import AttemptToolDedup, attempt_dedup_policy
 from run.retry.policy import (
     BUDGET_EXHAUSTED,
     MAX_ATTEMPTS,
@@ -27,11 +28,14 @@ from run.retry.policy import (
     retrying_event,
     should_retry,
     view_from_event,
+    view_from_error,
     view_from_exception,
 )
 
 __all__ = [
     "BUDGET_EXHAUSTED",
+    "AttemptToolDedup",
+    "attempt_dedup_policy",
     "MAX_ATTEMPTS",
     "MAX_RETRIES",
     "FailureView",
@@ -48,5 +52,6 @@ __all__ = [
     "run_attempts",
     "should_retry",
     "view_from_event",
+    "view_from_error",
     "view_from_exception",
 ]

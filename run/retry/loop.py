@@ -29,7 +29,7 @@ class RetryLedger:
         return max(0, self.max_attempts - 1)
 
     def begin_attempt(self) -> RunAttemptContext:
-        if self.exhausted:
+        if self.exhausted or self.attempts >= self.max_attempts:
             raise RuntimeError("retry attempt budget already exhausted")
         self.attempts += 1
         return RunAttemptContext(self.attempts, self.max_attempts)
@@ -38,11 +38,14 @@ class RetryLedger:
         return 1 if progress else self.consecutive_failures + 1
 
     def would_allow_retry(self, progress: bool) -> bool:
-        return self.next_consecutive_failures(progress) <= self.max_retries
+        return (self.attempts < self.max_attempts
+                and self.next_consecutive_failures(progress) <= self.max_retries)
 
     def record_failure(self, progress: bool = False) -> int:
         self.consecutive_failures = self.next_consecutive_failures(progress)
-        self.exhausted = self.consecutive_failures > self.max_retries
+        # Progress changes diagnostics, never the run's cumulative retry budget.
+        self.exhausted = (self.attempts >= self.max_attempts
+                          or self.consecutive_failures > self.max_retries)
         return self.consecutive_failures
 
     def can_retry(self) -> bool:
