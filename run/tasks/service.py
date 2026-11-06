@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,7 +11,12 @@ from provider.factory import create_provider
 from run.agents import AgentRunError, AgentRunner
 from run.config import MainAgentSourcePolicy, load_config, select_knowledge_index
 from run.memory import MemoryStore
-from run.tasks.store import PlanStore, PlanValidationError, normalize_plan
+from run.tasks.store import (
+    PlanConflictError,
+    PlanStore,
+    PlanValidationError,
+    normalize_plan,
+)
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
 
 
@@ -25,6 +31,7 @@ _PROTECTED_COMPLETED_FIELDS = (
     "tool_arguments",
     "critical",
 )
+_LOG = logging.getLogger(__name__)
 
 
 class PlanGenerationError(RuntimeError):
@@ -83,7 +90,7 @@ def _render_markdown_files(root: Path, paths: list[Path]) -> str:
 def _collect_skills(root: Path, user: str) -> dict[str, str]:
     """Collect complete plugin, shared, and current-user SKILL.md files."""
     plugin_files = _safe_markdown_files(root / "plugins", recursive=False)
-    shared_files = _safe_markdown_files(root / "shared_skills", recursive=True)
+    shared_files = _safe_markdown_files(root / "skills", recursive=True)
     user_files = _safe_markdown_files(
         root / "users" / user / "user_skills",
         recursive=True,
@@ -276,7 +283,6 @@ def prepare_task_plan_input(
     injections = _planning_injections(root, user, cfg)
 
     payload: dict[str, Any] = {
-        "action": input_data.get("action"),
         "goal": goal,
         "available_tools": _tool_summary(registry),
         "plugin_skills": injections["plugin_skills"],
@@ -311,6 +317,11 @@ def _normalize_result(
     tool_names: set[str],
     existing_plan: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    if "status" in data:
+        _LOG.warning(
+            "忽略模型返回的计划 status=%r；计划状态由服务端维护",
+            data.get("status"),
+        )
     expected_action = "edit" if existing_plan is not None else "create"
     action = data.get("action")
     if action == "skip" and existing_plan is None:
@@ -479,6 +490,11 @@ def persist_agent_result(
         raise PlanGenerationError("task_plan 编辑结果缺少 existing_plan")
     if action == "create":
         existing = None
+    if action == "edit" and existing is not None:
+        # Keep every persistence entry point on the same editability boundary
+        # as the explicit edit API.  In particular, a completed plan must not
+        # accept an agent response that appends new pending steps.
+        _editable_plan(existing)
     cfg = config if config is not None else load_config(user, root)
     registry = _runtime_tools(root, user, cfg, None)
     task_plan_config = cfg.get("task_plan") or {}
@@ -501,4 +517,15 @@ def persist_agent_result(
     if existing is None:
         raise PlanGenerationError("task_plan 编辑结果缺少 existing_plan")
     plan_id = str(existing.get("plan_id") or normalized.get("plan_id") or "")
-    return store.update(plan_id, lambda current: {**normalized, "plan_id": current["plan_id"]})
+    expected_revision = existing.get("revision")
+
+    def persist(current: dict[str, Any]) -> dict[str, Any]:
+        _editable_plan(current)
+        if current.get("revision") != expected_revision:
+            raise PlanConflictError(f"计划版本已变化：{plan_id}")
+        return {**normalized, "plan_id": current["plan_id"]}
+
+    return store.update(
+        plan_id,
+        persist,
+    )

@@ -6,9 +6,7 @@ from run.agents import AgentOutputError, AgentRunResult
 
 
 def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
-    requested_action = input_data.get("action")
-    if requested_action not in {"create", "edit"}:
-        raise AgentOutputError("task_plan 输入 action 必须是 create 或 edit")
+    requested_action = input_data["action"]  # Validated by AgentRunner's input schema.
     result = context.run_model(input_data)
     action = result.data.get("action")
     allowed = {requested_action}

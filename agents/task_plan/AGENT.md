@@ -1,8 +1,9 @@
 # task_plan
 
-根据上下文数据、可用工具/技能清单和知识库索引，创建或编辑结构化任务计划。不直接执行工具或写文件。
+根据上下文、可用工具/技能/知识库索引，为用户真正想完成的事创建或编辑结构化计划。不直接执行工具或写文件。
+优先纳入用户明确给出的背景、偏好、顺序和验收方式，不把个人目标改写成泛化流程；未提供的个人背景不得臆测。
 
-所有阈值均从 `config/global_config.json` 读取，不做硬编码。
+所有阈值均从 `config/global_config.yaml` 读取，不做硬编码。
 
 ---
 
@@ -29,17 +30,17 @@
    → 全部插件的 SKILL.md 全文
    → 含指令型技能和工具型技能
 
-3. 共享技能目录 (shared_skills/)
+3. 共享技能目录 (skills/)
    → 全部共享技能的 SKILL.md 全文
 
 4. 用户技能目录 (users/<name>/user_skills/)
    → 全部用户技能的 SKILL.md 全文
    → 包含 agent_create 和 user_create
 
-5. 全局知识库索引 (global_knowledge/data_structure.md)
+5. 全局知识库索引 (knowledge/global/data_structure.md)
    → 索引全文，含文件用途和检索关键词
 
-6. 共享知识库索引 (shared_knowledge/data_structure.md)
+6. 共享知识库索引 (knowledge/share/data_structure.md)
    → 同上
 
 7. 用户知识库索引 (users/<name>/knowledge/data_structure.md)
@@ -87,8 +88,9 @@
 - 使用调用方提供的工具名（来自 `available_tools`），不编造
 - `depends_on` 表达依赖关系，不得形成循环
 - `critical=true` 的步骤失败时暂停整个计划
-- 步骤数不超过 `global_config.json → task_plan.max_steps`（默认 20）
+- 步骤数不超过 `global_config.yaml → task_plan.max_steps`（默认 20）
 - 禁止使用 `task_plan_` 前缀的工具
+- 简单任务输出 `action=skip` 表示不创建计划；它不是步骤跳过。已创建计划中的步骤只能由运行时管理工具 `skip_step` 显式跳过，且仅限 `critical=false` 的 pending 步骤，写入状态为 `skipped` 并满足后续依赖。
 
 ---
 
@@ -114,6 +116,10 @@
 6. `completed_steps` 中列出的步骤不得删除、改名、修改执行内容或重置状态
 7. failed/cancelled 步骤在修正失败原因后可以重置为 `pending`
 8. 重置失败步骤时必须清空旧的 `error`、`result`、`started_at` 和 `finished_at`，不得伪造已完成结果
+
+本子代理只生成 `create`、`edit` 或 `skip` 计划结果，不调用任务计划管理工具。
+计划处于 `running` 时，普通 `edit` 会被运行时拒绝；如需调整尚未开始的连续
+pending 后缀，由主智能体调用任务计划管理工具的 `revise_remaining` 动作。
 
 ---
 

@@ -110,9 +110,10 @@ pending → approved → running → completed
 |------|------|
 | `pending` | 等待执行 |
 | `running` | 正在执行 |
+| `paused` | 不接受新写入；读取旧计划时归一为 pending 并清空旧执行结果 |
 | `completed` | 已完成 |
 | `failed` | 执行失败 |
-| `skipped` | 因依赖失败或取消而跳过 |
+| `skipped` | 显式跳过的非关键步骤；后续依赖将其视为已满足 |
 | `cancelled` | 已取消 |
 
 ### 合法迁移
@@ -140,16 +141,22 @@ pending → approved → running → completed
 
 **步骤状态**:
 - `pending → running`
+- `running → pending`（计划暂停、取消事件或执行生成器关闭时由执行器 finally 收束；计划自身同时进入 paused）
 - `running → completed`
 - `running → failed`
-- `pending → skipped`（依赖失败）
+- `pending → skipped`（用户显式跳过非关键分支）
 - `pending → cancelled`
+
+计划运行中不允许使用普通 `edit` 修改元数据或步骤字段；仅允许通过
+`revise_remaining` 在尚未开始的 pending 后缀中重排、插入或删除步骤。
 
 ## 进程重启恢复
 
 - TaskPlanScheduler 按依赖逐步触发主智能体 Run；活跃计划由系统提示词自动注入。
 - 每次 Run 只执行当前可运行步骤，步骤与计划状态由框架持久化，不能交给模型自行修改。
 - 启动时按索引查询所有用户数据库中的运行步骤
-- 步骤状态为 `running` 的计划：计划状态转为 `paused`，步骤状态恢复为 `pending`
+- 步骤状态为 `running` 的计划：计划状态转为 `paused`，步骤状态恢复为 `pending`，
+  即使计划在崩溃前已经是 `paused` 也会重新落盘；读取历史遗留步骤级 `paused` 时
+  立即按 `pending` 兼容归一，resume 后按正常状态持久化
 - 不自动重放有副作用的步骤
 - 等待用户决定恢复或取消

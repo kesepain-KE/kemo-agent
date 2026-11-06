@@ -4,7 +4,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from run.tasks.boundary import TaskPlanCreationBoundary as TaskPlanCreationBoundary
 
-_DOMAIN_MODULES = ("boundary", "store", "mutations", "executor", "service", "scheduler")
+_DOMAIN_MODULES = (
+    "boundary", "store", "prompt_selection", "mutations", "executor", "service", "scheduler",
+)
 
 
 def __getattr__(name: str):

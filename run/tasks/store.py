@@ -7,11 +7,9 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from run.config import truncate_chars
 from run.infra import add_missing_columns, execute_schema, schema_migration
 from run.tasks.errors import (
     PlanConflictError,
@@ -56,19 +54,6 @@ def _store_lock(root: Path, user: str) -> threading.RLock:
     key = (str(root.resolve()).casefold(), user)
     with _STORE_LOCKS_GUARD:
         return _STORE_LOCKS.setdefault(key, threading.RLock())
-
-
-@dataclass(frozen=True, slots=True)
-class TaskPlanSelection:
-    text: str
-    source_files: tuple[str, ...]
-    original_chars: int
-    injected_chars: int
-    original_items: int
-    injected_items: int
-    truncated: bool
-
-
 
 
 class PlanStore:
@@ -361,19 +346,21 @@ class PlanStore:
             )
         steps = []
         for step in step_rows:
+            step_status = str(step["status"])
+            legacy_paused = step_status == "paused"
             steps.append({
                 "step_id": str(step["step_id"]),
                 "title": str(step["title"]),
                 "description": str(step["description"]),
-                "status": str(step["status"]),
+                "status": "pending" if legacy_paused else step_status,
                 "depends_on": dependencies.get(str(step["step_id"]), []),
                 "tool_name": step["tool_name"],
                 "tool_arguments": _json_value(step["tool_arguments_json"], {}),
                 "critical": bool(step["critical"]),
-                "result": _json_value(step["result_json"], None),
-                "error": _json_value(step["error_json"], None),
-                "started_at": str(step["started_at"] or ""),
-                "finished_at": str(step["finished_at"] or ""),
+                "result": None if legacy_paused else _json_value(step["result_json"], None),
+                "error": None if legacy_paused else _json_value(step["error_json"], None),
+                "started_at": "" if legacy_paused else str(step["started_at"] or ""),
+                "finished_at": "" if legacy_paused else str(step["finished_at"] or ""),
             })
         return {
             "schema_version": int(row["schema_version"]),
@@ -685,7 +672,6 @@ class PlanStore:
             restore,
             note=f"回滚到 revision {plan_revision}",
         )
-
     def recover_interrupted(self) -> list[str]:
         """On startup, find plans with running steps and pause them."""
         with self._lock:
@@ -704,8 +690,10 @@ class PlanStore:
                             if step.get("status") == "running":
                                 step["status"] = "pending"
                                 changed = True
-                        if changed and data.get("status") in {"running", "approved"}:
-                            data["status"] = "paused"
+                        if changed:
+                            # Also persist stale running steps inside paused plans.
+                            if data.get("status") in {"running", "approved"}:
+                                data["status"] = "paused"
                             data["revision"] = int(data.get("revision", 1)) + 1
                             data["updated_at"] = _now()
                             _validate_plan(data)
@@ -719,81 +707,3 @@ class PlanStore:
                 return recovered
             except sqlite3.Error as exc:
                 raise PlanError(f"任务计划数据库不可用：{exc}") from exc
-
-
-def _prompt_step(step: dict[str, Any]) -> str:
-    description = step.get("description") or step.get("title") or "未命名步骤"
-    status = str(step.get("status") or "pending")
-    if status == "completed":
-        return f"- [x] {description} ✓"
-    return f"- [ ] {description}（{status}）"
-
-
-def select_prompt_plans(
-    root: Path,
-    user: str,
-    *,
-    max_chars: int,
-    source: str | None = None,
-    session_id: str | None = None,
-) -> TaskPlanSelection:
-    """Read unfinished plans, optionally limited to one conversation space."""
-
-    if max_chars == 0:
-        return TaskPlanSelection("", (), 0, 0, 0, 0, False)
-    directory = _plan_dir(root, user)
-    if not directory.is_dir():
-        return TaskPlanSelection("", (), 0, 0, 0, 0, False)
-    plans = PlanStore(root, user).list_plans(statuses=("pending", "approved", "running", "paused"), source=source, session_id=session_id)
-    status_map = {
-        "pending": "pending",
-        "approved": "active",
-        "running": "active",
-        "paused": "active",
-        "completed": "completed",
-        "failed": "aborted",
-        "cancelled": "aborted",
-    }
-    pieces: list[str] = []
-    selected_paths: list[str] = []
-    offsets: list[int] = []
-    used = 0
-    for data in plans:
-        if source is not None and str(data.get("source") or "") != source:
-            continue
-        if session_id is not None and str(data.get("session_id") or "") != session_id:
-            continue
-        plan_id = str(data.get("plan_id") or "")
-        mapped = status_map.get(str(data.get("status") or ""))
-        if mapped is None:
-            raise PlanError(f"计划状态无效：{plan_id}")
-        if mapped in {"completed", "aborted"}:
-            continue
-        title = str(data.get("title") or plan_id)
-        description = str(data.get("description") or "").strip()
-        lines = [f"[plan:{plan_id}]", f"title: {title}", f"status: {mapped}"]
-        if description:
-            lines.append(f"description: {description}")
-        steps = data.get("steps") or []
-        if not isinstance(steps, list):
-            raise PlanError(f"计划 steps 必须是数组：{plan_id}")
-        lines.extend(_prompt_step(step) for step in steps if isinstance(step, dict))
-        piece = "\n".join(lines)
-        offsets.append(used + (2 if pieces else 0))
-        pieces.append(piece)
-        selected_paths.append(
-            f"users/{user}/task_plan/{TASK_PLAN_DB_FILENAME}#{plan_id}"
-        )
-        used += len(piece) + (2 if len(pieces) > 1 else 0)
-    full_text = "\n\n".join(pieces)
-    text, truncated = truncate_chars(full_text, max_chars)
-    injected_count = sum(offset < len(text) for offset in offsets)
-    return TaskPlanSelection(
-        text=text,
-        source_files=tuple(selected_paths[:injected_count]),
-        original_chars=len(full_text),
-        injected_chars=len(text),
-        original_items=len(pieces),
-        injected_items=injected_count,
-        truncated=truncated,
-    )

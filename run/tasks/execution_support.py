@@ -29,7 +29,7 @@ def _next_step(plan: dict[str, Any]) -> dict[str, Any] | None:
             continue
         dependencies = step.get("depends_on") or []
         if all(
-            steps_by_id.get(dependency, {}).get("status") == "completed"
+            steps_by_id.get(dependency, {}).get("status") in {"completed", "skipped"}
             for dependency in dependencies
         ):
             return step

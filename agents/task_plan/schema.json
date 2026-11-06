@@ -1,0 +1,22 @@
+{
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["create", "edit"],
+        "description": "创建计划用 create，修改草案用 edit；这是 input 内的动作，不是外层分派动作 call。"
+      },
+      "goal": {"type": "string", "description": "用户想完成的目标与验收要求。"},
+      "context": {"description": "与这份计划相关的主对话背景。"},
+      "existing_plan": {"type": "object", "description": "编辑模式的现有计划。"},
+      "edit_request": {"type": "string", "description": "编辑模式的修改要求。"}
+    },
+    "required": ["action"],
+    "additionalProperties": true
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

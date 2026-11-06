@@ -14,7 +14,7 @@ class PlanValidationError(PlanError):
 
 
 class PlanConflictError(PlanError):
-    pass
+    code = "plan_revision_conflict"
 
 
 __all__ = [

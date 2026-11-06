@@ -2,8 +2,34 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
+
+from provider.protocol.models import ToolCallItem
+
+
+def task_plan_creation_batch(calls: list[ToolCallItem], *, record) -> Iterator[tuple[ToolCallItem, bool]]:
+    """Yield through plan generation and record the remainder as unexecuted."""
+    for index, call in enumerate(calls):
+        plan_generation = (
+            call.name == "subagent_dispatch"
+            and call.arguments.get("action") == "call"
+            and call.arguments.get("agent") == "task_plan"
+        )
+        yield call, plan_generation
+        if not plan_generation:
+            continue
+        for deferred in calls[index + 1:]:
+            record(deferred, {
+                "ok": False,
+                "execution": {"executed": False},
+                "error": {
+                    "code": "task_plan_creation_boundary",
+                    "message": "本批次先生成任务计划，后续调用未执行；请根据计划创建结果继续。",
+                },
+            }, status="not_executed")
+        return
 
 
 @dataclass(frozen=True, slots=True)

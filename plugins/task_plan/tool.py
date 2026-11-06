@@ -16,11 +16,14 @@ from run.tasks import (
 from run.tasks import (
     edit_plan_fields,
     plan_fix_activation_result,
+    revise_remaining_steps,
     reset_plan_step,
+    skip_plan_step,
 )
 from run.tasks import (
     PLAN_ID_RE,
     STEP_ID_RE,
+    PlanConflictError,
     PlanError,
     PlanNotFoundError,
     PlanStore,
@@ -34,7 +37,8 @@ _STEP_TERMINAL_STATUSES = frozenset(
 )
 _ACTIONS = frozenset(
     {
-        "view", "list", "edit", "retry_step", "reset_step",
+        "view", "list", "edit", "revise_remaining", "retry_step", "reset_step",
+        "skip_step",
         "step_done", "step_fail", "abort", "approve", "pause", "resume",
     }
 )
@@ -88,7 +92,10 @@ def _next_runnable_step(plan: dict[str, Any]) -> dict[str, Any] | None:
         if step.get("status") != "pending":
             continue
         dependencies = [str(value) for value in (step.get("depends_on") or [])]
-        if all(by_id.get(dependency, {}).get("status") == "completed" for dependency in dependencies):
+        if all(
+            by_id.get(dependency, {}).get("status") in {"completed", "skipped"}
+            for dependency in dependencies
+        ):
             return step
     return None
 
@@ -129,9 +136,9 @@ def _auto_complete_check(store: PlanStore, plan_id: str) -> dict[str, Any]:
     plan = store.read(plan_id)
     steps = plan.get("steps") or []
     if steps and all(
-        isinstance(step, dict) and step.get("status") in _STEP_TERMINAL_STATUSES
+        isinstance(step, dict) and step.get("status") in {"completed", "skipped"}
         for step in steps
-    ) and all(step.get("status") == "completed" for step in steps):
+    ):
         if plan.get("status") != "completed":
             def mark_completed(current: dict[str, Any]) -> dict[str, Any]:
                 current_steps = current.get("steps") or []
@@ -142,7 +149,7 @@ def _auto_complete_check(store: PlanStore, plan_id: str) -> dict[str, Any]:
                     not current_steps
                     or not all(
                         isinstance(step, dict)
-                        and step.get("status") == "completed"
+                        and step.get("status") in {"completed", "skipped"}
                         for step in current_steps
                     )
                     or current.get("status") not in {"approved", "running", "paused"}
@@ -271,6 +278,7 @@ def run(
     title: str | None = None,
     description: str | None = None,
     steps: list[dict[str, Any]] | None = None,
+    retry_failed: bool = False,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     if not isinstance(context, dict) or not context.get("root") or not context.get("user"):
@@ -332,6 +340,33 @@ def run(
     if selected_action == "view":
         return _result(True, plan=selected_plan)
 
+    if selected_action == "revise_remaining":
+        if steps is None:
+            return _result(False, error="revise_remaining 需要 steps")
+        try:
+            plan = revise_remaining_steps(
+                store,
+                selected_plan_id,
+                expected_revision=revision,
+                steps=steps,
+                retry_failed=retry_failed,
+            )
+            activated = (
+                selected_plan.get("status") in {"paused", "failed", "pending"}
+                and plan.get("status") == "approved"
+            )
+            return _result(
+                True,
+                plan=plan,
+                activated=activated,
+                reason="plan_revised",
+                **_progress_payload(plan),
+            )
+        except PlanConflictError as exc:
+            return _result(False, error=str(exc), error_code=exc.code)
+        except (PlanError, ValueError) as exc:
+            return _result(False, error=str(exc))
+
     if selected_action == "edit":
         changes: dict[str, Any] = {}
         if title is not None:
@@ -363,6 +398,29 @@ def run(
                 plan=plan,
                 activated=activated,
                 reason=activation_reason,
+            )
+        except (PlanError, ValueError) as exc:
+            return _result(False, error=str(exc))
+
+    if selected_action == "skip_step":
+        selected_step_id = str(step_id or "").strip()
+        if not selected_step_id:
+            return _result(False, error="skip_step 需要 step_id")
+        if STEP_ID_RE.fullmatch(selected_step_id) is None:
+            return _result(False, error=f"step_id 无效: {selected_step_id}")
+        try:
+            plan = skip_plan_step(
+                store,
+                selected_plan_id,
+                selected_step_id,
+                expected_revision=revision,
+            )
+            plan = _auto_complete_check(store, selected_plan_id)
+            return _result(
+                True,
+                plan=plan,
+                skipped_step=_step_by_id(plan, selected_step_id),
+                **_progress_payload(plan),
             )
         except (PlanError, ValueError) as exc:
             return _result(False, error=str(exc))

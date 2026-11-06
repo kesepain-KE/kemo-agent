@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,7 @@ from run.tasks import (
     persist_agent_result,
     prepare_task_plan_input,
 )
+from run.tasks.mutations import revise_remaining_steps
 from run.tasks import TaskPlanScheduler
 from run.tools import ToolDefinition, ToolRegistry
 
@@ -51,7 +53,7 @@ CONFIG = {
     "provider": {
         "type": "kemo",
         "base_url": "http://127.0.0.1:1/v1",
-        "api_key_env": "TEST_PLAN_KEY",
+        "api_key_env": "KEMO_API_KEY",
         "model": "mock",
     },
     "tools": {"enabled": True, "timeout": 5},
@@ -97,14 +99,14 @@ def _make_root(users: list[str]) -> tuple[tempfile.TemporaryDirectory, Path]:
     temporary = tempfile.TemporaryDirectory()
     root = Path(temporary.name)
     (root / "config").mkdir()
-    (root / "config" / "global_config.json").write_text(
+    (root / "config" / "global_config.yaml").write_text(
         json.dumps(CONFIG), "utf-8"
     )
     (root / "config" / "global_soul.md").write_text("SOUL", "utf-8")
     (root / "agents.md").write_text("AGENTS", "utf-8")
     for user in users:
         (root / "users" / user / "task_plan").mkdir(parents=True)
-        (root / "users" / user / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / user / "user_config.yaml").write_text("{}", "utf-8")
     return temporary, root
 
 
@@ -718,6 +720,24 @@ class PlanStoreTests(unittest.TestCase):
         self.assertEqual(plan["status"], "paused")
         self.assertEqual(plan["steps"][0]["status"], "pending")
 
+    def test_recover_interrupted_persists_running_step_inside_paused_plan(self) -> None:
+        _, root = _make_root(["alice"])
+        store = PlanStore(root, "alice")
+        plan = store.create(_make_plan([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ]))
+        store.update(plan["plan_id"], lambda p: {
+            **p,
+            "status": "paused",
+            "steps": [{**p["steps"][0], "status": "running"}],
+        })
+
+        self.assertEqual(store.recover_interrupted(), [plan["plan_id"]])
+        restored = store.read(plan["plan_id"])
+        self.assertEqual(restored["status"], "paused")
+        self.assertEqual(restored["steps"][0]["status"], "pending")
+
     def test_reminder_is_persisted(self) -> None:
         _, root = _make_root(["alice"])
         store = PlanStore(root, "alice")
@@ -769,8 +789,106 @@ class PlanExecutionTests(unittest.TestCase):
         ))
         types = [e.type for e in events]
         self.assertIn("done", types)
+
+    def test_revise_remaining_order_is_used_by_the_real_executor(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "depends_on": [], "critical": True},
+            {"step_id": "step_2", "title": "B", "description": "B",
+             "tool_name": None, "tool_arguments": {}, "depends_on": [], "critical": True},
+            {"step_id": "step_3", "title": "C", "description": "C",
+             "tool_name": None, "tool_arguments": {}, "depends_on": [], "critical": True},
+        ])
+
+        revised = revise_remaining_steps(
+            PlanStore(self.root, "alice"),
+            plan["plan_id"],
+            expected_revision=plan["revision"],
+            steps=[
+                {"step_id": "step_1", "position": 1, "depends_on": []},
+                {"step_id": "step_3", "position": 2, "depends_on": []},
+                {"step_id": "step_2", "position": 3, "depends_on": []},
+            ],
+        )
+        self.assertEqual(
+            [step["step_id"] for step in revised["steps"]],
+            ["step_1", "step_3", "step_2"],
+        )
+        events = list(execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+        ))
+
+        started = [
+            event.metadata["step_id"]
+            for event in events
+            if event.type == "tool_call_start"
+        ]
+        self.assertEqual(started, ["step_1", "step_3", "step_2"])
+        self.assertEqual(get_plan(self.root, "alice", plan["plan_id"])["status"], "completed")
         done = next(e for e in events if e.type == "done")
         self.assertEqual(done.metadata["status"], "completed")
+
+    def test_revise_remaining_during_execution_reorders_pending_suffix(self) -> None:
+        from run.tools import ToolDefinition, ToolRegistry
+
+        started: list[str] = []
+
+        def record_step(context, **_kwargs):
+            started.append(str(context["step_id"]))
+            return {"ok": True}
+
+        tool = ToolDefinition(
+            name="get_current_time",
+            description="record execution order",
+            input_schema={"type": "object", "properties": {}},
+            version="1",
+            enabled=True,
+            entrypoint="tool.py:run",
+            source="test",
+            directory=self.root / "plugins" / "get_current_time",
+            _callable=record_step,
+        )
+        plan = self._plan_with_steps([
+            {"step_id": f"step_{number}", "title": str(number),
+             "description": str(number), "tool_name": "get_current_time",
+             "tool_arguments": {}, "depends_on": [], "critical": True}
+            for number in (1, 2, 3)
+        ])
+        store = PlanStore(self.root, "alice")
+        store.update(plan["plan_id"], lambda value: {**value, "status": "approved"})
+        events = execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+            tool_registry=ToolRegistry({"get_current_time": tool}),
+        )
+
+        first_result_seen = False
+        for event in events:
+            if event.type == "tool_call_result" and not first_result_seen:
+                first_result_seen = True
+                current = store.read(plan["plan_id"])
+                revised = revise_remaining_steps(
+                    store,
+                    plan["plan_id"],
+                    expected_revision=current["revision"],
+                    steps=[
+                        {"step_id": "step_1", "position": 1, "depends_on": []},
+                        {"step_id": "step_3", "position": 2, "depends_on": []},
+                        {"step_id": "step_2", "position": 3, "depends_on": []},
+                    ],
+                )
+                self.assertEqual(
+                    [step["step_id"] for step in revised["steps"]],
+                    ["step_1", "step_3", "step_2"],
+                )
+
+        self.assertTrue(first_result_seen)
+        self.assertEqual(started, ["step_1", "step_3", "step_2"])
 
     def test_pending_plan_cannot_execute(self) -> None:
         plan = self._plan_with_steps([
@@ -824,6 +942,47 @@ class PlanExecutionTests(unittest.TestCase):
             get_plan(self.root, "alice", plan["plan_id"])["status"],
             "cancelled",
         )
+
+    def test_cancel_after_step_claim_does_not_leave_running_step(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ])
+        approve_plan(self.root, "alice", plan["plan_id"])
+        cancel_event = threading.Event()
+        iterator = execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+            cancel_event=cancel_event,
+        )
+        first = next(iterator)
+        self.assertEqual(first.type, "tool_call_start")
+        cancel_event.set()
+        self.assertEqual(list(iterator), [])
+        stored = get_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(stored["status"], "paused")
+        self.assertEqual(stored["steps"][0]["status"], "pending")
+
+    def test_generator_close_after_step_claim_does_not_leave_running_step(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ])
+        approve_plan(self.root, "alice", plan["plan_id"])
+        iterator = execute_plan(
+            root=self.root,
+            user="alice",
+            plan_id=plan["plan_id"],
+            config=CONFIG,
+        )
+        first = next(iterator)
+        self.assertEqual(first.type, "tool_call_start")
+        iterator.close()
+        stored = get_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(stored["status"], "paused")
+        self.assertEqual(stored["steps"][0]["status"], "pending")
 
     def test_inflight_step_can_persist_after_plan_is_paused(self) -> None:
         plan = self._plan_with_steps([
@@ -1235,6 +1394,21 @@ class PlanExecutionTests(unittest.TestCase):
         self.assertEqual(plan["steps"][0]["status"], "cancelled")
         self.assertEqual(plan["steps"][1]["status"], "cancelled")
 
+        running = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ])
+        store = PlanStore(self.root, "alice")
+        store.update(running["plan_id"], lambda value: {
+            **value,
+            "status": "running",
+            "steps": [{**value["steps"][0], "status": "running"}],
+        })
+        cancel_plan(self.root, "alice", running["plan_id"])
+        cancelled_running = get_plan(self.root, "alice", running["plan_id"])
+        self.assertEqual(cancelled_running["status"], "cancelled")
+        self.assertEqual(cancelled_running["steps"][0]["status"], "cancelled")
+
     def test_pause_and_resume(self) -> None:
         plan = self._plan_with_steps([
             {"step_id": "step_1", "title": "A", "description": "A",
@@ -1247,6 +1421,64 @@ class PlanExecutionTests(unittest.TestCase):
         resume_plan(self.root, "alice", plan["plan_id"])
         plan = get_plan(self.root, "alice", plan["plan_id"])
         self.assertEqual(plan["status"], "approved")
+
+    def test_legacy_paused_step_normalizes_on_read_and_resume(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ])
+        store = PlanStore(self.root, "alice")
+        with store._connection(write=True) as database:
+            database.execute(
+                """
+                UPDATE task_plan_steps
+                SET status='paused', result_json='{"stale":true}',
+                    error_json='{"message":"stale"}',
+                    started_at='2026-10-31T00:00:00+00:00',
+                    finished_at='2026-10-31T00:01:00+00:00'
+                WHERE plan_id=? AND step_id='step_1'
+                """,
+                (plan["plan_id"],),
+            )
+            database.execute(
+                "UPDATE task_plans SET status='paused' WHERE plan_id=?",
+                (plan["plan_id"],),
+            )
+        loaded = store.read(plan["plan_id"])
+        self.assertEqual(loaded["steps"][0]["status"], "pending")
+        self.assertIsNone(loaded["steps"][0]["result"])
+        self.assertIsNone(loaded["steps"][0]["error"])
+        self.assertEqual(loaded["steps"][0]["started_at"], "")
+        self.assertEqual(loaded["steps"][0]["finished_at"], "")
+
+        resumed = resume_plan(self.root, "alice", plan["plan_id"])
+        self.assertEqual(resumed["status"], "approved")
+        self.assertEqual(resumed["steps"][0]["status"], "pending")
+
+    def test_resume_converts_running_inflight_step_to_pending(self) -> None:
+        plan = self._plan_with_steps([
+            {"step_id": "step_1", "title": "A", "description": "A",
+             "tool_name": None, "tool_arguments": {}, "critical": True},
+        ])
+        store = PlanStore(self.root, "alice")
+        store.update(plan["plan_id"], lambda value: {
+            **value,
+            "status": "paused",
+            "steps": [{
+                **value["steps"][0],
+                "status": "running",
+                "result": {"partial": True},
+                "error": {"message": "stale"},
+                "started_at": "2026-10-31T00:00:00+00:00",
+            }],
+        })
+
+        resumed = resume_plan(self.root, "alice", plan["plan_id"])
+        step = resumed["steps"][0]
+        self.assertEqual(step["status"], "pending")
+        self.assertIsNone(step["result"])
+        self.assertIsNone(step["error"])
+        self.assertEqual(step["started_at"], "")
 
     def test_completed_step_not_replayed(self) -> None:
         plan = self._plan_with_steps([
@@ -1319,7 +1551,7 @@ class PlanGenerationTests(unittest.TestCase):
                  "tool_name": None, "tool_arguments": {}, "critical": True},
             ],
         })
-        with patch.dict(os.environ, {"TEST_PLAN_KEY": "x"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "x"}, clear=False):
             plan = generate_plan(
                 root=root, user="alice", goal="test goal",
                 provider_factory=lambda _: MockProvider(plan_json),
@@ -1377,7 +1609,7 @@ class PlanGenerationTests(unittest.TestCase):
             "test instruction", "utf-8",
         )
         skip_json = json.dumps({"action": "skip", "message": "too simple"})
-        with patch.dict(os.environ, {"TEST_PLAN_KEY": "x"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "x"}, clear=False):
             with self.assertRaises(PlanSkipped):
                 generate_plan(
                     root=root, user="alice", goal="hello",
@@ -1402,7 +1634,7 @@ class PlanGenerationTests(unittest.TestCase):
         (root / "agents" / "task_plan" / "任务计划.txt").write_text(
             "test instruction", "utf-8",
         )
-        with patch.dict(os.environ, {"TEST_PLAN_KEY": "x"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "x"}, clear=False):
             with self.assertRaises(PlanGenerationError):
                 generate_plan(
                     root=root, user="alice", goal="test",
@@ -1415,10 +1647,10 @@ class PlanGenerationTests(unittest.TestCase):
         files = {
             root / "plugins" / "zeta" / "SKILL.md": "# zeta\n" + "Z" * 12000,
             root / "plugins" / "alpha" / "SKILL.md": "# alpha",
-            root / "shared_skills" / "development" / "python" / "SKILL.md": "# shared python",
+            root / "skills" / "development" / "python" / "SKILL.md": "# shared python",
             root / "users" / "alice" / "user_skills" / "agent_create" / "deploy" / "SKILL.md": "# user deploy",
-            root / "global_knowledge" / "data_structure.md": "GLOBAL INDEX",
-            root / "shared_knowledge" / "data_structure.md": "SHARED INDEX",
+            root / "knowledge" / "global" / "data_structure.md": "GLOBAL INDEX",
+            root / "knowledge" / "share" / "data_structure.md": "SHARED INDEX",
             root / "users" / "alice" / "knowledge" / "data_structure.md": "USER INDEX",
         }
         for path, content in files.items():
@@ -1481,8 +1713,8 @@ class PlanGenerationTests(unittest.TestCase):
     def test_generation_uses_configured_knowledge_scopes_and_named_indexes(self) -> None:
         _, root = _make_root(["alice"])
         files = {
-            root / "global_knowledge" / "index.md": "GLOBAL INDEX",
-            root / "shared_knowledge" / "索引.md": "SHARED INDEX",
+            root / "knowledge" / "global" / "index.md": "GLOBAL INDEX",
+            root / "knowledge" / "share" / "索引.md": "SHARED INDEX",
             root / "users" / "alice" / "knowledge" / "目录.md": "USER INDEX",
         }
         for path, content in files.items():

@@ -25,6 +25,7 @@ from run.tools import (
 from run.tasks.execution_support import (
     PlanExecutionError,
 )
+from run.tasks.mutations import skip_plan_step
 from run.tasks.plan_execution import execute_plan as _execute_plan_impl
 
 
@@ -91,6 +92,13 @@ def resume_plan(root: Path, user: str, plan_id: str) -> dict[str, Any]:
             raise PlanExecutionError(
                 f"计划 {plan_id} 当前状态为 {plan.get('status')!r}，无法恢复"
             )
+        for step in plan.get("steps") or []:
+            if step.get("status") == "running":
+                step["status"] = "pending"
+                step["result"] = None
+                step["error"] = None
+                step["started_at"] = ""
+                step["finished_at"] = ""
         return {**plan, "status": "approved"}
 
     return store.update(plan_id, _resume)
@@ -106,7 +114,7 @@ def cancel_plan(root: Path, user: str, plan_id: str) -> dict[str, Any]:
             if s["status"] == "pending":
                 s["status"] = "cancelled"
             elif s["status"] == "running":
-                s["status"] = "pending"
+                s["status"] = "cancelled"
         return p
 
     return store.update(plan_id, _cancel)

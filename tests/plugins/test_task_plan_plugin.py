@@ -23,7 +23,7 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "users" / "alice").mkdir(parents=True)
         (self.root / "config").mkdir()
-        (self.root / "config" / "global_config.json").write_text(
+        (self.root / "config" / "global_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
             "utf-8",
         )
@@ -77,7 +77,8 @@ class TaskPlanPluginTests(unittest.TestCase):
             set(actions),
             {
                 "view", "list", "edit", "retry_step", "reset_step",
-                "step_done", "step_fail", "abort", "approve", "pause", "resume",
+                "revise_remaining", "skip_step", "step_done", "step_fail", "abort",
+                "approve", "pause", "resume",
             },
         )
         definition = discover_tools(PROJECT_ROOT, "kesepain").get("task_plan")
@@ -462,7 +463,7 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertIn("已完成步骤", completed["error"])
 
     def test_edit_reactivates_failed_plan_when_policy_is_enabled(self) -> None:
-        (self.root / "users" / "alice" / "user_config.json").write_text(
+        (self.root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
             "utf-8",
         )
@@ -478,6 +479,206 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertTrue(edited["activated"])
         self.assertEqual(edited["reason"], "auto_retry_on_fix")
         self.assertEqual(edited["plan"]["status"], "approved")
+
+    def test_revise_remaining_reorders_and_physically_deletes_pending_steps(self) -> None:
+        plan = self.create_plan(steps=6, status="running")
+        store = PlanStore(self.root, "alice")
+        progressed = store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "current_step": "step_3",
+                "steps": [
+                    {
+                        **step,
+                        "status": "completed" if step["step_id"] in {"step_1", "step_2", "step_3"} else "pending",
+                        "result": "done" if step["step_id"] in {"step_1", "step_2", "step_3"} else None,
+                    }
+                    for step in current["steps"]
+                ],
+            },
+        )
+
+        revised = run(
+            action="revise_remaining",
+            plan_id=plan["plan_id"],
+            revision=progressed["revision"],
+            steps=[
+                {"step_id": "step_5", "position": 1, "depends_on": []},
+                {"step_id": "step_4", "position": 2, "depends_on": []},
+            ],
+            context=self.context,
+        )
+
+        self.assertTrue(revised["ok"], revised)
+        self.assertEqual(
+            [step["step_id"] for step in revised["plan"]["steps"]],
+            ["step_1", "step_2", "step_3", "step_5", "step_4"],
+        )
+        self.assertEqual(revised["next_step"]["step_id"], "step_5")
+        self.assertEqual(revised["plan"]["status"], "running")
+        self.assertEqual(revised["plan"]["revision"], progressed["revision"] + 1)
+        self.assertNotIn("step_6", revised["plan"]["steps"])
+
+    def test_revise_remaining_resumes_paused_plan_without_auto_retry_config(self) -> None:
+        plan = self.create_plan(status="paused", auto_accept=False)
+        store = PlanStore(self.root, "alice")
+        progressed = store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "steps": [
+                    {**current["steps"][0], "status": "completed", "result": "done"},
+                    current["steps"][1],
+                ],
+            },
+        )
+
+        revised = run(
+            action="revise_remaining",
+            plan_id=plan["plan_id"],
+            revision=progressed["revision"],
+            steps=[
+                {"step_id": "step_2", "position": 1, "depends_on": ["step_1"]},
+            ],
+            context=self.context,
+        )
+
+        self.assertTrue(revised["ok"], revised)
+        self.assertEqual(revised["plan"]["status"], "approved")
+        self.assertTrue(revised["activated"])
+        self.assertEqual(revised["remaining_steps"][0]["step_id"], "step_2")
+        self.assertEqual(revised["plan"]["steps"][0]["status"], "completed")
+
+    def test_revise_remaining_returns_stable_conflict_code(self) -> None:
+        plan = self.create_plan(status="running")
+        store = PlanStore(self.root, "alice")
+        latest = store.update(plan["plan_id"], lambda current: {**current, "title": "new"})
+
+        rejected = run(
+            action="revise_remaining",
+            plan_id=plan["plan_id"],
+            revision=plan["revision"],
+            steps=[{"step_id": "step_2", "position": 1, "depends_on": []}],
+            context=self.context,
+        )
+
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["error_code"], "plan_revision_conflict")
+        self.assertEqual(store.read(plan["plan_id"]), latest)
+
+    def test_revise_remaining_rejects_cycles_without_mutating_plan(self) -> None:
+        plan = self.create_plan(steps=3, status="running")
+        store = PlanStore(self.root, "alice")
+        progressed = store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "steps": [
+                    {
+                        **step,
+                        "status": "completed" if step["step_id"] == "step_1" else "pending",
+                        "result": "done" if step["step_id"] == "step_1" else None,
+                    }
+                    for step in current["steps"]
+                ],
+            },
+        )
+
+        rejected = run(
+            action="revise_remaining",
+            plan_id=plan["plan_id"],
+            revision=progressed["revision"],
+            steps=[
+                {"step_id": "step_2", "position": 1, "depends_on": ["step_3"]},
+                {"step_id": "step_3", "position": 2, "depends_on": ["step_2"]},
+            ],
+            context=self.context,
+        )
+
+        self.assertFalse(rejected["ok"])
+        self.assertIn("循环依赖", rejected["error"])
+        current = store.read(plan["plan_id"])
+        self.assertEqual(current["revision"], progressed["revision"])
+        self.assertEqual([step["step_id"] for step in current["steps"]], ["step_1", "step_2", "step_3"])
+
+    def test_revise_remaining_does_not_reset_failed_step_by_default(self) -> None:
+        plan = self.create_plan(steps=3, status="running")
+        store = PlanStore(self.root, "alice")
+        failed = store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "status": "paused",
+                "steps": [
+                    {
+                        **step,
+                        "status": (
+                            "failed" if step["step_id"] == "step_2"
+                            else "completed" if step["step_id"] == "step_1"
+                            else step["status"]
+                        ),
+                        "error": {"message": "failed"} if step["step_id"] == "step_2" else step["error"],
+                        "result": "done" if step["step_id"] == "step_1" else step["result"],
+                    }
+                    for step in current["steps"]
+                ],
+            },
+        )
+
+        revised = run(
+            action="revise_remaining",
+            plan_id=plan["plan_id"],
+            revision=failed["revision"],
+            retry_failed=False,
+            steps=[
+                {"step_id": "step_2", "position": 1, "depends_on": []},
+                {"step_id": "step_3", "position": 2, "depends_on": []},
+            ],
+            context=self.context,
+        )
+
+        self.assertTrue(revised["ok"], revised)
+        self.assertEqual(revised["plan"]["steps"][1]["status"], "failed")
+        self.assertEqual(revised["plan"]["status"], "paused")
+
+    def test_skip_step_records_skipped_and_unblocks_the_next_branch(self) -> None:
+        plan = self.create_plan(steps=3, status="running")
+        store = PlanStore(self.root, "alice")
+        progressed = store.update(
+            plan["plan_id"],
+            lambda current: {
+                **current,
+                "current_step": "step_1",
+                "steps": [
+                    {
+                        **current["steps"][0],
+                        "status": "completed",
+                        "result": "done",
+                    },
+                    {
+                        **current["steps"][1],
+                        "critical": False,
+                    },
+                    {
+                        **current["steps"][2],
+                        "depends_on": ["step_2"],
+                    },
+                ],
+            },
+        )
+
+        skipped = run(
+            action="skip_step",
+            plan_id=plan["plan_id"],
+            step_id="step_2",
+            revision=progressed["revision"],
+            context=self.context,
+        )
+
+        self.assertTrue(skipped["ok"], skipped)
+        self.assertEqual(skipped["plan"]["steps"][1]["status"], "skipped")
+        self.assertEqual(skipped["next_step"]["step_id"], "step_3")
 
     def test_retry_step_defaults_to_reset_only_and_reset_step_never_activates(self) -> None:
         plan = self.create_plan(status="running")
@@ -507,7 +708,7 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertEqual(reset_step["finished_at"], "")
 
     def test_retry_step_does_not_activate_while_another_failed_step_remains(self) -> None:
-        (self.root / "users" / "alice" / "user_config.json").write_text(
+        (self.root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
             "utf-8",
         )
@@ -556,7 +757,7 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertEqual(retried["plan"]["steps"][0]["status"], "pending")
         self.assertEqual(retried["plan"]["steps"][1]["status"], "failed")
 
-        (self.root / "users" / "alice" / "user_config.json").write_text(
+        (self.root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
             "utf-8",
         )
@@ -586,7 +787,7 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertEqual(reset["plan"]["steps"][0]["status"], "pending")
 
     def test_retry_step_reactivates_for_config_auto_accept_and_failed_plan(self) -> None:
-        (self.root / "users" / "alice" / "user_config.json").write_text(
+        (self.root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": True}}),
             "utf-8",
         )
@@ -623,7 +824,7 @@ class TaskPlanPluginTests(unittest.TestCase):
         self.assertEqual(terminal.metadata["status"], "completed")
         self.assertNotEqual(terminal.metadata.get("reason"), "no_runnable_step")
 
-        (self.root / "users" / "alice" / "user_config.json").write_text(
+        (self.root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"task_plan": {"auto_retry_on_fix": False}}),
             "utf-8",
         )

@@ -5,12 +5,20 @@
 - **职责**: 根据上下文+目标+工具/技能/知识库注入，创建或编辑结构化任务计划草案
 - **模型**: reasoning
 - **工具**: 无；仅使用调用方注入的技能全文和知识索引
+- **输入**: `input.action=create/edit` 必填；创建时提供 `goal` 与相关 `context`，默认同步生成并持久化
 
 # 操作信息
 
 ## 调用方式
 
-由主智能体通过 `AgentRunner.run("task_plan", input_data)` 调用。
+主智能体通过 `subagent_dispatch` 调用，外层 `action=call` 与内层计划动作不同：
+
+```json
+{"action":"call","agent":"task_plan","input":{"action":"create","goal":"用户的任务目标","context":"相关背景"}}
+```
+
+输入契约在同目录 `schema.json`，通过 `subagent_dispatch(action=list)` 也可读取。
+缺少动作会在分派前返回 `invalid_input`，不启动子任务。内部服务由 `AgentRunner.run` 执行。
 
 ## 输入
 
@@ -22,7 +30,7 @@
 |------|------|------|------|
 | 1 | `available_tools` | 主智能体的 ToolRegistry | 扁平工具：{name, description} |
 | 2 | `plugin_skills` | `plugins/*/SKILL.md` | 全部插件的完整 SKILL.md |
-| 3 | `shared_skills_text` | `shared_skills/**/SKILL.md` | 全部共享技能的完整 SKILL.md |
+| 3 | `shared_skills_text` | `skills/**/SKILL.md` | 全部共享技能的完整 SKILL.md |
 | 4 | `user_skills_text` | `users/<name>/user_skills/**/SKILL.md` | 全部用户技能的完整 SKILL.md |
 
 ### 知识库
@@ -58,7 +66,9 @@
 
 只能编辑以下状态的计划：`pending` / `approved` / `paused` / `failed`
 
-不能编辑：`completed` / `cancelled`
+不能编辑：`running` / `completed` / `cancelled`。计划运行中若需要重排、
+插入或删除尚未开始的步骤，必须使用带 revision 的 `revise_remaining`，
+不得使用 `edit` 修改计划元数据或步骤字段。
 
 已完成步骤（`status=completed`）不可修改。
 
@@ -87,7 +97,7 @@
 
 ## 注意事项
 
-- 所有阈值从 global_config.json 读取
+- 所有阈值从 global_config.yaml 读取
 - 不直接执行工具或写文件
 - 不编造不存在的工具名
 - `depends_on` 不得形成循环

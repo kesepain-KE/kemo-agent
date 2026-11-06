@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import copy
+from datetime import datetime, timezone
 from typing import Any
 
 from run.tasks.store import (
     PlanConflictError,
     PlanStore,
     PlanValidationError,
+    STEP_ID_RE,
 )
 
 
 EDITABLE_PLAN_STATUSES = frozenset({"pending", "approved", "paused", "failed"})
+# ``revise_remaining`` is the only mutation intentionally allowed while the
+# plan is running, and it can touch only the still-pending suffix.
+REVISION_PLAN_STATUSES = EDITABLE_PLAN_STATUSES | {"running"}
 RESETTABLE_PLAN_STATUSES = frozenset(
     {"pending", "approved", "paused", "failed", "cancelled"}
 )
@@ -20,6 +26,10 @@ EDITABLE_STEP_FIELDS = frozenset(
     {"tool_name", "tool_arguments", "depends_on", "critical"}
 )
 _ACTIVATING_REASONS = frozenset({"auto_accept", "auto_retry_on_fix"})
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _require_revision(current: dict[str, Any], expected_revision: Any) -> None:
@@ -160,6 +170,10 @@ def edit_plan_fields(
             if target.get("status") == "completed":
                 raise PlanValidationError(f"已完成步骤 {step_id} 不得修改")
             previous_status = str(target.get("status") or "")
+            if previous_status == "running":
+                raise PlanValidationError(
+                    f"运行中的步骤 {step_id} 不得通过普通 edit 修改"
+                )
             for field in EDITABLE_STEP_FIELDS:
                 if field in patch:
                     target[field] = patch[field]
@@ -179,6 +193,144 @@ def edit_plan_fields(
         return current
 
     return store.update(plan_id, mutate, note="修改计划")
+
+
+def revise_remaining_steps(
+    store: PlanStore,
+    plan_id: str,
+    *,
+    expected_revision: Any,
+    steps: Any,
+    retry_failed: bool = False,
+) -> dict[str, Any]:
+    """Reorder, insert, or delete only the not-yet-started plan suffix."""
+
+    if not isinstance(steps, list):
+        raise PlanValidationError("steps 必须是步骤数组")
+    if not isinstance(retry_failed, bool):
+        raise PlanValidationError("retry_failed 必须是布尔值")
+
+    def mutate(current: dict[str, Any]) -> dict[str, Any]:
+        _require_revision(current, expected_revision)
+        status = str(current.get("status") or "")
+        if status not in REVISION_PLAN_STATUSES:
+            raise PlanValidationError(
+                f"计划 {plan_id} 当前状态为 {status!r}，不能修正剩余步骤"
+            )
+        original_steps = [
+            copy.deepcopy(step)
+            for step in current.get("steps") or []
+            if isinstance(step, dict)
+        ]
+        if not original_steps:
+            raise PlanValidationError("计划没有可修正的步骤")
+        protected_indexes = [
+            index for index, step in enumerate(original_steps)
+            if step.get("status") != "pending"
+        ]
+        last_protected = max(protected_indexes, default=-1)
+        if last_protected >= 0 and any(
+            step.get("status") == "pending"
+            for step in original_steps[:last_protected]
+        ):
+            raise PlanValidationError("仅支持修正当前步骤之后连续的 pending 步骤")
+
+        by_id = {str(step.get("step_id")): step for step in original_steps}
+        seen: set[str] = set()
+        requested_positions: list[int] = []
+        desired: list[tuple[int, dict[str, Any]]] = []
+        allowed_fields = {
+            "step_id", "position", "title", "description", "tool_name",
+            "tool_arguments", "depends_on", "critical",
+        }
+        for index, patch in enumerate(steps):
+            if not isinstance(patch, dict):
+                raise PlanValidationError(f"步骤修正 {index} 必须是对象")
+            step_id = patch.get("step_id")
+            if not isinstance(step_id, str) or not STEP_ID_RE.fullmatch(step_id):
+                raise PlanValidationError(f"步骤修正 {index} 的 step_id 无效")
+            if step_id in seen:
+                raise PlanValidationError(f"步骤 {step_id} 重复")
+            seen.add(step_id)
+            position = patch.get("position")
+            if isinstance(position, bool) or not isinstance(position, int) or position < 1:
+                raise PlanValidationError(f"步骤 {step_id} 的 position 必须是正整数")
+            requested_positions.append(position)
+            unknown = set(patch) - allowed_fields
+            if unknown:
+                raise PlanValidationError(
+                    f"步骤 {step_id} 不支持字段：{', '.join(sorted(unknown))}"
+                )
+            original = by_id.get(step_id)
+            if original is not None and original.get("status") != "pending":
+                comparable = {
+                    key: value for key, value in patch.items()
+                    if key not in {"step_id", "position"}
+                }
+                for key, value in comparable.items():
+                    if value != original.get(key):
+                        raise PlanValidationError(
+                            f"已开始步骤 {step_id} 不得修改"
+                        )
+                continue
+            if original is not None:
+                if "depends_on" not in patch:
+                    raise PlanValidationError(
+                        f"步骤 {step_id} 必须同时提供 depends_on"
+                    )
+                revised = copy.deepcopy(original)
+                for key in allowed_fields - {"step_id", "position"}:
+                    if key in patch:
+                        revised[key] = copy.deepcopy(patch[key])
+            else:
+                required = {"title", "description", "depends_on"}
+                missing = required - set(patch)
+                if missing:
+                    raise PlanValidationError(
+                        f"新增步骤 {step_id} 缺少：{', '.join(sorted(missing))}"
+                    )
+                revised = {
+                    "step_id": step_id,
+                    "title": patch["title"],
+                    "description": patch["description"],
+                    "status": "pending",
+                    "depends_on": copy.deepcopy(patch["depends_on"]),
+                    "tool_name": patch.get("tool_name"),
+                    "tool_arguments": copy.deepcopy(patch.get("tool_arguments") or {}),
+                    "critical": patch.get("critical", True),
+                    "result": None,
+                    "error": None,
+                    "started_at": "",
+                    "finished_at": "",
+                }
+            desired.append((position, revised))
+
+        if sorted(requested_positions) != list(range(1, len(requested_positions) + 1)):
+            raise PlanValidationError("剩余步骤 position 必须从 1 连续编号")
+        desired_steps = [
+            step for _, step in sorted(desired, key=lambda item: item[0])
+        ]
+
+        protected_steps = original_steps[:last_protected + 1]
+        for step in protected_steps:
+            if step.get("status") == "failed" and retry_failed:
+                step["status"] = "pending"
+                step["error"] = None
+                step["result"] = None
+                step["started_at"] = ""
+                step["finished_at"] = ""
+        has_failed = any(
+            step.get("status") == "failed"
+            for step in protected_steps + desired_steps
+        )
+        # revise_remaining explicitly requests continuation of the corrected
+        # plan. retry_failed controls failed steps only, not plan activation.
+        if not has_failed and status in {"paused", "failed", "pending", "approved"}:
+            current["status"] = "approved"
+        current["steps"] = protected_steps + desired_steps
+        return current
+
+    return store.update(plan_id, mutate, note="修正剩余步骤")
 
 
 def reset_plan_step(
@@ -230,3 +382,42 @@ def reset_plan_step(
         mutate,
         note=("重试步骤" if activate_paused else "重置步骤") + f" {step_id}",
     )
+
+
+def skip_plan_step(
+    store: PlanStore,
+    plan_id: str,
+    step_id: str,
+    *,
+    expected_revision: Any,
+) -> dict[str, Any]:
+    """Explicitly skip one pending, non-critical branch of a plan."""
+
+    def mutate(current: dict[str, Any]) -> dict[str, Any]:
+        _require_revision(current, expected_revision)
+        plan_status = str(current.get("status") or "")
+        if plan_status not in {"approved", "running", "paused"}:
+            raise PlanValidationError(
+                f"计划 {plan_id} 当前状态为 {plan_status!r}，无法跳过步骤"
+            )
+        target = _find_step(current, step_id)
+        step_status = str(target.get("status") or "")
+        if step_status != "pending":
+            raise PlanValidationError(
+                f"步骤 {step_id} 当前状态为 {step_status!r}，只有 pending 步骤可以跳过"
+            )
+        if bool(target.get("critical", True)):
+            raise PlanValidationError(
+                f"步骤 {step_id} 是关键步骤，不能跳过；请修正或重试该步骤"
+            )
+        target["status"] = "skipped"
+        target["result"] = {
+            "status": "skipped",
+            "reason": "explicit_skip",
+        }
+        target["error"] = None
+        target["finished_at"] = _now()
+        current["current_step"] = step_id
+        return current
+
+    return store.update(plan_id, mutate, note=f"跳过步骤 {step_id}")
