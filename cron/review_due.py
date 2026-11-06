@@ -16,6 +16,7 @@ from run.memory import (
     normalize_memory_filename,
     parse_time,
     utc_now,
+    memory_upgrade_threshold,
 )
 from run.conversation import new_usage_total, record_provider_request, usage_from_dict
 from run.memory import (
@@ -114,8 +115,8 @@ def scan_and_promote(
                 if expires_at is None or expires_at > current:
                     continue
                 weight = int(meta.get("weight", 0))
-                threshold = int(rule.upgrade_threshold or 0)
-                if weight < threshold:
+                threshold = memory_upgrade_threshold(config, tier, item.get("domain", "fact"))
+                if threshold is None or weight < threshold:
                     try:
                         archived = archive_expired(store, tier, filename, current)
                         if archived["archived"]:

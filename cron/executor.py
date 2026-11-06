@@ -6,6 +6,7 @@ import json
 import uuid
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +24,12 @@ from run.extensions import (
     run_module_updater,
 )
 from run.tools import ToolRegistry, discover_tools
+from cron.system_execution import module_data_signature
+from cron.system_tasks import (
+    execute_memory_promotion,
+    execute_memory_review,
+    execute_session_sweep,
+)
 
 
 def _parse_subagent_prompt(prompt: str) -> tuple[str, dict[str, Any]]:
@@ -236,81 +243,6 @@ def _execute_claimed_task(
     return result
 
 
-def _execute_memory_promotion(
-    root: Path,
-    user: str,
-    *,
-    config: dict[str, Any],
-    provider_factory: Callable[[dict[str, Any]], Any],
-    cancel_event: threading.Event | None,
-) -> dict[str, Any]:
-    from cron.review_due import scan_and_promote
-
-    return scan_and_promote(
-        root=root,
-        user=user,
-        config=config,
-        provider_factory=provider_factory,
-        cancel_event=cancel_event,
-    )
-
-
-def _execute_memory_review(
-    root: Path,
-    user: str,
-    *,
-    trigger: str,
-    config: dict[str, Any],
-    provider_factory: Callable[[dict[str, Any]], Any],
-    cancel_event: threading.Event | None,
-    task_id: str,
-) -> dict[str, Any]:
-    if cancel_event is not None and cancel_event.is_set():
-        return {"status": "cancelled", "action": trigger, "user": user}
-    result = AgentRunner(
-        root,
-        user,
-        config=config,
-        provider_factory=provider_factory,
-    ).run(
-        "memory_temporary_important",
-        {"trigger": trigger},
-        cancel_event=cancel_event,
-        task_id=task_id,
-    )
-    response = {
-        "status": "completed",
-        "action": trigger,
-        "user": user,
-        "data": result.data if isinstance(getattr(result, "data", None), dict) else {},
-    }
-    update = (
-        result.metadata.get("important_memory_update")
-        if isinstance(getattr(result, "metadata", None), dict)
-        else None
-    )
-    if isinstance(update, dict):
-        response["memory_update"] = update
-    return response
-
-
-def _execute_session_sweep(
-    root: Path,
-    user: str,
-    *,
-    config: dict[str, Any],
-) -> dict[str, Any]:
-    from run.scheduler import SESSION_IDLE_CLOSE_SECONDS, sweep_idle_sessions
-
-    cron_config = (checked_293 if isinstance(checked_293 := config.get("cron"), dict) else {})
-    raw_idle = cron_config.get("session_idle_close_seconds") if isinstance(cron_config, dict) else None
-    try:
-        idle_seconds = max(3600, int(raw_idle)) if raw_idle is not None else SESSION_IDLE_CLOSE_SECONDS
-    except (TypeError, ValueError):
-        idle_seconds = SESSION_IDLE_CLOSE_SECONDS
-    return sweep_idle_sessions(root, user, idle_seconds=idle_seconds)
-
-
 def _is_link_or_junction(path: Path) -> bool:
     """Return true for symbolic links and Windows directory junctions."""
 
@@ -347,6 +279,7 @@ def _update_modules(
     config: dict[str, Any],
     cancel_event: threading.Event | None,
     module_prefix: str = "",
+    _entries: list[Path] | None = None,
 ) -> dict[str, Any]:
     """Run declared sense/expand updaters in bounded child processes."""
 
@@ -373,11 +306,24 @@ def _update_modules(
             "updated": [],
             "failed": [],
             "errors": [],
+            "data_changed": False,
         }
+
+    entries = sorted(modules_dir.iterdir(), key=lambda item: item.name) if _entries is None else _entries
+    if category == "expand" and _entries is None and len(entries) > 1:
+        def refresh(entry: Path) -> dict[str, Any]:
+            return _update_modules(
+                modules_dir, category, config=config, cancel_event=cancel_event,
+                module_prefix=module_prefix, _entries=[entry],
+            )
+
+        with ThreadPoolExecutor(max_workers=min(4, len(entries)), thread_name_prefix="expand-refresh") as executor:
+            return _merge_module_results(list(executor.map(refresh, entries)), category=category)
 
     updated: list[str] = []
     failed: list[str] = []
     errors: list[dict[str, str]] = []
+    data_changed = False
 
     def module_id(name: str) -> str:
         return f"{module_prefix}{name}" if module_prefix else name
@@ -397,7 +343,7 @@ def _update_modules(
             detail["exception_type"] = exception_type
         errors.append(detail)
 
-    for entry in sorted(modules_dir.iterdir(), key=lambda item: item.name):
+    for entry in entries:
         if cancel_event is not None and cancel_event.is_set():
             return {
                 "status": "cancelled",
@@ -464,6 +410,7 @@ def _update_modules(
             reject(logical_name, f"start_update 文件不存在：{start_update}")
             continue
 
+        before_data = module_data_signature(module_root, manifest_name)
         run_started = time.monotonic()
         run_result = _run_module_updater(
             update_path,
@@ -512,6 +459,8 @@ def _update_modules(
             except Exception as exc:
                 reject(logical_name, f"更新成功但运行诊断写回失败：{exc}", exc)
                 continue
+        after_data = module_data_signature(module_root, manifest_name)
+        data_changed = data_changed or before_data is None or before_data != after_data
         updated.append(logical_name)
 
     status = "completed" if not failed else ("partial" if updated else "failed")
@@ -521,6 +470,7 @@ def _update_modules(
         "updated": updated,
         "failed": failed,
         "errors": errors,
+        "data_changed": bool(failed) or data_changed,
     }
 
 
@@ -533,7 +483,7 @@ def _execute_perception_update(
     """Update every global perception module exactly once."""
 
     return _update_modules(
-        root / "global_sense",
+        root / "sense",
         "sense",
         config=config,
         cancel_event=cancel_event,
@@ -562,6 +512,7 @@ def _merge_module_results(
         "updated": updated,
         "failed": failed,
         "errors": errors,
+        "data_changed": any(result.get("data_changed") is not False for result in results),
     }
 
 
@@ -578,14 +529,14 @@ def _execute_expand_update(
         result = _merge_module_results(
             [
                 _update_modules(
-                    root / "global_expand",
+                    root / "expand" / "global",
                     "expand",
                     config=config,
                     cancel_event=cancel_event,
                     module_prefix="global/",
                 ),
                 _update_modules(
-                    root / "shared_expand",
+                    root / "expand" / "share",
                     "expand",
                     config=config,
                     cancel_event=cancel_event,
@@ -654,7 +605,7 @@ def _execute_system_task(
         raise CronValidationError("system_task 必须使用 system 执行模式")
     action = str(task.get("action") or task.get("task_id") or "")
     if action == "memory_promotion":
-        return _execute_memory_promotion(
+        return execute_memory_promotion(
             root,
             user,
             config=config,
@@ -662,7 +613,7 @@ def _execute_system_task(
             cancel_event=cancel_event,
         )
     if action in {"periodic_scan", "daily_consolidate"}:
-        return _execute_memory_review(
+        return execute_memory_review(
             root,
             user,
             trigger=action,
@@ -685,7 +636,7 @@ def _execute_system_task(
             cancel_event=cancel_event,
         )
     if action == "session_lifecycle_sweep":
-        return _execute_session_sweep(root, user, config=config)
+        return execute_session_sweep(root, user, config=config)
     raise CronValidationError(f"未注册的系统 cron 动作：{action}")
 
 

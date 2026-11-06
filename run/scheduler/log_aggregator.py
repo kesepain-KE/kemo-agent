@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 from pathlib import Path
 import threading
 import time
@@ -13,7 +12,7 @@ from run.infra import LogStore
 
 
 class CronLogAggregator:
-    def __init__(self, root: Path, *, flush_seconds: float = 300.0) -> None:
+    def __init__(self, root: Path, *, flush_seconds: float = 3600.0) -> None:
         self.root = root.resolve()
         self.flush_seconds = max(1.0, float(flush_seconds))
         self._lock = threading.RLock()
@@ -24,21 +23,16 @@ class CronLogAggregator:
     def _key(record: dict[str, Any]) -> tuple[str, str, str, str]:
         user = str(record.get("user") or "")
         task_id = str(record.get("task_id") or "")
-        status = str(record.get("status") or "unknown")
-        signature = json.dumps(
-            {"status": status, "result": record.get("result") or {}, "error": record.get("error")},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        return user, task_id, status, signature
+        # One metrics window per task, independent of status/data changes.
+        return user, task_id, "hourly", ""
 
     def record_success(self, record: dict[str, Any]) -> None:
-        self.record_aggregated(record)
+        self.record_aggregated(
+            record, immediate_on_change=(record.get("result") or {}).get("data_changed") is not False,
+        )
 
     def record_repeated(self, record: dict[str, Any]) -> None:
-        """Record a partial result immediately on change, then aggregate repeats."""
+        """Every partial result remains immediately durable."""
 
         self.record_aggregated(record, immediate_on_change=True)
 
@@ -46,18 +40,27 @@ class CronLogAggregator:
         key = self._key(record)
         owner = key[:2]
         now = time.monotonic()
-        immediate = False
+        error: Exception | None = None
+        if immediate_on_change:
+            try:
+                LogStore(self.root).append_cron(record)
+            except Exception as exc:
+                error = exc
         with self._lock:
             previous = self._active.get(owner)
-            if previous != key:
-                if previous is not None:
-                    self._flush_key_locked(previous)
-                self._active[owner] = key
-                immediate = immediate_on_change
-            if not immediate:
-                self._append_locked(key, record, now)
-        if immediate:
-            LogStore(self.root).append_cron(record)
+            if previous is not None and previous != key:
+                self._flush_key_locked(previous)
+            self._active[owner] = key
+            # A run at the boundary belongs to the next window.
+            window = self._windows.get(key)
+            if window is not None and now - float(window["opened_monotonic"]) >= self.flush_seconds:
+                try:
+                    self._flush_key_locked(key)
+                except Exception as exc:
+                    error = error or exc
+            self._append_locked(key, record, now)
+        if error is not None:
+            raise error
 
     def _append_locked(
         self,
@@ -76,6 +79,7 @@ class CronLogAggregator:
                 "last_result": {},
                 "last_error": None,
                 "opened_monotonic": now,
+                "status_counts": {},
             }
             self._windows[key] = window
         duration = max(0, int(record.get("duration_ms") or 0))
@@ -85,28 +89,12 @@ class CronLogAggregator:
         window["max_duration_ms"] = max(int(window.get("max_duration_ms") or 0), duration)
         window["last_result"] = copy.deepcopy(record.get("result") or {})
         window["last_error"] = copy.deepcopy(record.get("error"))
-        if now - float(window.get("opened_monotonic") or now) >= self.flush_seconds:
-            self._flush_key_locked(key)
+        status = str(record.get("status") or "unknown")
+        counts = window["status_counts"]
+        counts[status] = counts.get(status, 0) + 1
 
     def record_immediate(self, record: dict[str, Any]) -> None:
-        owner = (str(record.get("user") or ""), str(record.get("task_id") or ""))
-        flush_error: Exception | None = None
-        with self._lock:
-            previous = self._active.pop(owner, None)
-            if previous is not None:
-                try:
-                    self._flush_key_locked(previous)
-                except Exception as exc:
-                    flush_error = exc
-        immediate_error: Exception | None = None
-        try:
-            LogStore(self.root).append_cron(record)
-        except Exception as exc:
-            immediate_error = exc
-        if immediate_error is not None:
-            raise immediate_error
-        if flush_error is not None:
-            raise flush_error
+        self.record_aggregated(record, immediate_on_change=True)
 
     def flush_due(self, *, now: float | None = None) -> int:
         current = time.monotonic() if now is None else float(now)
@@ -114,7 +102,7 @@ class CronLogAggregator:
             keys = [
                 key
                 for key, window in self._windows.items()
-                if current - float(window.get("opened_monotonic") or current) >= self.flush_seconds
+                if current - float(window["opened_monotonic"]) >= self.flush_seconds
             ]
             return self._flush_keys_locked(keys)
 
@@ -145,7 +133,9 @@ class CronLogAggregator:
             return
         runs = max(1, int(window.get("runs") or 0))
         total = max(0, int(window.get("total_duration_ms") or 0))
-        status = key[2]
+        counts = window["status_counts"]
+        successes = counts.get("success", 0)
+        status = "success" if successes == runs else "partial" if successes else "failed"
         record = {
             "schema_version": 1,
             "executed_at": str(window.get("last_executed_at") or ""),
@@ -158,9 +148,10 @@ class CronLogAggregator:
                 "window_started_at": str(window.get("first_executed_at") or ""),
                 "window_finished_at": str(window.get("last_executed_at") or ""),
                 "runs": runs,
-                "status_counts": {status: runs},
-                "successes": runs if status == "success" else 0,
-                "failures": 0 if status == "success" else runs,
+                "status_counts": dict(counts),
+                "successes": successes,
+                "failures": runs - successes,
+                "success_rate": successes / runs,
                 "average_duration_ms": round(total / runs),
                 "max_duration_ms": max(0, int(window.get("max_duration_ms") or 0)),
                 "last_result": copy.deepcopy(window.get("last_result") or {}),

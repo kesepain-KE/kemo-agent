@@ -1,928 +1,290 @@
-from __future__ import annotations
-
+"""Background metadata and memory operate on bounded immutable RAW sequences."""
 import json
-import tempfile
-import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from run.agents import AgentOutputError
+import pytest
+
 from provider.factory import ProviderCongestionError
-from run.history import (
-    commit_window,
-    empty_window,
-    load_window,
-    queue_memory_extraction,
-)
-from run.history import (
-    close_session,
-    find_record,
-    queue_summary,
-    session_key,
-)
-from run.history import read_registry, write_registry
-from run.context import estimate_text_tokens
-from run.scheduler import (
-    HISTORY_SUMMARY_CHUNK_TOKENS,
-    MaintenanceScheduler,
-    _summary_chunks,
-)
+from run.agents import AgentOutputError
+from run.agents.contracts import validate_json_schema
+from run.cards import CardStore
+from run.history import (close_session, find_record, mutate_registry_record,
+                         queue_memory_extraction, queue_summary)
 from run.memory import MemoryStore, normalize_memory_filename
+from run.scheduler import MaintenanceScheduler
+from run.scheduler.maintenance import (
+    HISTORY_SUMMARY_MAX_OUTPUT_TOKENS,
+)
+from tests.card_history_support import seed_history
 from tests.support.memory_db import update_fragment_metadata
 
 
-class MaintenanceSchedulerTests(unittest.TestCase):
-    def test_summary_chunks_hard_split_one_oversized_round_without_data_loss(
-        self,
-    ) -> None:
-        user_text = "用户内容。" * 15_000
-        assistant_text = "助手结果。" * 15_000
-        chunks = _summary_chunks(
-            [{"round": 1, "user": user_text, "assistant": assistant_text}]
-        )
-
-        self.assertGreater(len(chunks), 1)
-        for chunk in chunks:
-            tokens = estimate_text_tokens(
-                json.dumps(chunk, ensure_ascii=False, default=str)
-            )
-            self.assertLessEqual(tokens, HISTORY_SUMMARY_CHUNK_TOKENS)
-        pieces = [item for chunk in chunks for item in chunk]
-        self.assertEqual("".join(item["user"] for item in pieces), user_text)
-        self.assertEqual(
-            "".join(item["assistant"] for item in pieces),
-            assistant_text,
-        )
-
-    def test_closed_session_summary_is_generated_in_background(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}), "utf-8"
-        )
-        archive = root / "users" / "alice" / "history" / "conv_summary"
-        window = empty_window("alice", "web", "conv_summary")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "给历史对话增加后台摘要"},
-            {"role": "assistant", "content": "已设计后台任务和原子索引写回"},
-        ]
-        window["data"].update(
-            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
-        )
-        commit_window(archive, window)
-        close_session(root, "alice", "web", "conv_summary")
-        queue_summary(root, "alice", "web", "conv_summary")
-
-        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
-            runner_type.return_value.run.return_value = SimpleNamespace(
-                data={
-                    "title": "历史会话后台摘要功能",
-                    "summary": "关闭会话后异步生成可读标题和简短摘要，并安全写入历史索引。",
-                }
-            )
-            result = MaintenanceScheduler(root).scan_once()
-
-        summary_result = result["alice"]["history_summary"]
-        self.assertEqual(summary_result["claimed"], 1)
-        self.assertEqual(summary_result["processed"][0]["status"], "completed")
-        record = find_record(root, "alice", "web", "conv_summary")
-        self.assertEqual(record["title"], "历史会话后台摘要功能")
-        self.assertEqual(record["summary_status"], "completed")
-        self.assertIn("异步生成", record["summary"])
-        run_kwargs = runner_type.return_value.run.call_args.kwargs
-        self.assertEqual(run_kwargs["max_tokens"], 10_000)
-        self.assertTrue(run_kwargs["structured_output_tool"])
-
-    def test_failed_summary_preserves_safe_output_preview(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}), "utf-8"
-        )
-        archive = root / "users" / "alice" / "history" / "conv_failed"
-        window = empty_window("alice", "web", "conv_failed")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "总结这段对话"},
-            {"role": "assistant", "content": "返回了一段无法解析的普通文本"},
-        ]
-        window["data"].update(
-            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
-        )
-        commit_window(archive, window)
-        close_session(root, "alice", "web", "conv_failed")
-        queue_summary(root, "alice", "web", "conv_failed")
-
-        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
-            runner_type.return_value.run.side_effect = AgentOutputError(
-                "子代理响应中没有 JSON 对象",
-                raw_text="第一行普通文本\n第二行仍不是 JSON",
-            )
-            result = MaintenanceScheduler(root).scan_once()
-
-        self.assertEqual(
-            result["alice"]["history_summary"]["failed"][0]["error"][
-                "raw_output_preview"
-            ],
-            "第一行普通文本 第二行仍不是 JSON",
-        )
-        record = find_record(root, "alice", "web", "conv_failed")
-        self.assertEqual(record["summary_status"], "retry_wait")
-        self.assertEqual(record["summary_retry_count"], 1)
-        self.assertTrue(record["summary_retry_at"])
-        self.assertEqual(
-            record["summary_error"]["raw_output_preview"],
-            "第一行普通文本 第二行仍不是 JSON",
-        )
-
-    def test_failed_summary_hides_sensitive_output_preview(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}), "utf-8"
-        )
-        archive = root / "users" / "alice" / "history" / "conv_sensitive"
-        window = empty_window("alice", "web", "conv_sensitive")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "总结这段对话"},
-            {"role": "assistant", "content": "摘要输出失败"},
-        ]
-        window["data"].update(
-            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
-        )
-        commit_window(archive, window)
-        close_session(root, "alice", "web", "conv_sensitive")
-        queue_summary(root, "alice", "web", "conv_sensitive")
-
-        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
-            runner_type.return_value.run.side_effect = AgentOutputError(
-                "子代理响应格式错误",
-                raw_text="api_key: test-secret-value",
-            )
-            MaintenanceScheduler(root).scan_once()
-
-        record = find_record(root, "alice", "web", "conv_sensitive")
-        self.assertEqual(
-            record["summary_error"]["raw_output_preview"],
-            "[输出包含疑似敏感内容，已隐藏]",
-        )
-
-    def test_summary_retry_resumes_from_persisted_chunk_checkpoint(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text("{}", "utf-8")
-        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
-        archive = root / "users" / "alice" / "history" / "conv_chunked"
-        window = empty_window("alice", "web", "conv_chunked")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "第一轮" + "甲" * 26_000},
-            {"role": "assistant", "content": "第一答"},
-        ]
-        window["data"].update(
-            {"rounds": 1, "memory_processed_round": 1, "memory_status": "completed"}
-        )
-        commit_window(archive, window)
-        close_session(root, "alice", "web", "conv_chunked")
-        queue_summary(root, "alice", "web", "conv_chunked")
-        scheduler = MaintenanceScheduler(root, summary_retry_delays=(1,))
-
-        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
-            runner_type.return_value.run.side_effect = [
-                SimpleNamespace(
-                    data={
-                        "title": "分块摘要第一阶段结果",
-                        "summary": "第一块历史内容已经完成摘要并写入持久断点，后续失败时无需重新处理。",
-                    }
-                ),
-                AgentOutputError("第二块暂时失败"),
-            ]
-            first = scheduler.process_next_summary("alice")
-        self.assertEqual(first["failed"][0]["round"], 1)
-        checkpointed = find_record(root, "alice", "web", "conv_chunked")
-        self.assertEqual(checkpointed["summary_checkpoint_next_chunk"], 1)
-        self.assertEqual(checkpointed["summary_checkpoint_total_chunks"], 2)
-
-        sessions, active = read_registry(root, "alice")
-        sessions[session_key("web", "conv_chunked")]["summary_retry_at"] = (
-            "2000-01-01T00:00:00+00:00"
-        )
-        write_registry(root, "alice", sessions, active)
-        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
-            runner_type.return_value.run.return_value = SimpleNamespace(
-                data={
-                    "title": "分块摘要断点恢复完成",
-                    "summary": "第二块从持久断点继续处理，最终摘要成功写回且没有重复调用第一块内容。",
-                }
-            )
-            second = scheduler.process_next_summary("alice")
-
-        self.assertEqual(second["processed"][0]["resumed_from_chunk"], 1)
-        self.assertEqual(runner_type.return_value.run.call_count, 1)
-        payload = runner_type.return_value.run.call_args.args[1]
-        self.assertEqual(payload["previous_summary"]["title"], "分块摘要第一阶段结果")
-        recovered = find_record(root, "alice", "web", "conv_chunked")
-        self.assertEqual(recovered["summary_status"], "completed")
-        self.assertTrue(recovered["summary_recovered_at"])
-
-    def test_provider_congestion_defers_without_consuming_retry(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text("{}", "utf-8")
-        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
-        archive = root / "users" / "alice" / "history" / "conv_congested"
-        window = empty_window("alice", "web", "conv_congested")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "生成摘要"},
-            {"role": "assistant", "content": "等待可用模型槽位"},
-        ]
-        window["data"].update({"rounds": 1, "memory_processed_round": 1})
-        commit_window(archive, window)
-        close_session(root, "alice", "web", "conv_congested")
-        queue_summary(root, "alice", "web", "conv_congested")
-
-        with patch("run.scheduler.maintenance.AgentRunner") as runner_type:
-            runner_type.return_value.run.side_effect = ProviderCongestionError(
-                "Provider 繁忙"
-            )
-            result = MaintenanceScheduler(root).process_next_summary("alice")
-
-        self.assertTrue(result["failed"][0]["deferred"])
-        record = find_record(root, "alice", "web", "conv_congested")
-        self.assertEqual(record["summary_status"], "retry_wait")
-        self.assertEqual(record["summary_attempt_count"], 0)
-        self.assertEqual(record.get("summary_retry_count", 0), 0)
-
-    def test_pending_committed_round_is_recovered_once(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {
-                    "memory": {
-                        "extraction_mode": "background",
-                        "recovery_max_rounds_per_scan": 2,
-                    }
-                }
-            ),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        archive = root / "users" / "alice" / "history" / "conv_pending"
-        window = empty_window("alice", "web", "conv_pending")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "请记住设备名"},
-            {"role": "assistant", "content": "设备名是 J1900"},
-        ]
-        window["think"]["rounds"] = [{"round": 1, "content": "提取设备名"}]
-        window["tool"]["rounds"] = [{"round": 1, "calls": []}]
-        window["data"].update(
-            {
-                "rounds": 1,
-                "memory_processed_round": 0,
-                "memory_status": "pending",
-            }
-        )
-        commit_window(archive, window)
-        observed: dict[str, object] = {}
-
-        def analyze(**kwargs):
-            observed.update(kwargs)
-            return {
-                "status": "completed",
-                "candidate_count": 1,
-                "candidates": [],
-                "source": {"source": "round_commit", "round": 1},
-                "error": None,
-            }
-
-        with (
-            patch("run.scheduler.maintenance.analyze_round_memory", side_effect=analyze),
-            patch(
-                "run.scheduler.maintenance.persist_round_memory_analysis",
-                return_value={
-                    "status": "completed",
-                    "candidate_count": 1,
-                    "error": None,
-                },
-            ),
-        ):
-            result = MaintenanceScheduler(root).scan_once()
-
-        self.assertEqual(result["alice"]["memory_recovery"]["claimed"], 1)
-        self.assertEqual(observed["round_number"], 1)
-        self.assertEqual(observed["prompt"], "请记住设备名")
-        self.assertEqual(load_window(archive)["data"]["memory_processed_round"], 1)
-        record = find_record(root, "alice", "web", "conv_pending")
-        self.assertEqual(record["memory_processed_round"], 1)
-        self.assertEqual(record["memory_status"], "completed")
-
-    def test_compression_only_does_not_claim_untouched_pending_round(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        archive = root / "users" / "alice" / "history" / "conv_deferred"
-        window = empty_window("alice", "web", "conv_deferred")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "普通问题"},
-            {"role": "assistant", "content": "普通回答"},
-        ]
-        window["data"].update(
-            {
-                "rounds": 1,
-                "memory_processed_round": 0,
-                # Also protect legacy pending records created before the mode
-                # migration; the policy, not only the status, controls claims.
-                "memory_status": "pending",
-            }
-        )
-        commit_window(archive, window)
-
-        with patch("run.scheduler.maintenance.analyze_round_memory") as extract:
-            result = MaintenanceScheduler(root).scan_once()
-
-        recovery = result["alice"]["memory_recovery"]
-        self.assertEqual(recovery["mode"], "compression_only")
-        self.assertEqual(recovery["claimed"], 0)
-        extract.assert_not_called()
-        self.assertEqual(
-            find_record(root, "alice", "web", "conv_deferred")["memory_status"],
-            "pending",
-        )
-
-    def test_compression_only_claims_closed_session_explicitly_queued_for_save(
-        self,
-    ) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {
-                    "memory": {
-                        "extraction_mode": "compression_only",
-                        "recovery_max_rounds_per_scan": 2,
-                    }
-                }
-            ),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        archive = root / "users" / "alice" / "history" / "conv_saved"
-        window = empty_window("alice", "web", "conv_saved")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "需要后台提取"},
-            {"role": "assistant", "content": "已保存对话"},
-        ]
-        window["data"].update(
-            {
-                "rounds": 1,
-                "memory_processed_round": 0,
-                "memory_status": "deferred",
-            }
-        )
-        commit_window(archive, window)
-        queued = queue_memory_extraction(root, "alice", "web", "conv_saved")
-        close_session(root, "alice", "web", "conv_saved")
-
-        with (
-            patch(
-                "run.scheduler.maintenance.analyze_round_memory",
-                return_value={
-                    "status": "completed",
-                    "candidate_count": 1,
-                    "candidates": [],
-                    "source": {"source": "round_commit", "round": 1},
-                    "error": None,
-                },
-            ) as extract,
-            patch(
-                "run.scheduler.maintenance.persist_round_memory_analysis",
-                return_value={
-                    "status": "completed",
-                    "candidate_count": 1,
-                    "error": None,
-                },
-            ),
-        ):
-            result = MaintenanceScheduler(root).scan_once()
-
-        self.assertEqual(queued["status"], "queued")
-        self.assertEqual(result["alice"]["memory_recovery"]["claimed"], 1)
-        extract.assert_called_once()
-        self.assertEqual(load_window(archive)["data"]["memory_status"], "completed")
-        self.assertEqual(
-            find_record(root, "alice", "web", "conv_saved")["memory_status"],
-            "completed",
-        )
-
-    def test_manual_compression_queue_drains_open_session_to_bounded_target(
-        self,
-    ) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {
-                    "memory": {
-                        "extraction_mode": "compression_only",
-                        "recovery_max_rounds_per_scan": 2,
-                    }
-                }
-            ),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        archive = root / "users" / "alice" / "history" / "conv_manual"
-        window = empty_window("alice", "web", "conv_manual")
-        window["text"]["messages"] = [
-            item
-            for round_number in range(1, 4)
-            for item in (
-                {"role": "user", "content": f"问题 {round_number}"},
-                {"role": "assistant", "content": f"回答 {round_number}"},
-            )
-        ]
-        window["data"].update(
-            {
-                "rounds": 3,
-                "memory_processed_round": 0,
-                "memory_status": "deferred",
-            }
-        )
-        commit_window(archive, window)
-        queued = queue_memory_extraction(
-            root,
-            "alice",
-            "web",
-            "conv_manual",
-            target_round=3,
-            reason="manual_compression",
-        )
-
-        analysis = {
-            "status": "completed",
-            "candidate_count": 0,
-            "candidates": [],
-            "source": {"source": "round_commit"},
-            "error": None,
-        }
-        persisted = {"status": "completed", "candidate_count": 0, "error": None}
-        with (
-            patch(
-                "run.scheduler.maintenance.analyze_memory_batch_resilient", return_value=analysis
-            ) as analyze_batch,
-            patch(
-                "run.scheduler.maintenance.analyze_round_memory", return_value=analysis
-            ) as analyze_round,
-            patch(
-                "run.scheduler.maintenance.persist_round_memory_analysis",
-                return_value=persisted,
-            ),
-        ):
-            first = MaintenanceScheduler(root).scan_once()
-            after_first = load_window(archive)["data"]
-            second = MaintenanceScheduler(root).scan_once()
-
-        self.assertEqual(queued["pending_rounds"], 3)
-        self.assertEqual(first["alice"]["memory_recovery"]["claimed"], 2)
-        self.assertEqual(first["alice"]["memory_recovery"]["batches"], 1)
-        self.assertEqual(analyze_batch.call_count, 1)
-        self.assertEqual(analyze_round.call_count, 1)
-        self.assertEqual(after_first["memory_processed_round"], 2)
-        self.assertEqual(after_first["memory_status"], "queued")
-        self.assertEqual(after_first["memory_target_round"], 3)
-        self.assertEqual(second["alice"]["memory_recovery"]["claimed"], 1)
-        completed = load_window(archive)["data"]
-        self.assertEqual(completed["memory_processed_round"], 3)
-        self.assertEqual(completed["memory_status"], "completed")
-        self.assertNotIn("memory_target_round", completed)
-
-    def test_manual_compression_queue_stops_at_target_when_new_round_arrives(
-        self,
-    ) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {
-                    "memory": {
-                        "extraction_mode": "compression_only",
-                        "recovery_max_rounds_per_scan": 10,
-                    }
-                }
-            ),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        archive = root / "users" / "alice" / "history" / "conv_bounded"
-        window = empty_window("alice", "web", "conv_bounded")
-        window["text"]["messages"] = [
-            item
-            for round_number in range(1, 4)
-            for item in (
-                {"role": "user", "content": f"问题 {round_number}"},
-                {"role": "assistant", "content": f"回答 {round_number}"},
-            )
-        ]
-        window["data"].update(
-            {"rounds": 3, "memory_processed_round": 0, "memory_status": "deferred"}
-        )
-        commit_window(archive, window)
-        queue_memory_extraction(
-            root,
-            "alice",
-            "web",
-            "conv_bounded",
-            target_round=3,
-            reason="manual_compression",
-        )
-        window = load_window(archive)
-        window["text"]["messages"].extend(
-            [
-                {"role": "user", "content": "后来新增的问题"},
-                {"role": "assistant", "content": "后来新增的回答"},
-            ]
-        )
-        window["data"]["rounds"] = 4
-        commit_window(archive, window)
-
-        analysis = {
-            "status": "completed",
-            "candidate_count": 0,
-            "candidates": [],
-            "source": {"source": "round_commit"},
-            "error": None,
-        }
-        persisted = {"status": "completed", "candidate_count": 0, "error": None}
-        with (
-            patch(
-                "run.scheduler.maintenance.analyze_memory_batch_resilient",
-                return_value=analysis,
-            ) as analyze,
-            patch(
-                "run.scheduler.maintenance.persist_round_memory_analysis",
-                return_value=persisted,
-            ),
-        ):
-            result = MaintenanceScheduler(root).scan_once()
-
-        recovery = result["alice"]["memory_recovery"]
-        self.assertEqual(recovery["claimed"], 3)
-        self.assertEqual(recovery["batches"], 1)
-        self.assertEqual(analyze.call_count, 1)
-        self.assertEqual(len(analyze.call_args.kwargs["rounds"]), 3)
-        completed = load_window(archive)["data"]
-        self.assertEqual(completed["rounds"], 4)
-        self.assertEqual(completed["memory_processed_round"], 3)
-        self.assertEqual(completed["memory_status"], "deferred")
-        self.assertNotIn("memory_target_round", completed)
-        record = find_record(root, "alice", "web", "conv_bounded")
-        self.assertEqual(record["memory_processed_round"], 3)
-        self.assertEqual(record["memory_status"], "deferred")
-
-    def test_failed_manual_memory_retry_preserves_last_error(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {
-                    "memory": {
-                        "extraction_mode": "compression_only",
-                        "recovery_max_rounds_per_scan": 1,
-                    }
-                }
-            ),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        archive = root / "users" / "alice" / "history" / "conv_retry"
-        window = empty_window("alice", "web", "conv_retry")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "需要提取的事实"},
-            {"role": "assistant", "content": "事实回答"},
-        ]
-        window["data"].update(
-            {"rounds": 1, "memory_processed_round": 0, "memory_status": "deferred"}
-        )
-        commit_window(archive, window)
-        queue_memory_extraction(
-            root,
-            "alice",
-            "web",
-            "conv_retry",
-            target_round=1,
-            reason="manual_compression",
-        )
-        failure = {
-            "status": "failed",
-            "candidate_count": 0,
-            "error": {
-                "message": "self_improve 输出缺少 candidates 数组",
-                "exception_type": "AgentOutputError",
-            },
-        }
-        with patch("run.scheduler.maintenance.analyze_round_memory", return_value=failure):
-            first = MaintenanceScheduler(root).scan_once()
-
-        self.assertEqual(first["alice"]["memory_recovery"]["claimed"], 1)
-        failed_archive = load_window(archive)["data"]
-        failed_record = find_record(root, "alice", "web", "conv_retry")
-        for state in (failed_archive, failed_record):
-            self.assertEqual(state["memory_processed_round"], 0)
-            self.assertEqual(state["memory_status"], "failed")
-            self.assertEqual(state["memory_error"]["round"], 1)
-            self.assertEqual(
-                state["memory_last_error"]["exception_type"], "AgentOutputError"
-            )
-            self.assertEqual(state["memory_last_error"]["retry_count"], 1)
-            self.assertTrue(state["memory_last_error"]["occurred_at"])
-
-        sessions, active = read_registry(root, "alice")
-        record_key = session_key("web", "conv_retry")
-        sessions[record_key]["memory_state_updated_at"] = (
-            datetime.now(timezone.utc) - timedelta(minutes=2)
-        ).isoformat()
-        write_registry(root, "alice", sessions, active)
-        success_analysis = {
-            "status": "completed",
-            "candidate_count": 0,
-            "candidates": [],
-            "source": {"source": "round_commit"},
-            "error": None,
-        }
-        success_persisted = {
-            "status": "completed",
-            "candidate_count": 0,
-            "error": None,
-        }
-        with (
-            patch(
-                "run.scheduler.maintenance.analyze_round_memory",
-                return_value=success_analysis,
-            ),
-            patch(
-                "run.scheduler.maintenance.persist_round_memory_analysis",
-                return_value=success_persisted,
-            ),
-        ):
-            second = MaintenanceScheduler(root).scan_once()
-
-        self.assertEqual(second["alice"]["memory_recovery"]["claimed"], 1)
-        recovered_archive = load_window(archive)["data"]
-        recovered_record = find_record(root, "alice", "web", "conv_retry")
-        for state in (recovered_archive, recovered_record):
-            self.assertEqual(state["memory_processed_round"], 1)
-            self.assertEqual(state["memory_status"], "completed")
-            self.assertNotIn("memory_error", state)
-            self.assertEqual(state["memory_last_error"]["round"], 1)
-            self.assertEqual(state["memory_last_error"]["retry_count"], 1)
-
-    def test_stale_memory_analysis_is_discarded_without_persisting_or_marking_failed(
-        self,
-    ) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"memory": {"extraction_mode": "compression_only"}}),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        archive = root / "users" / "alice" / "history" / "conv_stale"
-        window = empty_window("alice", "web", "conv_stale")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "陈旧 claim 测试"},
-            {"role": "assistant", "content": "不会写入"},
-        ]
-        window["data"].update(
-            {"rounds": 1, "memory_processed_round": 0, "memory_status": "deferred"}
-        )
-        commit_window(archive, window)
-        queue_memory_extraction(
-            root,
-            "alice",
-            "web",
-            "conv_stale",
-            target_round=1,
-            reason="manual_compression",
-        )
-        analysis = {
-            "status": "completed",
-            "candidate_count": 1,
-            "candidates": [{"filename": "不应写入"}],
-            "source": {"source": "round_commit"},
-            "error": None,
-        }
-        with (
-            patch("run.scheduler.maintenance.analyze_round_memory", return_value=analysis),
-            patch(
-                "run.scheduler.maintenance.find_record",
-                return_value={
-                    "memory_claim_id": "newer-worker",
-                    "memory_claim_round": 1,
-                },
-            ),
-            patch("run.scheduler.maintenance.persist_round_memory_analysis") as persist,
-        ):
-            result = MaintenanceScheduler(root).scan_once()
-
-        recovery = result["alice"]["memory_recovery"]
-        self.assertEqual(recovery["claimed"], 1)
-        self.assertTrue(recovery["failed"][0]["stale"])
-        persist.assert_not_called()
-        archived = load_window(archive)["data"]
-        self.assertEqual(archived["memory_status"], "queued")
-        self.assertNotIn("memory_error", archived)
-
-    def test_capacity_blocked_memory_is_deferred_and_stops_this_scan(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
-            json.dumps({"memory": {"extraction_mode": "compression_only", "recovery_max_rounds_per_scan": 2}}),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}), "utf-8"
-        )
-        archive = root / "users" / "alice" / "history" / "conv_capacity"
-        window = empty_window("alice", "message:nya_desk_pet", "message-capacity")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "capacity"},
-            {"role": "assistant", "content": "defer"},
-        ]
-        window["data"].update(
-            {"rounds": 1, "memory_processed_round": 0, "memory_status": "deferred"}
-        )
-        commit_window(archive, window)
-        queue_memory_extraction(
-            root,
-            "alice",
-            "message:nya_desk_pet",
-            "message-capacity",
-            target_round=1,
-            reason="manual_compression",
-        )
-        blocked = {
-            "status": "failed",
-            "candidate_count": 0,
-            "error": {
-                "message": "同一执行仍在超时后的后台退出过程中，已拒绝重复启动",
-                "exception_type": "AgentExecutionCapacityError",
-                "capacity_blocked": True,
-            },
-        }
-        with patch("run.scheduler.maintenance.analyze_round_memory", return_value=blocked):
-            result = MaintenanceScheduler(root).scan_once()
-
-        recovery = result["alice"]["memory_recovery"]
-        self.assertEqual(recovery["claimed"], 1)
-        self.assertTrue(recovery["capacity_blocked"])
-        self.assertEqual(len(recovery["deferred"]), 1)
-        self.assertFalse(recovery["failed"])
-        archived = load_window(archive)["data"]
-        self.assertEqual(archived["memory_status"], "queued")
-        self.assertEqual(archived["memory_queue_reason"], "execution_capacity")
-        self.assertIn("memory_retry_at", archived)
-        self.assertNotIn("memory_error", archived)
-
-    def test_force_scan_promotes_expired_half_year_memory_to_permanent(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        (root / "config").mkdir()
-        (root / "users" / "alice").mkdir(parents=True)
-        config = {
-            "schema_version": 1,
-            "memory": {
-                "tiers": {
-                    "seven_days": {
-                        "days": 7,
-                        "upgrade_threshold": 3,
-                        "next": "one_month",
-                    },
-                    "one_month": {
-                        "days": 30,
-                        "upgrade_threshold": 10,
-                        "next": "half_year",
-                    },
-                    "half_year": {
-                        "days": 180,
-                        "upgrade_threshold": 60,
-                        "next": None,
-                    },
-                }
-            },
-            "agents": {
-                "important_memory_review_hours": 3,
-                "daily_memory_review_time": "02:00",
-            },
-        }
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(config),
-            "utf-8",
-        )
-        (root / "users" / "alice" / "user_config.json").write_text(
-            json.dumps({"schema_version": 1}),
-            "utf-8",
-        )
-        store = MemoryStore(root, "alice", config)
-        filename = normalize_memory_filename("durable preference")
-        now = datetime(2026, 7, 19, 3, tzinfo=timezone.utc)
-        store.create_fragment(
-            "half_year", filename, "durable preference", now=now - timedelta(days=181)
-        )
-        update_fragment_metadata(
-            store,
-            "half_year",
-            filename,
-            weight=60,
-            expires_at=now - timedelta(seconds=1),
-        )
-
-        result = MaintenanceScheduler(root).scan_once(now=now, force=True)
-
-        self.assertNotIn("_perception", result)
-        self.assertNotIn("memory_lifecycle", result["alice"])
-        self.assertIsNone(store.get_entry("permanent", filename))
-        self.assertIsNotNone(store.get_entry("half_year", filename))
-        self.assertNotIn("important_memory", result["alice"])
-        self.assertNotIn("daily_memory_review", result["alice"])
+@pytest.fixture
+def root(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/global_config.yaml").write_text(
+        json.dumps({"memory": {"extraction_mode": "compression_only", "extraction_input_tokens": 12000}}))
+    (tmp_path / "users/alice").mkdir(parents=True)
+    (tmp_path / "users/alice/user_config.yaml").write_text('{}')
+    return tmp_path
 
 
-if __name__ == "__main__":
-    unittest.main()
+def seed(root, text="事实正文", count=1):
+    return seed_history(root, "alice", "web", "s1", [message for n in range(count) for message in (
+        {"role": "user", "content": text}, {"role": "assistant", "content": f"回答 {n}"})])
+
+
+def queue(root):
+    close_session(root, "alice", "web", "s1")
+    queue_summary(root, "alice", "web", "s1")
+
+
+def response(title="历史简介", summary="可读摘要"):
+    return SimpleNamespace(data={"title": title, "summary": summary})
+
+
+def record(root):
+    return find_record(root, "alice", "web", "s1")
+
+
+def clear_backoff(root, kind="summary"):
+    mutate_registry_record(root, "alice", "web", "s1", lambda r: {**r, f"{kind}_retry_at": ""})
+
+
+def test_closed_session_summary_is_background_metadata_and_preserves_raw(root):
+    history = seed(root)
+    before = [card.raw_payload_json for card in history.cards]
+    queue(root)
+    input_schema = json.loads(
+        (Path(__file__).resolve().parents[2] / "agents/history_summary/schema.json").read_text()
+    )["input_schema"]
+    def summarize(name, data, **kwargs):
+        assert name == "history_summary"
+        validate_json_schema(data, input_schema)
+        return response()
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.side_effect = summarize
+        result = MaintenanceScheduler(root).scan_once()
+    assert result["alice"]["history_summary"]["processed"][0]["status"] == "completed"
+    assert record(root)["summary_status"] == "completed"
+    assert record(root)["summary_completed_seq"] == 2
+    assert [card.raw_payload_json for card in history.cards] == before
+    assert runner.return_value.run.call_args.kwargs["max_tokens"] == HISTORY_SUMMARY_MAX_OUTPUT_TOKENS
+    assert runner.return_value.run.call_args.kwargs["structured_output_tool"]
+
+
+def test_summary_combines_all_short_user_and_final_text_in_one_model_call(root):
+    seed(root, count=20)
+    queue(root)
+
+    def summarize(name, data, **kwargs):
+        assert name == "history_summary"
+        return response()
+
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.side_effect = summarize
+        result = MaintenanceScheduler(root).process_next_summary("alice")
+
+    assert not result["failed"]
+    records = runner.return_value.run.call_args.args[1]["records"]
+    assert len(records) == 40
+    assert [item["role"] for item in records[:4]] == ["user", "assistant", "user", "assistant"]
+    assert runner.return_value.run.call_count == 1
+
+
+def test_summary_token_budget_keeps_latest_text_and_clips_its_oldest_part(root, monkeypatch):
+    monkeypatch.setattr(
+        "run.scheduler.maintenance.HISTORY_SUMMARY_INPUT_TOKEN_BUDGET", 256
+    )
+    history = seed(root, text="较早的用户正文" * 1000)
+    latest = "最新最终答复" * 3000
+    latest_card = history.store.append(
+        "web", "s1", history.cards[0].integration_id, "agent_text",
+        {"text": latest}, level="final",
+    )
+    queue(root)
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.return_value = response()
+        result = MaintenanceScheduler(root).process_next_summary("alice")
+
+    assert not result["failed"]
+    summary_input = runner.return_value.run.call_args.args[1]
+    records = summary_input["records"]
+    assert len(records) == 1
+    assert records[0]["seq"] == latest_card.seq
+    assert records[0]["role"] == "assistant"
+    assert records[0]["text"] == latest[-len(records[0]["text"]):]
+    assert len(records[0]["text"]) < len(latest)
+    assert result["processed"][0]["input_tokens"] <= 256
+    assert runner.return_value.run.call_count == 1
+
+
+def test_summary_uses_only_initial_user_and_final_assistant_text(root):
+    history = seed(root, text="原始用户正文")
+    integration_id = history.cards[0].integration_id
+    history.store.append("web", "s1", integration_id, "user_text",
+                         {"text": "后续引导不属于对话正文"}, level="guidance")
+    history.store.append("web", "s1", integration_id, "agent_text",
+                         {"text": "智能体临时正文不属于最终交付"}, level="interim")
+    queue(root)
+    seen = []
+
+    def summarize(_name, data, **_kwargs):
+        seen.extend(data["records"])
+        return response()
+
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.side_effect = summarize
+        result = MaintenanceScheduler(root).process_next_summary("alice")
+
+    assert not result["failed"]
+    assert [(item["role"], item["text"]) for item in seen] == [
+        ("user", "原始用户正文"),
+        ("assistant", "回答 0"),
+    ]
+
+
+@pytest.mark.parametrize("output,expected", [
+    ("第一行普通文本\n第二行仍不是 JSON", "第一行普通文本 第二行仍不是 JSON"),
+    ("api_key: test-secret-value", "[输出包含疑似敏感内容，已隐藏]"),
+])
+def test_failed_summary_preserves_only_safe_diagnostics(root, output, expected):
+    seed(root)
+    queue(root)
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.side_effect = AgentOutputError("格式错误", raw_text=output)
+        result = MaintenanceScheduler(root).process_next_summary("alice")
+    assert result["failed"][0]["error"]["raw_output_preview"] == expected
+    assert record(root)["summary_last_error"]["raw_output_preview"] == expected
+    assert record(root)["summary_status"] == "failed" and record(root)["summary_retry_at"]
+
+
+def test_summary_retry_rebuilds_one_bounded_latest_snapshot(root, monkeypatch):
+    monkeypatch.setattr(
+        "run.scheduler.maintenance.HISTORY_SUMMARY_INPUT_TOKEN_BUDGET", 256
+    )
+    seed(root, text="较早内容" * 2000)
+    queue(root)
+    scheduler = MaintenanceScheduler(root, summary_retry_delays=(1,))
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.side_effect = AgentOutputError("摘要暂时失败")
+        assert scheduler.process_next_summary("alice")["failed"]
+        first_input = runner.return_value.run.call_args.args[1]
+    assert not record(root).get("summary_checkpoint")
+    clear_backoff(root)
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.return_value = response()
+        result = scheduler.process_next_summary("alice")
+        assert result["processed"]
+        assert runner.return_value.run.call_count == 1
+        assert runner.return_value.run.call_args.args[1] == first_input
+        assert result["processed"][0]["input_tokens"] <= 256
+
+
+def test_summary_congestion_defers_without_consuming_attempt(root):
+    seed(root)
+    queue(root)
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.side_effect = ProviderCongestionError("繁忙")
+        result = MaintenanceScheduler(root).process_next_summary("alice")
+    assert result["failed"][0]["deferred"]
+    assert record(root)["summary_attempt_count"] == 0
+    assert record(root)["summary_status"] == "queued"
+
+
+def test_summary_respects_configured_attempt_ceiling(root):
+    seed(root)
+    queue(root)
+    scheduler = MaintenanceScheduler(root, summary_max_attempts=1)
+    with patch("run.scheduler.maintenance.AgentRunner") as runner:
+        runner.return_value.run.side_effect = AgentOutputError("failure")
+        assert scheduler.process_next_summary("alice")["failed"]
+        assert record(root)["summary_max_attempts"] == 1
+        clear_backoff(root)
+        assert scheduler.process_next_summary("alice")["claimed"] == 0
+    assert runner.return_value.run.call_count == 1
+
+
+def test_compression_only_does_not_claim_unqueued_raw(root):
+    seed(root)
+    result = MaintenanceScheduler(root).scan_once()
+    assert result["alice"]["memory_recovery"]["claimed"] == 0
+    assert record(root)["memory_processed_seq"] == 0
+
+
+def analysis(**kwargs):
+    return {"status": "completed", "candidate_count": 0, "candidates": [], "source": kwargs.get("source", {})}
+
+
+def test_explicit_memory_queue_drains_narrative_batch_without_raw_count_split(root):
+    seed(root, count=3)
+    queue_memory_extraction(root, "alice", "web", "s1", target_seq=4, reason="manual_compression")
+    scheduler = MaintenanceScheduler(root)
+    with patch("run.memory.analysis.analyze_memory_batch_resilient", side_effect=analysis) as analyze:
+        first = scheduler.scan_once()
+        assert record(root)["memory_processed_seq"] == 4 and record(root)["memory_status"] == "pending"
+        second = scheduler.scan_once()
+        third = scheduler.scan_once()
+    assert first["alice"]["memory_recovery"]["claimed"] == 4
+    assert second["alice"]["memory_recovery"]["claimed"] == 0
+    assert third["alice"]["memory_recovery"]["claimed"] == 0
+    assert analyze.call_count == 1
+    assert record(root)["memory_processed_seq"] == 4 and record(root)["memory_status"] == "pending"
+
+
+@pytest.mark.parametrize("flag", ["capacity_blocked", "work_pending"])
+def test_memory_pending_work_defers_without_moving_cursor(root, flag):
+    seed(root)
+    queue_memory_extraction(root, "alice", "web", "s1")
+    failure = {"status": "failed", "error": {flag: True, "message": "wait"}}
+    with patch("run.memory.analysis.analyze_memory_batch_resilient", return_value=failure):
+        result = MaintenanceScheduler(root).scan_once()["alice"]["memory_recovery"]
+    assert result["deferred"] and not result["failed"]
+    assert record(root)["memory_processed_seq"] == 0
+    assert record(root)["memory_status"] == "queued" and record(root)["memory_retry_at"]
+
+
+def test_failed_memory_analysis_keeps_raw_cursor_and_can_retry(root):
+    seed(root)
+    queue_memory_extraction(root, "alice", "web", "s1")
+    with patch("run.memory.analysis.analyze_memory_batch_resilient", return_value={
+            "status": "failed", "error": {"exception_type": "AgentOutputError", "message": "bad format"}}):
+        MaintenanceScheduler(root).scan_once()
+    assert record(root)["memory_processed_seq"] == 0
+    assert record(root)["memory_last_error"]["exception_type"] == "AgentOutputError"
+    clear_backoff(root, "memory")
+    with patch("run.memory.analysis.analyze_memory_batch_resilient", side_effect=analysis):
+        MaintenanceScheduler(root).scan_once()
+    assert record(root)["memory_processed_seq"] == 2
+
+
+def test_stolen_memory_claim_cannot_apply_late_analysis(root):
+    seed(root)
+    queue_memory_extraction(root, "alice", "web", "s1")
+    def stolen(**kwargs):
+        mutate_registry_record(root, "alice", "web", "s1", lambda r: {**r, "memory_claim_id": "newer"})
+        return analysis(**kwargs)
+    with (patch("run.memory.analysis.analyze_memory_batch_resilient", side_effect=stolen),
+          patch("run.memory.analysis.persist_round_memory_analysis") as persist):
+        MaintenanceScheduler(root).scan_once()
+    persist.assert_not_called()
+    assert record(root)["memory_claim_id"] == "newer" and record(root)["memory_processed_seq"] == 0
+
+
+def test_force_maintenance_does_not_promote_memory_implicitly(root):
+    config = {"memory": {"tiers": {
+        "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
+        "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
+        "half_year": {"days": 180, "upgrade_threshold": 60, "next": None},
+    }}}
+    store = MemoryStore(root, "alice", config)
+    filename, now = normalize_memory_filename("durable preference"), datetime.now(timezone.utc)
+    store.create_fragment("half_year", filename, "durable preference", now=now - timedelta(days=181))
+    update_fragment_metadata(store, "half_year", filename, weight=60, expires_at=now - timedelta(seconds=1))
+    result = MaintenanceScheduler(root).scan_once(now=now, force=True)
+    assert "memory_lifecycle" not in result["alice"]
+    assert store.get_entry("permanent", filename) is None
+    assert store.get_entry("half_year", filename) is not None

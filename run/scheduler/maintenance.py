@@ -1,642 +1,280 @@
-"""Background maintenance for memory review and context compaction."""
-
+"""Background RAW memory and display-title work, never automatic compaction."""
 from __future__ import annotations
 
+import copy
+from datetime import datetime, timedelta, timezone
 import json
 import threading
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Callable
-from zoneinfo import ZoneInfo
 
 from provider.factory import ProviderCongestionError, create_provider
 from run.agents import AgentRunner
-from run.config import load_config
-from run.context import estimate_text_tokens
-from run.context import context_status
-from run.engine import compress_context
-from run.memory import (
-    analyze_memory_batch_resilient,
-    analyze_round_memory,
-    memory_batch_operation_id,
-    memory_round_data,
-    persist_round_memory_analysis,
-)
-from run.history import load_window, patch_archive_metadata
+from run.cards import CardStore
+from run.config import cron_history_retention_days, list_users, load_config, read_yaml_object
+from run.context import context_status, estimate_text_tokens
 from run.history import (
-    claim_pending_memory,
-    defer_memory_claim,
-    claim_pending_summary,
-    defer_summary_claim,
-    find_record,
-    finish_memory_claim,
-    finish_summary_claim,
-    history_directory,
-    update_summary_checkpoint,
+    claim_pending_summary, cleanup_cron_history, defer_summary_claim, finish_summary_claim,
+    list_records,
 )
-from run.history import list_windows as list_history_windows
-from run.memory import (
-    contains_sensitive_credential,
-    memory_extraction_batch_rounds,
-    memory_extraction_mode,
-)
-from run.memory import memory_round_payload
-from run.long_task import semantic_user_text
-from run.conversation import session_lock
-from run.tools import ToolRegistry, discover_tools
-from run.config import list_users, read_json_object, cron_history_retention_days
-from run.history import cleanup_cron_history
-from run.scheduler.memory_recovery import recover_pending_memory as _recover_pending_memory_impl
+from run.scheduler.memory_recovery import recover_pending_memory
+from run.tools import discover_tools
+from run.infra import diagnostic_text
 
-
-BEIJING = ZoneInfo("Asia/Shanghai")
 CONTEXT_REVIEW_INTERVAL = timedelta(hours=1)
 CRON_HISTORY_CLEANUP_INTERVAL = timedelta(minutes=5)
-MEMORY_RECOVERY_ROUNDS_PER_SCAN = 10
-HISTORY_SUMMARY_CHUNK_TOKENS = 24_000
-HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 10_000
+HISTORY_SUMMARY_MAX_OUTPUT_TOKENS = 4096
+HISTORY_SUMMARY_INPUT_TOKEN_BUDGET = 24_000
 
 
 class MaintenanceError(RuntimeError):
     pass
 
 
-def _safe_agent_output_preview(error: BaseException) -> str:
-    raw_text = str(getattr(error, "raw_text", "") or "").strip()
-    if not raw_text:
-        return ""
-    if contains_sensitive_credential(raw_text):
-        return "[输出包含疑似敏感内容，已隐藏]"
-    return " ".join(raw_text.split())[:1000]
+def _summary_input_tokens(records, *, session_id, target_seq):
+    payload = {
+        "trigger": "session_closed",
+        "session_id": session_id,
+        "target_seq": target_seq,
+        "records": records,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return estimate_text_tokens(serialized)
 
 
-def _message_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if not isinstance(value, list):
-        return str(value or "").strip()
-    parts = [
-        str(block.get("text") or "").strip()
-        for block in value
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
-    return "\n".join(part for part in parts if part)
+def _append_latest_summary_record(records, record, *, session_id, target_seq):
+    """Keep a bounded chronological suffix, preferring the newest RAW text."""
+    selected = [*records, record]
+    while len(selected) > 1 and _summary_input_tokens(
+        selected, session_id=session_id, target_seq=target_seq
+    ) > HISTORY_SUMMARY_INPUT_TOKEN_BUDGET:
+        selected.pop(0)
 
-
-def _summary_rounds(window: dict[str, Any], target_round: int) -> list[dict[str, Any]]:
-    groups: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
-    for raw in (window.get("text") or {}).get("messages", []):
-        if not isinstance(raw, dict):
-            continue
-        if raw.get("role") == "user" and current:
-            groups.append(current)
-            current = []
-        current.append(raw)
-    if current:
-        groups.append(current)
-    result: list[dict[str, Any]] = []
-    for number, group in enumerate(groups[:target_round], start=1):
-        user_text = "\n".join(
-            text
-            for item in group
-            if item.get("role") == "user"
-            for text in [
-                semantic_user_text(item, _message_text(item.get("content")))
-            ]
-            if text
-        )
-        assistant_text = "\n".join(
-            text
-            for item in group
-            if item.get("role") == "assistant"
-            for text in [_message_text(item.get("content"))]
-            if text
-        )
-        if user_text or assistant_text:
-            result.append(
-                {"round": number, "user": user_text, "assistant": assistant_text}
-            )
-    return result
-
-
-def _split_summary_text(text: str, token_budget: int) -> list[str]:
-    value = str(text or "")
-    if not value:
-        return []
-    budget = max(256, int(token_budget))
-    parts: list[str] = []
-    remaining = value
-    while remaining:
-        if estimate_text_tokens(remaining) <= budget:
-            parts.append(remaining)
-            break
-        low = 1
-        high = len(remaining)
-        while low < high:
-            middle = (low + high + 1) // 2
-            if estimate_text_tokens(remaining[:middle]) <= budget:
-                low = middle
-            else:
-                high = middle - 1
-        cut = max(1, low)
-        search_start = max(1, int(cut * 0.75))
-        preferred = max(
-            remaining.rfind("\n", search_start, cut),
-            remaining.rfind("。", search_start, cut),
-            remaining.rfind("！", search_start, cut),
-            remaining.rfind("？", search_start, cut),
-        )
-        if preferred >= search_start:
-            cut = preferred + 1
-        parts.append(remaining[:cut])
-        remaining = remaining[cut:]
-    return parts
-
-
-def _summary_round_parts(
-    item: dict[str, Any],
-    token_budget: int,
-) -> list[dict[str, Any]]:
-    if (
-        estimate_text_tokens(json.dumps(item, ensure_ascii=False, default=str))
-        <= token_budget
+    if _summary_input_tokens(selected, session_id=session_id, target_seq=target_seq) <= (
+        HISTORY_SUMMARY_INPUT_TOKEN_BUDGET
     ):
-        return [item]
-    round_number = max(0, int(item.get("round") or 0))
-    empty_tokens = estimate_text_tokens(
-        json.dumps(
-            {"round": round_number, "user": "", "assistant": ""},
-            ensure_ascii=False,
-        )
-    )
-    text_budget = max(256, token_budget - empty_tokens - 64)
-    parts = [
-        {"round": round_number, "user": value, "assistant": ""}
-        for value in _split_summary_text(str(item.get("user") or ""), text_budget)
-    ]
-    parts.extend(
-        {"round": round_number, "user": "", "assistant": value}
-        for value in _split_summary_text(
-            str(item.get("assistant") or ""),
-            text_budget,
-        )
-    )
-    return parts or [{"round": round_number, "user": "", "assistant": ""}]
+        return selected
 
-
-def _summary_chunks(rounds: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    chunks: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
-    for raw_item in rounds:
-        for item in _summary_round_parts(raw_item, HISTORY_SUMMARY_CHUNK_TOKENS):
-            candidate = [*current, item]
-            candidate_tokens = estimate_text_tokens(
-                json.dumps(candidate, ensure_ascii=False, default=str)
-            )
-            if current and candidate_tokens > HISTORY_SUMMARY_CHUNK_TOKENS:
-                chunks.append(current)
-                current = [item]
-            else:
-                current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def _history_sessions(root: Path, user: str) -> list[dict[str, str]]:
-    latest: dict[tuple[str, str], tuple[str, dict[str, str]]] = {}
-    for stored in list_history_windows(root, user):
-        data = stored.get("data") or {}
-        source = str(data.get("source") or "")
-        session_id = str(data.get("session_id") or "")
-        if not source or not session_id:
-            continue
-        value = {
-            "source": source,
-            "session_id": session_id,
-            "window": str(stored.get("window_name") or ""),
-        }
-        updated = str(data.get("updated_at") or "")
-        key = (source, session_id)
-        if key not in latest or updated > latest[key][0]:
-            latest[key] = (updated, value)
-    return [
-        value
-        for _, value in sorted(
-            latest.values(),
-            key=lambda item: item[0],
-            reverse=True,
-        )
-    ]
+    latest = selected[-1]
+    text = latest["text"]
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high) // 2
+        candidate = [{**latest, "text": text[middle:]}]
+        if _summary_input_tokens(
+            candidate, session_id=session_id, target_seq=target_seq
+        ) <= HISTORY_SUMMARY_INPUT_TOKEN_BUDGET:
+            high = middle
+        else:
+            low = middle + 1
+    latest = {**latest, "text": text[low:]}
+    selected = [latest]
+    if not latest["text"] or _summary_input_tokens(
+        selected, session_id=session_id, target_seq=target_seq
+    ) > HISTORY_SUMMARY_INPUT_TOKEN_BUDGET:
+        raise MaintenanceError("历史简介 Token 预算不足以容纳单条正文")
+    return selected
 
 
 class MaintenanceScheduler:
-    """Run system-owned maintenance alongside, but independently from, cron."""
-
-    def __init__(
-        self,
-        root: Path,
-        *,
-        poll_interval: float = 30.0,
-        provider_factory: Callable[[dict[str, Any]], Any] = create_provider,
-        tool_registry_factory: Callable[[Path, str], ToolRegistry] = discover_tools,
-        on_error: Callable[[str, Exception], None] | None = None,
-        history_summary_enabled: bool = True,
-        summary_max_attempts: int = 5,
-        summary_retry_delays: tuple[int, ...] = (30, 120, 600, 1800),
-    ) -> None:
+    def __init__(self, root, *, poll_interval=30.0, provider_factory=create_provider,
+                 tool_registry_factory=discover_tools, on_error=None,
+                 history_summary_enabled=True, summary_max_attempts=5,
+                 summary_retry_delays=(30, 120, 600, 1800)):
         self.root = root.resolve()
         self.poll_interval = max(1.0, float(poll_interval))
-        self.provider_factory = provider_factory
-        self.tool_registry_factory = tool_registry_factory
-        self.on_error = on_error
-        self.history_summary_enabled = bool(history_summary_enabled)
-        self.summary_max_attempts = max(1, int(summary_max_attempts))
-        self.summary_retry_delays = tuple(
-            max(1, int(value)) for value in summary_retry_delays
-        ) or (30,)
-        self._stop_event = threading.Event()
-        self._wake_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._lock = threading.RLock()
-        self._next_context_review: dict[str, datetime] = {}
-        self._next_cron_history_cleanup: dict[str, datetime] = {}
-        self._last_results: dict[str, Any] = {}
+        self.provider_factory, self.tool_registry_factory = provider_factory, tool_registry_factory
+        self.on_error, self.history_summary_enabled = on_error, bool(history_summary_enabled)
+        self.summary_max_attempts = max(1, min(5, int(summary_max_attempts)))
+        self.summary_retry_delays = summary_retry_delays
+        self._stop_event, self._wake_event = threading.Event(), threading.Event()
+        self._thread, self._lock = None, threading.RLock()
+        self._last_results, self._next_context_review, self._next_cron_history_cleanup = {}, {}, {}
 
     @property
-    def running(self) -> bool:
+    def running(self):
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
 
-    def start(self) -> None:
+    def start(self):
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            if self.running:
                 return
             self._stop_event.clear()
             self._wake_event.clear()
-            self._thread = threading.Thread(
-                target=self._run_loop,
-                name="system-maintenance",
-                daemon=True,
-            )
+            self._thread = threading.Thread(target=self._run_loop, name="system-maintenance", daemon=True)
             self._thread.start()
 
-    def stop(self, *, timeout: float = 10.0) -> None:
+    def stop(self, *, timeout=10.0):
         self._stop_event.set()
         self._wake_event.set()
         with self._lock:
             thread = self._thread
-        if thread is not None and thread.is_alive():
+        if thread and thread.is_alive():
             thread.join(timeout=timeout)
         with self._lock:
             if self._thread is thread and (thread is None or not thread.is_alive()):
                 self._thread = None
 
-    def status(self) -> dict[str, Any]:
+    def status(self):
         with self._lock:
-            return {
-                "running": self.running,
-                "last_results": json.loads(
-                    json.dumps(self._last_results, ensure_ascii=False, default=str)
-                ),
-            }
+            return {"running": self.running, "last_results": copy.deepcopy(self._last_results)}
 
-    def wake(self) -> None:
-        """Promptly recheck durable queues without running work on the caller."""
+    def wake(self):
         self._wake_event.set()
 
-    def scan_once(
-        self,
-        *,
-        now: datetime | None = None,
-        force: bool = False,
-    ) -> dict[str, Any]:
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        results: dict[str, Any] = {}
+    def scan_once(self, *, now=None, force=False):
+        current, results = now or datetime.now(timezone.utc), {}
         for user in list_users(self.root):
             if self._stop_event.is_set():
                 break
             try:
                 results[user] = self._scan_user(user, current, force=force)
-            except Exception as exc:
-                self._report_error(f"maintenance:{user}", exc)
-                results[user] = {
-                    "error": {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-                }
+            except Exception as error:
+                self._report_error(f"maintenance:{user}", error)
+                results[user] = {"error": {"message": str(error), "exception_type": type(error).__name__}}
         with self._lock:
-            self._last_results = results
+            self._last_results = copy.deepcopy(results)
         return results
 
-    def _scan_user(
-        self,
-        user: str,
-        current: datetime,
-        *,
-        force: bool,
-    ) -> dict[str, Any]:
-        result: dict[str, Any] = {}
+    def _scan_user(self, user, current, *, force):
+        result = {}
         if force or current >= self._next_cron_history_cleanup.get(user, current):
-            try:
-                global_config = read_json_object(self.root / "config" / "global_config.json")
-                result["cron_history_cleanup"] = cleanup_cron_history(
-                    self.root, user, retention_days=cron_history_retention_days(global_config), now=current,
-                )
-            except Exception as exc:
-                self._report_error(f"cron_history_cleanup:{user}", exc)
-                result["cron_history_cleanup"] = {"error": type(exc).__name__}
+            config = read_yaml_object(self.root / "config" / "global_config.yaml")
+            result["cron_history_cleanup"] = cleanup_cron_history(
+                self.root, user, retention_days=cron_history_retention_days(config), now=current)
             self._next_cron_history_cleanup[user] = current + CRON_HISTORY_CLEANUP_INTERVAL
         result["memory_recovery"] = self._recover_pending_memory(user)
         if self.history_summary_enabled:
             result["history_summary"] = self.process_next_summary(user)
-
-        next_context = self._next_context_review.setdefault(
-            user, current + CONTEXT_REVIEW_INTERVAL
-        )
-        if force or current >= next_context:
+        if force or current >= self._next_context_review.setdefault(user, current + CONTEXT_REVIEW_INTERVAL):
             result["context"] = self._review_contexts(user)
             self._next_context_review[user] = current + CONTEXT_REVIEW_INTERVAL
         return result
 
-    def process_next_summary(self, user: str) -> dict[str, Any]:
-        claim = claim_pending_summary(self.root, user)
+    def process_next_summary(self, user):
+        """The session-list synopsis is metadata, not the rolling VIEW summary."""
+        claim = claim_pending_summary(self.root, user, max_attempts=self.summary_max_attempts)
         if claim is None:
             return {"claimed": 0, "processed": [], "failed": []}
-        source = str(claim.get("source") or "")
-        session_id = str(claim.get("session_id") or "")
-        archive_name = str(claim.get("archive_window") or "")
-        claim_id = str(claim.get("summary_claim_id") or "")
-        target_round = max(0, int(claim.get("summary_target_round") or 0))
-        identity = {"source": source, "session_id": session_id, "round": target_round}
+        source, identity, claim_id = claim["source"], claim["session_id"], claim["summary_claim_id"]
+        target = claim["summary_claim_end_seq"]
+        store = CardStore(self.root, user)
+        config = load_config(user, self.root)
+        runner = AgentRunner(self.root, user, config=config, provider_factory=self.provider_factory)
         try:
-            if (
-                not source
-                or not session_id
-                or not claim_id
-                or target_round < 1
-                or not archive_name
-                or Path(archive_name).name != archive_name
-            ):
-                raise MaintenanceError("历史摘要领取记录缺少有效会话身份")
-            archive_path = history_directory(self.root, user) / archive_name
-            with session_lock(self.root, user, source, session_id):
-                window = load_window(archive_path)
-                data = window.get("data") or {}
-                if data.get("source") != source or data.get("session_id") != session_id:
-                    raise MaintenanceError("历史摘要领取记录与归档身份不一致")
-                archive_rounds = max(0, int(data.get("rounds") or 0))
-                if target_round > archive_rounds:
-                    raise MaintenanceError(
-                        f"历史摘要目标轮次 {target_round} 超过归档轮数 {archive_rounds}"
-                    )
-                rounds = _summary_rounds(window, target_round)
-            if not rounds:
-                raise MaintenanceError("历史摘要没有可用的用户或助手正文")
-            config = load_config(user, self.root)
-            runner = AgentRunner(
-                self.root,
-                user,
-                config=config,
-                provider_factory=self.provider_factory,
-            )
-            chunks = _summary_chunks(rounds)
-            checkpoint = claim.get("summary_checkpoint")
-            checkpoint_round = (
-                max(0, int(checkpoint.get("target_round") or 0))
-                if isinstance(checkpoint, dict)
-                else 0
-            )
-            start_chunk = max(0, int(claim.get("summary_checkpoint_next_chunk") or 0))
-            checkpoint_total = max(
-                0, int(claim.get("summary_checkpoint_total_chunks") or 0)
-            )
-            if (
-                not isinstance(checkpoint, dict)
-                or checkpoint_round != target_round
-                or checkpoint_total != len(chunks)
-                or start_chunk > len(chunks)
-            ):
-                rolling: dict[str, str] | None = None
-                start_chunk = 0
-            else:
-                rolling = {
-                    "title": str(checkpoint.get("title") or "").strip(),
-                    "summary": str(checkpoint.get("summary") or "").strip(),
-                }
-                if not rolling["title"] or not rolling["summary"]:
-                    rolling = None
-                    start_chunk = 0
-            recovery_modes: list[str] = []
-            output_transports: list[str] = []
-            for chunk_index, chunk in enumerate(
-                chunks[start_chunk:], start=start_chunk
-            ):
+            records = []
+            through = 0
+            while through < target:
                 if self._stop_event.is_set():
-                    raise MaintenanceError("历史摘要任务已取消")
-                result = runner.run(
-                    "history_summary",
-                    {
-                        "trigger": "session_closed",
-                        "session_id": session_id,
-                        "target_round": target_round,
-                        "previous_summary": rolling,
-                        "rounds": chunk,
-                    },
-                    cancel_event=self._stop_event,
-                    max_tokens=HISTORY_SUMMARY_MAX_OUTPUT_TOKENS,
-                    structured_output_tool=True,
-                    source=source,
-                    session_id=session_id,
-                )
-                result_metadata = getattr(result, "metadata", {})
-                if not isinstance(result_metadata, dict):
-                    result_metadata = {}
-                recovery = str(
-                    result_metadata.get("history_summary_recovery") or ""
-                ).strip()
-                if recovery:
-                    recovery_modes.append(recovery)
-                transport = str(
-                    result_metadata.get("structured_output_transport") or ""
-                ).strip()
-                if transport:
-                    output_transports.append(transport)
-                rolling = {
-                    "title": str(result.data.get("title") or "").strip(),
-                    "summary": str(result.data.get("summary") or "").strip(),
-                }
-                checkpoint_result = update_summary_checkpoint(
-                    self.root,
-                    user,
-                    source,
-                    session_id,
-                    claim_id=claim_id,
-                    next_chunk=chunk_index + 1,
-                    total_chunks=len(chunks),
-                    title=rolling["title"],
-                    summary=rolling["summary"],
-                )
-                if checkpoint_result is None:
-                    raise MaintenanceError("历史摘要领取已失效")
-            if not rolling:
-                raise MaintenanceError("历史摘要结果为空")
-            finished = finish_summary_claim(
-                self.root,
-                user,
-                source,
-                session_id,
-                claim_id=claim_id,
-                title=rolling["title"],
-                summary=rolling["summary"],
-                completed_round=target_round,
-                max_attempts=self.summary_max_attempts,
-                retry_delays=self.summary_retry_delays,
-            )
-            if finished is None:
-                raise MaintenanceError("历史摘要领取已失效")
-            return {
-                "claimed": 1,
-                "processed": [
-                    {
-                        **identity,
-                        "status": "completed",
-                        "chunks": len(chunks),
-                        "resumed_from_chunk": start_chunk,
-                        "recovery_modes": recovery_modes,
-                        "output_transports": output_transports,
-                    }
-                ],
-                "failed": [],
-            }
-        except ProviderCongestionError as exc:
-            error: dict[str, Any] = {"message": str(exc), "exception_type": type(exc).__name__}
-            try:
-                defer_summary_claim(
-                    self.root,
-                    user,
-                    source,
-                    session_id,
-                    claim_id=claim_id,
-                    error=error,
-                    delay_seconds=30,
-                )
-            except Exception as index_exc:
-                error["index_error"] = {
-                    "message": str(index_exc),
-                    "exception_type": type(index_exc).__name__,
-                }
-            self._report_error(f"history_summary:{user}:congestion", exc)
-            return {
-                "claimed": 1,
-                "processed": [],
-                "failed": [{**identity, "deferred": True, "error": error}],
-            }
-        except Exception as exc:
-            error: dict[str, Any] = {"message": str(exc), "exception_type": type(exc).__name__}
-            raw_output_preview = _safe_agent_output_preview(exc)
-            if raw_output_preview:
-                error["raw_output_preview"] = raw_output_preview
-            if self._stop_event.is_set():
-                try:
-                    defer_summary_claim(
-                        self.root,
-                        user,
-                        source,
-                        session_id,
-                        claim_id=claim_id,
-                        error=error,
-                        delay_seconds=1,
+                    raise MaintenanceError("历史简介任务已取消")
+                page = store.raw_page(source, identity, after_seq=through, through_seq=target, limit=50)
+                if not page:
+                    raise MaintenanceError("RAW 范围缺失，未标记摘要完成")
+                for card in page:
+                    if card.seq != through + 1:
+                        raise MaintenanceError("RAW 序号不连续，未标记摘要完成")
+                    is_summary_text = (
+                        card.raw_kind == "user_text" and card.raw_level == "initial"
+                    ) or (
+                        card.raw_kind == "agent_text" and card.raw_level == "final"
                     )
-                except Exception as index_exc:
-                    error["index_error"] = {
-                        "message": str(index_exc),
-                        "exception_type": type(index_exc).__name__,
-                    }
-                return {
-                    "claimed": 1,
-                    "processed": [],
-                    "failed": [{**identity, "deferred": True, "error": error}],
+                    if is_summary_text:
+                        text = str(card.raw_payload.get("text") or "")
+                        if text.strip():
+                            records = _append_latest_summary_record(records, {
+                                "seq": card.seq,
+                                "role": "user" if card.raw_kind == "user_text" else "assistant",
+                                "text": text,
+                            }, session_id=identity, target_seq=target)
+                    through = card.seq
+            if records:
+                if self._stop_event.is_set():
+                    raise MaintenanceError("历史简介任务已取消")
+                summary_input = {
+                    "trigger": "session_closed",
+                    "session_id": identity,
+                    "target_seq": target,
+                    "records": records,
                 }
-            try:
-                finish_summary_claim(
-                    self.root,
-                    user,
-                    source,
-                    session_id,
-                    claim_id=claim_id,
-                    error=error,
-                    max_attempts=self.summary_max_attempts,
-                    retry_delays=self.summary_retry_delays,
+                input_tokens = _summary_input_tokens(
+                    records, session_id=identity, target_seq=target
                 )
-            except Exception as index_exc:
-                error["index_error"] = {
-                    "message": str(index_exc),
-                    "exception_type": type(index_exc).__name__,
+                result = runner.run(
+                    "history_summary", summary_input, cancel_event=self._stop_event,
+                    max_tokens=HISTORY_SUMMARY_MAX_OUTPUT_TOKENS,
+                    structured_output_tool=True, source=source, session_id=identity,
+                )
+                summary = {
+                    key: str(result.data.get(key) or "").strip()
+                    for key in ("title", "summary")
                 }
-            self._report_error(f"maintenance:{user}:history_summary", exc)
-            return {
-                "claimed": 1,
-                "processed": [],
-                "failed": [{**identity, "error": error}],
-            }
+                if not all(summary.values()):
+                    raise MaintenanceError("历史简介候选缺少 title 或 summary")
+            else:
+                input_tokens = 0
+                summary = {
+                    "title": "工具执行历史记录",
+                    "summary": "本次历史记录未包含可用于摘要的用户正文或智能体最终正文；"
+                    "工具与运行事件仍完整保存在 RAW 中。",
+                }
+            saved = finish_summary_claim(
+                self.root, user, source, identity, claim_id=claim_id,
+                summary_checkpoint=None, **summary,
+            )
+            if saved is None:
+                raise MaintenanceError("历史简介认领已失效")
+            return {"claimed": 1, "processed": [{"source": source, "session_id": identity,
+                                                "status": "completed", "through_seq": target,
+                                                "included_records": len(records),
+                                                "input_tokens": input_tokens, **summary}], "failed": []}
+        except Exception as error:
+            from run.memory import contains_sensitive_credential
+            detail = {"message": diagnostic_text(str(error)), "exception_type": type(error).__name__}
+            raw_output = getattr(error, "raw_text", "")
+            if raw_output:
+                detail["raw_output_preview"] = (
+                    "[输出包含疑似敏感内容，已隐藏]" if contains_sensitive_credential(raw_output)
+                    else diagnostic_text(" ".join(raw_output.split()))[:500])
+            deferred = self._stop_event.is_set() or isinstance(error, ProviderCongestionError)
+            if deferred:
+                defer_summary_claim(self.root, user, source, identity, claim_id=claim_id, error=detail)
+            else:
+                delays = self.summary_retry_delays or (60,)
+                delay = delays[min(max(0, claim.get("summary_attempt_count", 1) - 1), len(delays) - 1)]
+                finish_summary_claim(self.root, user, source, identity, claim_id=claim_id,
+                                     error=detail, retry_delay=delay)
+            self._report_error(f"history_summary:{user}", error)
+            return {"claimed": 1, "processed": [], "failed": [
+                {"session_id": identity, "error": detail, "deferred": deferred}]}
 
-    def _recover_pending_summary(self, user: str) -> dict[str, Any]:
-        """Compatibility alias for callers predating the dedicated scheduler."""
+    def _recover_pending_memory(self, user):
+        return recover_pending_memory(self, user)
 
-        return self.process_next_summary(user)
-
-    def _recover_pending_memory(self, user: str) -> dict[str, Any]:
-        """Compatibility entry point delegated to memory recovery."""
-
-        return _recover_pending_memory_impl(self, user)
-    def _review_contexts(self, user: str) -> dict[str, Any]:
-        reviewed = 0
-        compressed: list[str] = []
-        for session in _history_sessions(self.root, user):
+    def _review_contexts(self, user):
+        reviewed, over_budget = 0, []
+        for record in list_records(self.root, user, limit=100):
             if self._stop_event.is_set():
                 break
-            request = {
-                "user": user,
-                "source": session["source"],
-                "session_id": session["session_id"],
-            }
             try:
-                status = context_status(
-                    request,
-                    root=self.root,
-                    tool_registry_factory=self.tool_registry_factory,
-                )
+                value = context_status({"user": user, "source": record["source"],
+                                        "session_id": record["session_id"]}, root=self.root,
+                                       tool_registry_factory=self.tool_registry_factory)
                 reviewed += 1
-                context = status.get("context") or {}
-                if not (
-                    context.get("round_limit_triggered")
-                    or context.get("token_limit_triggered")
-                ):
-                    continue
-                compress_context(
-                    request,
-                    root=self.root,
-                    provider_factory=self.provider_factory,
-                    tool_registry_factory=self.tool_registry_factory,
-                    cancel_event=self._stop_event,
-                )
-                compressed.append(session["window"])
-            except Exception as exc:
-                self._report_error(f"maintenance:{user}:context", exc)
-        return {"reviewed": reviewed, "compressed": compressed}
+                if value["context"]["compression_needed"]:
+                    over_budget.append(record["session_id"])
+            except Exception as error:
+                self._report_error(f"maintenance:{user}:context", error)
+        return {"reviewed": reviewed, "over_budget": over_budget,
+                "automatic_compaction": "main_request_barrier_only"}
 
-    def _report_error(self, component: str, exc: Exception) -> None:
-        if self.on_error is not None:
-            self.on_error(component, exc)
+    def _report_error(self, component, error):
+        if self.on_error:
+            self.on_error(component, error)
 
-    def _run_loop(self) -> None:
+    def _run_loop(self):
         while not self._stop_event.is_set():
             try:
                 self.scan_once()
-            except Exception as exc:
-                self._report_error("maintenance", exc)
+            except Exception as error:
+                self._report_error("maintenance", error)
             self._wake_event.wait(self.poll_interval)
             self._wake_event.clear()

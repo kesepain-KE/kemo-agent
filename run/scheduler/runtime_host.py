@@ -17,6 +17,7 @@ from cron.scheduler import (
     ensure_perception_task,
     recover_all,
 )
+from cron.collector import COLLECTION_ACTIONS, CollectorSupervisor, collector_status
 from message.identity import IdentityResolver
 from message.plugin import (
     FileMessageTransport,
@@ -34,7 +35,7 @@ from message.transport import (
     TransportRegistry,
 )
 from provider.factory import create_provider
-from run.config import read_json_object, system_update_rate
+from run.config import read_json_object, read_yaml_object, system_update_rate
 from run.history import HistorySummaryScheduler
 from run.scheduler.maintenance import MaintenanceScheduler
 from run.tasks import TaskPlanScheduler
@@ -117,8 +118,8 @@ class RuntimeHost:
         on_error: Callable[[str, BaseException], None] | None = None,
     ) -> None:
         self.root = root.resolve()
-        self.config = config or read_json_object(
-            self.root / "config" / "global_config.json"
+        self.config = config or read_yaml_object(
+            self.root / "config" / "global_config.yaml"
         )
         self.message_config = (
             message_config
@@ -194,7 +195,9 @@ class RuntimeHost:
             tool_registry_factory=tool_registry_factory,
             on_error=self._handle_error,
             transport_registry=self.router.transports,
+            excluded_system_actions=COLLECTION_ACTIONS,
         )
+        self.collector = CollectorSupervisor(self.root) if cron_scheduler is None else None
         summary_config = self.config.get("history_summary") or {}
         if not isinstance(summary_config, dict):
             summary_config = {}
@@ -258,6 +261,7 @@ class RuntimeHost:
             "background", "scheduler_group"
         )
         self._components["cron"] = ComponentStatus("cron", "scheduler")
+        self._components["collector"] = ComponentStatus("collector", "worker_process")
         self._components["maintenance"] = ComponentStatus(
             "maintenance", "scheduler"
         )
@@ -386,8 +390,13 @@ class RuntimeHost:
                 self._set_component("cron", "starting")
                 self.cron.start()
                 self._set_component("cron", "running")
+                if self.collector is not None:
+                    self._set_component("collector", "starting")
+                    self.collector.start()
+                    self._set_component("collector", "running")
             else:
                 self._set_component("cron", "stopped")
+                self._set_component("collector", "stopped")
 
             if self.background_enabled:
                 self._set_component("background", "running")
@@ -445,6 +454,13 @@ class RuntimeHost:
             self._set_component("cron", "failed", exc)
 
         try:
+            if self.collector is not None:
+                self.collector.stop(timeout=DEFAULT_SHUTDOWN_TIMEOUT)
+            self._set_component("collector", "stopped")
+        except Exception as exc:
+            self._set_component("collector", "failed", exc)
+
+        try:
             self.maintenance.stop(timeout=DEFAULT_SHUTDOWN_TIMEOUT)
             self._set_component("maintenance", "stopped")
         except Exception as exc:
@@ -458,6 +474,7 @@ class RuntimeHost:
 
         if (
             self._components["cron"].state == "stopped"
+            and self._components["collector"].state == "stopped"
             and self._components["maintenance"].state == "stopped"
             and self._components["history_summaries"].state == "stopped"
             and self._components["task_plans"].state == "stopped"
@@ -482,6 +499,7 @@ class RuntimeHost:
                 "components": components,
                 "history_summaries": self.history_summaries.status(),
                 "task_plans": self.task_plans.status(),
+                "collector": collector_status(self.root) if self.collector is not None else {},
             }
 
     def _start_transport(self, item: RegisteredTransport) -> None:
@@ -596,7 +614,7 @@ def build_host(
 ) -> RuntimeHost:
     """Build a RuntimeHost from global config for CLI/background startup."""
     base = root.resolve()
-    config = read_json_object(base / "config" / "global_config.json")
+    config = read_yaml_object(base / "config" / "global_config.yaml")
     message_config = read_json_object(
         base / "config" / "message_config.json",
         allow_empty=True,

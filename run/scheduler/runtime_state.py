@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -31,10 +32,12 @@ class SystemCronLease:
     two scheduler objects in the same interpreter from becoming leaders.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, namespace: str = "system-cron") -> None:
+        if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", namespace) is None:
+            raise ValueError("调度租约名称无效")
         self.root = root.resolve()
-        self.path = self.root / "runtime" / ".system-cron.lock"
-        self._root_key = os.path.normcase(str(self.root))
+        self.path = self.root / "runtime" / f".{namespace}.lock"
+        self._root_key = os.path.normcase(str(self.root)) + ":" + namespace
         self._handle: Any | None = None
 
     @property

@@ -11,8 +11,7 @@ from run.config import list_users
 from run.conversation import session_lock
 from run.history import (
     close_session,
-    connection,
-    database_path,
+    active_session_lease_clients,
     find_record,
     list_records,
     queue_summary,
@@ -35,19 +34,8 @@ def _timestamp(value: Any) -> float | None:
 
 def _session_lease_active(root: Path, user: str, source: str,
                           session_id: str, now: float) -> bool:
-    if not database_path(root, user).is_file():
-        return False
     try:
-        with connection(root, user) as database:
-            if source == 'web':
-                scope_sql, scope_value = "client_id NOT LIKE ?", '%\x1f%'
-            else:
-                scope_sql, scope_value = "client_id LIKE ?", f'{source}\x1f%'
-            row = database.execute(
-                f"SELECT 1 FROM history_web_leases WHERE session_id=? AND expires_at>? AND released=0 AND {scope_sql} LIMIT 1",
-                (session_id, now, scope_value),
-            ).fetchone()
-        return row is not None
+        return bool(active_session_lease_clients(root, user, source, session_id, now=now))
     except Exception:
         return True
 
@@ -78,24 +66,21 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
             return 0
 
     def pending_memory(record: dict[str, Any]) -> bool:
-        rounds = count(record.get("rounds"))
-        processed = count(record.get("memory_processed_round"))
+        rounds = count(record.get("last_seq"))
+        processed = count(record.get("memory_processed_seq"))
         status = str(record.get("memory_status") or "unknown").casefold()
         return (str(record.get("lifecycle") or "") == "closed"
                 and rounds > processed
-                and status not in {"queued", "processing", "failed", "completed", "disabled"})
+                and status not in {"queued", "processing", "disabled"})
 
     def pending_summary(record: dict[str, Any]) -> bool:
-        rounds = max(
-            count(record.get("last_committed_round")),
-            count(record.get("rounds")),
-        )
+        target = count(record.get("last_seq"))
+        completed = count(record.get("summary_completed_seq"))
+        status = str(record.get("summary_status") or "none").casefold()
         return (
             str(record.get("lifecycle") or "") == "closed"
-            and rounds > 0
-            and bool(str(record.get("archive_window") or ""))
-            and not str(record.get("title") or "").strip()
-            and str(record.get("summary_status") or "none").casefold() == "none"
+            and target > completed
+            and status in {"none", "completed"}
         )
 
     allowed_sources = {str(value) for value in sources} if sources is not None else None

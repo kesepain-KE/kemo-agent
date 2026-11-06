@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from cron.scheduler import BEIJING, CronScheduler
+from cron.executor import execute_cron_task
 from run.scheduler import CronLogAggregator
 from run.scheduler import (
     SystemCronLease,
@@ -53,7 +54,7 @@ def test_one_hundred_successes_are_persisted_as_one_aggregate() -> None:
                     "task_id": "expand_update",
                     "status": "success",
                     "duration_ms": index,
-                    "result": {"status": "completed"},
+                    "result": {"status": "completed", "data_changed": False},
                 }
             )
 
@@ -80,7 +81,7 @@ def test_error_flushes_pending_successes_and_is_immediately_durable() -> None:
             "duration_ms": 10,
         }
         aggregator.record_success(
-            {**common, "status": "success", "result": {"status": "completed"}}
+            {**common, "status": "success", "result": {"status": "completed", "data_changed": False}}
         )
         aggregator.record_immediate(
             {
@@ -93,8 +94,12 @@ def test_error_flushes_pending_successes_and_is_immediately_durable() -> None:
         )
 
         rows = LogStore(root).list_cron("alice")
+        assert len(rows) == 1 and rows[0]["status"] == "failed"
+        aggregator.flush()
+        rows = LogStore(root).list_cron("alice")
         assert len(rows) == 2
-        assert {row["status"] for row in rows} == {"success", "failed"}
+        aggregate = next(row["result"] for row in rows if row["result"].get("aggregated"))
+        assert aggregate["runs"] == 2 and aggregate["successes"] == 1 and aggregate["failures"] == 1
 
 
 def test_due_success_window_flushes_without_another_record() -> None:
@@ -108,7 +113,7 @@ def test_due_success_window_flushes_without_another_record() -> None:
                 "task_id": "expand_update",
                 "status": "success",
                 "duration_ms": 10,
-                "result": {"status": "completed"},
+                "result": {"status": "completed", "data_changed": False},
             }
         )
 
@@ -126,17 +131,20 @@ def test_failed_success_flush_does_not_suppress_immediate_error() -> None:
                 "task_id": "expand_update",
                 "status": "success",
                 "duration_ms": 10,
-                "result": {"status": "completed"},
+                "result": {"status": "completed", "data_changed": False},
             }
         )
         written: list[dict[str, object]] = []
 
         def flaky_append(_store: LogStore, record: dict[str, object]) -> None:
-            if record.get("status") == "success":
+            result = record.get("result")
+            if isinstance(result, dict) and result.get("aggregated"):
                 raise RuntimeError("temporary database failure")
             written.append(record)
 
-        with patch.object(LogStore, "append_cron", new=flaky_append):
+        with patch.object(LogStore, "append_cron", new=flaky_append), patch(
+            "run.scheduler.log_aggregator.time.monotonic", return_value=time.monotonic() + 3601,
+        ):
             with pytest.raises(RuntimeError, match="temporary database failure"):
                 aggregator.record_immediate(
                     {
@@ -164,7 +172,7 @@ def test_high_frequency_noop_is_aggregated_but_partial_failure_is_immediate() ->
             task_id="expand_update",
             executed_at=datetime.now(BEIJING),
             duration_ms=1,
-            result={"status": "skipped"},
+            result={"status": "skipped", "data_changed": False},
         )
         assert LogStore(root).list_cron("alice") == []
         scheduler._record_system_execution(
@@ -176,10 +184,82 @@ def test_high_frequency_noop_is_aggregated_but_partial_failure_is_immediate() ->
             result={"status": "partial", "failed": ["demo"]},
         )
         rows = LogStore(root).list_cron("alice")
-        assert len(rows) == 2
+        assert len(rows) == 1
         assert rows[0]["status"] == "partial"
-        assert rows[1]["status"] == "success"
-        assert rows[1]["result"]["aggregated"] is True
+        scheduler.flush_persistence()
+        rows = LogStore(root).list_cron("alice")
+        assert len(rows) == 2
+        aggregate = next(row["result"] for row in rows if row["result"].get("aggregated"))
+        assert aggregate["runs"] == 2 and aggregate["successes"] == 1 and aggregate["failures"] == 1
+
+
+@pytest.mark.parametrize("action", ["memory_promotion", "session_lifecycle_sweep"])
+def test_real_high_frequency_system_executors_report_noop_data_change(action: str) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "users" / "alice").mkdir(parents=True)
+
+        result = execute_cron_task(
+            root=root,
+            user="alice",
+            task_id=action,
+            config={},
+            system_task={
+                "task_id": action,
+                "action": action,
+                "exec_mode": "system",
+            },
+        )
+
+        assert result["data_changed"] is False
+        scheduler = CronScheduler(root, config={})
+        scheduler._record_system_execution(
+            action=action,
+            user="alice",
+            task_id=action,
+            executed_at=datetime.now(BEIJING),
+            duration_ms=1,
+            result=result,
+        )
+        assert LogStore(root).list_cron("alice") == []
+
+
+def test_real_memory_promotion_executor_persists_each_changed_success() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "users" / "alice").mkdir(parents=True)
+        scheduler = CronScheduler(root, config={})
+
+        with patch(
+            "cron.review_due.scan_and_promote",
+            return_value={"promotions": [{"filename": "fact.md"}]},
+        ) as promote:
+            for _ in range(20):
+                result = execute_cron_task(
+                    root=root,
+                    user="alice",
+                    task_id="memory_promotion",
+                    config={},
+                    system_task={
+                        "task_id": "memory_promotion",
+                        "action": "memory_promotion",
+                        "exec_mode": "system",
+                    },
+                )
+                assert result["data_changed"] is True
+                scheduler._record_system_execution(
+                    action="memory_promotion",
+                    user="alice",
+                    task_id="memory_promotion",
+                    executed_at=datetime.now(BEIJING),
+                    duration_ms=1,
+                    result=result,
+                )
+
+        rows = LogStore(root).list_cron("alice")
+        assert promote.call_count == 20
+        assert len(rows) == 20
+        assert all(row["result"]["data_changed"] is True for row in rows)
 
 
 def test_repeated_identical_partial_results_are_aggregated_after_first_record() -> None:
@@ -193,14 +273,15 @@ def test_repeated_identical_partial_results_are_aggregated_after_first_record() 
                 result={"status": "partial", "failed": ["global/kemo_app"]},
             )
         rows = LogStore(root).list_cron("__system__")
-        assert len(rows) == 1
-        assert rows[0]["status"] == "partial"
+        assert len(rows) == 20
+        assert all(row["status"] == "partial" for row in rows)
         scheduler.flush_persistence()
         rows = LogStore(root).list_cron("__system__")
-        assert len(rows) == 2
+        assert len(rows) == 21
         aggregate = rows[0]
         assert aggregate["result"]["aggregated"] is True
-        assert aggregate["result"]["runs"] == 19
+        assert aggregate["result"]["runs"] == 20
+        assert aggregate["result"]["failures"] == 20
 
 
 def test_system_schedule_advances_in_memory_until_explicit_flush() -> None:
@@ -220,7 +301,7 @@ def test_system_schedule_advances_in_memory_until_explicit_flush() -> None:
 
         with patch(
             "cron.scheduler.execute_cron_task",
-            return_value={"status": "completed", "category": "expand"},
+            return_value={"status": "completed", "category": "expand", "data_changed": False},
         ):
             assert scheduler._system_lease.try_acquire() is True
             assert scheduler._scan_once(include_system=True) == 1

@@ -367,7 +367,7 @@ class ExecutorTests(unittest.TestCase):
                     "action": "session_lifecycle_sweep",
                 },
             )
-        self.assertEqual(result, {"closed": 0})
+        self.assertEqual(result, {"closed": 0, "data_changed": False})
         sweep.assert_called_once_with(self.root, "alice", idle_seconds=7200)
 
     def test_session_sweep_system_task_rejects_too_small_or_invalid_threshold(self) -> None:
@@ -508,7 +508,7 @@ class ExecutorTests(unittest.TestCase):
                 )
             )
         )
-        with patch("cron.executor.AgentRunner", return_value=runner):
+        with patch("cron.system_tasks.AgentRunner", return_value=runner):
             result = execute_cron_task(
                 root=self.root,
                 user="alice",
@@ -522,6 +522,7 @@ class ExecutorTests(unittest.TestCase):
             )
 
         self.assertEqual(result["memory_update"], update)
+        self.assertTrue(result["data_changed"])
         runner.run.assert_called_once_with(
             "memory_temporary_important",
             {"trigger": "periodic_scan"},
@@ -547,9 +548,9 @@ class ExecutorTests(unittest.TestCase):
 
     def test_system_module_updates_support_update_and_main(self) -> None:
         modules = (
-            ("global_sense", "sense.json", "update_entry", "update"),
-            ("global_sense", "sense.json", "main_entry", "main"),
-            ("global_expand", "expand.json", "expand_entry", "main"),
+            ("sense", "sense.json", "update_entry", "update"),
+            ("sense", "sense.json", "main_entry", "main"),
+            ("expand/global", "expand.json", "expand_entry", "main"),
         )
         for parent, manifest, name, function_name in modules:
             directory = self.root / parent / name
@@ -598,7 +599,7 @@ class ExecutorTests(unittest.TestCase):
             )
 
     def test_system_module_update_reports_unsafe_and_invalid_entries(self) -> None:
-        sense = self.root / "global_sense"
+        sense = self.root / "sense"
         outside = self.root / "outside.py"
         outside.write_text("def update():\n    raise AssertionError('must not run')\n", "utf-8")
 
@@ -643,8 +644,8 @@ class ExecutorTests(unittest.TestCase):
 
     def test_expand_updates_are_scoped_to_system_roots_or_one_user(self) -> None:
         modules = (
-            (self.root / "global_expand" / "global_weather", "global"),
-            (self.root / "shared_expand" / "shared_weather", "shared"),
+            (self.root / "expand" / "global" / "global_weather", "global"),
+            (self.root / "expand" / "share" / "shared_weather", "shared"),
             (self.root / "users" / "alice" / "expand" / "alice_weather", "alice"),
             (self.root / "users" / "bob" / "expand" / "bob_weather", "bob"),
         )
@@ -848,6 +849,32 @@ class SchedulerTests(unittest.TestCase):
             all("system_key" not in task for task in [*first, promotion, perception, expand])
         )
 
+    def test_reconcile_keeps_interrupted_system_task_paused(self) -> None:
+        store = CronStore(self.root, "__system__", system=True)
+        task = normalize_task(
+            task_id="memory_promotion",
+            title="记忆碎片到期晋升检查",
+            prompt="",
+            user="",
+            type="recurring",
+            interval_seconds=30,
+            next_run_at="",
+            exec_mode="system",
+            action="memory_promotion",
+            status="paused",
+        )
+        task["last_stop_reason"] = "interrupted_pending_confirmation"
+        store.create(task)
+
+        reconciled = ensure_memory_promotion_task(self.root)
+
+        self.assertEqual(reconciled["status"], "paused")
+        self.assertEqual(reconciled["next_run_at"], "")
+        self.assertEqual(
+            reconciled["last_stop_reason"],
+            "interrupted_pending_confirmation",
+        )
+
     def test_system_summary_keeps_bounded_important_memory_update_diagnostics(self) -> None:
         summary = _system_result_summary(
             {
@@ -904,7 +931,7 @@ class SchedulerTests(unittest.TestCase):
             {"task_cron_system": {"expand_update_rate": False}},
         )
         self.assertEqual(perception["interval_seconds"], 5)
-        self.assertEqual(expand["interval_seconds"], 5)
+        self.assertEqual(expand["interval_seconds"], 30)
 
         updated = ensure_perception_task(
             self.root,
@@ -993,7 +1020,7 @@ class SchedulerTests(unittest.TestCase):
         scheduler = CronScheduler(self.root)
         task_path = self.root / "cron" / "task_cron_system" / "memory_promotion.json"
         persisted_before = json.loads(task_path.read_text("utf-8"))
-        with patch("cron.scheduler.execute_cron_task", return_value={"status": "completed"}) as execute:
+        with patch("cron.scheduler.execute_cron_task", return_value={"status": "completed", "data_changed": False}) as execute:
             count = scheduler.scan_once()
         self.assertEqual(count, 2)
         self.assertEqual({call.kwargs["user"] for call in execute.call_args_list}, {"alice", "bob"})

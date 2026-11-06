@@ -54,26 +54,6 @@
 
 主智能体通过 `update` 只能设置 `enabled` 或 `paused`；其他运行状态由 cron 模块管理。
 
-## 参数说明
-
-| 参数 | 适用 action | 说明 |
-|---|---|---|
-| `action` | 全部 | `list` / `get` / `history` / `create` / `update` / `delete` |
-| `task_id` | `get` / `history` / `update` / `delete` | 任务 ID |
-| `title` | `create` / `update` | 任务标题 |
-| `prompt` | `create` / `update` | 执行时发送给智能体的自包含提示词 |
-| `type` | `create` / `update` | `daily` / `weekly` / `monthly` / `once` / `recurring` |
-| `time` / `times` | `create` / `update` | 日历任务的一个或多个北京时间 `HH:MM` |
-| `weekdays` | `create` / `update` | weekly 的 ISO 星期数组，1=周一、7=周日 |
-| `month_days` | `create` / `update` | monthly 的日期数组，1–31；不存在的日期跳过 |
-| `interval_seconds` | `create` / `update` | `recurring` 的间隔秒数，至少 60 |
-| `next_run_at` | `create` / `update` | `once` 的北京时间 ISO 8601 |
-| `start_date` / `end_date` | `create` / `update` | 重复任务首尾包含的生效日期，`YYYY-MM-DD` |
-| `max_runs` | `create` / `update` | 最大成功执行次数 |
-| `status` | `update` | `enabled` / `paused` |
-| `query` | `list` | 按标题子串过滤，大小写不敏感 |
-| `history_limit` | `get` / `history` | 最近执行记录数量，最多 50 |
-
 ## 返回字段
 
 | 字段 | 适用 action | 说明 |
@@ -100,27 +80,15 @@
         "enum": ["list", "get", "history", "create", "update", "delete"],
         "description": "list=列出，get=查询单个，history=执行历史，create=创建，update=修改，delete=删除"
       },
-      "task_id": {
-        "type": "string",
-        "description": "任务 ID，get/update/delete 使用"
-      },
-      "title": {
-        "type": "string",
-        "description": "任务标题，create/update 使用"
-      },
-      "prompt": {
-        "type": "string",
-        "description": "自包含执行提示词，create/update 使用；用户自然语言需求应使用 time_plan 输出"
-      },
+      "task_id": {"type": "string", "description": "任务 ID，get/update/delete 使用"},
+      "title": {"type": "string", "description": "任务标题，create/update 使用"},
+      "prompt": {"type": "string", "description": "自包含执行提示词，create/update 使用；用户自然语言需求应使用 time_plan 输出"},
       "type": {
         "type": "string",
         "enum": ["daily", "weekly", "monthly", "once", "recurring"],
         "description": "任务类型，用户自然语言需求应使用 time_plan 输出"
       },
-      "time": {
-        "type": "string",
-        "description": "daily 的北京时间 HH:MM"
-      },
+      "time": {"type": "string", "description": "daily 的北京时间 HH:MM"},
       "times": {
         "type": "array",
         "items": {"type": "string"},
@@ -137,28 +105,14 @@
         "items": {"type": "integer", "minimum": 1, "maximum": 31},
         "description": "monthly 的日期；不存在的日期跳过"
       },
-      "interval_seconds": {
-        "type": "integer",
-        "minimum": 60,
-        "description": "recurring 间隔秒数"
-      },
-      "next_run_at": {
-        "type": "string",
-        "description": "once 的北京时间 ISO 8601"
-      },
+      "interval_seconds": {"type": "integer", "minimum": 60, "description": "recurring 间隔秒数"},
+      "next_run_at": {"type": "string", "description": "once 的北京时间 ISO 8601"},
       "start_date": {"type": "string", "description": "生效开始日期 YYYY-MM-DD"},
       "end_date": {"type": "string", "description": "生效结束日期 YYYY-MM-DD，首尾包含"},
       "max_runs": {"type": "integer", "minimum": 1, "description": "最大成功执行次数"},
       "clear_max_runs": {"type": "boolean", "description": "update 时清除最大成功次数限制"},
-      "status": {
-        "type": "string",
-        "enum": ["enabled", "paused"],
-        "description": "update 可设置的任务状态"
-      },
-      "query": {
-        "type": "string",
-        "description": "list 按标题子串过滤，大小写不敏感"
-      },
+      "status": {"type": "string", "enum": ["enabled", "paused"], "description": "update 可设置的任务状态"},
+      "query": {"type": "string", "description": "list 按标题子串过滤，大小写不敏感"},
       "history_limit": {"type": "integer", "minimum": 0, "maximum": 50, "description": "get/history 返回的最近执行记录数量"}
     },
     "required": ["action"],
@@ -166,6 +120,7 @@
   },
   "version": "2.2.0",
   "enabled": true,
-  "entrypoint": "tool.py:run"
+  "entrypoint": "tool.py:run",
+  "permission": "write"
 }
 ```

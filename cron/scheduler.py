@@ -51,9 +51,6 @@ _EXPAND_TITLE = "拓展模块数据采集"
 _SESSION_SWEEP_TITLE = "对话生命周期兜底巡检"
 _SINGLETON_SYSTEM_ACTIONS = frozenset({"perception_update"})
 _NO_BACKOFF_SYSTEM_ACTIONS = frozenset({"perception_update", "expand_update"})
-_AGGREGATED_SYSTEM_ACTIONS = frozenset(
-    {"perception_update", "expand_update", "memory_promotion"}
-)
 _SUCCESS_SYSTEM_STATUSES = frozenset(
     {"success", "completed", "enabled", "ok", "active", "inactive", "skipped"}
 )
@@ -191,6 +188,10 @@ def _reconcile_system_task(
             )
         )
 
+    interrupted_pending_confirmation = (
+        current.get("status") == "paused"
+        and current.get("last_stop_reason") == "interrupted_pending_confirmation"
+    )
     inactive = current.get("status") not in {"enabled", "failed"}
     schedule_changed = not _same_schedule(current, spec)
     changed = (
@@ -218,9 +219,16 @@ def _reconcile_system_task(
             task["interval_seconds"] = spec["interval_seconds"]
         elif spec["type"] == "daily":
             task["time"] = spec["time"]
-        if inactive:
+        if interrupted_pending_confirmation:
+            # Startup recovery is an explicit confirmation boundary.  Do not
+            # turn an interrupted system task back on merely because its
+            # canonical spec is being reconciled.
+            task["status"] = "paused"
+            task["next_run_at"] = ""
+            task["last_stop_reason"] = "interrupted_pending_confirmation"
+        elif inactive:
             task["status"] = "enabled"
-        if inactive or schedule_changed:
+        if (inactive or schedule_changed) and not interrupted_pending_confirmation:
             task["next_run_at"] = compute_next_run(task, after=now)
         return task
 
@@ -336,6 +344,10 @@ class CronScheduler:
         on_task_executed: Callable[[str, str, dict[str, Any]], None] | None = None,
         on_error: Callable[[str, Exception], None] | None = None,
         transport_registry: Any | None = None,
+        system_actions: set[str] | None = None,
+        excluded_system_actions: set[str] | None = None,
+        include_user_tasks: bool = True,
+        lease_namespace: str = "system-cron",
     ) -> None:
         self.root = root.resolve()
         self.poll_interval = poll_interval
@@ -345,6 +357,9 @@ class CronScheduler:
         self.on_task_executed = on_task_executed
         self.on_error = on_error
         self._transport_registry = transport_registry
+        self._system_actions = frozenset(system_actions) if system_actions is not None else None
+        self._excluded_system_actions = frozenset(excluded_system_actions or ())
+        self._include_user_tasks = include_user_tasks
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._system_worker: threading.Thread | None = None
@@ -360,13 +375,13 @@ class CronScheduler:
         )
         self._success_log_flush_seconds = self._positive_interval(
             task_config.get("success_log_flush_seconds"),
-            _DEFAULT_PERSISTENCE_INTERVAL_SECONDS,
+            3600.0,
         )
         self._log_aggregator = CronLogAggregator(
             self.root,
             flush_seconds=self._success_log_flush_seconds,
         )
-        self._system_lease = SystemCronLease(self.root)
+        self._system_lease = SystemCronLease(self.root, namespace=lease_namespace)
 
     @staticmethod
     def _positive_interval(value: Any, default: float) -> float:
@@ -398,9 +413,9 @@ class CronScheduler:
             error=error,
         )
         try:
-            if action in _AGGREGATED_SYSTEM_ACTIONS and record["status"] == "success":
+            if record["status"] == "success":
                 self._log_aggregator.record_success(record)
-            elif action in _AGGREGATED_SYSTEM_ACTIONS and record["status"] == "partial":
+            elif record["status"] == "partial":
                 self._log_aggregator.record_repeated(record)
             else:
                 self._log_aggregator.record_immediate(record)
@@ -565,7 +580,7 @@ class CronScheduler:
                 dispatch_system_scan(self, now)
             else:
                 executed += self._scan_system_tasks(now)
-        for user in list_users(self.root):
+        for user in list_users(self.root) if self._include_user_tasks else ():
             if self._stop_event.is_set():
                 break
             try:
@@ -590,6 +605,10 @@ class CronScheduler:
                 continue
             task_id = str(task.get("task_id") or "")
             action = str(task.get("action") or task_id)
+            if action in self._excluded_system_actions or (
+                self._system_actions is not None and action not in self._system_actions
+            ):
+                continue
             if action not in _NO_BACKOFF_SYSTEM_ACTIONS and self._should_backoff():
                 continue
             users = tuple(list_users(self.root))
