@@ -105,29 +105,43 @@ Schema 拒绝未知或废弃字段。不要重新引入旧式嵌套 `schedule` �
 | `cancelled` | 已取消的终态 | 否 |
 
 RuntimeHost 重启时把遗留 `running` 用户任务改为 `paused`，清空 `next_run_at` 并标记
-`last_stop_reason=interrupted_pending_confirmation`，由用户核对副作用后显式重新启用；不立即重跑。
+`last_stop_reason=interrupted_pending_confirmation`，由用户核对副作用后显式重新启用；不立即重跑。系统任务对账不会把该暂停态重新校准成 enabled；运行状态接口的
+`system_cron.pending_confirmation_count` 暴露待确认数量。
 `cron.enabled=false` 或 `runtime_host.enable_background_scheduler=false` 时不会后台执行。
 
-用户任务和系统任务的执行记录都只写入结构化运行日志数据库 `runtime/logs.sqlite3`。用户任务失败会保存受限异常类型与错误摘要，不保存完整提示词。高频 `success` 以及内容完全相同的连续 `partial` 使用时间窗口聚合；新的 partial 指纹、失败和恢复仍即时记录，避免重复异常刷爆数据库。
+用户任务和系统任务的执行记录都只写入结构化运行日志数据库 `runtime/logs.sqlite3`。用户任务失败会保存受限异常类型与错误摘要，不保存完整提示词。系统任务仅在 `success` 且结果明确 `data_changed=false` 时省略逐次日志；变化为真或未知的成功、每一次 `partial` / `failed` 都立即尝试落盘，不按错误指纹抑制重复异常。
+
+调度器另按用户、任务累计一小时统计，默认 `task_cron_system.success_log_flush_seconds=3600`：记录任务 ID、次数、成功率、状态计数、平均/最大耗时和最后一次有界结果摘要。变化和异常也计入同一窗口，不提前结束小时窗口；到期由调度循环冲刷，正常停止强制冲刷，进程异常退出可能丢失未冲刷的内存统计。日志故障不得重跑业务；聚合写入失败保留窗口，仍尝试写当次异常。
+
+拓展/感知的无变化证据只来自清单声明的 `input_data` 文件字节及清单状态；单独 `recent_update` 采集时间不算变化。声明缺失、越界、链接、数据超过 1 MiB 或读取失败均按未知变化处理，不以 `updated` 名称代替证据。这个判定不扫描模块任意文件；链接判断复用附件路径检查，旧 Python 没有 `Path.is_junction` 时仍检查 Windows reparse 属性。
+未激活的网关状态模块保持业务正文稳定，检查时间保留在清单与运行诊断，不每30秒将心跳写成业务变化；激活、停用、健康或真实业务内容变化仍正常记录。
+
+结构化日志保留期采用环境变量 `KEMO_LOG_RETENTION_DAYS` → 实例 `cron.log_retention_days` → 代码兜底 90 天；仓库配置为 30 天，0 表示不自动清理。既有 `cron.history_retention_days=7` 控制定时任务历史会话，不能用于控制日志。
+
+RuntimeHost 将 `perception_update` 和 `expand_update` 交给独立采集进程（`cron/collector.py`），主调度器排除这两个 action，采集进程不派发用户对话。两条采集调度各自持有跨进程租约，慢拓展不会占住感知调度；感知默认5秒，拓展默认30秒。同一拓展根下互不依赖的模块最多4个并行，合并结果保持名称排序，单模块仍使用可取消的隔离进程。
+
+拓展周期优先采用 `cron.task_cron_system.expand_update.interval_seconds`；仅新键缺失时兼容旧 `task_cron_system.expand_update_rate`，非法旧值回退30秒，新键非法则报配置错误。采集进程每2秒检查全局配置并校准任务周期。模块自身耗时仍可能延迟同类下一轮，不能把5秒配置声称为所有模块的时限保证。
+
+主宿主监护器每秒检查采集进程身份，死亡后以至少5秒的启动间隔恢复。宿主异常退出不结束已脱离的采集进程；新宿主复用同根存活进程。正常关闭用 token 请求退出，仍活着时保留真实状态与租约；超时明确报告未退出。`runtime/collector-status.json` 记录 PID、启动标识和心跳，读取状态须核验操作系统身份，不能只信 PID。采集只写模块快照，不启动或迁移 WebSocket 服务，现有端点、鉴权、消息帧和心跳契约保持原实现。
 
 ### 定时任务历史对话生命周期
 
-`exec_mode=agent` 的任务使用 `background:cron:<task_id>` 作为独立历史来源。每次执行结束时，历史会话登记 `cron_finished_at`；全局 `cron.history_retention_days` 控制从这次结束时间开始的保留期，默认 7 天，范围 0–3650，`0` 表示永久保留。该字段只能写在 `config/global_config.json`，旧用户配置中的同名值不会覆盖全局策略。
+`exec_mode=agent` 的任务使用 `background:cron:<task_id>` 作为独立历史来源。每次执行结束时，历史会话登记 `cron_finished_at`；全局 `cron.history_retention_days` 控制从这次结束时间开始的保留期，默认 7 天，范围 0–3650，`0` 表示永久保留。该字段只能写在 `config/global_config.yaml`，旧用户配置中的同名值不会覆盖全局策略。
 
 RuntimeHost 的 Maintenance 每 5 分钟读取一次全局配置，并按用户最多清理 100 个已到期会话。到期边界按 UTC 实时时长计算，恰好达到保留期即可清理；旧会话没有 `cron_finished_at` 时，保守使用会话最近更新时间。无效或无法解析的时间不会触发删除。关闭 `runtime_host.enable_background_scheduler` 时，定时任务和此维护清理都会暂停。
 
-清理只匹配大小写准确且任务 ID 非空的 `background:cron:<task_id>`：普通 Web/CLI 对话、外部消息、任务计划、其他后台来源以及别的用户均不受影响。每次 agent 定时执行都创建新的逻辑会话，并把任务标题写入历史索引；网页历史抽屉以“定时任务”来源只读打开。运行中的会话、正在执行记忆提取或历史摘要的会话会跳过；候选在会话锁和 SQLite 写事务中再次校验，删除 session、active binding、archive/runtime window、消息、轮次和上下文摘要，并保留删除栅栏防止旧 Run 迟到复写。
+清理只匹配大小写准确且任务 ID 非空的 `background:cron:<task_id>`：普通 Web/CLI 对话、外部消息、任务计划、其他后台来源以及别的用户均不受影响。每次 agent 定时执行都创建新的逻辑会话，并把任务标题写入历史索引；网页历史抽屉以“定时任务”来源只读打开。运行中或持有维护认领的会话会跳过；候选在会话锁和 SQLite 写事务中再次校验，只将 CardStream 会话标记为 deleted、清除活动绑定并更新代际。RAW 保留，旧历史文件不读取或删除，迟到执行不能重新激活会话。
 
-网页入口位于“配置 → 运行限制 → 调度与超时 → 定时任务历史保留天数”，使用现有全局配置读取和修改 API。缩短天数会在后续维护扫描中清理已经越过新期限的历史，删除不可撤销；不会删除 Cron 任务定义、结构化执行日志、附件、下载文件或消息队列。
+网页入口位于“配置 → 运行限制 → 调度与超时 → 定时任务历史保留天数”，使用现有全局配置读取和修改 API。缩短天数会在后续扫描中隐藏越过新期限的会话；该接口不提供恢复入口，也不物理删除 RAW、Cron 定义、执行日志、附件、下载文件或消息队列。
 
 ### 对话生命周期兜底巡检
 
 RuntimeHost 启动时会在 `cron/task_cron_system/` 对账创建系统任务
 `session_lifecycle_sweep`，默认每小时执行一次。任务按用户扫描超过 24 小时未更新的未关闭会话，并补偿 closed 但记忆入队尚未登记成功的会话，
-单轮最多处理 50 个；`config/global_config.json` 的 `cron.session_idle_close_seconds` 可覆盖闲置阈值，
+单轮最多处理 50 个；`config/global_config.yaml` 的 `cron.session_idle_close_seconds` 可覆盖闲置阈值，
 但不会低于 3600 秒，非法值回退为 24 小时。正在运行、排队、停止中的会话、持有未过期 Web/App 持久 lease
 的会话以及无法确认租约状态的会话都会跳过。未关闭候选先登记记忆提取队列，再关闭逻辑会话；closed 补偿候选只补登记队列。
-两者都不删除历史窗口或消息，单会话失败会记录并继续处理后续候选。
+两者都不删除 RAW 卡片，单会话失败会记录并继续处理后续候选。
 
 CLI 使用独立 `source=cli` 会话，在正常结束、交互退出或异常收束时关闭；Cron 主智能体每次任务使用新的独立会话并在结束时执行同样的“记忆提取登记 →
 关闭会话”收尾；收尾失败不改变入口或 Cron 任务本身的退出状态。`subagent`、`function` 系统分支不
@@ -208,10 +222,14 @@ CLI 使用独立 `source=cli` 会话，在正常结束、交互退出或异常�
 全局 `task_plan.max_steps` 默认限制为 20。用户配置 `task_plan.auto_accept=false` 时，计划必须等待明确批准。
 `auto_accept=true` 时，新计划直接保存为 `approved` 并由正式计划执行链路领取；无论开关状态如何，创建计划的原始主智能体 Run 都不得继续自由执行普通工具，以避免绕过计划状态机或重复执行。
 
-创建成功后的强制收束只作用于当前 `user + source + session_id + run_id`：同一 Provider 响应中位于计划创建之后的工具统一记录为 `not_executed`，不再发起下一次 Provider 请求。本机制不写入用户级暂停标志，也不会停止同一用户的其他对话空间。
+同一 Provider 响应允许混合计划生成与其他工具调用，运行时按返回顺序提交到 `task_plan` 子智能体调用为止，其后调用统一记录为 `not_executed`，不因混批直接判整轮失败。未执行回执不计真实执行、连续失败或副作用去重。若计划创建失败，模型可根据真实失败结果决定后续调用，不自动重放原批次。
+
+创建成功后的强制收束只作用于当前 `user + source + session_id + run_id`，不再发起下一次 Provider 请求。本机制不写入用户级暂停标志，也不会停止同一用户的其他对话空间。
 
 任务计划数据库按用户集中保存，便于任务页统一管理；系统提示词注入则按 `source + session_id` 过滤。A 对话只能看到 A 对话所属的未完成计划，B 对话不会因 A 创建计划而获得其内容或被迫停止。聊天页顶部的活动计划卡同样只允许展示当前有效会话所属的计划：没有选中会话、会话归档已清理或会话已删除时，`overview.active_plan` 必须为 `null`，不能从用户全部计划中挑选一条塞进开始页。计划数据本身仍保留在任务中枢，供用户统一查看、取消或整理，不随会话归档清理而静默删除。
 主智能体调用 `task_plan` 工具时同样执行会话归属校验；B 对话即使显式提交 A 的 `plan_id`，也不能查看、批准、暂停、恢复或取消 A 的计划。统一任务页、CLI 管理命令和后台调度器不经过这一模型工具边界，仍可在用户明确操作或系统调度下管理集中存储的计划。
+
+每个主 Provider 请求前，动态尾部按当前 source/session_id 读取 PlanStore 的未完成计划及 revision，显示最新执行状态；新建、取消与完成在下一请求生效。计划不再作为固定 System 段，也不写成历史卡片，不因 VIEW 压缩失效。感知与拓展同时读取各自最新快照；人格、手册和能力清单保持固定前缀，记忆修订独立刷新。其他会话计划不进入本会话尾部，计划字符预算仍适用。
 Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前原子校验请求的 `source + session_id` 与计划归属完全一致；错误客户端不能把 A 的计划挂到 B 对话执行。任务页可以统一查看计划，但执行流仍回到计划原始对话空间。
 
 ### 完整 Schema 示例
@@ -282,14 +300,14 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 
 计划状态：`pending`、`approved`、`running`、`paused`、`completed`、`failed`、`cancelled`。
 
-步骤状态：`pending`、`running`、`completed`、`failed`、`skipped`、`cancelled`。
+步骤状态：`pending`、`running`、`completed`、`failed`、`skipped`、`cancelled`。读取旧数据时，步骤级 `paused` 会归一为 `pending` 并清空旧执行结果；新写入不接受步骤级 `paused`。执行器取消或生成器关闭会在 finally 中把计划收束为 paused、把当前 running 步骤恢复为 pending。`skipped` 仅用于显式跳过非关键分支，并视为后续依赖已满足。
 
 计划批准后有两种执行形态：
 
 1. Web/App 前台执行：在当前对话中连续运行；每步完成后主智能体调用 `task_plan step_done`，读取返回的 `progress` 和 `next_step` 继续下一步，用户可以看到工具与文本输出。当前会话显式开启长任务模式时，仍处于 `running` 的计划可在单 Run 工具次数上限后跨 Run 继续，保持同一计划与已完成步骤，不重新领取或批准；中间 Run 不触发计划暂停。完整续跑、取消与交接边界见 `long-task-runtime.md`。
 2. 后台执行器：一次只运行一个步骤，步骤状态由框架维护；控制提示会明确禁止再次调用 `step_done/step_fail`。
 
-两种形态不能混用步骤写入责任。运行中暂停表示在安全边界停止；取消则进入不可继续的 `cancelled` 终态。
+两种形态不能混用步骤写入责任。运行中暂停表示在安全边界停止；执行器取消或生成器关闭会把计划记为 paused 并将当前步骤恢复为 pending，显式恢复后再继续领取；用户 abort 则进入不可继续的 `cancelled` 终态。显式 `skip_step` 只接受 pending 且 `critical=false` 的步骤，不能代替 `revise_remaining` 的物理删除。
 
 ### 步骤设计原则
 
@@ -301,12 +319,17 @@ Web/App 发起计划执行时，后端会在把计划迁移到 `running` 之前�
 
 ### 编辑与并发
 
-只允许编辑 `pending`、`approved`、`paused` 或等待修正的 `failed` 计划；`running`、`completed` 和
-`cancelled` 计划不能编辑。`retry_step`/`reset_step` 只能处理 `failed` 或 `cancelled` 步骤，已完成
+普通 `edit` 只允许编辑 `pending`、`approved`、`paused` 或等待修正的 `failed` 计划。
+运行中的计划可用 `revise_remaining` 重排、插入或物理删除连续 pending 后缀；已完成、运行中、
+失败步骤不得删改，`retry_failed=true` 才允许将 failed 步骤重置为 pending。修正后没有失败步骤
+时自动继续，不受 `auto_retry_on_fix` 开关限制；已在 running 的执行器继续按新依赖领取步骤，
+暂停的计划恢复为 approved 等待唯一执行器领取。completed/cancelled 计划不能编辑。
+`retry_step`/`reset_step` 只能处理 `failed` 或 `cancelled` 步骤，已完成
 步骤永远不能修改、删除或重置。每次更新都会增加 `revision`；界面保存前必须基于最新版本，收到
 “计划版本已变化”时重新读取并合并，而不是强制覆盖。`retry_step` 可以把暂停计划恢复为
-`approved`；`reset_step` 只清理步骤，不改变计划状态。若 `auto_accept=true` 或用户配置
-`task_plan.auto_retry_on_fix=true`，修正后才会自动等待执行器领取，否则仍需用户批准。运行结束或启动恢复时，
+`approved`；`reset_step` 只清理步骤，不改变计划状态。普通 edit/retry_step 仅在 `auto_accept=true`
+或用户配置 `task_plan.auto_retry_on_fix=true` 时自动等待执行器领取，否则仍需用户批准。
+revision 冲突返回 `plan_revision_conflict`，重新读取后再提交，不用陈旧快照覆盖新计划。运行结束或启动恢复时，
 未完成的运行步骤会回收到安全状态。
 
 网页任务计划的 edit/retry 请求必须带当前计划的 `session_id`。后端会拒绝用其他对话空间的

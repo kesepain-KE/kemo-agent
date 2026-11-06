@@ -17,52 +17,88 @@
 不抢占已发出的请求，不承诺服务端未返回时新空间立即启动，也不宣称跨服务进程共享。
 子任务入队余量、执行额度与 API 槽位是三层不同约束，详见 `agent-task-coordination.md`。
 
-## 跨轮缓存前缀与脱敏诊断
+## CardStream 缓存前缀与脱敏诊断
 
-历史工具结果重建应保留原始 Kemo 内容块及 JSON 字段顺序，不把 `type/data` 内容块数组再次包装成结果数据；历史工具参数也沿用本轮发送时的字段顺序。旧 `tool.calls` 格式同样不额外排序。原始历史不修改；只有现有中途压缩规则或工具结果硬上限确实改写了 Provider 视图时，才移除原生结果副本，防止绕过限制。
+主请求由固定 Prompt、有效历史 VIEW 和每请求重建的动态尾部组成。历史工具结果保留原生内容与参数顺序，自描述结果中的 original_call 仅描述执行事实，不能被适配器当成新调用。RAW 不变，只有候选摘要验证并原子提交后才更换有效 VIEW；主整合工具结果不因旧内联字符预算静默截断。
 
-每次主对话 Provider 调用在映射前生成脱敏指纹，保存到 `history_rounds.metric_json` 的 `provider_request_diagnostics`。记录包含请求标识、迭代/尝试序号、系统提示词/各段/工具定义/控制参数的 SHA-256，以及逐 Item 内容和累计前缀的 SHA-256、字节长度；不保存额外提示词、工具正文、凭据或 Provider State。随机 Item ID、保存时补充的元数据及状态不参与前缀比较，工具配对 ID 和实际内容仍参与。失败、取消与受控停止也保存已经尝试的请求指纹。
+每次主对话 Provider 调用在映射前生成脱敏指纹，保存到 `card_integrations.record_json` 的 `provider_request_diagnostics`。记录包含请求标识、迭代/尝试序号、系统提示词/各段/工具定义/控制参数的 SHA-256，以及逐 Item 内容和累计前缀的 SHA-256、字节长度；不保存额外提示词、工具正文、凭据或 Provider State。随机 Item ID、保存时补充的元数据及状态不参与前缀比较，工具配对 ID 和实际内容仍参与。失败、取消与受控停止也保存已经尝试的请求指纹。
 
 指纹作用域为 `agent_before_provider_mapping`，只能证明 Agent 侧输入是否变化，不代表网关映射后模型实际收到的字节；不能仅凭指纹一致就断言云端故障。历史请求没有这项记录时，不能事后补造当时的系统提示词或前缀证据。
 
 ## 运行级中断自动重试
 
-输入上下文超限在主运行时单独恢复：既处理异常，也检查结构化失败终态中的嵌套错误；
-`context_length_exceeded`、`input_length_exceeded`、`maximum context length`、
-`prompt is too long` 等输入长度证据才触发压缩。只有网关包装码
-`PROVIDER_BAD_RESPONSE` 和 HTTP 400 不足以认定输入超限；输出的
-`max_output_tokens` 或 `finish_reason=length` 不属于此路径。
+框架本地 Token 统计统一使用随发布包携带的固定版本 DeepSeek tokenizer，所有 Provider 和
+模型共用同一计数器。系统提示词、历史卡片、工具 Schema、动态尾部、摘要预算、子代理输入
+预检和网页统计使用同一口径；切换模型不切换 tokenizer，也不因模型名变化重算已有卡片。
 
-每次内部恢复保留当前用户输入、运行中引导、已完成的本轮工具调用及结果，
-只移除被新摘要完整覆盖的旧轮次。即使本地估算尚未超过配置上限，服务端明确拒绝后，
-仍必须比上次减少历史；最多两次内部恢复，最后一次以仅保留当前轮重试。
-有效上限取配置 `token_limit` 与 Provider 声明输入上限的较小值；
-摘要完成后重新计算包括摘要、固定提示词、工具定义与当前轮尾部的预算。
-没有可移除历史、摘要失败、最后一轮仍超限或恢复预算耗尽时明确结束当前尝试，
-之后是否进行运行级重试仍遵循下文独立规则。已执行工具不因上下文恢复而重新执行。
+请求返回后，usage 各字段优先保留网关或 Provider 实报值（包括显式 0）；仅对缺失字段、
+明确标记为 estimated 的字段使用本地补偿。输入和输出都是实报时，缺失 total 可直接相加；
+混合结果通过 measurement.exact_fields / estimated_fields 标明来源。正文、真实思考和工具
+参数都计入本地输出补偿，随机协议 ID、时间戳和合成思考占位不作为生成正文收费。
+主对话、摘要和子代理各请求只累计一次最终 usage，不把 SSE 累计快照重复相加。
+发送前容量检查仍使用本地计量；实报输入量只用于其 Provider/模型及媒体类型作用域内的
+保守校准，估算输入量不反向参与校准。本地补偿不等于模型厂商的精确账单。
 
-主对话运行（L2）和子代理运行（L4）共用 `run/retry/` 的错误序列账本。一次**没有进展的连续错误序列**最多执行 **5 次重试**，即该序列的第一次失败加 5 次重试共 **6 次尝试**；`retrying` 事件中的 `max_attempts` 因此仍为 6，但它表示当前错误序列的尝试上限，不是整个 Run 的总尝试上限。每次尝试都会创建新的逻辑 Provider 请求和新的 `request_id`，可能产生新的模型计费，不属于同一请求的网络续传。
+CardStream 自动压缩唯一入口在主 Provider 请求前。请求占用包括固定上下文、有效历史、动态尾部和工具 Schema，输入预算同时考虑配置容量、Provider 声明及输出预留。超过80%阈值时只压缩连续历史前缀，目标按全部有效历史 Token 乘比例计算。固定内容已超容、候选不达标或事务失败时明确结束，保留原 RAW 和已提交 VIEW。
 
-重试额度只属于当前 Run 内当前错误序列，不写入会话级持久计数器。一次尝试在失败前只要成功接受过至少一次完整 Provider 响应，该错误序列就已经结束；尝试末尾的新失败按新错误序列的第一次失败计算，重新获得完整的 5 次重试额度。因此上游在同一长工具循环里反复“中断—恢复—再中断”时，单个 Run 的累计尝试次数理论上不设上限；只有连续 6 次都没有接受过完整响应的失败才会停止。半截流式文本、半截推理内容和提前到达的 usage 不算进展，避免上游每次只输出少量 token 就无限刷新额度。用户稍后重新发起或失败后点击“继续”形成新 Run 时，同样重新计满。
+主请求和摘要请求分别按实际输出额度计算输入预算；输出额度先受模型 max_output_tokens
+约束，共享 context_window 扣除输出，独立 max_input_tokens 不重复扣。历史目标同时受剩余输入
+容量约束。摘要前缀过大时按完整卡片分片，临时摘要只留内存；所有片段共用总 deadline 和一份
+额外重试额度，完整请求容量检查也通过后才在一次事务中提交 VIEW。
+结构化候选被拒绝后换请求 ID；网络重试保留原 ID 和正文。所有收到的响应 usage 都累计，
+后片失败或提交失败仍保留已知消耗，未知的迟到响应不冒充零消耗。
+原生媒体计量不把 Base64 当文字，媒体预留与 usage 校准仍属本地估算。
+校准按模型、计量版本和原生媒体类型集合隔离，媒体回执不污染纯文字请求；摘要卡片的
+标签、JSON 转义、消息封装及保留后缀也进入预算计算。
 
-`retrying.metadata.failed_attempt` 与 `consecutive_failures` 表示当前错误序列内的失败序号，会在有进展后重新从 1 开始；`run_attempt` 表示当前 Run 的累计尝试序号，始终单调递增；`retry_progress` 表示这次失败前是否已经接受过完整响应。前端使用 `run_attempt` 生成重试快照边界，避免错误序列重置后出现重复组件 key；展示文案仍使用当前错误序列的 `next_attempt/max_attempts`。
+旧的轮末裁剪、4xx计数后压缩、413缩减轮数及“只保留当前轮”恢复已退出主链路。413只表示传输体积问题，不推断模型Token容量；普通400不触发隐式裁剪。上下文错误保留诊断并失败，不靠重复发送相同错误请求获得压缩资格。
 
-除以下边界外，错误声明为 `retryable=false`、HTTP 400/401/403/404/409/422、鉴权错误、请求校验错误、协议错误、上下文压缩恢复耗尽、工具参数修复耗尽和普通运行时异常都必须消耗当前错误序列的完整预算后才停止：
+主模型的 `provider.retry.RetryManager` 默认额外5次、最多5次，首次不计入；一次推理的恢复序列最多6次尝试。没有输出且尚未得到完整终态的传输重放保留相同 request_id 和正文。已得到失败终态或已经输出部分思考/正文时，瞬时失败可以使用新 request_id、以原请求为 parent_request_id 对同一输入快照重新推理，避免反复获取网关缓存的失败终态。工具与整合保持原现场，只有接受完整有效响应后才执行新提出的工具，已成功工具不重跑。
+
+中断思考/正文先追加为不完整 RAW 快照，网页封存流式片段并分开后续输出，不把仍在执行的工具或子任务标成失败。原生输入媒体在恢复成功前保留，工具批次纠错不提前消费；首次可接受的有效响应后消费，不要求本次响应已经是最终正文。图片生成等已经产生输出媒体的请求不自动重放。失败记录保留脱敏的错误消息、分类、HTTP状态、尝试次数、停止原因及失败请求ID；不能只保存异常类型。失败终态中已提供的用量计入本轮统计。
+
+Provider 请求 completed 不自动构成最终正文：只有有效 assistant 交付可成为最终候选，明确的
+commentary、仅思考及空白文本不能冒充 final。没有必要依赖时，缺失最终正文按
+provider_incomplete / missing_final_answer 使用当前推理序列的恢复额度；使用新请求 ID、
+保留相同输入，失败响应用量仍累计，最多首次加5次，耗尽后明确失败。
+必要工具、子任务或 Shell 仍未结束时允许阶段响应并等待真实结果，不为等待状态空转重试。
+已被成功快照接受的工具回执即使网页通知迟到，也不能清掉最终候选；只有真实后续请求才将其
+追加为 interim。完成屏障仍校验未退出执行、未处理结果及新引导，不因模型声称结束就跳过。
+
+工具结果或引导后的下一次正常推理拥有新的请求身份及独立恢复序列。Kemo 同一请求的传输续传独立最多6次尝试，传输预算耗尽不由外层重新放大。运行中新增媒体会在下一次模型请求内明确标记“本次已携带”，可立即原生读取；`queued` 指下一次模型请求，不表示下一轮用户对话。该标记不把像素重复附带到后续已成功的工具循环。
+
+子代理的 `run/retry/loop.py::RetryLedger` 对单次运行累计限制为最多6次尝试。已取得完整响应可以重置连续失败的诊断计数，但不能恢复累计额度。`failed_attempt`、`next_attempt`、`run_attempt` 按累计尝试编号，`consecutive_failures` 和 `retry_progress` 只描述进展；显式续跑仍受分段时长、工具预算与成功副作用回执保护。
+
+主请求分类使用 `provider.retry.transient`，子代理运行分类使用 `run/retry/policy.py::should_retry`，共同遵守：
+
+- `KeyError` / `TypeError` / `AttributeError` / `AssertionError` 等框架内部缺陷，不重试；确定性鉴权、校验和协议错误不重试；
+- 确定性 4xx（408/429 除外，包括 400/401/403/404/409/422/425）不重试，不能用服务端 `retryable=true` 放开；
+- HTTP 408 / 429 / 5xx、已分类连接中断/超时/短暂容量不足可以重试；显式 `retryable=false` 始终可关闭重试，未知错误不能只因 true 获得重试资格；
+- 未知异常、确定性容量/协议问题不能借重试标志扩大恢复范围；错误原样进入当前整合的失败收尾；
+- 公开终态及历史 `failure.retryable` 采用统一分类后的结果，不照抄服务端对确定性错误的 true。没有重试不等于预算耗尽，不虚构 `retry_budget_exhausted`。
+
+以下生命周期边界保持不变：
 
 - 用户取消：尊重用户意志，不重试，立即落盘；
-- `completed` 和工具轮数上限产生的 `limited`：属于正常或受控结束，不重试；
+- 整合 `completed` 与计划批准、完成等待期限等受控边界产生的 `limited`：属于终态，不再自动续跑；
 - `SystemExit` / `KeyboardInterrupt` / `GeneratorExit` / `MemoryError` 是宿主控制或资源异常，
   原异常向外传播，不消耗业务失败重试计数，也不改写为工具失败或超时。
   后台子代理线程必须先记录真实 failed / host_exception 终态、完成通知并释放执行占用；
   同步 wait 重新抛出原异常，不把异常对象写入公开快照或持久化回执。
 
-工具参数修复和上下文压缩属于尝试内部的修复型重发（L3），各自预算不计入上述 5 次；只有其自身预算耗尽后，最终失败才进入 L2/L4 的错误序列。成功工具结果的跨尝试重放仍受 32 次、120,000 字符的上限和副作用安全规则约束。用户取消（包括重试退避等待期间取消）始终立即停止，不因已经取得进展而继续重试。
+工具参数修复有独立有限额度，压缩请求使用独立 deadline 与尝试预算；不递归触发自己的压缩屏障。子代理成功工具结果的跨尝试重放仍受32次、120,000字符与副作用安全规则约束。保留 Retry-After，在各层有界退避范围内等待；用户取消包括退避期间取消始终停止恢复。
 
-主/子代理共用 `run/retry/recovery.py` 的动作级复用策略。file 动态读取、
-expand_call 状态查询、subagent_dispatch list/status、shell status、network get/read
-必须重新查询，不能把“仍在运行”缓存成永远运行。相反，成功的发消息、Shell 启动、
-子任务派发/续跑及写操作仍保留同签名复用，避免运行级恢复制造重复副作用。
-这里“禁止复用”代表会重新执行，不代表禁止调用；不能把默认策略翻转成仅复用只读工具。
+主/子代理共用 `run/retry/tool_dedup.py::AttemptToolDedup`。查询类调用在每次请求中重新执行，
+包括 Provider 故障恢复后的请求；相同查询参数也不会复用旧结果。已知副作用成功后按签名去重；
+失败结果在同一推理轮次允许模型按回执重试，但 Provider 故障恢复时会保留失败副作用的签名保护。
+重复请求返回不含旧结果的 `duplicate_blocked` 回执，不再次执行。未知工具默认采用副作用保护。
+`expand_call` 不读取 `expand.json` 中的复用策略，所有调用均按当前状态真实执行。
+连续相同真实调用仍受默认三次上限约束；副作用重复拦截不计为一次真实执行。
+
+**跨尝试**恢复只保留副作用操作的签名保护，阻止已经执行的发消息、Shell 启动、
+子任务派发/续跑及写操作再次产生副作用。恢复到模型上下文的拒绝回执不包含旧工具结果；
+历史工具执行记录仍可保留真实结果用于审计，但不得将其作为新调用的结果。
+拓展查询跨尝试也会重新执行。不要更改副作用参数来绕过去重。
 
 ## Kemo 协议网络稳定性与恢复边界
 
@@ -80,20 +116,20 @@ expand_call 状态查询、subagent_dispatch list/status、shell status、networ
 Kemo 原生客户端对 LLM、Embedding 和 Rerank 的以下传输故障执行有限恢复：
 
 - 建连失败、DNS/连接异常和读取超时；
-- 网关明确声明 `retryable=true` 的 HTTP 错误；错误没有显式声明时，HTTP 408、425、429、500、502、503、504 按瞬时故障处理；
+- HTTP 408、429 和 5xx，且网关未显式声明 `retryable=false`；true 不能把其他确定性 HTTP 状态扩大为瞬态故障；
 - SSE 在统一终态前结束；
 - 连接在一条 SSE JSON 中间断开。
 
-一次逻辑请求最多进行 3 次网络尝试。重试使用指数退避和小幅随机抖动；网关提供 `Retry-After` 或 `retry_after_ms` 时优先采用，但单次等待最多 10 秒。等待过程可被当前 Run 的取消信号中断。
+当前 `KemoNetworkRetryPolicy.max_attempts` 为6（首次加最多5次重试），仅适用于Kemo传输链路。重试使用指数退避和小幅随机抖动；网关提供 `Retry-After` 或 `retry_after_ms` 时优先采用，但单次等待最多10秒。耗尽后携带 retry_budget_exhausted，外层不继续重放。等待可被当前 Run 的取消信号中断。
 
-HTTP 错误中的显式 `retryable` 是最高优先级声明。即使状态码通常可重试，只要网关返回 `retryable=false`，客户端也必须立即停止；只有缺少该字段时才使用状态码默认值。Embedding 和 Rerank 重试同样复用首次序列化出的正文、`request_id` 和幂等键。
+HTTP 状态的确定性边界优先于服务端 true；即使状态码通常可重试，只要网关返回 `retryable=false`，客户端也必须立即停止。Embedding 和 Rerank 重试同样复用首次序列化出的正文、`request_id` 和幂等键。
 
 以下情况不会自动重试：
 
 - 鉴权、权限、请求校验、能力不匹配和幂等冲突；
 - 完整但不符合 Kemo Schema 的 JSON/SSE 事件；
 - 模型已经通过统一终态返回的业务失败；
-- 上下文超限。该情况仍由对话运行时原有的上下文压缩与受控重试处理。
+- 上下文或请求体超限。主运行时在请求屏障校验容量，错误不进入旧轮次裁剪恢复。
 
 业务失败不由传输层重新生成，避免重复计费、重复工具调用或在用户已经看到部分输出后启动另一份回答。特别是已经持久化的 LLM `response.failed` 终态，即使其中包含 `retryable=true`，使用同一 `request_id` 也只会重放该失败终态；若上层策略决定重新执行模型，必须创建新的逻辑请求和新 ID，并承担可能产生的新计费。
 
@@ -150,7 +186,7 @@ Kemo 协议允许 `http://`，方便同机或可信内网部署，但 HTTP 不�
 
 ### Kemo 2.0 固定协议制品与契约门禁
 
-`kemo-agent 1.5.2` 与 `kemo-adapter-api 1.0.0` 使用精确 Kemo 2.0 线路协议，并与 `kemo-graph 1.6.0` 的请求/响应合同对齐。权威源码在
+`kemo-agent 1.5.3` 与 `kemo-adapter-api 1.0.0` 使用精确 Kemo 2.0 线路协议，并与 `kemo-graph 1.6.0` 的请求/响应合同对齐。权威源码在
 `provider/protocol/`，其 `spec/` 生成 `schema.json`、`model-index.json`、`invariants.json`、
 `freeze.json` 与脱敏 Fixture；Gateway 只消费由该目录构建并以 lock 文件固定 SHA-256 的
 `vendor/kemo_protocol-2.0.zip`。这保证两仓不各自维护模型副本，也不提供 Kemo 1.x shim。
@@ -228,21 +264,21 @@ Chat Bridge 支持现代 `message.tool_calls[]` 和旧式单个 `message.functio
 
 Chat 请求在 HTTP 序列化前按 adapter 内的策略净化；DeepSeek 保留独立分支：
 
-- 普通 Chat 默认不把内部逻辑控制 `reasoning_enabled` / `reasoning_effort` 发给上游，
-  也不发送框架 metadata。模型支持思考不代表它接受这两个 HTTP 字段；厂商参数必须由
-  有效 transport 档案声明（框架内置或用户显式覆盖），不能根据“OpenAI 兼容”承诺所有高级能力；
-- DeepSeek 分支使用 `thinking.type` 和 `reasoning_effort`，显式关闭思考时尊重关闭设置；缺失历史思考字段按下一节的兼容占位策略处理；
-- 不注入 `stream_options.include_usage`：usage 依赖上游自愿返回，缺失时按输出文本估算 completion tokens；
+- 普通 Chat Bridge 的自动档案默认把已指定的思考控制映射为 `reasoning_effort`；内部
+  `reasoning_enabled` 不直接透传，框架 metadata 默认不发送。直接使用底层传输且没有档案时不自动添加控制。
+- 思考开关保留三态：未指定不添加控制，True 显式启用，False 显式关闭；
+  DeepSeek 使用 `thinking.type` 和 `reasoning_effort`，缺失历史思考仅补空字段。
+- 不注入 `stream_options.include_usage`：usage 依赖上游自愿返回，缺失字段使用统一 DeepSeek tokenizer 补偿，输出包含正文、真实思考和工具参数；
 - 工具终态携带的 `finish_reason` 附着在工具事件上，截断调用在发布前即可被拦截。
 
 `provider.capabilities.transport.reasoning.request_format` 支持以下值。下列配置是已有
-capabilities 的 **transport 片段**，不代替完整模型能力声明；既有外层 capabilities 包装也支持。
+capabilities 的 **transport 片段**，只定义序列化映射，不授予模型能力；既有外层 capabilities 包装也支持。
 
 | 值 | Chat HTTP 请求行为 |
 |---|---|
-| `none`（默认） | 不自动发送思考控制字段 |
+| `none` | 不自动发送思考控制字段；底层传输无档案时使用 |
 | `fields` | 按 `enabled_field` / `effort_field` 发送；只配置一个时只发送该字段 |
-| `effort` | 仅发送 `effort_field`，默认名为 `reasoning_effort` |
+| `effort`（普通 Bridge 自动档案默认） | 仅发送 `effort_field`，默认名为 `reasoning_effort` |
 | `openrouter` | 使用嵌套 `reasoning.enabled` / `reasoning.effort`；已有 `max_tokens` 预算时不再添加 effort |
 
 未写 `request_format` 但配置了字段名时，按 `fields` 处理；显式选择 `fields` 且两个字段名
@@ -273,6 +309,8 @@ capabilities 的 **transport 片段**，不代替完整模型能力声明；既�
   不为了复用 Kemo 对象而额外套用 1 MiB 限制，也不自动压缩原图。厂商实际限制仍需分别遵守。
 - 主循环 Chat→内部请求映射必须显式传入真实 transport；子代理媒体投影采用相同图片类型，
   保持原始校验和、MIME、detail 与工具调用/结果配对。
+- `ChatImageContent` 和 `ChatMessageItem` 在 adapter 内完成 20 MiB 校验；原生 `AssetContent`
+  没有可放宽内联大小的类属性或字段，固定使用协议的 1 MiB 上限。
 - 默认协议模型和 Chat→Kemo 转换仍按原生 1 MiB 上限处理；内部专用图片类型不得绕过
   Kemo Provider 的原生验证。大图通过 Kemo Asset 引用发送，不修改 wire Schema。
 - 媒体准备中的 Pydantic 校验失败转换为脱敏的媒体错误，并准确记录 failed；
@@ -290,18 +328,34 @@ capabilities 的 **transport 片段**，不代替完整模型能力声明；既�
 - 缺失上游思考而正文、拒绝说明或工具响应有效时，不凭空补成模型思考。
   兼容占位仅作为本地诊断处理，不进入协议 `ReasoningItem.content`、公开思考事件或下一轮
   `reasoning_content`；真实上游思考及签名状态仍按各自合同保留。
-- `reasoning_details` 按原值保留；SSE 按 index 聚合文本、密文和签名分片，
-  不改写签名、跨模型或跨地址复用。状态使用现有 `ReasoningItem.provider_state`
+- SSE 按 index 聚合真实文本、密文和签名分片；持久化续接状态只保留签名、标识和密文，
+  移除可读 text/summary/reasoning_content/reasoning 正文，不改写签名或跨模型、跨地址复用。
+  状态使用现有 `ReasoningItem.provider_state`
   中 `provider=chat-adapter` 的 opaque 数据，不新增协议字段；同次响应正文和工具调用
   合并为一个 assistant 消息，使状态留在工具调用消息上。
-- 只有配置 `transport.reasoning.history_field` 为 `reasoning_content` 或 `reasoning`
-  时才保存和回放对应的真实普通思考；`reasoning_details` 自动保留原始续接块，也可以显式指定。
-  损坏、版本不符或地址/模型不匹配的状态不回放，内部标记在发 HTTP 前移除。
+- `transport.reasoning.history_field` 只控制正常 ReasoningItem 中真实思考的回放，不把正文另存进
+  provider_state。旧版编码状态在解码后同样去除正文。损坏、版本不符或地址/模型不匹配的状态
+  不回放，内部标记在发 HTTP 前移除。有效的本适配器签名状态可作为实际续接能力证据，
+  不依赖用户能力声明；陌生 provider_state 仍按未知高级能力拒绝。
 - 状态先按现有凭据脱敏规则检查，再压缩；编码后最多 8192 字符、解码后最多 262144 字节，
   超限明确失败，不能截断签名再执行工具。状态通过既有内部持久化通道保存，
   不写入公开流事件；公开帧也移除含签名或密文的 `reasoning_details`。
+- 没有可验证 `provider_state` 的旧 reasoning 历史不再把正文发送给上游；只保留可安全重放的
+  continuation 标识（如 signature、index、type、data 等有限字段），正文、`text`、
+  `summary`、`reasoning_content` 和 `reasoning` 一律剥离。不能把“旧历史可见”当作“可回放正文”。
 - 普通 Chat 地址保留配置的 API 前缀和查询参数，已包含 `/chat/completions` 时不重复拼接，
   不擅自增加或移除 `/v1`。
+- 文本 delta 到达即输出，保持上游顺序；SSE 复用协议分帧器，将同一事件多行 data 用换行拼接。
+  refusal 经 output_refusal.delta/done 发出。消息开始时无法预知后续是否出现工具调用，
+  此时 `MessageItemStart.phase` 允许缺省，不延迟文本；终态 `MessageItem.phase` 按最终是否
+  出现工具调用判定为 commentary 或 final_answer，与非流式路径一致，且不回改已发出的 start 帧。
+- Chat Bridge 仅返回单候选：n>1 的有效请求按 n=1 发出，choice_index=0、choice_count=1；
+  忽略不属于首候选的流帧，避免合并候选。Kemo 原生 Batch 合同保持不变。
+- 未知或畸形输入内容块明确拒绝；工具省略 strict 时遵循原生默认 True，只有显式 False 才关闭。
+  `text`/`input_text`/`output_text` 块的 `text` 也必须是字符串；整数、`None`、数组等
+  不静默转字符串或制造空文本块，直接返回 `CapabilityError`。
+  显式空字符串、空 text 块及空数组保留为空内容，不生成空 TextContent；非空字符串原样保留。
+  工具结果按原生协议至少需要一项内容，空工具字符串直接返回 CapabilityError，不造占位块。
 
 这些分支已用本地模拟中转站覆盖字段拒绝、真实思考别名、签名续接、持久化回放、
 空响应和流式降级；不代表已对所有厂商或真实中转站完成联调。DeepSeek 的专用占位与请求策略
@@ -318,10 +372,9 @@ DeepSeek 的特殊适配只在 Chat adapter 内按官方主机或 `deepseek-` �
 - 上游提供真实 `reasoning_content` 时完整保留并回传；同一响应中的正文说明和工具调用
   组合到同一个 assistant 消息，避免思考内容只附在说明消息上、工具消息反而丢失思考。
   合并只发生在紧邻的正文与工具调用之间，不跨越新的思考片段或其他消息。
-- 开启思考并携带工具时，历史 assistant 消息缺少思考字段或字段为空，Chat adapter 为其补入
-  固定占位 `[DeepSeek compatibility placeholder: upstream reasoning was not provided.]`。
-  官方接口和中转站默认均启用此兼容方式。占位只说明上游缺失数据，不冒充真实模型思考；
-  已有非空思考内容保持原样，序列化不回写调用方传入的历史字典。
+- 开启思考并携带工具时，历史 assistant 消息缺少思考字段、字段为空或为旧兼容占位，
+  Chat adapter 仅补空 reasoning_content；真实非空思考保持原样，序列化不回写原历史字典。
+  已知旧占位在 Chat→协议映射时也被移除，不成为 ReasoningItem 正文。
 - 非流式、SSE 和流式 JSON 降级共用此策略。新响应缺失思考时，兼容占位保留
   `reasoning_synthetic=true` 和 `missing_upstream_reasoning` 诊断，方便识别其来源。
   完整工具调用仍可继续执行，截断、无效参数和其他错误继续按原合同拦截。
@@ -340,7 +393,7 @@ DeepSeek 的特殊适配只在 Chat adapter 内按官方主机或 `deepseek-` �
 
 Chat HTTP 传输层对一次调用只发起一次请求，连接失败、429、5xx 和流式中断向统一运行级重试所有者报告，不在传输层另开重试循环：
 
-- 错误保留 HTTP 状态、错误分类和可用的 `Retry-After`（上限 10 秒），运行级预算按本文前面的错误序列规则执行；
+- 错误保留 HTTP 状态、错误分类和可用的 `Retry-After`（适配器上限10秒）；主请求及子代理按前述各自有限预算执行；
 - 已产出文本、思考或工具分片后，HTTP 传输层也不自行重发，避免重复拼接输出或调用工具；
 - 401、403、409 和普通 400 同样向上报告，不在本层改写请求规避错误。
 
@@ -434,17 +487,18 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
 - `tool_call.completed` 只作整批暂存，只有 `response.completed(status=requires_action)` 到达后调用方才可执行；断流不得提前执行。
 - 双仓共享固定 `vendor/kemo_protocol-2.0.zip`，由 Agent 的 `provider/protocol` 生成，Gateway 通过 lock 文件校验 SHA-256。
 
-## Chat 自动兼容档案（2026-10-26）
+## Chat 自动兼容档案（2026-10-31）
 
 普通用户只配置 Chat 地址、模型和凭据，不必手写 `capabilities` 或运行检测工具。
 `provider/chat_profiles.py` 按实际请求模型统一解析有效档案，并由 Chat Bridge 将相同档案交给
 能力校验、请求转换和 HTTP 策略；子代理换模型重新解析，不借用主模型档案。
 解析不发探测请求、不改用户配置，亦不修改原生 Kemo 的协议默认与 vendor 选项授权。
 
-- 优先级：用户显式覆盖 → 内置精确型号兼容档案 → 基础 Chat 兼容策略。
-  显式能力组整体替换该组，避免关闭 function_calling 后还继承 parallel=true；transport 单独合并。
+- 能力由内置精确型号档案与标准 Chat 默认策略决定。旧 capabilities 中的能力声明已 deprecated，
+  加载配置时提示并忽略，不修改原配置；transport 与正式 vendor 映射白名单单独保留。
 - 基础策略允许普通 function calling、并行工具、auto/none/required/named、常用采样字段
-  temperature/top_p/stop/presence_penalty/frequency_penalty，以及非 strict 的 json_object。
+  temperature/top_p/stop/presence_penalty/frequency_penalty、reasoning，以及非 strict 的
+  json_object/json_schema。默认思考映射为 effort，厂商 transport 可定义字段格式。
   来源标记为 `capability_source=compat-default`、`capability_verification=assumed`，
   表示兼容尝试而不是端点经过验证。无凭据探测、无剥离工具重试，服务端不支持仍明确报错。
 - 目前内置 `deepseek-flash`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、
@@ -452,11 +506,10 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
   官方地址标记 documented-endpoint，同名中转标记 assumed-relay，不冒充中转已联调。
   官方依据为 2026-10-26 的 DeepSeek Models & Pricing 和 Thinking Mode 文档。
 - DeepSeek 逻辑档位按既有明确映射发成 thinking.type / reasoning_effort；工具模式保守限制
-  auto/none，与当前转换器一致。Flash 档案声明 image 输入，v4-pro 不声明；没有显式
-  input_modalities 限制时，视觉路由可直接采用本地档案。已有 text-only 限制仍保留。
-- 未知 Chat 不声明 reasoning、strict JSON schema、思考摘要、跨轮持久思考状态和多媒体输出。
-  显式思考声明没有对应 wire 控制时，有效档案标记 reasoning_unmapped 并关闭该能力，
-  不再出现“框架声称已开启、实际发送时悄悄丢弃控制”的成功假象。
+  auto/none，与当前转换器一致。Flash 档案声明 image 输入，v4-pro 不声明；名称带 vision
+  的模型自动推定 image 输入并标记 assumed。DeepSeek 结构化输出单独限制为 json_object。
+- 未知 Chat 的 strict JSON schema、思考摘要、跨轮持久思考状态、prediction 和多媒体输出
+  继续 fail-closed；这些能力不因用户填写 capabilities 而开启。基础聊天与工具请求仍可运行。
 - 当前工具结果仅原生表达 text/json/reference，multimodal_results 始终 false；媒体工具结果
   明确拒绝，不把图片描述 JSON 当作原生看图。已有 attach_media 队列可把图片投影到下一次
   user 消息，是否接受仍按实际模型模态与视觉路由校验。
@@ -470,8 +523,8 @@ Kemo 网关已经提供类型化 `ToolCallItem`、明确响应状态和有序 SS
 
 - 原生协议校验不接受 `allow_chat_images` 参数；其 ImageContent 始终按 wire 1 MiB 重验。
   Chat 20 MiB 原图由适配器本地校验，不调用一个放宽原生模型的开关。
-- Chat 有效档案按上一节自动选择，显式覆盖保留；未知端点的基础兼容假设明确标记，
-  未实现/未确认的高级能力保持关闭，不能用自造的全支持默认能力自验。
+- Chat 有效档案按上一节自动选择，用户能力声明不参与选择；未知端点的标准兼容假设明确标记，
+  未实现/未确认的高级能力保持关闭。
 - reasoning 必须同时有有效能力与对应传输映射；主对话和子代理据此自动选择并显式提交
   启用标记，不要求用户自行测试，也不因“Chat兼容”而向所有端点发思考字段。
 - `provider_options` 全量校验，只有 `vendor.<provider>.<option>` 命名且 profile 显式登记的键
