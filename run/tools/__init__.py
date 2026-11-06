@@ -16,9 +16,8 @@ if TYPE_CHECKING:
         write_job_request as write_job_request,
     )
 
-from typing import TYPE_CHECKING
-
 import asyncio
+import copy
 import importlib.util
 import inspect
 import json
@@ -44,113 +43,19 @@ from run.tools.execution_watchdog import (
 from run.infra import run_awaitable, start_isolated_tool
 from run.config import MainAgentSourcePolicy
 from run.retry import HOST_CONTROL_EXCEPTIONS
-
-
-class ToolError(RuntimeError):
-    pass
-
-
-class ToolValidationError(ToolError):
-    pass
-
-
-class ToolTimeoutError(ToolError):
-    category = "timeout"
-    retryable = False
-
-    def __init__(self, message: str, *, still_running: bool = False, completion_future: Any = None) -> None:
-        super().__init__(message)
-        self.still_running = bool(still_running)
-        self.completion_future = completion_future
-
-
-class ToolExecutionCapacityError(ToolError):
-    category = "execution_capacity"
-    retryable = False
-
-
-class ToolProcessError(ToolError):
-    if TYPE_CHECKING:
-        category: str
-        status_code: int
-        retryable: bool
-        retry_after_ms: int
-        attempt_count: int
-
-    def __init__(self, detail: dict[str, Any]) -> None:
-        super().__init__(str(detail.get("message") or "隔离工具执行失败"))
-        self.remote_exception_type = str(
-            detail.get("exception_type") or "ToolProcessError"
-        )
-        for detail_field in (
-            "category",
-            "status_code",
-            "retryable",
-            "retry_after_ms",
-            "attempt_count",
-        ):
-            value = detail.get(detail_field)
-            if value is not None:
-                setattr(self, detail_field, value)
-
-
-class ToolCancelledError(ToolError):
-    """The user explicitly cancelled the run while a tool was executing."""
-
-    def __init__(self, message: str, *, completion_future: Any = None) -> None:
-        super().__init__(message)
-        self.completion_future = completion_future
-        self.still_running = completion_future is not None and not completion_future.done()
-
-class ToolResultTooLargeError(ToolError):
-    """A tool completed, but its inline result is unsafe to place in context."""
-
-    category = "result_too_large"
-    retryable = False
-    counts_as_failure = False
-
-    def __init__(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-        *,
-        result_chars: int,
-        limit_chars: int,
-    ) -> None:
-        self.tool_name = str(tool_name or "unknown_tool").strip()[:128] or "unknown_tool"
-        self.result_chars = max(0, int(result_chars))
-        self.limit_chars = max(1, int(limit_chars))
-        self.action = str(arguments.get("action") or "").strip()[:256]
-        self.path = str(arguments.get("path") or "").strip()[:512]
-        self.instruction = _oversized_result_instruction(
-            self.tool_name,
-            self.action,
-        )
-        super().__init__(
-            f"工具 {self.tool_name} 返回约 {self.result_chars} 字符，"
-            f"超过 {self.limit_chars} 字符上限；正文未返回"
-        )
-
-    def error_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "message": str(self),
-            "exception_type": type(self).__name__,
-            "category": self.category,
-            "retryable": self.retryable,
-            "result_chars": self.result_chars,
-            "limit_chars": self.limit_chars,
-            "content_omitted": True,
-            "execution_completed": True,
-            "instruction": "执行已经完成，先核对副作用，禁止原样重试。 " + self.instruction,
-        }
-        if self.action:
-            payload["action"] = self.action
-        if self.path:
-            payload["path"] = self.path
-        return payload
+from run.tools.errors import (
+    ToolCancelledError,
+    ToolError,
+    ToolExecutionCapacityError,
+    ToolProcessError,
+    ToolResultTooLargeError,
+    ToolTimeoutError,
+    ToolValidationError,
+)
 
 
 _TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
+_TOOL_PERMISSIONS = frozenset({"read", "write", "delete", "external"})
 _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
 _TOOL_CANCEL_CLEANUP_GRACE = 0.1
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
@@ -161,37 +66,29 @@ _SUBAGENT_DEFAULT_WATCHDOG_SECONDS = 3_600.0
 MAX_TOOL_RESULT_CHARS = 100_000
 
 
-def _oversized_result_instruction(tool_name: str, action: str) -> str:
-    if tool_name == "file" and action == "read":
-        return (
-            "请先使用 file.stat 查看文件大小，再使用 file.read_range，并通过 "
-            "start_line/end_line 或 tail 分段读取"
-        )
-    if tool_name == "file" and action == "read_range":
-        return (
-            "请缩小 file.read_range 的 start_line/end_line、max_lines 或 tail 范围后重试"
-        )
-    if tool_name == "file":
-        return (
-            "请先使用 file.stat 检查目标，再使用 file.read_range 并缩小 "
-            "start_line/end_line、max_lines 或 tail 范围"
-        )
-    if tool_name == "shell":
-        return "请缩小命令输出范围，或将完整输出写入文件后使用 file.read_range 分段读取"
-    return (
-        "请缩小查询或读取范围、降低 limit/max_results，"
-        "或将完整结果保存为文件后分段读取"
-    )
-
-
 def _enforce_tool_result_limit(
     tool_name: str,
     arguments: dict[str, Any],
     value: Any,
     context: dict[str, Any] | None = None,
+    *,
+    preserve_result: bool = False,
 ) -> Any:
+    # CardStream owns full RAW and applies its ordinary card-capacity policy.
+    # Do not silently turn a main-integration result into a truncated receipt.
+    if preserve_result:
+        return value
     rendered = json.dumps(value, ensure_ascii=False, default=str)
     if len(rendered) > MAX_TOOL_RESULT_CHARS:
+        if context and context.get("root") and context.get("user") and (
+            not isinstance(value, dict) or "ok" not in value
+        ):
+            from run.infra import record_runtime_event
+            record_runtime_event(
+                Path(context["root"]), str(context["user"]),
+                category="backend", name="tool_result_missing_ok", status="failed",
+                tool_name=tool_name, session_id=str(context.get("session_id") or ""),
+            )
         if context and context.get("root") and context.get("user"):
             from run.tools.result_artifacts import save_result_artifact
             try:
@@ -202,7 +99,7 @@ def _enforce_tool_result_limit(
                 artifact = None
             if artifact is not None:
                 return {
-                    "ok": not (isinstance(value, dict) and value.get("ok") is False),
+                    "ok": isinstance(value, dict) and value.get("ok") is True,
                     "execution_completed": True,
                     "content_omitted": True, "result_chars": len(rendered),
                     "artifact": artifact,
@@ -257,6 +154,10 @@ class ConsecutiveIdenticalToolCallTracker:
     def is_blocked(self, count: int) -> bool:
         return count > self.limit
 
+    def next_count(self, name: str, arguments: dict[str, Any]) -> int:
+        """Peek before execution; rejected/deduplicated calls must not mutate count."""
+        return self.count + 1 if tool_call_signature(name, arguments) == self.signature else 1
+
 
 @dataclass(slots=True)
 class ConsecutiveToolFailureTracker:
@@ -288,6 +189,10 @@ class ConsecutiveToolFailureTracker:
             self.unavailable.add(name)
         return self.count
 
+    def record_capacity_limited(self, name: str) -> int:
+        """Leave the business-failure streak unchanged for an unstarted call."""
+        return self.count if name == self.tool_name else 0
+
 
 @dataclass(slots=True)
 class ToolDefinition:
@@ -303,8 +208,10 @@ class ToolDefinition:
     timeout_policy: str = "argument_or_default"
     timeout_grace_seconds: float = 0.0
     execution_mode: str = "thread"
+    permission: str = "write"
     overrides: list[str] = field(default_factory=list)
     _callable: Callable[..., Any] | None = field(default=None, repr=False)
+    _loaded_from_entrypoint: bool = field(default=False, init=False, repr=False)
 
     def openai_schema(self) -> dict[str, Any]:
         return {
@@ -340,6 +247,7 @@ class ToolDefinition:
         if not callable(function):
             raise ToolError(f"工具 {self.name} 入口不可调用：{self.entrypoint}")
         self._callable = function
+        self._loaded_from_entrypoint = True
         return function
 
 
@@ -358,6 +266,13 @@ class ToolRegistry:
 
     def schemas(self, *, exclude: set[str] | None = None) -> list[dict[str, Any]]:
         return [tool.openai_schema() for tool in self.enabled_tools(exclude=exclude)]
+
+    def protocol_tools(self, *, exclude: set[str] | None = None):
+        from provider.protocol.models import ToolDefinition as ProtocolTool
+        return [ProtocolTool(
+            name=tool.name, description=tool.description,
+            parameters=copy.deepcopy(tool.input_schema), strict=tool.strict,
+        ) for tool in self.enabled_tools(exclude=exclude)]
 
     def selected(self, names: set[str]) -> "ToolRegistry":
         selected = {
@@ -396,6 +311,7 @@ def _definition(manifest: PluginManifest) -> ToolDefinition:
         timeout_policy=str(raw.get("timeout_policy") or "argument_or_default"),
         timeout_grace_seconds=float(raw.get("timeout_grace_seconds") or 0),
         execution_mode=str(raw.get("execution_mode") or "process"),
+        permission=str(raw.get("permission") or "write"),
     )
 
 
@@ -412,7 +328,10 @@ def discover_tools(root: Path, user: str) -> ToolRegistry:
 
 
 def apply_runtime_tool_policy(
-    registry: ToolRegistry, config: dict[str, Any]
+    registry: ToolRegistry,
+    config: dict[str, Any],
+    *,
+    allowed_permissions: set[str] | None = None,
 ) -> ToolRegistry:
     """Apply global runtime switches that control individual registered tools."""
 
@@ -428,6 +347,21 @@ def apply_runtime_tool_policy(
         names &= set(source_policy.plugins.names)
     if not history_read_enabled:
         names.discard("history_search")
+    configured_permissions = set(source_policy.plugin_permissions)
+    if allowed_permissions is None:
+        allowed_permissions = configured_permissions
+    else:
+        allowed_permissions &= configured_permissions
+    if allowed_permissions is not None:
+        unknown_permissions = allowed_permissions - _TOOL_PERMISSIONS
+        if unknown_permissions:
+            raise ToolError(
+                f"未知工具权限级别：{', '.join(sorted(unknown_permissions))}"
+            )
+        names = {
+            name for name in names
+            if registry.tools[name].permission in allowed_permissions
+        }
     return registry.selected(names)
 
 
@@ -558,10 +492,16 @@ def _execute_tool_process(
     context: dict[str, Any],
     effective_timeout: float,
     cancel_event: threading.Event | None,
+    preserve_result: bool = False,
 ) -> Any:
     file_name, separator, function_name = tool.entrypoint.partition(":")
     if not separator or not file_name or not function_name:
         raise ToolError(f"工具 {tool.name} entrypoint 无效：{tool.entrypoint}")
+    outbound_transport = None
+    if tool.name == "external_message":
+        from message.isolated_output import prepare_outbound
+        snapshot, outbound_transport = prepare_outbound(context, str(arguments.get("platform") or ""))
+        context = {**context, "_outbound_snapshot": snapshot}
     try:
         call = start_isolated_tool(
             module_path=tool.directory / file_name,
@@ -601,8 +541,19 @@ def _execute_tool_process(
                     continue
             call.wait(1)
             if payload.get("ok") is True:
+                value = payload.get("value")
+                if outbound_transport is not None and isinstance(value, dict) and value.get("ok") is True:
+                    try:
+                        outbound_transport._update_state(
+                            lambda state: state.__setitem__(
+                                "messages_sent_today", state["messages_sent_today"] + 1,
+                            )
+                        )
+                    except Exception:
+                        # A lost diagnostic counter cannot undo a confirmed send.
+                        pass
                 return _enforce_tool_result_limit(
-                    tool.name, arguments, payload.get("value"), context=context
+                    tool.name, arguments, value, context=context, preserve_result=preserve_result,
                 )
             detail = payload.get("error")
             raise ToolProcessError(detail if isinstance(detail, dict) else {})
@@ -619,7 +570,24 @@ def _execute_tool_impl(
     context: dict[str, Any],
     timeout: float,
     cancel_event: threading.Event | None = None,
+    preserve_result: bool = False,
 ) -> Any:
+    if tool.name == "file" and isinstance(arguments, dict):
+        mode = arguments.get("mode")
+        if mode is not None and mode not in {"name", "content"}:
+            raise ToolValidationError(
+                "mode 只接受 name / content；旧值 file、name 对应 name，"
+                "旧值 text、content、code 对应 content"
+            )
+    if tool.name == "web_search" and isinstance(arguments, dict):
+        if "include_answer" in arguments:
+            raise ToolValidationError(
+                "answer 只接受 none / basic / advanced（替代原 include_answer）"
+            )
+        if "include_raw_content" in arguments:
+            raise ToolValidationError(
+                "raw_content 只接受 none / markdown / text（替代原 include_raw_content）"
+            )
     validate_arguments(tool.input_schema, arguments)
     if cancel_event is not None and cancel_event.is_set():
         raise ToolCancelledError("工具调用因用户紧急停止而取消")
@@ -629,24 +597,21 @@ def _execute_tool_impl(
         default_timeout=timeout,
         context=context,
     )
-    if tool.execution_mode == "process" and tool._callable is None:
+    from run.tools.isolation_policy import reserve_tool_execution
+    execution_id = reserve_tool_execution(tool, arguments, context)
+    if execution_id is None:
         return _execute_tool_process(
             tool,
             arguments,
             context=context,
             effective_timeout=effective_timeout,
             cancel_event=cancel_event,
+            preserve_result=preserve_result,
         )
     tool_cancel_event = threading.Event()
     invocation_context = dict(context)
     invocation_context["tool_timeout"] = effective_timeout
     invocation_context["cancel_event"] = tool_cancel_event
-    try:
-        execution_id = reserve_execution(
-            f"tool:{context.get('root', '')}:{context.get('user', '')}:{tool.name}"
-        )
-    except ExecutionCapacityError as exc:
-        raise ToolExecutionCapacityError(str(exc)) from exc
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{tool.name}")
     try:
         future = executor.submit(
@@ -697,7 +662,9 @@ def _execute_tool_impl(
                 )
             try:
                 value = future.result(timeout=min(0.1, remaining))
-                return _enforce_tool_result_limit(tool.name, arguments, value, context=context)
+                return _enforce_tool_result_limit(
+                    tool.name, arguments, value, context=context, preserve_result=preserve_result,
+                )
             except FutureTimeout:
                 continue
     finally:
@@ -712,6 +679,7 @@ def execute_tool(
     context: dict[str, Any],
     timeout: float,
     cancel_event: threading.Event | None = None,
+    preserve_result: bool = False,
 ) -> Any:
     """Observe execution without copying arguments, output or exception messages."""
     started = time.monotonic()
@@ -719,6 +687,7 @@ def execute_tool(
     try:
         result = _execute_tool_impl(
             tool, arguments, context=context, timeout=timeout, cancel_event=cancel_event,
+            preserve_result=preserve_result,
         )
         if isinstance(result, dict):
             reported = result.get("status")
@@ -734,7 +703,11 @@ def execute_tool(
                     status = "failed"
         return result
     except BaseException as exc:
-        status = "cancelled" if isinstance(exc, (ToolCancelledError, KeyboardInterrupt, asyncio.CancelledError)) else "failed"
+        status = (
+            "running" if bool(getattr(exc, "still_running", False))
+            else "cancelled" if isinstance(exc, (ToolCancelledError, KeyboardInterrupt, asyncio.CancelledError))
+            else "failed"
+        )
         error_type = type(exc).__name__
         raise
     finally:
@@ -752,6 +725,8 @@ def execute_tool(
 
 
 _DOMAIN_MODULES = (
+    "runtime",
+    "result_contracts",
     "execution_watchdog",
     "provider_tool_recovery",
     "background_jobs",

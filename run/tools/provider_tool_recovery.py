@@ -172,12 +172,29 @@ def invalid_tool_call_error(item: ToolCallItem) -> dict[str, Any]:
 def is_invalid_tool_arguments_error(error: Any) -> bool:
     if not isinstance(error, dict):
         return False
-    return (
-        str(error.get("stop_reason") or "").strip().casefold()
-        == INVALID_TOOL_ARGUMENTS_STOP_REASON
-        or str(error.get("exception_type") or "").strip()
-        == PROVIDER_TOOL_ARGUMENTS_ERROR
-    )
+    for key in ("stop_reason", "exception_type", "type", "category", "code"):
+        value = str(error.get(key) or "").strip().casefold()
+        if value in {
+            INVALID_TOOL_ARGUMENTS_STOP_REASON,
+            PROVIDER_TOOL_ARGUMENTS_ERROR.casefold(),
+        }:
+            return True
+    for key in ("incomplete_details", "details"):
+        details = error.get(key)
+        if not isinstance(details, dict):
+            continue
+        if (
+            str(details.get("reason") or "").strip().casefold()
+            == INVALID_TOOL_ARGUMENTS_STOP_REASON
+        ):
+            return True
+        nested = details.get("details")
+        if isinstance(nested, dict) and (
+            str(nested.get("reason") or "").strip().casefold()
+            == INVALID_TOOL_ARGUMENTS_STOP_REASON
+        ):
+            return True
+    return False
 
 
 def invalid_tool_name(error: dict[str, Any]) -> str:
@@ -211,25 +228,37 @@ def response_invalid_tool_arguments_error(
     )
     if invalid_call is not None:
         return invalid_tool_call_error(invalid_call)
-    details = response.incomplete_details
+    classified = False
+    if response.status == ResponseStatus.INCOMPLETE:
+        details = response.incomplete_details
+    elif response.status == ResponseStatus.FAILED and response.error is not None:
+        try:
+            provider_error = response.error.model_dump(
+                mode="json", exclude_none=True
+            )
+        except Exception:
+            provider_error = {}
+        if not is_invalid_tool_arguments_error(provider_error):
+            return None
+        classified = True
+        details = provider_error.get("details")
+    else:
+        return None
     if details is not None and hasattr(details, "model_dump"):
         try:
-            details = details.model_dump(mode="python")
+            details = details.model_dump(mode="json", exclude_none=True)
         except Exception:
             details = None
-    if response.status != ResponseStatus.INCOMPLETE or not isinstance(details, dict):
+    if not isinstance(details, dict):
         return None
     nested = details.get("details")
     if isinstance(nested, dict):
         details = {**nested, **details}
-    if (
-        str(details.get("reason") or "").strip().casefold()
-        != INVALID_TOOL_ARGUMENTS_STOP_REASON
-    ):
+    if not classified and not is_invalid_tool_arguments_error({"details": details}):
         return None
     safe_details = safe_invalid_tool_details(details)
     error: dict[str, Any] = {
-        "message": "Provider 返回的工具参数不是完整 JSON 对象",
+        "message": "Provider 返回的工具参数未通过校验",
         "exception_type": PROVIDER_TOOL_ARGUMENTS_ERROR,
         "phase": "provider",
         "stop_reason": INVALID_TOOL_ARGUMENTS_STOP_REASON,
@@ -238,7 +267,7 @@ def response_invalid_tool_arguments_error(
     name = invalid_tool_name(error)
     if name:
         error["tool_name"] = name
-        error["message"] = f"Provider 返回的工具 {name!r} 参数不是完整 JSON 对象"
+        error["message"] = f"Provider 返回的工具 {name!r} 参数未通过校验"
     return error
 
 
@@ -246,10 +275,10 @@ def tool_argument_repair_instruction(*, tool_name: str, retry_number: int) -> st
     target = f"工具 {tool_name!r}" if tool_name else "刚才的工具"
     return (
         "[provider_tool_argument_repair]\n"
-        f"上一次生成{target}时，arguments 不是完整 JSON 对象。"
+        f"上一次生成{target}时，arguments 未通过 Provider 校验或不是完整 JSON 对象。"
         f"这是第 {retry_number} 次恢复请求。请只重新生成原计划中的完整工具调用，"
-        "确保 arguments 的根节点是完整 JSON object；不要重复已经输出的解释文字，"
-        "也不要把 JSON 放进普通文本。\n"
+        "严格符合当前工具 Schema，并确保 arguments 的根节点是完整 JSON object；"
+        "不要重复已经输出的解释文字，也不要把 JSON 放进普通文本。\n"
         "[/provider_tool_argument_repair]"
     )
 

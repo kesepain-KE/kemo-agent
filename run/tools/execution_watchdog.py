@@ -1,9 +1,9 @@
 """Bound cooperative background executions that outlive their caller timeout.
 
 Python cannot safely terminate an already-running thread.  This registry makes
-that limitation explicit: completed calls clean themselves up, calls that miss
-their cancellation grace period are marked abandoned, and new work is rejected
-once too many abandoned calls are still alive.
+that limitation explicit: completed calls clean themselves up and calls that miss
+their cancellation grace remain registered. Independent work can use process
+isolation when its own role/tool bucket is exhausted or contains an aged deadlock.
 """
 
 from __future__ import annotations
@@ -17,10 +17,15 @@ from typing import Any
 
 
 MAX_ABANDONED_EXECUTIONS = 8
+DEADLOCK_SECONDS = 5 * 60
 
 
 class ExecutionCapacityError(RuntimeError):
     pass
+
+
+class ExecutionIsolationRequired(ExecutionCapacityError):
+    """Only a new, independently protected call may use process isolation."""
 
 
 @dataclass(slots=True)
@@ -28,6 +33,8 @@ class _Execution:
     label: str
     state: str
     created_at: float
+    bucket: str = ""
+    abandoned_at: float | None = None
     future: Future[Any] | None = None
     executor: ThreadPoolExecutor | None = None
 
@@ -56,7 +63,7 @@ def _prune_completed_locked() -> list[ThreadPoolExecutor]:
     return completed
 
 
-def reserve_execution(label: str) -> str:
+def reserve_execution(label: str, *, bucket: str | None = None) -> str:
     completed: list[ThreadPoolExecutor]
     with _EXECUTIONS_LOCK:
         completed = _prune_completed_locked()
@@ -67,16 +74,24 @@ def reserve_execution(label: str) -> str:
             raise ExecutionCapacityError(
                 "同一执行仍在超时后的后台退出过程中，已拒绝重复启动"
             )
-        abandoned = sum(entry.state == "abandoned" for entry in _EXECUTIONS.values())
-        if abandoned >= MAX_ABANDONED_EXECUTIONS:
-            raise ExecutionCapacityError(
-                f"后台仍有 {abandoned} 个超时执行未退出，已暂停启动新的执行"
+        abandoned = [
+            entry for entry in _EXECUTIONS.values()
+            if entry.state == "abandoned" and entry.bucket == (bucket or label)
+        ]
+        if len(abandoned) >= MAX_ABANDONED_EXECUTIONS or any(
+            entry.abandoned_at is not None
+            and time.monotonic() - entry.abandoned_at >= DEADLOCK_SECONDS
+            for entry in abandoned
+        ):
+            raise ExecutionIsolationRequired(
+                "本角色工具存在未退出的超时执行；新独立调用须使用进程隔离"
             )
         execution_id = uuid.uuid4().hex
         _EXECUTIONS[execution_id] = _Execution(
             label=str(label or "execution"),
             state="reserved",
             created_at=time.monotonic(),
+            bucket=bucket or label,
         )
     for executor in completed:
         executor.shutdown(wait=False, cancel_futures=True)
@@ -107,6 +122,8 @@ def abandon_execution(execution_id: str) -> bool:
         if entry is None or entry.future is None or entry.future.done():
             return False
         entry.state = "abandoned"
+        if entry.abandoned_at is None:
+            entry.abandoned_at = time.monotonic()
         return True
 
 

@@ -7,12 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
-from provider.protocol.enums import ResponseStatus
+from provider.protocol.enums import ErrorCode, ResponseStatus
 from provider.protocol.models import (
     KemoResponse,
     Measurement,
     ModelCapabilities,
     ToolCallItem,
+    UnifiedError,
     Usage,
 )
 from provider.schema import ToolCall
@@ -93,7 +94,7 @@ def _runner(provider: RecoveryProvider, *, retries: int = 2) -> AgentRunner:
         "provider": {
             "type": "kemo",
             "base_url": "http://127.0.0.1:1",
-            "api_key_env": "TEST_AGENT_KEY",
+            "api_key_env": "KEMO_API_KEY",
             "model": "mock",
         },
         "tools": {
@@ -115,9 +116,11 @@ def _history_summary_input() -> dict:
     return {
         "trigger": "session_closed",
         "session_id": "conv_provider_recovery",
-        "target_round": 1,
-        "previous_summary": None,
-        "rounds": [{"round": 1, "user": "问题", "assistant": "回答"}],
+        "target_seq": 2,
+        "records": [
+            {"seq": 1, "role": "user", "text": "问题"},
+            {"seq": 2, "role": "assistant", "text": "回答"},
+        ],
     }
 
 
@@ -232,6 +235,33 @@ def test_compatibility_incomplete_details_names_subagent_dispatch() -> None:
     assert "debug" not in error["incomplete_details"]
 
 
+def test_failed_response_error_details_identify_invalid_tool_arguments() -> None:
+    response = KemoResponse(
+        request_id="req_placeholder",
+        status=ResponseStatus.FAILED,
+        model="mock",
+        output=[],
+        error=UnifiedError(
+            type="validation_error",
+            code=ErrorCode.VALIDATION_ERROR,
+            message="tool arguments rejected",
+            details={
+                "reason": "invalid_tool_arguments",
+                "invalid_tool_calls": [
+                    {"name": "subagent_dispatch", "call_id": "callid_subagent"}
+                ],
+            },
+        ),
+        usage=_usage(),
+    )
+
+    error = response_invalid_tool_arguments_error(response)
+
+    assert error is not None
+    assert error["stop_reason"] == "invalid_tool_arguments"
+    assert error["tool_name"] == "subagent_dispatch"
+
+
 def test_malformed_tool_identifier_cannot_bypass_diagnostic_redaction() -> None:
     response = KemoResponse(
         request_id="req_placeholder",
@@ -271,7 +301,7 @@ def test_subagent_retries_malformed_structured_tool_arguments() -> None:
         ]
     )
 
-    with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+    with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
         result = _runner(provider).run(
             "history_summary",
             _history_summary_input(),
@@ -301,10 +331,10 @@ def test_subagent_stops_at_configured_malformed_argument_retry_limit() -> None:
                 arguments_raw="{",
                 parse_error={"message": "invalid again"},
             ),
-        ] * 6
+        ]
     )
 
-    with patch.dict(os.environ, {"TEST_AGENT_KEY": "secret"}, clear=False):
+    with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
         with pytest.raises(AgentRunError, match="已重试 1/1 次"):
             _runner(provider, retries=1).run(
                 "history_summary",
@@ -313,4 +343,5 @@ def test_subagent_stops_at_configured_malformed_argument_retry_limit() -> None:
                 max_tokens=512,
             )
 
-    assert len(provider.requests) == 12
+    # The one configured argument repair is preserved; no outer blind replay.
+    assert len(provider.requests) == 2

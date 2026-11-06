@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -289,6 +290,17 @@ def prepare_background_job(
     if completion_mode not in {"required", "detached"}:
         raise ValueError("completion_mode 必须是 required/detached")
     from run.infra import diagnostic_text
+    ownership = dict(ownership or {})
+    # Child Shell calls bypass the main ToolRuntime. Bind them while their
+    # task still exists, before taking the job-directory write lock.
+    if not ownership.get("cardstream_integration_id") and ownership.get("owner_task_id"):
+        from run.agents import TaskLedger
+        ledger = TaskLedger(root, user)
+        task = (ledger.get(str(ownership["owner_task_id"]), source, session_id)
+                if ledger.path.exists() else None)
+        if task:
+            for key in ("cardstream_integration_id", "cardstream_generation", "cardstream_meter_key"):
+                ownership[key] = task.get(key, "")
     job_id = f"job_{uuid.uuid4().hex}"
     paths = job_paths(root, user, job_id)
     now = _now()
@@ -334,6 +346,10 @@ def prepare_background_job(
         "notification_handled": False,
         "completion_mode": completion_mode,
         "label": diagnostic_text(label)[:160],
+        **{key: ownership[key] for key in (
+            "cardstream_integration_id", "cardstream_generation", "cardstream_meter_key",
+            "original_call", "tool_call_id",
+        ) if key in ownership},
     }
     directory = paths["record"].parent
     with index_lock(root, user):
@@ -409,7 +425,31 @@ def update_background_job(
         rendered["user"] = user
         rendered["updated_at"] = _now()
         _atomic_json(paths["record"], rendered)
-        return rendered
+    # The job file is the execution fact. Publishing its history happens after
+    # releasing the directory lock, and can be repaired without re-execution.
+    return publish_background_result(root, user, rendered)
+
+
+def publish_background_result(root: Path, user: str, record: dict[str, Any]) -> dict[str, Any]:
+    if (record.get("status") not in JOB_TERMINAL_STATUSES
+            or not record.get("cardstream_integration_id")
+            or record.get("card_result_seq")):
+        return record
+    from run.tools.background_notifications import persist_shell_result
+    try:
+        seq = persist_shell_result(root, user, record)
+        changes = {"card_result_seq": seq, "card_result_error_type": ""}
+    except Exception as error:
+        logging.getLogger(__name__).exception("后台 Shell 结果卡提交失败：%s", record["job_id"])
+        changes = {"card_result_error_type": type(error).__name__}
+    path = job_paths(root, user, record["job_id"])["record"]
+    with index_lock(root, user):
+        current = _read_record(path)
+        # Another publisher may already have committed the same event.
+        if not current.get("card_result_seq"):
+            current.update(changes)
+            _atomic_json(path, current)
+        return current
 
 
 def _identity_alive(record: dict[str, Any], *, prefix: str = "") -> tuple[bool, dict[str, Any]]:
@@ -533,7 +573,7 @@ def _settle_identity_unknown(
 def reconcile_background_job(root: Path, user: str, job_id: str) -> dict[str, Any]:
     current = read_background_job(root, user, job_id)
     if current.get("status") in JOB_TERMINAL_STATUSES:
-        return current
+        return publish_background_result(root, user, current)
     process_alive, process = _identity_alive(current)
     worker_alive, worker = _identity_alive(current, prefix="worker_")
     if _deadline_expired(current):

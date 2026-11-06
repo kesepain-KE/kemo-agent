@@ -8,8 +8,57 @@ from typing import Any
 
 from run.tools.background_jobs import (
     JOB_ACTIVE_STATUSES, JOB_TERMINAL_STATUSES, _jobs_dir, _read_record, _JOB_ID_RE,
-    cancel_background_job, reconcile_background_job, update_background_job,
+    cancel_background_job, publish_background_result, reconcile_background_job, update_background_job,
 )
+
+
+def persist_shell_result(root: Path, user: str, record: dict[str, Any]) -> int:
+    """Commit one terminal job receipt, including after its response closed."""
+    from run.cards import CardConflictError, CardMeter, CardStore, session_key
+    from run.tools.background_jobs import public_background_job
+
+    source, session_id = str(record["source"]), str(record["session_id"])
+    integration_id = str(record["cardstream_integration_id"])
+    job_id = str(record["job_id"])
+    call_id = str(record.get("tool_call_id") or f"shell_{job_id}")
+    original = record.get("original_call")
+    if not isinstance(original, dict) or not {"name", "arguments"} <= original.keys():
+        raise CardConflictError("后台 Shell 缺少完整原始调用，拒绝伪造结果卡")
+    payload = {
+        "tool_call_id": call_id, "execution_id": job_id, "original_call": original,
+        "execution": {"status": record["status"], "execution_live": False,
+                      "started_at": record.get("started_at"), "finished_at": record.get("finished_at")},
+        "result": {"ok": record["status"] == "completed",
+                   **public_background_job(record, root=root),
+                   "output_tail": record.get("output_tail") or [],
+                   "output_tail_complete": record.get("output_tail_complete") is True},
+    }
+    store = CardStore(root, user)
+    event_key = f"shell-result:{job_id}"
+    with store.db(write=True) as db:
+        key = session_key(source, session_id)
+        integration = db.execute(
+            "SELECT generation FROM card_integrations WHERE integration_id=? AND session_key=?",
+            (integration_id, key),
+        ).fetchone()
+        if integration is None or integration["generation"] != record.get("cardstream_generation"):
+            raise CardConflictError("后台 Shell 结果与整合身份或代际不匹配")
+        old = db.execute(
+            "SELECT seq,integration_id FROM context_cards WHERE session_key=? AND event_key=?",
+            (key, event_key),
+        ).fetchone()
+        if old:
+            if old["integration_id"] != integration_id:
+                raise CardConflictError("后台 Shell 结果事件归属冲突")
+            return int(old["seq"])
+        state = db.execute("SELECT meter_key FROM card_sessions WHERE session_key=?", (key,)).fetchone()
+        # A late receipt can outlive the model that started it.
+        store.meter = CardMeter(key=state["meter_key"])
+        return store.append(
+            source, session_id, integration_id, "tool_result", payload,
+            tool_call_id=call_id, event_key=event_key,
+            expected_generation=record["cardstream_generation"], transaction=db,
+        ).seq
 
 
 class ShellInbox:
@@ -87,17 +136,24 @@ class ShellInbox:
         return bool(child and child.get("root_task_id") == self.root_task_id)
 
     def ready(self) -> list[dict[str, Any]]:
-        return sorted((r for r in self.records()
-                       if r.get("status") in JOB_TERMINAL_STATUSES
-                       and not r.get("notification_handled")
-                       and r["job_id"] not in self.delivered and self._recipient(r)),
-                      key=lambda r: (str(r.get("finished_at") or ""), r["job_id"]))
+        ready = []
+        for record in self.records():
+            if (record.get("status") in JOB_TERMINAL_STATUSES
+                    and not record.get("notification_handled")
+                    and record["job_id"] not in self.delivered and self._recipient(record)):
+                record = publish_background_result(self.root, self.user, record)
+                if not record.get("cardstream_integration_id") or record.get("card_result_seq"):
+                    ready.append(record)
+        return sorted(ready, key=lambda r: (str(r.get("finished_at") or ""), r["job_id"]))
 
-    def pending(self) -> list[dict[str, Any]]:
+    def pending(self, *, owned_task_ids: set[str] | None = None) -> list[dict[str, Any]]:
         records = []
         for record in self.records():
             if (record.get("completion_mode") != "required"
-                    or (not self.owner_task_id and not self._belongs_to_root(record))
+                    or (not self.owner_task_id and (
+                        not self._belongs_to_root(record) if owned_task_ids is None else
+                        record.get("root_task_id") != self.root_task_id
+                        and str(record.get("owner_task_id") or "") not in owned_task_ids))
                     or (self.owner_task_id and record.get("owner_task_id") != self.owner_task_id)):
                 continue
             if record.get("status") in JOB_ACTIVE_STATUSES:
@@ -110,6 +166,11 @@ class ShellInbox:
                     record = reconcile_background_job(self.root, self.user, record["job_id"])
                 if record.get("status") in JOB_ACTIVE_STATUSES:
                     records.append(record)
+                    continue
+            if record.get("status") in JOB_TERMINAL_STATUSES:
+                record = publish_background_result(self.root, self.user, record)
+                if record.get("cardstream_integration_id") and not record.get("card_result_seq"):
+                    records.append({**record, "status": "result_commit_pending"})
         return records
 
     def take(self) -> dict[str, str] | None:

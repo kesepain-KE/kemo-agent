@@ -331,6 +331,10 @@ def run(request_path: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
+    if len(values) == 3 and values[0] == "--collector":
+        from cron.collector import run_collector
+
+        return run_collector(Path(values[1]).resolve(), values[2])
     if len(values) != 1:
         return 2
     try:
