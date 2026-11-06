@@ -112,6 +112,13 @@ class GuidanceMailbox:
         with self._lock:
             self._open = False
 
+    def close_and_drain(self) -> list[Any]:
+        """Atomically stop offers and return values needing a final disposition."""
+
+        with self._lock:
+            self._open = False
+            return self._drain_unlocked()
+
     @property
     def accepting(self) -> bool:
         with self._lock:

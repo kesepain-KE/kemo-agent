@@ -3,40 +3,6 @@
 from __future__ import annotations
 
 
-def project_context_input(local_tokens, provider_tokens, previous_local_tokens):
-    if provider_tokens is not None and previous_local_tokens is not None:
-        delta = local_tokens - previous_local_tokens
-        return delta, max(0, provider_tokens + delta), "provider_plus_increment"
-    return None, local_tokens, "local_estimate"
-
-
-def record_context_checkpoint(stats, usage, local_tokens, provider, cache, previous):
-    from run.context import make_checkpoint
-    if usage is None or usage.estimated or usage.prompt_tokens <= 0:
-        return previous
-    stats["usage_checkpoint"] = make_checkpoint(usage.prompt_tokens, int(local_tokens), provider, cache)
-    return usage.prompt_tokens, int(local_tokens)
-
-
-def request_output_limit(runtime_provider, context_policy):
-    configured = runtime_provider.get("max_tokens")
-    return min(context_policy.output_reserve, max(1, int(configured))) if configured is not None else None
-
-
-def tool_context_guard(*, measurement, provider_input_tokens, previous_local_tokens,
-                       current_local_tokens, incremental_tokens, projected_tokens,
-                       token_limit, configured_token_limit, provider_declared_input_limit,
-                       iteration, latest_tools):
-    """One public projection for a tool-context safety stop."""
-    return {
-        "measurement": measurement, "provider_input_tokens": provider_input_tokens,
-        "previous_local_tokens": previous_local_tokens, "current_local_tokens": current_local_tokens,
-        "incremental_tokens": incremental_tokens, "projected_tokens": projected_tokens,
-        "token_limit": token_limit, "configured_token_limit": configured_token_limit,
-        "provider_declared_input_limit": provider_declared_input_limit,
-        "effective_token_limit": token_limit, "iteration": iteration, "latest_tools": latest_tools,
-    }
-
 import hashlib
 import json
 from typing import Any
@@ -130,3 +96,21 @@ def record_provider_request_diagnostic(
     )
     state.provider_request_diagnostics.append(diagnostic)
     request.metadata["prompt_hash"] = diagnostic["system_prompt_sha256"]
+
+
+def build_conversation_request(*, runtime, system_prompt, items, tools, output_reserve,
+                               stream, reasoning_enabled, reasoning_effort,
+                               user, source, session_id, run_id, integration_id, snapshot_id,
+                               iteration):
+    from provider.protocol.models import KemoRequest
+    return KemoRequest.create(
+        model=runtime["model"], system_prompt=system_prompt, input=items, tools=tools,
+        stream=stream,
+        generation={"max_output_tokens": output_reserve},
+        reasoning=({"enabled": True, "effort": reasoning_effort, "return": "auto"}
+                   if reasoning_enabled else {"enabled": False}),
+        metadata={"capability": "conversation", "user": user, "source": source,
+                  "session_id": session_id, "run_id": run_id,
+                  "integration_id": integration_id, "snapshot_id": snapshot_id,
+                  "iteration": iteration},
+    )

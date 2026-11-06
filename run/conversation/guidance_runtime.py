@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from provider.factory import provider_request_slot
 from provider.protocol.models import (
@@ -24,6 +24,24 @@ from run.extensions import (
 from run.conversation.guidance import GuidanceInput, normalize_guidance
 from run.extensions import main_model_supports_input, select_vision_route
 from run.conversation.request_input import content_for_message, uploaded_file_context
+
+
+def guidance_failure_details(values: Iterable[Any], reason: str) -> list[dict[str, Any]]:
+    """Describe undelivered inputs without claiming execution or leaking paths."""
+
+    details = []
+    for raw in values:
+        item = normalize_guidance(raw)
+        if item is None:
+            continue
+        detail = item.history_detail()
+        detail["uploaded_files"] = history_attachment_descriptors(item.uploaded_files)
+        detail.update(
+            ok=False, status="not_applied", reason=reason,
+            note="本轮已结束，此引导未进入模型请求，也未自动排入下一轮；请重新发送。",
+        )
+        details.append(detail)
+    return details
 
 
 @dataclass(slots=True)

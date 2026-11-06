@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Callable, Iterable
 
 import copy
-import json
 import threading
 from pathlib import Path
 from typing import Any, Iterator
@@ -13,7 +12,6 @@ from typing import Any, Iterator
 from events import RunEvent
 from provider.protocol.diagnostics import (
     incomplete_retry_metadata,
-    redact_diagnostic_text,
     sanitize_provider_diagnostic,
 )
 from provider.protocol.enums import ResponseStatus, StreamEventType
@@ -21,7 +19,6 @@ from provider.protocol.models import (
     KemoRequest,
     KemoResponse,
     MessageItem,
-    ProviderState,
     ReasoningItem,
     TextContent,
     ToolCallItem,
@@ -29,14 +26,12 @@ from provider.protocol.models import (
 )
 from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import ProviderError
+from provider.token_usage import complete_usage, merge_usage_snapshots
 from run.infra import ContextLengthExceededError, EngineError
 from run.extensions import persist_response_media
 from run.tools import invalid_tool_call_error
-
-
-_MAX_DURABLE_RESPONSE_CHARS = 256_000
-_MAX_DURABLE_ITEM_CHARS = 32_000
-_MAX_DURABLE_PROVIDER_STATE_CHARS = 8_192
+from run.retry import view_from_error
+from run.conversation.provider_projection import durable_provider_response_payload
 
 
 def protocol_usage_dict(usage: ProtocolUsage) -> dict[str, Any]:
@@ -55,256 +50,6 @@ def protocol_usage_dict(usage: ProtocolUsage) -> dict[str, Any]:
         }
     )
     return value
-
-
-def _bounded_durable_text(value: Any) -> str:
-    text = redact_diagnostic_text(str(value or ""))
-    if len(text) <= _MAX_DURABLE_ITEM_CHARS:
-        return text
-    return text[:_MAX_DURABLE_ITEM_CHARS] + "…(历史内容已截断)"
-
-
-def _bounded_durable_json(value: Any) -> Any:
-    bounded = sanitize_provider_diagnostic(value)
-    try:
-        encoded = json.dumps(
-            bounded,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-    except (TypeError, ValueError, RecursionError):
-        return {"content_omitted": True, "reason": "durable_diagnostic_error"}
-    if len(encoded) <= _MAX_DURABLE_ITEM_CHARS:
-        return bounded
-    return {
-        "content_omitted": True,
-        "reason": "durable_item_limit",
-        "payload_length": len(encoded),
-    }
-
-
-def _durable_provider_state(value: Any) -> dict[str, Any] | None:
-    """Keep the minimum bounded state needed for native reasoning replay.
-
-    Provider state is executable continuation data, not a general diagnostic
-    tree.  Only the protocol fields are retained; the opaque payload is
-    redacted and bounded so arbitrary metadata or credential-shaped text cannot
-    expand durable history without a limit.
-    """
-
-    if not isinstance(value, dict):
-        return None
-    kind = str(value.get("kind") or "").strip()
-    provider = str(value.get("provider") or "").strip()
-    data = value.get("data")
-    if kind not in {"encrypted", "opaque"} or not provider or not isinstance(data, str):
-        return None
-    safe_data = redact_diagnostic_text(data)
-    # Provider continuation state is opaque and cannot be repaired after a
-    # partial redaction.  Omit a credential-shaped payload rather than writing
-    # a corrupted state that would fail on the next request.
-    if safe_data != data:
-        return None
-    if not safe_data or len(safe_data) > _MAX_DURABLE_PROVIDER_STATE_CHARS:
-        return None
-    state: dict[str, Any] = {
-        "kind": kind,
-        "data": safe_data,
-        "provider": provider[:160],
-    }
-    for key in ("model", "version", "expires_at"):
-        if value.get(key) is not None:
-            state[key] = redact_diagnostic_text(str(value[key]))[:160]
-    try:
-        ProviderState.model_validate(state)
-    except Exception:
-        return None
-    return state
-
-
-def _durable_content_blocks(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    blocks: list[dict[str, Any]] = []
-    for raw in value[:256]:
-        if not isinstance(raw, dict):
-            continue
-        kind = str(raw.get("type") or "")
-        if kind == "text":
-            block = {"type": "text", "text": _bounded_durable_text(raw.get("text"))}
-            if raw.get("language") is not None:
-                block["language"] = _bounded_durable_text(raw.get("language"))[:128]
-            blocks.append(block)
-            continue
-        if kind == "json":
-            blocks.append(
-                {
-                    "type": "json",
-                    "data": _bounded_durable_json(raw.get("data")),
-                }
-            )
-            continue
-        if kind in {"image", "audio", "video", "file"}:
-            block: dict[str, Any] = {"type": kind}
-            for key in (
-                "asset_id",
-                "mime_type",
-                "checksum_sha256",
-                "detail",
-                "width",
-                "height",
-                "duration_ms",
-                "filename",
-            ):
-                if raw.get(key) is not None:
-                    block[key] = raw[key]
-            # Do not persist source.uri/data or any other transient media body.
-            blocks.append(block)
-            continue
-        if kind == "reference":
-            block = {"type": "reference", "target_id": str(raw.get("target_id") or "")}
-            if raw.get("label") is not None:
-                block["label"] = _bounded_durable_text(raw.get("label"))[:256]
-            blocks.append(block)
-    return blocks
-
-
-def _durable_item_payload(item: Any) -> dict[str, Any] | None:
-    raw = item.model_dump(mode="json", by_alias=True, exclude_none=True)
-    kind = str(raw.get("type") or "")
-    item_id = str(raw.get("id") or "")
-    status = str(raw.get("status") or "completed")
-    if not item_id or kind not in {"message", "reasoning", "tool_call", "tool_result"}:
-        return None
-    base: dict[str, Any] = {"id": item_id, "type": kind, "status": status}
-    if kind == "tool_call":
-        call_id = str(raw.get("call_id") or "")
-        name = str(raw.get("name") or "")
-        if not call_id or not name:
-            return None
-        arguments = _bounded_durable_json(raw.get("arguments") or {})
-        base.update(
-            {
-                "call_id": call_id,
-                "name": name,
-                "arguments": arguments if isinstance(arguments, dict) else {},
-            }
-        )
-        return base
-    if kind == "reasoning":
-        for key in ("summary", "content"):
-            if key in raw:
-                base[key] = _bounded_durable_text(raw[key])
-        provider_state = _durable_provider_state(raw.get("provider_state"))
-        if provider_state is not None:
-            base["provider_state"] = provider_state
-        if "token_count" in raw:
-            base["token_count"] = raw["token_count"]
-        # Only the validated, bounded provider_state projection above is kept;
-        # arbitrary reasoning metadata and opaque response extensions are not.
-        return base
-    if kind == "message":
-        role = str(raw.get("role") or "assistant")
-        content = _durable_content_blocks(raw.get("content") or [])
-        base.update(
-            {
-                "role": role,
-                "content": content,
-            }
-        )
-        return base
-    call_id = str(raw.get("call_id") or "")
-    name = str(raw.get("name") or "")
-    if not call_id or not name:
-        return None
-    content = _durable_content_blocks(raw.get("content") or [])
-    base.update(
-        {
-            "call_id": call_id,
-            "name": name,
-            "is_error": bool(raw.get("is_error")),
-            "content": content,
-        }
-    )
-    return base
-
-
-def durable_provider_response_payload(response: KemoResponse) -> dict[str, Any]:
-    """Return the minimal native response needed to rebuild durable history.
-
-    Public runtime events keep using the bounded diagnostic representation.  The
-    history copy must not pass through that formatter because its global budget
-    can truncate structural Item fields such as ``type``, ``call_id`` and
-    ``name``.  Keeping only the response identity and canonical output Items
-    also prevents unrelated Provider metadata from entering conversation
-    history through this private channel.
-    """
-
-    output: list[dict[str, Any]] = []
-    encoded_size = 0
-    for item in response.output:
-        safe_item = _durable_item_payload(item)
-        if safe_item is None:
-            continue
-        encoded_item = json.dumps(
-            safe_item,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        if encoded_size + len(encoded_item) > _MAX_DURABLE_RESPONSE_CHARS:
-            if safe_item.get("type") == "tool_call":
-                safe_item = {
-                    key: value
-                    for key, value in safe_item.items()
-                    if key != "arguments"
-                }
-                safe_item["arguments"] = {}
-                encoded_item = json.dumps(
-                    safe_item,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
-                )
-            else:
-                continue
-        if encoded_size + len(encoded_item) > _MAX_DURABLE_RESPONSE_CHARS:
-            continue
-        output.append(safe_item)
-        encoded_size += len(encoded_item)
-    return {
-        "id": redact_diagnostic_text(str(response.id or ""))[:160],
-        "request_id": redact_diagnostic_text(str(response.request_id or ""))[:160],
-        "status": str(response.status),
-        "model": redact_diagnostic_text(str(response.model or ""))[:160],
-        "output": output,
-    }
-
-
-def metric_provider_response_payload(value: Any) -> dict[str, Any] | None:
-    """Project a bounded Provider diagnostic before placing it in history metrics."""
-
-    if not isinstance(value, dict):
-        return None
-
-    def project(node: Any) -> Any:
-        if isinstance(node, dict):
-            return {
-                str(key): project(item)
-                for key, item in node.items()
-                if str(key) not in {"provider_state", "provider_raw"}
-            }
-        if isinstance(node, list):
-            return [project(item) for item in node[:256]]
-        return node
-
-    try:
-        bounded = sanitize_provider_diagnostic(value)
-    except (TypeError, ValueError, RecursionError):
-        return None
-    projected = project(bounded)
-    return projected if isinstance(projected, dict) else None
 
 
 def protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
@@ -424,8 +169,8 @@ def is_request_size_exceeded(value: Any) -> bool:
     """A transport limit, deliberately distinct from a model context limit."""
     if isinstance(value, BaseException):
         return getattr(value, "status_code", None) == 413
-    if callable(getattr(value, "model_dump", None)):
-        value = value.model_dump(mode="json", exclude_none=True)
+    dump = getattr(value, "model_dump", None)
+    value = dump(mode="json", exclude_none=True) if callable(dump) else value
     if isinstance(value, dict):
         return (
             value.get("status_code") == 413 or value.get("provider_status") == 413
@@ -435,38 +180,44 @@ def is_request_size_exceeded(value: Any) -> bool:
 
 
 def is_context_length_exceeded(value: Any) -> bool:
+    """Only explicit context evidence permits compaction, never generic 4xx."""
+    if is_request_size_exceeded(value) or view_from_error(value).status_code in {401, 403}:
+        return False
     if isinstance(value, ContextLengthExceededError):
         return True
-    if isinstance(value, ProviderError):
-        return any(is_context_length_exceeded(item) for item in (
-            value.category, value.body, str(value),
-        ))
-    if callable(getattr(value, "model_dump", None)):
-        value = value.model_dump(mode="json", exclude_none=True)
-    if isinstance(value, dict):
-        return any(is_context_length_exceeded(item) for item in value.values())
+    if isinstance(value, BaseException):
+        if any(is_context_length_exceeded(item) for item in (
+                getattr(value, "category", None), getattr(value, "body", None),
+                getattr(value, "code", None), str(value))):
+            return True
+    if callable(dump := getattr(value, "model_dump", None)):
+        value = dump(mode="json", exclude_none=True)
+    if isinstance(value, dict) and any(is_context_length_exceeded(item) for item in value.values()):
+        return True
     if isinstance(value, (list, tuple)):
         return any(is_context_length_exceeded(item) for item in value)
-    if not isinstance(value, str):
-        return False
-    text = value.casefold().replace("_", " ").replace("-", " ")
-    return any(marker in text for marker in (
-        "context length exceeded", "context window exceeded",
-        "maximum context length", "prompt is too long", "prompt too long",
-        "input is too long", "input too long", "input token limit exceeded",
-        "input length exceeded",
-        "input tokens exceed", "too many input tokens",
-        "上下文长度超", "上下文超限", "输入 token 超限",
-    )) or (
-        ("context length" in text or "context window" in text)
-        and any(word in text for word in ("exceed", "too long", "limit reached"))
-    )
+    if isinstance(value, str):
+        text = value.casefold().replace("_", " ").replace("-", " ")
+        if any(marker in text for marker in (
+            "context length exceeded", "context window exceeded",
+            "maximum context length", "prompt is too long", "prompt too long",
+            "input is too long", "input too long", "input token limit exceeded",
+            "input length exceeded", "input tokens exceed", "too many input tokens",
+            "上下文长度超", "上下文超限", "输入 token 超限",
+        )) or (
+            ("context length" in text or "context window" in text)
+            and any(word in text for word in ("exceed", "too long", "limit reached"))
+        ):
+            return True
+    return False
 
 
 def raise_if_context_length_exceeded(value: Any) -> None:
+    if is_request_size_exceeded(value):
+        raise ProviderError("API 请求体超过传输大小上限", status_code=413)
     if is_context_length_exceeded(value):
         raise ContextLengthExceededError(
-            "Provider 返回 context_length_exceeded，已触发运行时上下文压缩"
+            "Provider 返回 context_length_exceeded，需要缩小请求上下文后恢复"
         )
 
 
@@ -506,6 +257,7 @@ def events_for_protocol_response(
     root: Path | None = None,
     user: str = "",
     cancel_event: threading.Event | None = None,
+    defer_tool_validation: bool = False,
 ) -> Iterator[RunEvent]:
     if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
         raise_if_context_length_exceeded(response.error)
@@ -517,7 +269,7 @@ def events_for_protocol_response(
         ),
         None,
     )
-    if invalid_call is not None:
+    if invalid_call is not None and not defer_tool_validation:
         yield RunEvent(
             type="error",
             error=invalid_tool_call_error(invalid_call),
@@ -618,6 +370,7 @@ def run_events_for_protocol_event(
     root: Path | None = None,
     user: str = "",
     cancel_event: threading.Event | None = None,
+    defer_tool_validation: bool = False,
 ) -> Iterator[RunEvent]:
     common: dict[str, Any] = {
         "event_id": event.event_id,
@@ -644,7 +397,7 @@ def run_events_for_protocol_event(
         )
     elif event.type == StreamEventType.TOOL_CALL_COMPLETED:
         item = event.item if isinstance(event.item, ToolCallItem) else None
-        if item is not None and item.parse_error is not None:
+        if item is not None and item.parse_error is not None and not defer_tool_validation:
             yield RunEvent(
                 type="error",
                 error=invalid_tool_call_error(item),
@@ -743,6 +496,8 @@ def provider_events(
     root: Path | None = None,
     user: str = "",
     cancel_event: threading.Event | None = None,
+    on_response: Callable[[KemoResponse], None] | None = None,
+    defer_tool_validation: bool = False,
 ) -> Iterator[RunEvent]:
     stream: Callable[..., Iterable[ProviderStreamEvent]] | None = getattr(provider, "stream", None)
     create = getattr(provider, "create", None)
@@ -755,16 +510,36 @@ def provider_events(
             else stream(protocol_request)
         )
         iterator = iter(source)
+        stream_usage = None
         try:
             for protocol_event in iterator:
                 if not isinstance(protocol_event, ProviderStreamEvent):
                     raise EngineError("Provider stream() 必须返回 ProviderStreamEvent")
+                if protocol_event.usage is not None:
+                    stream_usage = merge_usage_snapshots(protocol_event.usage, stream_usage)
+                    protocol_event = protocol_event.model_copy(update={"usage": stream_usage})
+                if protocol_event.response is not None:
+                    protocol_event = protocol_event.model_copy(update={
+                        "response": complete_usage(protocol_request, protocol_event.response, previous=stream_usage),
+                    })
+                if protocol_event.response is not None and on_response is not None:
+                    on_response(protocol_event.response)
+                if protocol_event.response is not None:
+                    final_usage = protocol_event.response.usage
+                    if final_usage != stream_usage:
+                        yield RunEvent(
+                            type="usage", usage=protocol_usage_dict(final_usage),
+                            request_id=protocol_event.response.request_id,
+                            response_id=protocol_event.response.id,
+                            protocol_event_type="usage.updated",
+                        )
                 yield from run_events_for_protocol_event(
                     protocol_event,
                     provider=provider,
                     root=root,
                     user=user,
                     cancel_event=cancel_event,
+                    defer_tool_validation=defer_tool_validation,
                 )
         finally:
             close = getattr(iterator, "close", None)
@@ -780,10 +555,14 @@ def provider_events(
     )
     if not isinstance(response, KemoResponse):
         raise EngineError("Provider create() 必须返回 KemoResponse")
+    response = complete_usage(protocol_request, response)
+    if on_response is not None:
+        on_response(response)
     yield from events_for_protocol_response(
         response,
         provider=provider,
         root=root,
         user=user,
         cancel_event=cancel_event,
+        defer_tool_validation=defer_tool_validation,
     )

@@ -11,11 +11,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from provider.factory import provider_request_slot
+from provider.protocol.models import AudioContent, FileContent, ImageContent, TextContent, VideoContent
+from provider.schema import ProviderError
+from run.agents import AgentRunner
+from run.config import MainAgentSourcePolicy, load_config, provider_runtime_config
+from run.infra import EngineError
+from run.extensions import (
+    AttachmentError, RunAssetResolver, history_attachment_descriptors,
+    main_model_supports_input, select_vision_route,
+)
+from run.conversation.request_input import uploaded_file_context as _uploaded_file_context
+
 
 @dataclass(slots=True)
 class PreparedProviderRequest:
     config: dict[str, Any]
-    context_policy: Any
     source_policy: Any
     runtime_provider: dict[str, Any]
     provider: Any
@@ -27,8 +38,6 @@ class PreparedProviderRequest:
     uploaded_file_context: str
     durable_user_content_blocks: list[Any]
     agent_runner: Any
-    window_path: Path
-    archive_window: dict[str, Any]
 
 def prepare_provider_request(
     request: dict[str, Any],
@@ -41,33 +50,7 @@ def prepare_provider_request(
     dependencies: Any,
     cancel_event: Any,
 ) -> PreparedProviderRequest:
-    import importlib
-    _runtime = importlib.import_module("run.conversation.runtime")
-    AgentRunner = _runtime.AgentRunner
-    AttachmentError = _runtime.AttachmentError
-    AudioContent = _runtime.AudioContent
-    ContextPolicy = _runtime.ContextPolicy
-    EngineError = _runtime.EngineError
-    FileContent = _runtime.FileContent
-    ImageContent = _runtime.ImageContent
-    MainAgentSourcePolicy = _runtime.MainAgentSourcePolicy
-    ProviderError = _runtime.ProviderError
-    RunAssetResolver = _runtime.RunAssetResolver
-    TextContent = _runtime.TextContent
-    VideoContent = _runtime.VideoContent
-    _content_display = _runtime._content_display
-    history_attachment_descriptors = _runtime.history_attachment_descriptors
-    load_config = _runtime.load_config
-    main_model_supports_input = _runtime.main_model_supports_input
-    prepare_window = _runtime.prepare_window
-    project_root = _runtime.project_root
-    provider_request_slot = _runtime.provider_request_slot
-    provider_runtime_config = _runtime.provider_runtime_config
-    select_vision_route = _runtime.select_vision_route
-    _uploaded_file_context = _runtime._uploaded_file_context
-
     config = load_config(user, base)
-    context_policy = ContextPolicy.from_config(config)
     source_policy = MainAgentSourcePolicy.from_config(config)
     runtime_provider = provider_runtime_config(config)
     provider = dependencies.provider_factory(runtime_provider)
@@ -195,7 +178,16 @@ def prepare_provider_request(
         vision_route=vision_route,
         direct_asset_ids=direct_asset_ids,
     )
-    durable_user_content_blocks = list(content_blocks)
+    durable_user_content_blocks = []
+    for block in content_blocks:
+        if isinstance(block, (ImageContent, AudioContent, VideoContent, FileContent)):
+            provider_media.append(block)
+            durable_user_content_blocks.append(TextContent(
+                text=f"[{block.type} 输入资产：{block.asset_id or 'inline'}；"
+                "原生内容仅随首次成功请求提供]"
+            ))
+        else:
+            durable_user_content_blocks.append(block)
     if uploaded_file_context:
         # Keep a stable attachment reference in history, but never persist
         # transient inline Base64 or remote Provider Asset blocks generated
@@ -210,11 +202,8 @@ def prepare_provider_request(
         config=config,
         provider_factory=dependencies.provider_factory,
     )
-    window_path, archive_window, _ = prepare_window(base, user, source, session_id)
-
     return PreparedProviderRequest(
         config=config,
-        context_policy=context_policy,
         source_policy=source_policy,
         runtime_provider=runtime_provider,
         provider=provider,
@@ -226,6 +215,4 @@ def prepare_provider_request(
         uploaded_file_context=uploaded_file_context,
         durable_user_content_blocks=durable_user_content_blocks,
         agent_runner=agent_runner,
-        window_path=window_path,
-        archive_window=archive_window,
     )

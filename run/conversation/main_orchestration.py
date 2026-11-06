@@ -1,784 +1,800 @@
-"""Conversation orchestration implementation behind the stable main-loop facade."""
+"""CardStream main runtime: event commits, request barrier and real completion.
+
+No window loading, round selection, terminal history copying or legacy context
+recovery participates in this path. A Provider response is an input to the
+integration state machine, not its completion authority.
+"""
 from __future__ import annotations
 
-from events import RunEvent as _AnnotationRunEvent
-
+import copy
+from dataclasses import replace
+import hashlib
+import logging
+from pathlib import Path
+import threading
+import time
+from types import SimpleNamespace
 from typing import Any
-from run.retry import HOST_CONTROL_EXCEPTIONS, raise_if_host_exception
+from uuid import uuid4
 
-def run_conversation(request, *, runtime_bindings, root=None, provider_factory=None, tool_registry_factory=None, cancel_event=None):
-    (ContextLengthExceededError, ProviderLoopState, RoundRuntime, RoundState, RunDependencies, RunEvent, SUMMARY_STORE_REF, TerminalRoundCommitter, TerminalRoundContext, _build_request_context, _commit_verified_manual_compression, _committed_failure_event, _compress_per_round_tool_think, _content_display, _copy_committed_round_to_archive, _extract_round_memory, _memory_injected_chars, _merge_usage, _metric_provider_responses, _prepare_compression, _prepare_provider_request, _queue_summary_memory_extraction, _record_provider_request, _request_content_blocks, _required_text, _retry_recovery_messages, _retry_recovery_provider_responses, _run_provider_loop, _session_lock, _tool_result_reuse_allowed, _trim_to_max_rounds, _usage_from_dict, append_round_items, build_context_snapshot, build_summary_message, cleanup_run_registration, commit_terminal_windows, copy, datetime, error_event, memory_extraction_mode, patch_archive_metadata, project_root, queue_memory_extraction, restore_summary_cache, select_context, terminal_failure_events, time, timezone, tool_call_signature, update_run_state) = map(runtime_bindings.__getitem__, ('ContextLengthExceededError', 'ProviderLoopState', 'RoundRuntime', 'RoundState', 'RunDependencies', 'RunEvent', 'SUMMARY_STORE_REF', 'TerminalRoundCommitter', 'TerminalRoundContext', '_build_request_context', '_commit_verified_manual_compression', '_committed_failure_event', '_compress_per_round_tool_think', '_content_display', '_copy_committed_round_to_archive', '_extract_round_memory', '_memory_injected_chars', '_merge_usage', '_metric_provider_responses', '_prepare_compression', '_prepare_provider_request', '_queue_summary_memory_extraction', '_record_provider_request', '_request_content_blocks', '_required_text', '_retry_recovery_messages', '_retry_recovery_provider_responses', '_run_provider_loop', '_session_lock', '_tool_result_reuse_allowed', '_trim_to_max_rounds', '_usage_from_dict', 'append_round_items', 'build_context_snapshot', 'build_summary_message', 'cleanup_run_registration', 'commit_terminal_windows', 'copy', 'datetime', 'error_event', 'memory_extraction_mode', 'patch_archive_metadata', 'project_root', 'queue_memory_extraction', 'restore_summary_cache', 'select_context', 'terminal_failure_events', 'time', 'timezone', 'tool_call_signature', 'update_run_state'))
-    round_state = RoundState(run_started=time.monotonic())
-    run_started = round_state.run_started
-    dependencies = RunDependencies(
-        provider_factory=provider_factory,
-        tool_registry_factory=tool_registry_factory,
-        cancel_event=cancel_event,
-    )
+from events import RunEvent, error_event
+from provider.protocol.models import (
+    MessageItem, ToolCallItem,
+)
+from provider.retry import RetryCancelled, RetryManager
+from provider.token_usage import reported_token_fields
+from run.agents import TaskCoordinator
+from run.cards import (
+    CardMeter, CardStore, IntegrationStore, estimate_request_tokens,
+    json_text,
+)
+from run.config import build_prompt_bundle, load_config, read_dynamic_tail, refresh_memory_prompt_bundle
+from run.extensions import MediaInputHost, context_input_budget, resolve_reasoning_selection
+from run.infra import EngineError, new_usage_total, record_provider_request, usage_from_dict
+from run.memory import MemoryStore, memory_extraction_mode
+from run.retry import (
+    AttemptToolDedup,
+    HOST_CONTROL_EXCEPTIONS,
+)
+from run.tasks import detect_task_plan_creation_boundary, task_plan_creation_batch
+from run.tools import (
+    ConsecutiveIdenticalToolCallTracker, ConsecutiveToolFailureTracker,
+    ShellInbox, ToolRegistry, ToolRuntime, apply_runtime_tool_policy,
+    invalid_tool_name, response_invalid_tool_arguments_error,
+    system_prompt_with_tool_argument_repair, tool_call_signature,
+    validate_tool_call_batch,
+)
+from run.conversation.guidance import normalize_guidance
+from run.conversation.guidance_runtime import guidance_failure_details, prepare_guidance
+from run.conversation.media_routing import prepare_provider_request
+from run.conversation.provider_exchange import exchange
+from run.conversation.provider_events import is_context_length_exceeded
+from run.conversation.request_input import content_display, request_content_blocks
+from run.conversation.request_diagnostics import provider_request_diagnostic, build_conversation_request
+from run.conversation.runtime_helpers import (
+    close_mailbox as _close, drain as _drain, native_tools as _native_tools,
+    positive as _positive, build_failure_metadata, response_payloads,
+    call_is_explicitly_async as _call_is_explicitly_async,
+    duplicate_execution_should_block as _duplicate_execution_should_block, observed_exchange,
+    account_compression_failure, prepare_runtime_request,
+)
+
+def run_conversation(request, *, root: Path, provider_factory, tool_registry_factory,
+                     cancel_event: threading.Event):
+    user, source, session_id = (request[key].strip() for key in ("user", "source", "session_id"))
+    run_id = str(request.get("run_id") or "run_" + uuid4().hex)
+    integration_id = "integration_" + uuid4().hex
+    channel = request.get("_guidance_queue")
+    integration = tool_runtime = coordinator = shell = media = None
+    finished = False
+    cleanup_attempted = False
+    request_inflight = False
+    compression_started: dict[str, Any] = {}
+    consumed_guidance: list[dict] = []
+    pending_guidance: list[tuple[int, Any]] = []
+    preparing_guidance: list[Any] = []
+    guidance_seqs: dict[str, int] = {}
+    usage_total = new_usage_total()
+    all_text, all_reasoning, tool_records = [], [], []
+    observed_text, observed_reasoning = [], []
+    request_diagnostics = []
+    context_stats: dict[str, Any] = {
+        "engine": "cardstream", "storage": "cards.sqlite3", "provider_latency": 0,
+        "compression_latency": 0, "compression_input_tokens": 0, "compression_output_tokens": 0,
+    }
+    final_payload = None
+    overflow_attempts = overflow_wire = 0
+    preventative_retry_at = 0.0
+    started = time.monotonic()
     try:
-        request_context = _build_request_context(
-            request,
-            root=root,
-            project_root_fn=project_root,
-            required_text_fn=_required_text,
-            request_content_blocks_fn=_request_content_blocks,
-            content_display_fn=_content_display,
+        compress_only = bool(request.get("compress_only"))
+        content_blocks = [] if compress_only else request_content_blocks(request)
+        if not compress_only and not content_blocks and not request.get("uploaded_files"):
+            raise EngineError("请求必须包含非空 prompt、content[] 或 uploaded_files")
+        config = load_config(user, root)
+        configured_provider = config.get("provider") or {}
+        store = CardStore(root, user, meter=CardMeter.for_model(
+            str(configured_provider.get("type") or ""), str(configured_provider.get("model") or "")))
+        state = store.ensure_session(source, session_id)
+        if state["meter_key"] != store.meter.key:
+            store.remeter(source, session_id)
+        candidate_integration = IntegrationStore(store, source, session_id, integration_id)
+        candidate_integration.start()
+        integration = candidate_integration
+        prepared = prepare_provider_request(
+            request, base=root, user=user, source=source, session_id=session_id,
+            content_blocks=content_blocks,
+            dependencies=SimpleNamespace(provider_factory=provider_factory), cancel_event=cancel_event,
         )
-        (base, user, source, session_id, run_id, prompt, content_blocks, identity) = map(request_context.__getattribute__, ('base', 'user', 'source', 'session_id', 'run_id', 'prompt', 'content_blocks', 'identity'))
-        uploaded_file_context = ""
-    except BaseException as exc:
-        if isinstance(exc, HOST_CONTROL_EXCEPTIONS):
-            raise
-        yield error_event(exc, phase="request")
-        return
+        config, runtime, provider = prepared.config, prepared.runtime_provider, prepared.provider
+        actual_meter = CardMeter.for_model(str(runtime.get("type") or ""), str(runtime.get("model") or ""))
+        if store.meter != actual_meter:
+            # The tokenizer/meter key is intentionally shared across models;
+            # only usage-derived safety calibration follows the active route.
+            store.meter = actual_meter
+        if store.snapshot(source, session_id).meter_key != actual_meter.key:
+            store.remeter(source, session_id)
+        settings, tool_settings = config.get("agents") or {}, config.get("tools") or {}
+        argument_repairs = tool_settings.get("invalid_tool_arguments_retries", 2)
+        if type(argument_repairs) is not int or not 0 <= argument_repairs <= 5:
+            raise EngineError("tools.invalid_tool_arguments_retries 必须为 0..5 的整数")
+        # An output reservation is always present, even if the upstream default
+        # is unknown. Shared context limits subtract it exactly once.
+        output_reserve = _positive(settings, "output_reserve", 8192)
+        if runtime.get("max_tokens") is not None:
+            output_reserve = min(output_reserve, _positive(runtime, "max_tokens", output_reserve))
+        reasoning = resolve_reasoning_selection(config, runtime, provider, cancel_event=cancel_event)
+        capacity = context_input_budget(
+            _positive(settings, "token_limit", 1000000), reasoning.capabilities,
+            output_reserve=output_reserve,
+        )
+        input_limit = capacity["effective_token_limit"]
+        output_reserve = capacity["output_reserve"]
+        context_stats.update(capacity)
+        ratio = settings.get("token_compression_ratio", .3)
+        if isinstance(ratio, bool) or not isinstance(ratio, (float, int)) or not 0 < ratio < 1:
+            raise EngineError("agents.token_compression_ratio 必须在 0 和 1 之间")
+        retry = RetryManager(max_retries=(config.get("provider_runtime") or {}).get("max_retries", 5))
+        if request.get("_auto_retry") is False:
+            retry = RetryManager(max_retries=0)
+        registry = (apply_runtime_tool_policy(tool_registry_factory(root, user), config)
+                    if tool_settings.get("enabled", True) else ToolRegistry({}))
+        failures = ConsecutiveToolFailureTracker(
+            _positive(config.get("history") or {}, "consecutive_tool_fail_limit", 5))
+        identical = ConsecutiveIdenticalToolCallTracker(
+            _positive(tool_settings, "consecutive_identical_call_limit", 3))
+        seen = AttemptToolDedup()
+        call_iterations, live_signatures = {}, {}
+        memory = MemoryStore(root, user, config)
+        bundle = build_prompt_bundle(root, user, config, plugin_manifests=registry.plugin_manifests,
+                                     memory_store=memory, source=source, session_id=session_id)
+        memory_revision = (memory.prompt_revision()
+                           if bundle.diagnostics["memory_prompt_injection"] else None)
+        tool_runtime = ToolRuntime(integration, cancel_event=cancel_event)
+        request["_cardstream_integration_id"] = integration_id
+        request["_cardstream_generation"] = integration.generation
+        request["_cardstream_meter_key"] = store.meter.key
+        coordinator = TaskCoordinator(root, user, source, session_id, run_id, request)
+        shell = ShellInbox(root, user, source, session_id, root_task_id=coordinator.id)
+        descriptors = prepared.uploaded_descriptors
+        prompt = content_display(content_blocks)
+        media = MediaInputHost(
+            root=root, user=user, scope=("main", source, session_id, run_id), state={},
+            config=config, runtime_provider=runtime, provider=provider, session_id=session_id,
+            known=descriptors, user_text=prompt, cancel_event=cancel_event,
+            input_limit=input_limit, visible_asset_ids=prepared.direct_asset_ids,
+        )
+        virtual_media = []
+        if prepared.provider_media:
+            virtual_media.append(MessageItem.text("user",
+                "[本次模型请求已携带用户输入的原生媒体，请现在直接读取；"
+                "无需等待最终回复或下一条用户消息。对应 RAW 中的资产引用。]"))
+            virtual_media[-1] = virtual_media[-1].model_copy(update={
+                "content": [*virtual_media[-1].content, *prepared.provider_media],
+            })
+        if not compress_only:
+            store.append(source, session_id, integration_id, "user_text", {
+                "text": prompt, "content": [block.model_dump(mode="json", exclude_none=True)
+                                              for block in prepared.durable_user_content_blocks],
+                "attachments": prepared.history_attachments,
+                "metadata": copy.deepcopy(request.get("_user_metadata") or {}),
+            }, level="initial", event_key=f"{integration_id}:initial",
+                expected_generation=integration.generation)
 
-    with _session_lock(identity.root, identity.user, identity.source, identity.session_id):
-        terminal_committer = None
-        task_coordinator = None
-        task_outcome = "interrupted"
-        try:
-            from run.history import ensure_session_appendable
+        def persist_guidance(values):
+            normalized = [item for raw in values if (item := normalize_guidance(raw)) is not None]
+            for item in normalized:
+                item.id = item.id or "guidance_" + uuid4().hex
+                if item.id not in guidance_seqs:
+                    safe_detail = guidance_failure_details([item], "received")[0]
+                    card = store.append(source, session_id, integration_id, "user_text", {
+                        "text": item.text or item.display_text,
+                        "attachments": safe_detail["uploaded_files"], "guidance_id": item.id,
+                    }, level="guidance", event_key=f"{integration_id}:guidance:{item.id}",
+                        expected_generation=integration.generation)
+                    guidance_seqs[item.id] = card.seq
+            return normalized
 
-            ensure_session_appendable(base, user, source, session_id)
-            prepared_request = _prepare_provider_request(
-                request,
-                base=base,
-                user=user,
-                source=source,
-                session_id=session_id,
-                content_blocks=content_blocks,
-                dependencies=dependencies,
-                cancel_event=cancel_event,
-            )
-            (config, context_policy, source_policy, runtime_provider, provider, uploaded_descriptors, history_attachments, provider_media, direct_asset_ids, vision_route, uploaded_file_context, durable_user_content_blocks, agent_runner, window_path, archive_window) = map(prepared_request.__getattribute__, ('config', 'context_policy', 'source_policy', 'runtime_provider', 'provider', 'uploaded_descriptors', 'history_attachments', 'provider_media', 'direct_asset_ids', 'vision_route', 'uploaded_file_context', 'durable_user_content_blocks', 'agent_runner', 'window_path', 'archive_window'))
-            try:
-                round_state.history_run_registered = (
-                    update_run_state(
-                        base,
-                        user,
-                        source,
-                        session_id,
-                        run_state="running",
-                        run_id=run_id or None,
-                        directory=window_path,
-                        session_generation=str(
-                            (archive_window.get("data") or {}).get(
-                                "session_generation"
-                            )
-                            or ""
-                        ),
-                    )
-                    is not None
-                )
-            except Exception as exc:
-                raise_if_host_exception(exc)
-                round_state.history_run_error = {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                }
-            round_runtime = RoundRuntime(
-                request=request,
-                identity=identity,
-                dependencies=dependencies,
-                round_state=round_state,
-                config=config,
-                context_policy=context_policy,
-                source_policy=source_policy,
-                runtime_provider=runtime_provider,
-                provider=provider,
-                agent_runner=agent_runner,
-                window_path=window_path,
-                archive_window=archive_window,
-                content_blocks=content_blocks,
-                prompt=prompt,
-                uploaded_descriptors=uploaded_descriptors,
-                provider_media=provider_media,
-                vision_route=vision_route,
-                uploaded_file_context=uploaded_file_context,
-                durable_user_content_blocks=durable_user_content_blocks,
-            )
-            compression = _prepare_compression(
-                round_runtime,
-                cancel_event=cancel_event,
-            )
-            (runtime_path, window, registry, tool_schemas, tool_timeout, agent_timeout, max_tool_calls, max_provider_iterations, identical_call_limit, invalid_tool_arguments_retry_limit, failure_limit, failures, identical_calls, memory_store, prompt_bundle, system_message, compress_only, queue_compression_memory, provider_content_blocks, current_user_message, force_compress, persisted_summary_cache) = map(compression.__getattribute__, ('runtime_path', 'window', 'registry', 'tool_schemas', 'tool_timeout', 'agent_timeout', 'max_tool_calls', 'max_provider_iterations', 'identical_call_limit', 'invalid_tool_arguments_retry_limit', 'failure_limit', 'failures', 'identical_calls', 'memory_store', 'prompt_bundle', 'system_message', 'compress_only', 'queue_compression_memory', 'provider_content_blocks', 'current_user_message', 'force_compress', 'persisted_summary_cache'))
-            persisted_summary_message = build_summary_message(
-                persisted_summary_cache
-            )
-            context_selection = compression.context_selection
-            (all_text, all_reasoning, observed_text, observed_reasoning, tool_records, pending_tool_calls, consumed_guidance, consumed_guidance_details, provider_responses, durable_provider_responses, usage_total) = map(round_state.__getattribute__, ('all_text', 'all_reasoning', 'observed_text', 'observed_reasoning', 'tool_records', 'pending_tool_calls', 'consumed_guidance', 'consumed_guidance_details', 'provider_responses', 'durable_provider_responses', 'usage_total'))
-            (context_stats, summary_usage, compression_memory, compression_usage, compression_notice_active, projected_current_rounds, compression_trigger, subagent_events, summary_cache, summary_diagnostics) = map(compression.__getattribute__, ('context_stats', 'summary_usage', 'compression_memory', 'compression_usage', 'compression_notice_active', 'projected_current_rounds', 'compression_trigger', 'subagent_events', 'summary_cache', 'summary_diagnostics'))
-            for compression_event in compression.events:
-                yield compression_event
-            terminal_committer = TerminalRoundCommitter(
-                TerminalRoundContext(
-                    identity=identity,
-                    dependencies=dependencies,
-                    state=round_state,
-                    request=request,
-                    content_blocks=durable_user_content_blocks,
-                    prompt=prompt,
-                    window=window,
-                    archive_window=archive_window,
-                    window_path=window_path,
-                    runtime_path=runtime_path,
-                    context_selection=context_selection,
-                    context_policy=context_policy,
-                    summary_cache=summary_cache,
-                    system_message=system_message,
-                    tool_schemas=tool_schemas,
-                    prompt_bundle=prompt_bundle,
-                    runtime_provider=runtime_provider,
-                    queue_compression_memory=queue_compression_memory,
-                )
-            )
-            commit_terminal_round = terminal_committer.commit_terminal_round
-            commit_cancelled_round = terminal_committer.commit_cancelled_round
-            task_plan_boundary = None
-
-            def commit_failed_round(
-                error: Any,
-                *,
-                reason: str = "provider_error",
-            ) -> _AnnotationRunEvent:
-                return terminal_committer.commit_failed_round(
-                    error,
-                    reason=reason,
-                )
-
-            if cancel_event is not None and cancel_event.is_set():
-                yield commit_cancelled_round()
+        def append_guidance(values):
+            nonlocal final_payload
+            if not values:
                 return
-            messages = context_selection.messages
-            retry_recovery = request.get("_retry_recovery")
-            recovery_map: dict[str, dict[str, Any]] = {}
-            if isinstance(retry_recovery, list):
-                for raw in retry_recovery:
-                    if not isinstance(raw, dict):
-                        continue
-                    name = str(raw.get("name") or "").strip()
-                    arguments = raw.get("arguments")
-                    result = raw.get("result")
-                    if not name or not isinstance(arguments, dict) or not isinstance(result, dict):
-                        continue
-                    ok = result.get("ok") is True
-                    if ok and not _tool_result_reuse_allowed(name, arguments):
-                        continue
-                    recovery_map[tool_call_signature(name, arguments)] = {
-                        "id": str(raw.get("id") or ""),
-                        "name": name,
-                        "arguments": copy.deepcopy(arguments),
-                        "result": copy.deepcopy(result),
-                        "replay_policy": "reuse" if ok else "blocked",
-                    }
-                if recovery_map:
-                    messages.extend(_retry_recovery_messages(recovery_map))
-            context_stats = {**context_stats, **context_selection.stats()}
-            context_stats["summary"] = summary_diagnostics
-            context_stats["compression_diagnostics"] = summary_diagnostics if summary_diagnostics.get("failed") else None
-            context_stats["summary_usage"] = summary_usage
-            round_state.context_stats = context_stats
-            if compression_notice_active:
-                compression_failed = bool(summary_diagnostics.get("failed"))
-                yield RunEvent(
-                    type="context_compression",
-                    content=(
-                        "对话上下文压缩失败"
-                        if compression_failed
-                        else "对话上下文摘要已就绪"
-                    ),
-                    metadata={
-                        "status": "failed" if compression_failed else "ready",
-                        "trigger": compression_trigger,
-                        "run_id": run_id,
-                        "rounds_before": len(context_selection.all_rounds)
-                        + projected_current_rounds,
-                        "rounds_removed": len(context_selection.removed_rounds),
-                        "rounds_remaining": len(context_selection.kept_rounds)
-                        + projected_current_rounds,
-                        "memory_mode": (
-                            "background" if queue_compression_memory else "synchronous"
-                        ),
-                        "memory_status": (
-                            "queued_after_commit"
-                            if queue_compression_memory and not compression_failed
-                            else str((compression_memory or {}).get("status") or "")
-                        ),
-                        "diagnostics": summary_diagnostics,
-                    },
-                )
-            for subagent_event in subagent_events:
-                yield subagent_event
-            if compress_only:
-                compression_applied = False
-                summary_failed = bool(summary_diagnostics.get("failed"))
-                if summary_failed:
-                    restore_summary_cache(runtime_path, persisted_summary_cache)
-                    summary_cache = persisted_summary_cache
-                if (
-                    not summary_failed
-                    and summary_cache is not None
-                    and context_selection.removed_rounds
-                ):
-                    previous_round_offset = max(
-                        0,
-                        int(
-                            (window.get("data", {}).get("context") or {}).get(
-                                "round_offset", 0
-                            )
-                        ),
-                    )
-                    runtime_window = _trim_to_max_rounds(
-                        window,
-                        max(1, len(context_selection.kept_rounds)),
-                    )
-                    runtime_window["data"]["context"] = {
-                        **context_stats,
-                        "round_offset": max(
-                            0,
-                            int(archive_window.get("data", {}).get("rounds") or 0)
-                            - int(runtime_window["data"].get("rounds") or 0),
-                        ),
-                        "workspace_rounds": int(
-                            runtime_window["data"].get("rounds") or 0
-                        ),
-                        "summary_cache": SUMMARY_STORE_REF,
-                    }
-                    runtime_selection = select_context(
-                        window=runtime_window,
-                        policy=context_policy,
-                        system_message=system_message,
-                        summary_message=build_summary_message(summary_cache),
-                        current_user_message=None,
-                        tools=tool_schemas,
-                        allow_compress=False,
-                    )
-                    runtime_window["data"]["context_snapshot"] = build_context_snapshot(
-                        runtime_selection,
-                        system_prompt=prompt_bundle.text,
-                        summary_message=build_summary_message(summary_cache),
-                        capacity_tokens=context_policy.token_limit,
-                    )
-                    expected_rounds = int(
-                        runtime_window["data"].get("rounds") or 0
-                    )
-                    expected_round_offset = max(
-                        0,
-                        int(archive_window.get("data", {}).get("rounds") or 0)
-                        - expected_rounds,
-                    )
-                    _commit_verified_manual_compression(
-                        runtime_path=runtime_path,
-                        original_window=window,
-                        compacted_window=runtime_window,
-                        summary_cache=summary_cache,
-                        previous_summary_cache=persisted_summary_cache,
-                        removed_round_numbers=[
-                            item.number for item in context_selection.removed_rounds
-                        ],
-                        previous_round_offset=previous_round_offset,
-                        expected_rounds=expected_rounds,
-                        expected_round_offset=expected_round_offset,
-                    )
-                    compression_applied = True
-                if queue_compression_memory:
-                    if bool(summary_diagnostics.get("failed")):
-                        compression_memory = {
-                            "status": "failed",
-                            "reason": "context_summary_failed",
-                            "round": int(
-                                archive_window.get("data", {}).get("rounds") or 0
-                            ),
-                            "candidates": 0,
-                            "error": {
-                                "message": "上下文摘要生成失败，未登记后台记忆提取",
-                                "exception_type": "ContextSummaryError",
-                            },
-                        }
-                    else:
-                        compression_memory = queue_memory_extraction(
-                            base,
-                            user,
-                            source,
-                            session_id,
-                            target_round=int(
-                                archive_window.get("data", {}).get("rounds") or 0
-                            ),
-                            reason="manual_compression",
-                        )
-                compression_total_usage = copy.deepcopy(summary_usage)
-                if compression_usage.get("provider_request_count", 0):
-                    _record_provider_request(
-                        compression_total_usage,
-                        _usage_from_dict(compression_usage),
-                    )
-                yield RunEvent(
-                    type="done",
-                    usage=dict(compression_total_usage),
-                    metadata={
-                        "text": "",
-                        "reasoning": "",
-                        "usage": dict(compression_total_usage),
-                        "model": runtime_provider["model"],
-                        "user": user,
-                        "source": source,
-                        "session_id": session_id,
-                        "window": window_path.name,
-                        "context": context_stats,
-                        "prompt": prompt_bundle.diagnostics,
-                        "summary_cache": (
-                            SUMMARY_STORE_REF
-                            if summary_cache is not None
-                            else None
-                        ),
-                        "compressed": compression_applied,
-                        "compression_verified": compression_applied,
-                        "committed": False,
-                        "memory": compression_memory,
-                    },
-                )
-                return
+            if final_payload is not None:
+                store.append(source, session_id, integration_id, "agent_text", final_payload, level="interim")
+                final_payload = None
+            # Retain ownership of all drained inputs until RAW commits succeed.
+            normalized = persist_guidance(values)
+            preparing_guidance.extend(normalized)
+            prepared_guidance = prepare_guidance(
+                normalized, root=root, user=user, session_id=session_id, config=config,
+                runtime_provider=runtime, provider=provider, cancel_event=cancel_event,
+                known_descriptors=descriptors,
+            )
+            descriptors.extend(prepared_guidance.uploaded_descriptors)
+            media.visible_asset_ids.update(prepared_guidance.direct_asset_ids)
+            for original, item, message in zip(
+                normalized, prepared_guidance.inputs, prepared_guidance.messages, strict=True,
+            ):
+                pending_guidance.append((guidance_seqs[item.id], item))
+                preparing_guidance.remove(original)
+                blocks = message.get("content")
+                if isinstance(blocks, list):
+                    # The guidance text is already durably present in the
+                    # CardStream user_text card included by prepare_request.
+                    # Keep only native provider media in the transient tail;
+                    # otherwise one guidance is sent twice in this request,
+                    # then once again on every later historical request.
+                    media_blocks = [
+                        block for block in blocks
+                        if isinstance(block, dict) and block.get("type") != "text"
+                    ]
+                    if media_blocks:
+                        virtual_media.append(MessageItem(
+                            id="msg_guidance_media_" + uuid4().hex,
+                            role="user", content=[{
+                                "type": "text", "text":
+                                "[本次模型请求已携带运行中新增的原生媒体，请现在直接读取；"
+                                f"无需等待最终回复或下一条用户消息。guidance_id={item.id}]",
+                            }, *media_blocks],
+                        ))
 
-            from run.agents import TaskCoordinator
-            task_coordinator = TaskCoordinator(base, user, source, session_id, run_id, request)
-            provider_loop_state = ProviderLoopState(values=locals(), dependencies={**runtime_bindings, **locals()})
-            for provider_event in _run_provider_loop(provider_loop_state):
-                if provider_event.type in {"done", "error"}:
-                    task_outcome = "cancelled" if cancel_event is not None and cancel_event.is_set() else "failed"
-                    task_coordinator.finish(task_outcome)
-                yield provider_event
-            provider_values = provider_loop_state.values
-            prompt_bundle = provider_values.get("prompt_bundle", prompt_bundle)
-            system_message = provider_values.get("system_message", system_message)
-            all_text = provider_values.get("all_text", all_text)
-            all_reasoning = provider_values.get("all_reasoning", all_reasoning)
-            context_selection = provider_values.get(
-                "context_selection", context_selection
-            )
-            context_stats = provider_values.get("context_stats", context_stats)
-            summary_cache = provider_values.get("summary_cache", summary_cache)
-            summary_diagnostics = provider_values.get(
-                "summary_diagnostics", summary_diagnostics
-            )
-            compression_memory = provider_values.get(
-                "compression_memory", compression_memory
-            )
-            compression_usage = provider_values.get(
-                "compression_usage", compression_usage
-            )
-            tool_argument_retry_count = provider_values.get(
-                "tool_argument_retry_count", 0
-            )
-            final_metadata = provider_values.get("final_metadata", {})
-            if task_coordinator.started:
-                final_metadata["root_task_id"] = task_coordinator.id
-            window = provider_values.get("window", window)
-            runtime_path = provider_values.get("runtime_path", runtime_path)
-            task_plan_boundary = provider_values.get(
-                "task_plan_boundary", task_plan_boundary
-            )
-            if provider_loop_state.stop_main:
-                return
-            round_number = int(window["data"].get("rounds", 0)) + 1
-            archive_round_number = int(
-                archive_window["data"].get("rounds", 0)
-            ) + 1
-            round_elapsed_ms = max(0, round((time.monotonic() - run_started) * 1000))
-            text = "".join(all_text)
-            reasoning = "".join(all_reasoning)
-            user_metadata = {
-                **(
-                    {"input_attachments": history_attachments}
-                    if history_attachments
-                    else {}
-                ),
-                **(
-                    copy.deepcopy(request.get("_user_metadata"))
-                    if isinstance(request.get("_user_metadata"), dict)
-                    else {}
-                ),
+        def metadata(status, **extra):
+            snapshot = store.snapshot(source, session_id)
+            return {
+                "user": user, "source": source, "session_id": session_id, "run_id": run_id,
+                "integration_id": integration_id, "status": status,
+                "committed": True, "cancelled": status == "cancelled",
+                "text": final_payload["text"] if status == "completed" and final_payload else "".join(all_text),
+                "reasoning": "".join(all_reasoning),
+                "final_item_ids": [item["id"] for item in (final_payload or {}).get("provider_output", [])
+                                   if item["type"] == "message"] if status == "completed" else [],
+                "tool_calls": dispatched, "usage": copy.deepcopy(usage_total),
+                "context": {**context_stats, **capacity, "last_seq": snapshot.last_seq,
+                            "history_tokens": snapshot.history_tokens,
+                            "view_epoch": snapshot.view_epoch, "cards_active": len(snapshot.cards),
+                            "summary": {"exists": any(card.view_kind == "summary" for card in snapshot.cards)}},
+                "guidance": [item.get("display_text", "") for item in consumed_guidance],
+                "guidance_count": len(consumed_guidance),
+                "guidance_details": copy.deepcopy(consumed_guidance),
+                "tool_argument_retries": argument_corrections,
+                "prompt": copy.deepcopy(bundle.diagnostics),
+                "knowledge": {"documents": copy.deepcopy(bundle.diagnostics["knowledge_documents"])},
+                "memory": {"injected_files": list(bundle.memory_files), "weighted_files": [],
+                           "extraction_mode": memory_extraction_mode(config)},
+                "media_inputs": copy.deepcopy(media.audit),
+                "provider_request_diagnostics": copy.deepcopy(request_diagnostics),
+                "elapsed_ms": round((time.monotonic() - started) * 1000), **extra,
             }
-            window["text"]["messages"].extend(
-                [
-                    {
-                        "role": "user",
-                        "content": prompt,
-                        **(
-                            {"attachments": copy.deepcopy(history_attachments)}
-                            if history_attachments
-                            else {}
-                        ),
-                        **({"metadata": copy.deepcopy(user_metadata)} if user_metadata else {}),
-                    },
-                    {"role": "assistant", "content": text},
-                ]
-            )
-            window["think"]["rounds"].append({"round": round_number, "content": reasoning})
-            committed_tool_records = [
-                *round_state.recovered_tool_records,
-                *tool_records,
-            ]
-            window["tool"]["rounds"].append(
-                {"round": round_number, "calls": committed_tool_records}
-            )
-            history_provider_responses = [
-                *_retry_recovery_provider_responses(recovery_map),
-                *durable_provider_responses,
-            ]
-            append_round_items(
-                window,
-                round_number=round_number,
-                user_content=[
-                    block.model_dump(mode="json", exclude_none=True)
-                    for block in durable_user_content_blocks
-                ],
-                reasoning=reasoning,
-                text=text,
-                tool_records=tool_records,
-                provider_responses=history_provider_responses,
-                user_metadata=user_metadata or None,
-            )
-            window["data"]["rounds"] = round_number
-            round_metrics = window["data"].setdefault("round_metrics", [])
-            if not isinstance(round_metrics, list):
-                round_metrics = []
-                window["data"]["round_metrics"] = round_metrics
-            round_metrics.append(
-                {
-                    "round": round_number,
-                    "committed_at": datetime.now(timezone.utc).isoformat(),
-                    "usage": dict(usage_total),
-                    "elapsed_ms": round_elapsed_ms,
-                    "tool_calls": len(committed_tool_records),
-                    "tool_argument_retries": tool_argument_retry_count,
-                    "guidance": list(consumed_guidance),
-                    "guidance_details": copy.deepcopy(consumed_guidance_details),
-                    "provider_responses": _metric_provider_responses(provider_responses),
-                    "provider_request_diagnostics": copy.deepcopy(
-                        round_state.provider_request_diagnostics
-                    ),
-                    "media_inputs": copy.deepcopy(round_state.media_inputs),
-                    **(
-                        {
-                            "status": "completed",
-                            "stop_reason": task_plan_boundary.stop_reason,
-                            "plan_id": task_plan_boundary.plan_id,
-                            "task_plan_status": task_plan_boundary.status,
-                            "task_plan_auto_accept": task_plan_boundary.auto_accept,
-                            "awaiting_user_approval": (
-                                task_plan_boundary.awaiting_user_approval
-                            ),
-                        }
-                        if task_plan_boundary is not None
-                        else {}
-                    ),
-                    **(
-                        {"input_attachments": copy.deepcopy(history_attachments)}
-                        if history_attachments
-                        else {}
-                    ),
+
+        def close_limited(stop_reason, **extra):
+            nonlocal finished
+            consumed_guidance.extend(guidance_failure_details(
+                [item for _, item in pending_guidance] + preparing_guidance
+                + persist_guidance(_close(channel)),
+                stop_reason,
+            ))
+            pending_guidance.clear()
+            preparing_guidance.clear()
+            receipt = coordinator.finish("limited", defer_terminal=True) or {}
+            live_tools = integration.live_executions()
+            unfinished = [*(receipt.get("unfinished_tasks") or []), *live_tools]
+            status = "partial" if receipt or live_tools else "limited"
+            outcome = metadata(status, **{
+                **extra, **{key: value for key, value in receipt.items() if key != "status"},
+                "stop_reason": receipt.get("stop_reason") or stop_reason,
+                "requested_stop_reason": stop_reason,
+                "unfinished_tasks": unfinished[:80],
+                "unfinished_task_count": int(receipt.get("unfinished_task_count") or 0) + len(live_tools),
+                "unfinished_tasks_truncated": bool(receipt.get("unfinished_tasks_truncated"))
+                    or len(unfinished) > 80,
+                "retryable": False,
+            })
+            integration.finish(status, final_payload=final_payload, metadata=outcome)
+            finished = True
+            coordinator.finish("limited")
+            return outcome
+
+        iteration, dispatched, invalid_batches, argument_corrections = 0, 0, 0, 0
+        repair_pending, repair_tool_name = False, ""
+        continuation = True
+        while True:
+            if cancel_event.is_set():
+                raise RetryCancelled("用户停止了当前整合")
+            result_events = tool_runtime.events()
+            plan_boundary = None
+            for event in result_events:
+                if event.type == "tool_call_start":
+                    yield event
+                    if cancel_event.is_set():
+                        raise RetryCancelled("用户停止了当前整合")
+                    continue
+                raw = event.result
+                status = str(event.metadata.get("status") or "")
+                synthetic_statuses = {
+                    "blocked", "duplicate_blocked", "duplicate_reused",
+                    "identical_call_blocked", "invalid_arguments",
+                    "retry_reuse_blocked", "temporarily_unavailable", "not_executed",
                 }
-            )
-            window["data"]["context"] = {
-                **context_stats,
-                "round_offset": max(0, archive_round_number - round_number),
-                "workspace_rounds": round_number,
-                "summary_cache": (
-                    SUMMARY_STORE_REF if summary_cache is not None else None
-                ),
-            }
-            _merge_usage(window["data"]["token_usage"], _usage_from_dict(usage_total))
-            _copy_committed_round_to_archive(
-                archive_window,
-                window,
-                round_number,
-                archive_round_number,
-            )
-            tool_think_compression: dict[str, Any]
-            if context_policy.mid_context_compression_enabled:
-                try:
-                    tool_think_compression = _compress_per_round_tool_think(
-                        window=window,
-                        conserved_rounds=context_policy.recent_tool_rounds,
-                        agent_runner=agent_runner,
-                        cancel_event=cancel_event,
-                        source=source,
-                        session_id=session_id,
+                payload = copy.deepcopy(raw)
+                event.result = payload
+                signature = tool_call_signature(event.tool_name, event.arguments or {})
+                execution_live = bool(event.metadata.get("execution_live"))
+                error = raw.get("error") if isinstance(raw, dict) else None
+                error = error if isinstance(error, dict) else {}
+                capacity_limited = error.get("category") == "execution_capacity"
+                result_too_large = error.get("category") == "result_too_large"
+                if not execution_live:
+                    # Synthetic duplicate receipts have their own IDs; only the
+                    # original execution's terminal receipt may release its fence.
+                    if live_signatures.get(signature) == event.metadata.get("execution_id"):
+                        live_signatures.pop(signature, None)
+                    if status not in synthetic_statuses:
+                        if not capacity_limited:
+                            identical.record(event.tool_name, event.arguments or {})
+                        if not capacity_limited:
+                            failures.record(
+                                event.tool_name,
+                                succeeded=payload.get("ok") is True or result_too_large,
+                            )
+                        if not capacity_limited:
+                            seen.remember(
+                                event.tool_name, event.arguments or {}, payload,
+                                call_iterations.get(event.tool_call_id, iteration),
+                                retain_failure_for_retry=(status == "failed"),
+                            )
+                    event.metadata["consecutive_identical_calls"] = (
+                        identical.count if signature == identical.signature else 0
                     )
-                    compression_usage = _usage_from_dict(
-                        tool_think_compression.get("usage") or {}
-                    )
-                    if (
-                        compression_usage.total_tokens
-                        or compression_usage.extra.get("provider_request_count", 0)
+                provider_call_id = "callid_" + hashlib.sha256(json_text([
+                    integration.key, integration.id, event.tool_call_id,
+                ]).encode("utf-8")).hexdigest()
+                tool_records.append({"id": event.tool_call_id,
+                                     "provider_call_id": provider_call_id,
+                                     "name": event.tool_name, "arguments": event.arguments,
+                                     "result": payload, **event.metadata})
+                if event.tool_name == "subagent_dispatch" and isinstance(raw, dict):
+                    business_result = raw.get("result")
+                    if (isinstance(business_result, dict)
+                            and business_result.get("status") == "completed"
+                            and business_result.get("task_id")):
+                        coordinator.acknowledge_sync(business_result["task_id"])
+                yield event
+                if cancel_event.is_set():
+                    raise RetryCancelled("用户停止了当前整合")
+                boundary = detect_task_plan_creation_boundary(
+                    tool_name=event.tool_name, arguments=event.arguments or {}, result_payload=payload,
+                )
+                if boundary is not None:
+                    plan_boundary = boundary
+            if plan_boundary is not None:
+                outcome = close_limited(
+                    plan_boundary.stop_reason, task_plan_id=plan_boundary.plan_id, plan_id=plan_boundary.plan_id,
+                    awaiting_user_approval=plan_boundary.awaiting_user_approval,
+                )
+                yield RunEvent(type="done", metadata=outcome)
+                return
+            new_guidance = _drain(channel)
+            append_guidance(new_guidance)
+            # Child and Shell notifications are runtime state in the virtual
+            # tail, not invented user history or an extra persistence mechanism.
+            child_notice, shell_notice = coordinator.notifications(), shell.take()
+            live, unseen = integration.pending()
+            dependencies_pending = bool(live or coordinator.pending() or shell.pending())
+            live_tool_waiting = bool(live and not continuation)
+            needs_request = continuation or bool(
+                (new_guidance or child_notice or shell_notice) and not live_tool_waiting
+            )
+            needs_request = needs_request or (unseen and not live)
+            needs_request = needs_request or (
+                final_payload is None and not dependencies_pending
+            )
+            if not needs_request:
+                if dependencies_pending:
+                    integration.phase("waiting")
+                    pending_jobs = shell.pending()
+                    if pending_jobs:
+                        yield RunEvent(type="background_job_progress", metadata={
+                            "status": "waiting",
+                            "jobs": [{"job_id": job["job_id"], "status": job["status"]}
+                                     for job in pending_jobs],
+                        })
+                    def wake():
+                        size = getattr(channel, "qsize", None)
+                        return (tool_runtime.changed.is_set()
+                                or bool(size() if callable(size) else False)
+                                or bool(shell.ready()))
+                    if not coordinator.wait(
+                        cancel_event, wake=wake,
+                        pending=lambda: bool(integration.pending()[0] or shell.pending()),
                     ):
-                        _record_provider_request(usage_total, compression_usage)
-                        _record_provider_request(
-                            window["data"]["token_usage"], compression_usage
-                        )
-                        _record_provider_request(
-                            archive_window["data"]["token_usage"], compression_usage
-                        )
-                        window["data"]["round_metrics"][-1]["usage"] = dict(usage_total)
-                        archive_window["data"]["round_metrics"][-1]["usage"] = dict(
-                            usage_total
-                        )
-                except Exception as exc:
-                    raise_if_host_exception(exc)
-                    tool_think_compression = {
-                        "compressed": False,
-                        "round": None,
-                        "error": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-            else:
-                tool_think_compression = {
-                    "compressed": False,
-                    "round": None,
-                    "disabled": True,
-                }
-            from run.conversation.context_finalization import finalize_completed_context
+                        if cancel_event.is_set():
+                            raise RetryCancelled("用户停止了当前整合")
+                        outcome = close_limited("completion_deadline")
+                        yield RunEvent(type="done", usage=usage_total, metadata=outcome)
+                        return
+                    continue
+                # Atomic mailbox closure prevents acknowledged guidance from
+                # landing between the final drain and terminal commit.
+                last_guidance = _drain(channel, closing=True)
+                if last_guidance:
+                    append_guidance(last_guidance)
+                    continuation = True
+                    continue
+                coordinator.finish("completed", defer_terminal=True)
+                result = metadata("completed")
+                integration.finish("completed", final_payload=final_payload, metadata=result)
+                finished = True
+                coordinator.finish("completed")
+                result = metadata("completed")
+                store.update_record(source, session_id, {"run_state": "idle", "last_integration": integration_id})
+                yield RunEvent(type="done", usage=usage_total, metadata=result)
+                return
 
-            finalized_context = yield from finalize_completed_context({**runtime_bindings, **locals()})
-            runtime_window = finalized_context.window
-            summary_cache = finalized_context.summary_cache
-            summary_diagnostics = finalized_context.summary_diagnostics
-            context_stats = finalized_context.context_stats
-            compression_applied = finalized_context.compressed
-            extraction_mode = memory_extraction_mode(config)
-            archive_data = archive_window.setdefault("data", {})
-            if archive_data.get("memory_processed_round") is None:
-                archive_data["memory_processed_round"] = max(
-                    0, archive_round_number - 1
+            if final_payload is not None:
+                store.append(source, session_id, integration_id, "agent_text", final_payload, level="interim")
+                final_payload = None
+            iteration += 1
+            native_tools = _native_tools(registry, failures.unavailable)
+            request_tools = list(native_tools)
+            tool_wire = [item.model_dump(mode="json", exclude_none=True) for item in request_tools]
+            if memory_revision is not None:
+                revision = memory.prompt_revision()
+                if revision != memory_revision:
+                    bundle = refresh_memory_prompt_bundle(bundle, root, user, config, memory_store=memory)
+                    memory_revision = memory.prompt_revision()
+
+            def dynamic_tail():
+                tail = read_dynamic_tail(root, user, config, source=source, session_id=session_id)
+                if child_notice:
+                    tail["subagent_events"] = {"content": child_notice["content"], "external_data": True}
+                if shell_notice:
+                    tail["shell_events"] = {"content": shell_notice["content"], "external_data": True}
+                return tail
+
+            request_system_prompt = (
+                system_prompt_with_tool_argument_repair(
+                    bundle.text,
+                    tool_name=repair_tool_name,
+                    retry_number=argument_corrections,
                 )
-            memory_processed_round = max(
-                0, int(archive_data.get("memory_processed_round") or 0)
+                if repair_pending else bundle.text
             )
-            extract_current_round = bool(
-                extraction_mode == "on_commit"
-                and memory_processed_round == archive_round_number - 1
+            media.refresh_items(virtual_media)
+            if media.audit:
+                yield RunEvent(type="media_input_update", metadata={"media_inputs": copy.deepcopy(media.audit)})
+            if cancel_event.is_set():
+                raise RetryCancelled("用户停止了当前整合")
+            compression_trigger = "provider_overflow" if overflow_wire else (
+                "manual" if request.get("compress") else "occupancy")
+            barrier = yield from prepare_runtime_request(
+                store=store, source=source, session_id=session_id, provider=provider, config=config,
+                runtime=runtime, request_system_prompt=request_system_prompt, dynamic_tail=dynamic_tail,
+                native_tools=native_tools, tool_wire=tool_wire, virtual_media=virtual_media,
+                input_limit=input_limit, ratio=ratio, retry=retry, cancel_event=cancel_event,
+                settings=settings, capabilities=reasoning.capabilities,
+                force_compact=bool(overflow_wire or request.get("compress") and iteration == 1),
+                skip_preventative=time.monotonic() < preventative_retry_at, run_id=run_id,
+                trigger=compression_trigger, compression_started=compression_started,
+                usage_total=usage_total, context_stats=context_stats,
             )
-            if extract_current_round:
-                initial_memory_status = "processing"
-            elif extraction_mode in {"background", "on_commit"}:
-                initial_memory_status = "pending"
-            elif extraction_mode == "compression_only":
-                initial_memory_status = "deferred"
-            else:
-                initial_memory_status = "disabled"
-            archive_data["memory_status"] = initial_memory_status
-            archive_data.pop("memory_error", None)
-            active_key = request.get("_history_active_key")
-            commit_terminal_windows(
-                window_path,
-                archive_window,
-                runtime_path,
-                runtime_window,
-                summary_cache=summary_cache,
-                run_state="idle",
-                active_key=(
-                    active_key.strip()
-                    if isinstance(active_key, str) and active_key.strip()
-                    else None
-                ),
-            )
-            round_state.finalized = True
-            round_state.history_run_registered = False
-            if queue_compression_memory and compression_applied:
-                compression_memory = _queue_summary_memory_extraction(
-                    root=base,
-                    user=user,
-                    source=source,
-                    session_id=session_id,
-                    summary_cache=summary_cache,
-                    archive_round_number=archive_round_number,
-                    reason="automatic_compression",
+            if barrier.compaction_error is not None or barrier.compaction is not None:
+                preventative_retry_at = time.monotonic() + 60
+            if overflow_wire and barrier.wire_tokens >= overflow_wire:
+                raise EngineError("压缩后请求未实际缩小，停止超限重试；RAW 与工具执行记录已保留")
+            if compress_only:
+                result = metadata("completed", compressed=barrier.compaction is not None)
+                integration.continuation(False)
+                integration.finish("completed", metadata=result)
+                finished = True
+                yield RunEvent(type="done", usage=usage_total, metadata=result)
+                return
+            items = barrier.snapshot.items()
+            media.validate_items(items, request_system_prompt, native_tools)
+            native_request = build_conversation_request(
+                runtime=runtime, system_prompt=request_system_prompt, items=items, tools=request_tools,
+                output_reserve=output_reserve, stream=bool(request.get("stream", runtime.get("stream", False))),
+                reasoning_enabled=reasoning.enabled, reasoning_effort=reasoning.effort,
+                user=user, source=source, session_id=session_id, run_id=run_id,
+                integration_id=integration_id, snapshot_id=barrier.snapshot.snapshot_id, iteration=iteration)
+            request_diagnostics.append(provider_request_diagnostic(native_request, bundle, iteration=iteration, attempt=1))
+            if cancel_event.is_set():
+                raise RetryCancelled("用户停止了当前整合")
+            integration.request_started()
+            request_inflight = True
+            observed_text.clear()
+            observed_reasoning.clear()
+            try:
+                accepted, provider_retry_recovery = yield from observed_exchange(
+                    exchange(provider, native_request, config, root=root, user=user,
+                             retry=retry, cancel_event=cancel_event, allow_interim=dependencies_pending),
+                    store=store, source=source, session_id=session_id, integration_id=integration_id,
+                    integration=integration,
+                    observed_text=observed_text, observed_reasoning=observed_reasoning,
+                    usage_total=usage_total, request_diagnostics=request_diagnostics,
+                    native_request=native_request, bundle=bundle, iteration=iteration,
                 )
-            history_index_error: dict[str, Any] | None = round_state.history_run_error
-
-            memory_extraction: dict[str, Any] = {
-                "status": "skipped",
-                "candidate_count": 0,
-                "reason": (
-                    "memory_backlog_pending"
-                    if extraction_mode == "on_commit" and not extract_current_round
-                    else (
-                        "deferred_until_compression"
-                        if extraction_mode == "compression_only"
-                        else (
-                            "background_extraction_pending"
-                            if extraction_mode == "background"
-                            else "memory_extraction_disabled"
-                        )
-                    )
-                ),
-                "error": None,
-            }
-            if extract_current_round:
-                try:
-                    from run.memory import memory_round_payload
-
-                    memory_payload = memory_round_payload(archive_window, archive_round_number)
-                    memory_extraction = _extract_round_memory(
-                        root=base,
-                        user=user,
-                        config=config,
-                        round_number=archive_round_number,
-                        **memory_payload,
-                        agent_runner=agent_runner,
-                        cancel_event=cancel_event,
-                        agent_source=source,
-                        session_id=session_id,
-                    )
-                except Exception as exc:
-                    raise_if_host_exception(exc)
-                    memory_extraction = {
-                        "status": "failed",
-                        "candidate_count": 0,
+            except Exception as error:
+                if not is_context_length_exceeded(error) or overflow_attempts >= 3 or cancel_event.is_set():
+                    raise
+                integration.request_finished(continuation_required=True)
+                request_inflight = False
+                if getattr(error, "failed_usage", None):
+                    record_provider_request(usage_total, usage_from_dict(error.failed_usage))
+                if observed_text or observed_reasoning:
+                    store.append(source, session_id, integration_id, "agent_text", {
+                        "text": "".join(observed_text), "reasoning": "".join(observed_reasoning),
+                        "incomplete": True, "retry_snapshot": True,
+                        "request_id": getattr(error, "failed_request_id", native_request.request_id),
+                    }, level="interim")
+                continuation = True
+                overflow_attempts += 1
+                overflow_wire = barrier.wire_tokens
+                input_limit = max(1, min(input_limit - 1, int(overflow_wire * .7)))
+                context_stats["recovery_input_limit"] = input_limit
+                yield RunEvent(type="retrying", metadata={"phase": "context_recovery",
+                    "retry_attempt": overflow_attempts, "max_retries": 3,
+                    "failed_request_id": native_request.request_id, "committed": False})
+                continue
+            overflow_attempts = 0
+            overflow_wire = 0
+            response = accepted.response
+            repair_pending = False
+            repair_tool_name = ""
+            context_stats["provider_latency"] += accepted.latency_ms
+            context_stats["latency_unit"] = "ms"
+            actual_input = response.usage.input_tokens
+            if (type(actual_input) is int
+                    and "input_tokens" in reported_token_fields(response.usage)):
+                store.observe_usage(barrier.snapshot, request_id=accepted.request.request_id,
+                                    estimated=estimate_request_tokens(
+                                        bundle.text, items, tool_wire), actual=actual_input)
+            calls = [item for item in response.output if isinstance(item, ToolCallItem)]
+            provider_argument_error = response_invalid_tool_arguments_error(response)
+            schemas = {tool.name: tool.parameters for tool in request_tools}
+            invalid = validate_tool_call_batch(calls, schemas)
+            invalid_batch = bool(
+                invalid or any(call.name not in registry.tools for call in calls)
+                or provider_argument_error
+            )
+            integration.request_finished(
+                accepted_seq=barrier.snapshot.history.last_seq,
+                continuation_required=bool(calls or provider_argument_error),
+            )
+            request_inflight = False
+            coordinator.acknowledge()
+            shell.acknowledge()
+            # A valid response consumes transient media once; invalid batches
+            # retain the original input for correction, with RAW unchanged.
+            if not invalid_batch:
+                media.acknowledge()
+                virtual_media.clear()
+            if media.audit:
+                yield RunEvent(type="media_input_update", metadata={"media_inputs": copy.deepcopy(media.audit)})
+            for seq, item in list(pending_guidance):
+                if seq <= barrier.snapshot.history.last_seq:
+                    detail = {**item.history_detail(), "ok": True, "status": "applied"}
+                    consumed_guidance.append(detail)
+                    pending_guidance.remove((seq, item))
+                    yield RunEvent(type="guidance_applied", content=item.display_text, metadata=detail)
+            record_provider_request(usage_total, usage_from_dict(
+                response.usage.model_dump(mode="json", exclude_none=True)))
+            interim_payload, final_payload = response_payloads(
+                response, model=runtime["model"],
+                allow_final=not dependencies_pending,
+            )
+            for payload in (interim_payload, final_payload):
+                if payload is not None:
+                    all_text.append(payload["text"])
+                    all_reasoning.append(payload["reasoning"])
+            if interim_payload is not None:
+                store.append(source, session_id, integration_id, "agent_text", interim_payload, level="interim")
+            if invalid_batch:
+                # Record what the model requested and why no tool ran. Correction
+                # is a new inference over these facts; no integration/tool replay.
+                for call in calls:
+                    tool_runtime.record(call, {
+                        "ok": False, "execution": {"executed": False},
+                        "error": {"code": "invalid_tool_batch",
+                                  "message": "整批未执行。请按当前工具 Schema 修正参数后重新提出调用。"},
+                    }, status="invalid_arguments")
+                invalid_batches += 1
+                if invalid_batches > argument_repairs:
+                    raise EngineError("Provider 工具参数纠错次数耗尽；整批未执行，未重放任何副作用")
+                argument_corrections += 1
+                if provider_argument_error is not None and not calls:
+                    repair_pending = True
+                    repair_tool_name = invalid_tool_name(provider_argument_error)
+                continuation = True
+                observed_text.clear()
+                observed_reasoning.clear()
+                continue
+            invalid_batches = 0
+            started_executions = []
+            batch_signatures: set[str] = set()
+            continuation = False
+            for call, plan_generation in task_plan_creation_batch(calls, record=tool_runtime.record):
+                continuation = (continuation or _call_is_explicitly_async(call)) and not plan_generation
+                call_iterations[call.call_id] = iteration
+                signature = tool_call_signature(call.name, call.arguments)
+                if signature in batch_signatures:
+                    tool_runtime.record(call, {"ok": False, "execution": {"executed": False},
+                        "error": {"code": "duplicate_blocked",
+                                  "message": "同一工具批次已提交相同调用；本次未再次启动，也未复用前次结果"}},
+                        status="duplicate_blocked")
+                    continue
+                batch_signatures.add(signature)
+                if failures.is_unavailable(call.name):
+                    tool_runtime.record(call, {
+                        "ok": False,
                         "error": {
-                            "message": str(exc),
-                            "exception_type": type(exc).__name__,
+                            "code": "temporarily_unavailable",
+                            "exception_type": "ToolTemporarilyUnavailable",
+                            "consecutive_failures": failures.count,
+                            "temporarily_unavailable": True,
+                            "message": f"工具 {call.name} 本次 Run 内已连续失败，暂时不可用",
                         },
-                    }
-            extraction_status = str(memory_extraction.get("status") or "pending")
-            memory_error = (
-                (checked_627 if isinstance(checked_627 := memory_extraction.get("error"), dict) else {"message": "记忆提取失败"})
-            )
-            if extraction_status == "completed":
-                archive_data["memory_processed_round"] = archive_round_number
-                archive_data["memory_status"] = "completed"
-                archive_data.pop("memory_error", None)
-                try:
-                    patch_archive_metadata(
-                        window_path,
-                        archive_window,
-                        updates={
-                            "memory_processed_round": archive_round_number,
-                            "memory_status": "completed",
-                        },
-                        removals=("memory_error",),
-                        run_state="idle",
-                    )
-                except Exception as exc:
-                    raise_if_host_exception(exc)
-                    history_index_error = history_index_error or {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-            elif extraction_status == "failed":
-                archive_data["memory_status"] = "failed"
-                archive_data["memory_error"] = memory_error
-                try:
-                    patch_archive_metadata(
-                        window_path,
-                        archive_window,
-                        updates={
-                            "memory_status": "failed",
-                            "memory_error": memory_error,
-                        },
-                        run_state="idle",
-                    )
-                except Exception as exc:
-                    raise_if_host_exception(exc)
-                    history_index_error = history_index_error or {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    }
-
-            # Prompt 注入和用户主动查看只是读操作，不得改变临时记忆权重。
-            # 权重只由保存/压缩等历史整理管线的用户原文命中更新。
-            persisted_memory = memory_extraction.get("persisted") or {}
-            memory_weighted_files = ([] if persisted_memory.get("replayed") else
-                                     list(persisted_memory.get("weighted") or []))
-            memory_weight_error = None
-            final_metadata.update(
-                {
-                    "text": text,
-                    "reasoning": reasoning,
-                    "usage": usage_total,
-                    "model": final_metadata.get("model") or runtime_provider["model"],
-                    "user": user,
-                    "source": source,
-                    "session_id": session_id,
-                    "window": window_path.name,
-                    "tool_calls": len(tool_records),
-                    "tool_argument_retries": tool_argument_retry_count,
-                    "elapsed_ms": round_elapsed_ms,
-                    "run_id": run_id,
-                    "guidance_count": len(consumed_guidance),
-                    "guidance_details": copy.deepcopy(consumed_guidance_details),
-                    "media_inputs": copy.deepcopy(round_state.media_inputs),
-                    "context": context_stats,
-                    "tool_think_compression": tool_think_compression,
-                    "prompt": prompt_bundle.diagnostics,
-                    "memory": {
-                        "injected_files": list(prompt_bundle.memory_files),
-                        "weighted_files": memory_weighted_files,
-                        "weight_error": memory_weight_error,
-                        "injected_chars": _memory_injected_chars(prompt_bundle),
-                        "extraction_task_id": None,
-                        "extraction_error": None,
-                        "extraction_mode": extraction_mode,
-                        "compression_extraction": compression_memory,
-                        "round_extraction": memory_extraction,
-                    },
-                    "history_index_error": history_index_error,
-                    "knowledge": {
-                        "documents": prompt_bundle.diagnostics["knowledge_documents"],
-                        "injected_chars": prompt_bundle.diagnostics["sections"]
-                        .get("knowledge_index", {})
-                        .get("injected_chars", 0),
-                    },
-                    "committed": True,
-                    "status": "completed",
-                    **(
-                        {
-                            "stop_reason": task_plan_boundary.stop_reason,
-                            "plan_id": task_plan_boundary.plan_id,
-                            "task_plan_status": task_plan_boundary.status,
-                            "task_plan_auto_accept": task_plan_boundary.auto_accept,
-                            "awaiting_user_approval": (
-                                task_plan_boundary.awaiting_user_approval
-                            ),
-                        }
-                        if task_plan_boundary is not None
-                        else {}
-                    ),
+                    }, status="temporarily_unavailable")
+                    continue
+                if signature in live_signatures:
+                    active_execution_id = live_signatures[signature]
+                    if _duplicate_execution_should_block(
+                        integration, active_execution_id,
+                    ):
+                        tool_runtime.record(call, {"ok": False, "execution": {"executed": False},
+                            "error": {"code": "duplicate_blocked",
+                                      "message": "相同调用仍在执行；本次未再次启动工具",
+                                      "execution_id": active_execution_id}},
+                            status="duplicate_blocked")
+                        continue
+                    live_signatures.pop(signature, None)
+                dedup = seen.check(call.name, call.arguments, identical,
+                                   retry_recovery=provider_retry_recovery)
+                if dedup is not None:
+                    tool_runtime.record(call, dedup[0], status=dedup[1])
+                    continue
+                definition = registry.get(call.name)
+                context = {
+                    "root": str(root), "user": user, "source": source, "session_id": session_id,
+                    "run_id": run_id, "integration_id": integration_id,
+                    "shell_ownership": shell.ownership(), "tool_timeout": tool_settings.get("timeout", 240),
+                    "agent_timeout": (config.get("agent_runtime") or {}).get("default_timeout", 600),
+                    "knowledge_scopes": list(prepared.source_policy.direct_knowledge_scopes()),
+                    "uploaded_files": copy.deepcopy(descriptors),
+                    "task_plan_id": request.get("_task_plan_id"),
+                    "task_plan_step_id": request.get("_task_plan_step_id"),
+                    "task_plan_mode": request.get("_task_plan_mode"),
                 }
+                if call.name == "external_message":
+                    context["transport_registry"] = request.get("_transport_registry")
+                if call.name == "shell":
+                    coordinator.ensure_started()
+                if call.name == "multimodal":
+                    context.update(user_text=prompt, tool_records=copy.deepcopy(tool_records))
+                if call.name == "subagent_dispatch":
+                    callback = request.get("_subagent_event_callback")
+                    if callable(callback):
+                        context["event_callback"] = lambda event, call=call: callback(replace(
+                            event, tool_call_id=call.call_id,
+                            metadata={**event.metadata, "parent_run_id": run_id}))
+                    if call.arguments.get("action") == "call":
+                        context["task_ownership_factory"] = lambda call=call: coordinator.ownership(call.call_id)
+                    elif call.arguments.get("action") in {"resume", "guide"}:
+                        context["task_ownership"] = coordinator.ownership(call.call_id)
+                transform = None
+                if call.name == "attach_media":
+                    transform = lambda value, call=call, definition=definition: media.accept(
+                        definition, call.arguments, value, call_id=call.call_id, tool_records=tool_records)
+                execution_id = tool_runtime.start(call, definition, context=context,
+                    timeout=float(tool_settings.get("timeout", 240)), transform=transform)
+                started_executions.append(execution_id)
+                live_signatures[signature] = execution_id
+                dispatched += 1
+            tool_runtime.handoff(started_executions)
+            observed_text.clear()
+            observed_reasoning.clear()
+    except BaseException as error:
+        if compression_started:
+            yield RunEvent(type="context_compression", content="压缩未完成，原有上下文保持不变", metadata={
+                "status": "failed", "trigger": str(compression_started.get("trigger") or "occupancy"),
+                "run_id": run_id,
+                "history_tokens_before": int(compression_started.get("history_tokens_before") or 0),
+                "absorbed_cards": int(compression_started.get("absorbed_cards") or 0),
+            })
+            compression_started.clear()
+        if getattr(error, "failed_usage", None):
+            record_provider_request(usage_total, usage_from_dict(error.failed_usage))
+        account_compression_failure(error, usage_total, context_stats)
+        cleanup_attempted = True
+        cleanup_errors = []
+        def cleanup(operation):
+            try:
+                return operation()
+            except Exception as cleanup_error:
+                # Retain the primary error and durable execution fence. Never
+                # pretend a failed cleanup committed, nor rerun it in finally.
+                cleanup_errors.append({"exception_type": type(cleanup_error).__name__})
+                return None
+        if integration is not None and not finished:
+            if request_inflight:
+                cleanup(lambda: integration.request_finished())
+            final_guidance = cleanup(lambda: _close(channel)) or []
+            if "persist_guidance" in locals():
+                final_guidance = cleanup(lambda: persist_guidance(final_guidance)) or final_guidance
+            consumed_guidance.extend(guidance_failure_details(
+                [item for _, item in pending_guidance] + preparing_guidance + final_guidance,
+            "run_cancelled" if cancel_event.is_set() else "run_failed"))
+            pending_guidance.clear()
+            preparing_guidance.clear()
+            cancelled = (isinstance(error, (RetryCancelled, GeneratorExit))
+                         or cancel_event.is_set() or getattr(error, "cancelled", False) is True)
+            if isinstance(error, GeneratorExit):
+                cancel_event.set()
+            terminal_status = "cancelled" if cancelled else "failed"
+            receipt = (cleanup(lambda: coordinator.finish(terminal_status, defer_terminal=True))
+                       if coordinator is not None else None) or {}
+            live_tools = (cleanup(integration.live_executions) or [])
+            partial_status = bool(receipt or live_tools)
+            partial = final_payload or {"text": "".join(observed_text), "reasoning": "".join(observed_reasoning),
+                                        "incomplete": True}
+            failure_metadata = build_failure_metadata(
+                error, usage=usage_total, context=context_stats,
+                guidance=consumed_guidance, argument_corrections=locals().get("argument_corrections", 0),
+                media_inputs=media.audit if media is not None else [],
+                request_diagnostics=request_diagnostics, receipt=receipt, live_tools=live_tools,
+                cancelled=cancelled,
             )
-            task_coordinator.finish("completed")
-            task_outcome = "completed"
-            yield RunEvent(type="done", usage=usage_total, metadata=final_metadata)
-        except HOST_CONTROL_EXCEPTIONS:
+            cleanup(lambda: integration.finish(
+                failure_metadata["status"],
+                final_payload=partial if partial.get("text") or partial.get("reasoning") else None,
+                metadata=failure_metadata))
+            if not cleanup_errors and coordinator is not None:
+                cleanup(lambda: coordinator.finish(terminal_status))
+            finished = not cleanup_errors
+            if isinstance(error, HOST_CONTROL_EXCEPTIONS) or not isinstance(error, Exception):
+                raise
+            if (cancelled or partial_status) and finished:
+                outcome = (cleanup(lambda: metadata(
+                    failure_metadata["status"], **{
+                        key: value for key, value in failure_metadata.items()
+                        if key not in {"status", "usage", "context", "guidance_details", "media_inputs"}
+                    },
+                )) if "metadata" in locals() else {
+                    **failure_metadata, "integration_id": integration_id,
+                })
+                if outcome is not None:
+                    yield RunEvent(type="done", metadata=outcome)
+                    return
+        if isinstance(error, HOST_CONTROL_EXCEPTIONS) or not isinstance(error, Exception):
             raise
-        except BaseException as exc:
-            task_outcome = "cancelled" if cancel_event is not None and cancel_event.is_set() else "failed"
-            if task_coordinator is not None:
-                task_coordinator.finish(task_outcome)
-            yield from terminal_failure_events(
-                exc,
-                terminal_committer=terminal_committer,
-                round_state=round_state,
-                cancel_event=cancel_event,
-                request=request,
-                context_length_error_type=ContextLengthExceededError,
-                committed_failure_event=_committed_failure_event,
-                error_event=error_event,
-            )
-        finally:
-            if task_coordinator is not None and task_outcome == "interrupted":
-                task_coordinator.finish("interrupted")
-            cleanup_run_registration(
-                terminal_committer=terminal_committer,
-                round_state=round_state,
-                cancel_event=cancel_event,
-                request=request,
-                update_run_state=update_run_state,
-                base=base,
-                user=user,
-                source=source,
-                session_id=session_id,
-                run_id=run_id,
-            )
-
-
+        event = error_event(error, phase="cardstream")
+        event.metadata.update(committed=integration is not None, retryable=False,
+                              status="failed", cancelled=cancel_event.is_set(),
+                              integration_id=integration_id, context=context_stats,
+                              media_inputs=copy.deepcopy(media.audit) if media is not None else [],
+                              guidance_details=consumed_guidance, cleanup_errors=cleanup_errors,
+                              terminal_committed=finished)
+        if event.error is not None and event.metadata.get("retryable") is False:
+            event.error["retryable"] = False
+        yield event
+    finally:
+        if not finished and not cleanup_attempted and integration is not None:
+            # Generator close is not permission to orphan live execution truth.
+            cancel_event.set()
+            try:
+                if request_inflight:
+                    integration.request_finished()
+                receipt = coordinator.finish("cancelled", defer_terminal=True) if coordinator is not None else None
+                live_tools = integration.live_executions()
+                integration.finish("partial" if receipt or live_tools else "cancelled", final_payload=final_payload, metadata={
+                    **(receipt or {}),
+                    "status": "partial" if receipt or live_tools else "cancelled",
+                    "unfinished_tools": live_tools,
+                })
+                if coordinator is not None:
+                    coordinator.finish("cancelled")
+            except Exception:
+                logging.getLogger(__name__).exception("CardStream generator cleanup failed")
+        try:
+            _close(channel)
+        except Exception:
+            logging.getLogger(__name__).exception("CardStream guidance mailbox cleanup failed")
