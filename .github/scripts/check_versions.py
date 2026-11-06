@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         errors.append(f"CLI 版本未指向 {version}")
 
     project_introduction = (
-        ROOT / "knowledge" / "global" / "knowledge/global/overview/project-introduction.md"
+        ROOT / "knowledge" / "global" / "overview" / "project-introduction.md"
     ).read_text(encoding="utf-8")
     if not any(
         f"当前{status}版本为 `{version}`" in project_introduction
@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         errors.append(f"项目介绍中的稳定或暂定版本未指向 {version}")
 
     version_guide = (
-        ROOT / "knowledge" / "global" / "knowledge/global/release/version-and-update-modules.md"
+        ROOT / "knowledge" / "global" / "release" / "version-and-update-modules.md"
     ).read_text(encoding="utf-8")
     example_match = re.search(r"```json\s*\n(.*?)\n```", version_guide, re.DOTALL)
     try:
