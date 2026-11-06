@@ -25,8 +25,8 @@ def maintenance_claim_active(record, now):
 
 
 def narrative_budget_end(db, key, start, target, input_tokens):
-    from run.cards.models import Card
-    from run.memory.evidence import narrative_record, narrative_rows
+    from run.cards import Card
+    from run.memory import narrative_record, narrative_rows
     from provider.tokenizer import count_value
     used, group_tokens, group_id, group_start = 0, 0, None, start
     for row in narrative_rows(db, key, start, target):

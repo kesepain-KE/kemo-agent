@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from run.history.archive_query_common import CONTENT, ROLE, TEXT_CARDS, VISIBLE, archive_database
-from run.infra.fulltext import compile_fulltext
+from run.infra import compile_fulltext
 
 
 def search_rows(root, user, query, *, source, session_id, since, until, role, limit, offset):

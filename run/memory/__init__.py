@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from run.memory.sqlite import SqliteMemoryStore
 from run.memory.store import MEMORY_DB_SCHEMA_VERSION
+from run.memory.fulltext import search_batch as search_fulltext_batch
 
 
 MEMORY_SCHEMA_VERSION = MEMORY_DB_SCHEMA_VERSION

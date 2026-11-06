@@ -13,8 +13,7 @@ import threading
 from typing import Iterator
 
 from run.config import user_dir
-from run.infra import execute_schema, schema_migration
-from run.infra.fulltext import load_simple
+from run.infra import execute_schema, load_simple, schema_migration
 
 
 MEMORY_DB_FILENAME = "memory.sqlite3"

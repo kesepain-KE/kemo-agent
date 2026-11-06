@@ -19,6 +19,8 @@ from run.infra.read_cache import BoundedReadCache, cached_read_text, invalidate_
 from run.infra.atomic_io import replace_with_retry
 from run.infra.async_utils import run_awaitable
 from run.infra.errors import ContextLengthExceededError, EngineError
+from run.infra.fulltext import compile_fulltext, load_simple, match_positions
+from run.infra.text_search import compile_query, match_span
 from run.infra.usage import (
     merge_usage,
     merge_usage_dict,
@@ -41,6 +43,11 @@ __all__ = [
     "invalidate_source_cache",
     "ContextLengthExceededError",
     "EngineError",
+    "compile_fulltext",
+    "compile_query",
+    "load_simple",
+    "match_positions",
+    "match_span",
     "merge_usage",
     "merge_usage_dict",
     "new_usage_total",

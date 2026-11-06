@@ -19,7 +19,8 @@ from run.history.store import (
     connection, database_path, mutate_registry_record, read_registry_record,
     session_page_cursor, upsert_registry_record,
 )
-from run.history.archive_query_common import raw_search_rows
+from run.history.archive_query_common import raw_search_rows, raw_text_context
+from run.history.fulltext import search_rows as fulltext_search_rows
 
 _DOMAIN_MODULES = (
     "archive_catalog", "archive_reader", "lease_presence", "web_lifecycle",

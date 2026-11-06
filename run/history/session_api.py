@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
+
 from run.cards import CardConflictError, CardStore, json_text, session_key
 from run.config import load_config
 from run.history.index_core import find_record, new_conversation_id, reserve_session, _now
@@ -11,6 +13,11 @@ from run.history.session_ops import close_session, update_title
 from run.history.session_payload import session_payload
 
 HistoryError = CardConflictError
+
+_UNPURGED = (
+    "(lifecycle!='deleted' OR last_seq>0 OR record_json!='{}' OR EXISTS("
+    "SELECT 1 FROM card_integrations i WHERE i.session_key=card_sessions.session_key))"
+)
 
 
 def ensure_session_appendable(root, user, source, session_id):
@@ -62,16 +69,51 @@ def _hide(db, key):
     db.execute("DELETE FROM card_leases WHERE session_key=?", (key,))
 
 
+def _purge(db, keys):
+    """Erase history in the caller's write transaction, retaining empty tombstones."""
+    if not keys:
+        return
+    for key in keys:
+        CardStore.require_idle(db, key)
+    guard = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='cards_raw_no_delete'"
+    ).fetchone()[0]
+    # BEGIN IMMEDIATE excludes other writers. Rollback restores both the data
+    # and this guard if any statement fails; context maintenance stays protected.
+    db.execute("DROP TRIGGER cards_raw_no_delete")
+    for key in keys:
+        db.execute(
+            "INSERT INTO card_text_fts(card_text_fts,rowid,text) "
+            "SELECT 'delete',rowid,coalesce(json_extract(raw_payload,'$.text'),'') "
+            "FROM context_cards WHERE session_key=? AND raw_kind IN ('user_text','agent_text')",
+            (key,),
+        )
+        db.execute("DELETE FROM context_cards WHERE session_key=?", (key,))
+        db.execute(
+            "DELETE FROM card_tool_executions WHERE integration_id IN "
+            "(SELECT integration_id FROM card_integrations WHERE session_key=?)", (key,),
+        )
+        db.execute("DELETE FROM card_integrations WHERE session_key=?", (key,))
+        db.execute("DELETE FROM card_bindings WHERE session_key=?", (key,))
+        db.execute("DELETE FROM card_leases WHERE session_key=?", (key,))
+        db.execute(
+            "UPDATE card_sessions SET lifecycle='deleted',generation=?,last_seq=0,"
+            "view_epoch=view_epoch+1,active_tokens=0,meter_key='',memory_processed_seq=0,"
+            "record_json='{}',updated_at=? WHERE session_key=?", (uuid4().hex, _now(), key),
+        )
+    db.execute(guard)
+
+
 def delete_session(root, user, source, session_id):
     store = CardStore(root, user)
     if not store.path.is_file():
         return 0
     key = session_key(source, session_id)
     with store.db(write=True) as db:
-        if not db.execute("SELECT 1 FROM card_sessions WHERE session_key=? AND lifecycle!='deleted'",
+        if not db.execute("SELECT 1 FROM card_sessions WHERE session_key=? AND " + _UNPURGED,
                           (key,)).fetchone():
             return 0
-        _hide(db, key)
+        _purge(db, [key])
     return 1
 
 
@@ -81,7 +123,7 @@ def delete_all_sessions(root, user, source=None, *, client_id=""):
     if not store.path.is_file():
         return 0, 0
     with store.db(write=True) as db:
-        sql, args = "SELECT session_key FROM card_sessions WHERE lifecycle!='deleted'", []
+        sql, args = "SELECT session_key FROM card_sessions WHERE " + _UNPURGED, []
         if source is not None:
             sql += " AND source=?"
             args.append(source)
@@ -91,10 +133,8 @@ def delete_all_sessions(root, user, source=None, *, client_id=""):
                                 "AND expires_at>? AND client_id!=?", (key, time.time(), client_id)).fetchone()
             if others:
                 raise HistoryError("仍有其他页面占用会话，未删除任何会话")
-            CardStore.require_idle(db, key)
-        for key in keys:
-            _hide(db, key)
-        # No physical historical records or old user files are removed.
+        _purge(db, keys)
+        # The second count is for legacy files; user files are not removed.
         return len(keys), 0
 
 

@@ -1,7 +1,7 @@
 """Indexed memory lookup; batch queries share one read snapshot."""
 from __future__ import annotations
 
-from run.infra.fulltext import compile_fulltext
+from run.infra import compile_fulltext
 from run.memory.sqlite_support import entry_from_row
 from run.memory.store import connection
 

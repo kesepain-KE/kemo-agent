@@ -472,7 +472,7 @@ def extract_card_memory(*, root, user, source, session_id, config, agent_runner,
     claim_id = claim["memory_claim_id"]
     identity = {**base, "seq_start": start, "seq_end": end, "claim_id": claim_id}
     try:
-        from run.cards.models import Card
+        from run.cards import Card
         from run.memory.evidence import narrative_record, narrative_rows
         with store.db() as db:
             count = db.execute("SELECT COUNT(*) FROM context_cards WHERE session_key=? AND seq BETWEEN ? AND ?",

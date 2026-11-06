@@ -16,6 +16,7 @@ REEXECUTE_ACTIONS = {
     "sense_creater": frozenset({"list", "validate"}),
     "skill_creater": frozenset({"list", "get", "validate"}),
     "multimodal": frozenset({"analyze_image", "transcribe_audio", "analyze_video"}),
+    "kemo_graph_write": frozenset({"operation_guide"}),
 }
 REEXECUTE_TOOLS = frozenset({
     "web_search", "history_search", "get_current_time",
