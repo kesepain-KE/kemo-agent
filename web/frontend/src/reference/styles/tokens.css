@@ -11,6 +11,7 @@
   --bg-surface: #ffffff;
   --bg-raised: #ffffff;
   --bg-sunken: #f3f1ee;
+  --bg-sidebar: var(--bg-sunken);
   --bg-inset: #f7f6f3;
   --bg-hover: rgba(28, 25, 23, 0.045);
   --bg-active: rgba(28, 25, 23, 0.075);
@@ -139,6 +140,7 @@
   --bg-surface: #21201e;
   --bg-raised: #2a2826;
   --bg-sunken: #151413;
+  --bg-sidebar: var(--bg-sunken);
   --bg-inset: #292724;
   --bg-hover: rgba(250, 249, 247, 0.055);
   --bg-active: rgba(250, 249, 247, 0.09);

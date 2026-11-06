@@ -23,7 +23,7 @@ export function closeOverlays() {
 export async function readDetail(fn, onResult) {
   const ctx = Current;
   try { const result = await fn(); if (ctx.active) onResult(result); }
-  catch (error) { if (ctx.active) toast(error instanceof Error ? error.message : '读取失败', {kind:'error'}); }
+  catch (error) { if (ctx.active) toast(error instanceof Error ? error.message : tr('读取失败'), {kind:'error'}); }
 }
 export async function mutate(fn, message, after) {
   const ctx = Current;
@@ -40,7 +40,7 @@ export async function mutate(fn, message, after) {
     return true;
   } catch(error) {
     if (ctx.active) {
-      toast(error instanceof Error ? error.message : '操作失败', {kind:'error',ttl:7000});
+      toast(error instanceof Error ? error.message : tr('操作失败'), {kind:'error',ttl:7000});
       ctx.restoreSwitches?.();
     }
     return false;
@@ -51,7 +51,7 @@ export async function mutate(fn, message, after) {
 export async function refreshPage() {
   const ctx = Current;
   try { await ctx.refresh(); }
-  catch(error) { if(ctx.active) toast(error.message || '刷新失败',{kind:'error'}); }
+  catch(error) { if(ctx.active) toast(error.message || tr('刷新失败'),{kind:'error'}); }
 }
 export function buildTokenChart(trend) {
   const values = (trend || []).map(v => Math.max(0, Number(v) || 0));
@@ -240,7 +240,7 @@ export function fmtNum(n) {
 /** 千分位 */
 export function fmtThousands(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
-  return Number(n).toLocaleString('en-US');
+  return Number(n).toLocaleString(useUiStore.getState().language);
 }
 
 export function pad2(n) { return n < 10 ? '0' + n : String(n); }
@@ -265,7 +265,7 @@ export function fmtRelative(input) {
     if (sec < 86400) return relative.format(-Math.floor(sec / 3600), 'hour');
     return relative.format(-Math.floor(sec / 86400), 'day');
   }
-  if (sec < 45) return '刚刚';
+  if (sec < 45) return tr('刚刚');
   if (sec < 60) return sec + ' 秒前';
   const min = Math.floor(sec / 60);
   if (min < 60) return min + ' 分钟前';
@@ -312,11 +312,11 @@ export function fmtClock(seconds) {
 /** 时段问候 */
 export function greeting(date = new Date()) {
   const hr = date.getHours();
-  if (hr < 5) return '夜深了';
-  if (hr < 11) return '上午好';
-  if (hr < 13) return '中午好';
-  if (hr < 18) return '下午好';
-  return '晚上好';
+  if (hr < 5) return tr('夜深了');
+  if (hr < 11) return tr('上午好');
+  if (hr < 13) return tr('中午好');
+  if (hr < 18) return tr('下午好');
+  return tr('晚上好');
 }
 
 /** ISO 时间偏移若干分钟，用于 mock 数据 */
@@ -442,7 +442,7 @@ export function toast(message, opts = {}) {
     h('button.icon-btn', {
       style: { width: '20px', height: '20px', marginTop: '-1px' },
       onclick: () => dismiss(),
-      'aria-label': '关闭通知',
+      'aria-label': tr('关闭通知'),
     }, h('span', { html: icon('close', 'icon-sm') })),
   );
   const dismiss = () => {
@@ -476,7 +476,7 @@ export const Overlay = {
       body,
       opts.foot ? h('div.modal-foot' + (opts.footBetween ? '.between' : ''), opts.foot) : null,
     );
-    const overlay = h('div.overlay.overlay-center', { role: 'dialog', 'aria-modal': 'true', 'aria-label':opts.title || '操作窗口' }, modal);
+    const overlay = h('div.overlay.overlay-center', { role: 'dialog', 'aria-modal': 'true', 'aria-label':opts.title || tr('操作窗口') }, modal);
     const previousFocus=document.activeElement;
     const close = () => {
       overlay.remove();
@@ -515,7 +515,7 @@ export const Overlay = {
       const finish = (v) => { if (!done) { done = true; resolve(v); } };
       const tone = opts.tone || 'warning';
       const entry = Overlay.modal({
-        title: opts.title || '确认操作',
+        title: opts.title || tr('确认操作'),
         size: 'sm',
         body: [
           h('div', { style: { display: 'flex', gap: 'var(--s-3)', alignItems: 'flex-start' } },
@@ -655,7 +655,7 @@ export function makeSwitch(on, onChange, opts = {}) {
   const el = h('button.switch' + (on ? '.is-on' : ''), {
     role: 'switch',
     'aria-checked': on ? 'true' : 'false',
-    'aria-label': opts.label || '切换',
+    'aria-label': opts.label || tr('切换'),
     disabled: !!opts.disabled,
     onclick: async () => {
       const next = !el.classList.contains('is-on');
@@ -682,7 +682,7 @@ export function makeSearchBox(opts = {}) {
     value: opts.value || '',
     'aria-label': opts.placeholder || tr('搜索'),
   });
-  const clear = h('button.search-clear', { 'aria-label': '清除搜索', onclick: () => { input.value = ''; input.dispatchEvent(new Event('input')); input.focus(); } },
+  const clear = h('button.search-clear', { 'aria-label': tr('清除搜索'), onclick: () => { input.value = ''; input.dispatchEvent(new Event('input')); input.focus(); } },
     h('span', { html: icon('close', 'icon-sm') }));
   const box = h('div.search-box',
     h('span', { html: icon('search', 'icon-sm') }),
@@ -718,7 +718,7 @@ export function makePager(page, totalPages, onGo) {
     onclick: () => onGo(target),
   }, label);
 
-  wrap.appendChild(btn('上一页', Math.max(1, page - 1), { disabled: page <= 1 }));
+  wrap.appendChild(btn(tr('上一页'), Math.max(1, page - 1), { disabled: page <= 1 }));
   const windowSize = 5;
   let from = Math.max(1, page - Math.floor(windowSize / 2));
   const to = Math.min(totalPages, from + windowSize - 1);
@@ -728,7 +728,7 @@ export function makePager(page, totalPages, onGo) {
   for (let p = from; p <= to; p++) wrap.appendChild(btn(String(p), p, { active: p === page }));
   if (to < totalPages - 1) wrap.appendChild(h('span', { style: { padding: '0 2px' } }, '…'));
   if (to < totalPages) wrap.appendChild(btn(String(totalPages), totalPages, { active: page === totalPages }));
-  wrap.appendChild(btn('下一页', Math.min(totalPages, page + 1), { disabled: page >= totalPages }));
+  wrap.appendChild(btn(tr('下一页'), Math.min(totalPages, page + 1), { disabled: page >= totalPages }));
   return wrap;
 }
 

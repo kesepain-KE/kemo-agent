@@ -1,0 +1,423 @@
+/* ============================================================================
+   polish · 界面质感打磨层
+   ----------------------------------------------------------------------------
+   这里只做"提升"不做"改版"：不新增配色、不改栅格、不动任何尺寸合同，
+   仅在既有令牌之上叠加层次（elevation）、模糊、描边与微动效。
+   颜色一律走 --accent / --border / --text-* 的灰度派生，
+   因此高级白与高级黑两套主题共享同一份规则。
+
+   注意：本文件在 production.css 之后、background.css 之前导入，
+   以便壁纸模式仍能决定 backdrop-filter 的强度。
+   ========================================================================= */
+
+/* ----------------------------------------------------------------------------
+   1. 通用弹层：统一"悬浮玻璃"观感
+   目标是把散落的菜单/气泡收敛成同一物性——半透明底 + 大半径模糊 +
+   一层 1px 高光描边，让它们在任何背景上都"浮起来"而不是"贴上去"。
+   -------------------------------------------------------------------------- */
+
+/* 弹层底色走变量：壁纸模式下面板本身已经是半透明的，
+   再叠一层透明度会糊掉，所以那里直接回落到主题面板色。 */
+:root { --polish-float-surface: color-mix(in srgb, var(--bg-raised) 92%, transparent); }
+.app-shell[data-background="on"] { --polish-float-surface: var(--bg-raised); }
+
+.composer-slash-menu,
+.conversation-menu,
+.reasoning-effort-popover,
+.reference-top-menu,
+.menu,
+.model-select-popover,
+.config-select-popover {
+  background: var(--polish-float-surface);
+  border-color: color-mix(in srgb, var(--border-strong) 62%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.18),
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    inset 0 1px 0 color-mix(in srgb, var(--bg-surface) 70%, transparent);
+}
+
+/* 暗色下阴影本身不再抬升体积，改用更强的描边承担"分层"，
+   否则纯黑底上的大面积阴影会糊成一片。 */
+[data-theme="dark"] .composer-slash-menu,
+[data-theme="dark"] .conversation-menu,
+[data-theme="dark"] .reasoning-effort-popover,
+[data-theme="dark"] .reference-top-menu,
+[data-theme="dark"] .menu,
+[data-theme="dark"] .model-select-popover,
+[data-theme="dark"] .config-select-popover {
+  border-color: color-mix(in srgb, var(--border) 90%, transparent);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.75),
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* 菜单项：悬停不做颜色跳变，只做一次极轻的表面抬升。 */
+.menu-item,
+.conversation-action,
+.composer-slash-option,
+.reasoning-effort-popover > button {
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+/* 斜杠菜单从输入框上沿"长出来"，方向与它的锚点一致。
+   填充模式用 backwards 而不是 both：动画结束后必须回到
+   transform:none，否则残留的 transform 会让弹层成为 fixed 子元素的
+   包含块（菜单里嵌套浮层时会错位）。 */
+.composer-slash-menu {
+  transform-origin: bottom center;
+  animation: kemo-polish-pop 140ms var(--ease-out) backwards;
+}
+.conversation-menu,
+.reasoning-effort-popover,
+.reference-top-menu {
+  transform-origin: bottom right;
+  animation: kemo-polish-pop 130ms var(--ease-out) backwards;
+}
+
+/* 选中项左侧加一条 2px 指示条，键盘走查时位置一眼可辨。 */
+.composer-slash-option {
+  position: relative;
+}
+.composer-slash-option::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition:
+    height var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease);
+}
+.composer-slash-option.is-active::before {
+  height: 18px;
+  opacity: 1;
+}
+
+/* ----------------------------------------------------------------------------
+   2. 输入坞：焦点、发送与上下文环
+   -------------------------------------------------------------------------- */
+.composer.composer-inner {
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+/* 焦点态在原有一圈柔光之外，再加一层贴边细环，
+   键盘用户能立刻确认"输入被接管了"。 */
+.composer.composer-inner:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+[data-theme="dark"] .composer.composer-inner:focus-within {
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.send-btn {
+  transition:
+    background var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.send-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.send-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.context-usage-ring {
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.context-usage-ring:hover {
+  transform: scale(1.14);
+}
+
+/* 输入坞底部提示：压低存在感，让视线停在正文。 */
+.composer-hint {
+  color: var(--text-faint);
+}
+.composer-hint kbd {
+  background: color-mix(in srgb, var(--bg-inset) 88%, transparent);
+}
+
+/* ----------------------------------------------------------------------------
+   3. 思考过程 / 工具调用卡：去噪 + 可发现
+   默认态降低描边对比，把信息密度让给内容；悬停才抬一次边。
+   -------------------------------------------------------------------------- */
+.trace,
+.tool-call {
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+.trace:hover,
+.tool-call:hover {
+  border-color: color-mix(in srgb, var(--border) 78%, transparent);
+}
+.tool-call.open {
+  border-color: color-mix(in srgb, var(--border) 88%, transparent);
+}
+
+.tool-call-chevron,
+.trace-head > svg {
+  transition: transform var(--dur) var(--ease-out);
+}
+.tool-call.open .tool-call-chevron {
+  transform: rotate(180deg);
+}
+.trace.open .trace-head > svg {
+  transform: rotate(180deg);
+}
+
+.tool-call-head,
+.trace-head {
+  transition: background var(--dur-fast) var(--ease);
+}
+.trace-head {
+  background: color-mix(in srgb, var(--bg-inset) 82%, transparent);
+}
+
+/* 展开后的结果面板与卡片本体之间留一条更轻的分隔线。 */
+.tool-call-body {
+  background: color-mix(in srgb, var(--bg-inset) 34%, transparent);
+}
+
+/* 用量小气泡：静态信息，悬停仅提示可选中。 */
+.usage-summary-chip {
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.usage-summary-chip:hover {
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+}
+.usage-summary-chip strong {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 计划记录行：可点击的摘要，悬停时轻微抬起。 */
+.task-plan-record {
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform var(--dur) var(--ease-out);
+}
+.task-plan-record:hover {
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+/* ----------------------------------------------------------------------------
+   4. 欢迎页：把"引导"做出触感
+   底色与文字已在 chat.css 里改用主题令牌，这里只补交互语言。
+   -------------------------------------------------------------------------- */
+.welcome-mark {
+  transition:
+    transform var(--dur-slow) var(--ease-out),
+    box-shadow var(--dur-slow) var(--ease),
+    border-color var(--dur-slow) var(--ease);
+}
+.welcome-mark:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border-subtle));
+  box-shadow: var(--shadow-lg);
+}
+
+.welcome-hi {
+  color: var(--text-primary);
+  text-wrap: balance;
+}
+.welcome-sub {
+  color: var(--text-tertiary);
+  text-wrap: pretty;
+}
+
+/* 近期任务与状态卡是开始页的两个主要入口，统一抬升语言。 */
+.recent-task,
+.welcome-metric {
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform var(--dur) var(--ease-out),
+    background var(--dur) var(--ease);
+}
+.recent-task:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+.recent-task:active {
+  transform: translateY(0);
+}
+.welcome-metric:hover {
+  border-color: color-mix(in srgb, var(--border) 72%, transparent);
+}
+.welcome-metric strong {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ----------------------------------------------------------------------------
+   5. 侧栏：进度感与"当前会话"的锚点
+   -------------------------------------------------------------------------- */
+.sidebar {
+  border-right-color: color-mix(in srgb, var(--border-subtle) 88%, transparent);
+}
+
+/* 当前会话左侧竖条：比整行底色更明确的"你在这里"。 */
+.session-item {
+  position: relative;
+}
+.session-item::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition:
+    height var(--dur) var(--ease-out),
+    opacity var(--dur) var(--ease);
+}
+.session-item.is-active::before {
+  height: 16px;
+  opacity: 1;
+}
+
+/* 悬停显形的操作按钮改为淡入 + 极轻位移，避免"啪"地闪出。 */
+.session-item .si-action {
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease-out);
+  transform: translateX(2px);
+}
+.session-item:hover .si-action,
+.session-item:focus-within .si-action {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* 侧栏底部用渐隐而不是硬线分隔，减少一条横线的视觉噪音。 */
+.sidebar-foot {
+  border-top-color: color-mix(in srgb, var(--border-subtle) 76%, transparent);
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--bg-sidebar) 60%, transparent)
+  );
+}
+
+.nav-item.is-active {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-subtle) 90%, transparent);
+}
+
+/* ----------------------------------------------------------------------------
+   6. 抽屉与遮罩
+   抽屉本身已有 translateX 过渡，这里只补材质，避免和位移过渡抢同一属性。
+   -------------------------------------------------------------------------- */
+.drawer[role="dialog"] {
+  border-left-color: color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--bg-raised) 96%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(24px) saturate(140%);
+}
+.drawer-backdrop {
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  animation: kemo-polish-fade 180ms var(--ease) both;
+}
+.app-shell[data-background="on"] .drawer[role="dialog"] {
+  background: var(--bg-raised);
+}
+
+/* 模态框承载正文与表单，底色沿用主题面板（壁纸模式下已是半透明），
+   只叠加模糊，避免二次稀释透明度导致文字对比下降。 */
+.modal {
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(24px) saturate(140%);
+}
+
+/* ----------------------------------------------------------------------------
+   7. 全局微交互
+   -------------------------------------------------------------------------- */
+.card,
+.panel-container,
+.setting-section {
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+.btn,
+.icon-btn {
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+/* 骨架屏在深色下过亮，压一档。 */
+[data-theme="dark"] .skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-inset) 0%,
+    color-mix(in srgb, var(--bg-hover) 70%, var(--bg-inset)) 42%,
+    var(--bg-inset) 84%
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   8. 动效与降级
+   -------------------------------------------------------------------------- */
+@keyframes kemo-polish-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes kemo-polish-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-slash-menu,
+  .conversation-menu,
+  .reasoning-effort-popover,
+  .reference-top-menu,
+  .drawer-backdrop {
+    animation: none !important;
+  }
+  .send-btn:hover:not(:disabled),
+  .welcome-mark:hover,
+  .recent-task:hover,
+  .task-plan-record:hover,
+  .context-usage-ring:hover {
+    transform: none;
+  }
+}

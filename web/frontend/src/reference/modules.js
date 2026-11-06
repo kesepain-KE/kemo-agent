@@ -61,7 +61,7 @@ export function renderSensePage(ctx) {
 
   inner.appendChild(pageHead({
     title: tr('感知'),
-    desc: '全局感知模块按目录注册，一个目录一个模块，读取 global_sense/<module>/sense.json。区分「采集到的数据」与「真正进入 Prompt 的片段」── 二者经常不同。',
+    desc: '全局感知模块按目录注册，一个目录一个模块，读取 sense/<module>/sense.json。区分「采集到的数据」与「真正进入 Prompt 的片段」── 二者经常不同。',
     actions: [
       h('button.btn.btn-outline', { onclick: () => refreshPage() },
         h('span', { html: icon('refresh', 'icon-sm') }), tr('重新读取')),
@@ -232,7 +232,7 @@ export function renderSensePage(ctx) {
             const ok = await Overlay.confirm({
               title: '删除全局感知模块',
               description: '这是全局模块，删除会影响所有用户，不只是你。目录及采集数据都会被移除。',
-              detail: `global_sense/${s.name}`, confirmLabel: '删除全局模块', tone: 'danger',
+              detail: `sense/${s.name}`, confirmLabel: '删除全局模块', tone: 'danger',
             });
             if (ok) await mutate(() => Api.deleteSenseModule(Store.user, s.name), '全局感知模块已删除');
           },
@@ -288,7 +288,7 @@ export function renderExpandPage(ctx) {
 
   inner.appendChild(h('div.stat-row',
     statTile('拓展模块', LIVE_EXPANDS.summary.total, { icon: 'expand', foot: '三层合计' }),
-    statTile('已启用', LIVE_EXPANDS.status_summary.enabled, { icon: 'checkCircle', color: 'var(--success)' }),
+    statTile(tr('已启用'), LIVE_EXPANDS.status_summary.enabled, { icon: 'checkCircle', color: 'var(--success)' }),
     statTile('注入 Tokens', LIVE_EXPANDS.injection.estimated_tokens, {
       icon: 'activity', unit: 'tok',
       foot: `${LIVE_EXPANDS.injection.injected_items}/${LIVE_EXPANDS.injection.original_items} 项 · ${LIVE_EXPANDS.injection.truncated ? '已截断' : '未截断'}`,
@@ -436,8 +436,8 @@ export function renderExpandPage(ctx) {
     body.appendChild(h('div.sense-status-grid',
       [['输入健康', m.input_health], ['更新入口', m.start_update || '未提供更新入口'],
         ['最近更新', m.runtime?.update?.last_success || fmtDateTime(m.updated_at ? m.updated_at * 1000 : null)],
-        ['实际数据注入', `${fmtNum(m.data_injected_tokens ?? expandDataFragment(m).length)} ${m.data_injected_tokens === undefined ? '字符' : 'tokens'}`],
-        ['数据输入', m.open_input ? '开启' : '关闭'], ['控制入口', m.open_control ? '开启' : '关闭']]
+        ['实际数据注入', `${fmtNum(m.data_injected_tokens ?? expandDataFragment(m).length)} ${m.data_injected_tokens === undefined ? tr('字符') : 'tokens'}`],
+        ['数据输入', m.open_input ? '开启' : tr('关闭')], ['控制入口', m.open_control ? '开启' : tr('关闭')]]
         .map(([label, value]) => h('div.sense-status-item', h('span', label), h('strong', value))),
     ));
     body.appendChild(h('div.sense-detail-tabs',

@@ -561,7 +561,7 @@
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--r-full);
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   text-align: left;
   max-width: 100%;
 }
@@ -666,7 +666,7 @@
   border: 1px solid var(--border-subtle);
   max-width: 290px;
   min-width: 0;
-  transition: all var(--dur-fast) var(--ease);
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
 .attach-item:hover { border-color: var(--border); }
 .attach-thumb {

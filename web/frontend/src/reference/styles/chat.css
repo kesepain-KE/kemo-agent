@@ -112,7 +112,7 @@
 }
 .msg-avatar.is-assistant {
   background: linear-gradient(148deg, var(--accent), color-mix(in srgb, var(--accent) 58%, #2f2f2f));
-  color: #fff;
+  color: var(--accent-contrast);
 }
 .msg-avatar.is-user { background: var(--bg-active); color: var(--text-secondary); }
 
@@ -146,14 +146,7 @@
 }
 
 /* 长任务边界 */
-.long-task-boundary {
-  display: flex; align-items: center; gap: var(--s-3);
-  padding: 9px 13px;
-  border-radius: var(--r-md);
-  background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
-  font-size: var(--t-xs);
-}
+
 .ltb-badge {
   font-family: var(--font-mono);
   font-size: var(--t-2xs);
@@ -298,23 +291,23 @@
 .welcome-mark {
   width: 78px; height: 78px;
   border-radius: var(--r-lg);
-  background: #fff;
+  background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   display: flex; align-items: center; justify-content: center;
-  color: #000;
+  color: var(--text-primary);
   font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.04em;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  box-shadow: var(--shadow-lg);
   margin-bottom: var(--s-2);
   overflow: hidden;
 }
 .welcome-mark > .kemo-logo { width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
 [data-theme="dark"] .welcome-mark {
-  background: #000;
-  border-color: rgba(255, 255, 255, 0.18);
-  color: #fff;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.42);
+  background: var(--bg-surface);
+  border-color: var(--border);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
 }
 .welcome-hi {
   font-size: var(--t-3xl);
@@ -413,7 +406,7 @@
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   cursor: pointer;
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease-out);
   min-width: 0;
 }
 .recent-task:hover { border-color: var(--border); background: var(--bg-hover); }
@@ -534,7 +527,7 @@
   color: var(--text-tertiary);
   background: var(--bg-inset);
   border: 1px solid var(--border-subtle);
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   white-space: nowrap;
 }
 button.model-pill:hover { background: var(--bg-hover); color: var(--text-secondary); border-color: var(--border); }
@@ -546,7 +539,7 @@ button.model-pill:hover { background: var(--bg-hover); color: var(--text-seconda
   display: flex; align-items: center; justify-content: center;
   background: var(--accent);
   color: var(--accent-contrast);
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease);
   flex: none;
 }
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
@@ -694,7 +687,7 @@ button.model-pill:hover { background: var(--bg-hover); color: var(--text-seconda
   font-size: var(--t-sm);
   color: var(--text-secondary);
   text-align: left;
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .aside-action:hover { background: var(--bg-hover); color: var(--text-primary); }
 .aside-action.is-danger { color: var(--danger); }

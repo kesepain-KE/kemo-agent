@@ -14,7 +14,7 @@ export const RUNTIME_TABS = [
 ];
 
 const runtimeBadge = state => statusBadge(state, {
-  injected: '已注入', truncated: '已截断', loaded: '已加载', offline: '未连接',
+  injected: '已注入', truncated: '已截断', loaded: '已加载', offline: tr('未连接'),
 }[state]);
 
 export function renderStatusPage(ctx) {
@@ -38,10 +38,10 @@ export function renderStatusPage(ctx) {
   /* 顶部 4 张摘要卡 */
   const summaryCards = h('div.stat-row');
   const cardDefs = [
-    { label: 'API 配置', value: R.api.model, foot: `${R.api.type} · ${R.api.configured ? '已配置' : '待配置'}`, icon: 'cpu', tab: 'api', smallValue: true },
-    { label: '上下文占用', value: `${Number(R.context.percent).toFixed(1)}%`, foot: `${fmtNum(R.context.used_tokens)} / ${fmtNum(R.context.max_tokens)} tokens`, icon: 'gauge', tab: 'tokens' },
-    { label: '对话轮次', value: `${R.context.rounds} / ${R.context.round_limit}`, foot: `压缩阈值 ${fmtNum(R.context.compression_threshold)} tokens`, icon: 'chat', tab: 'prompt' },
-    { label: '消息路由', value: `${R.message_routes.summary.connected_transports} / ${R.message_routes.summary.total_transports}`, foot: R.message_routes.summary.error_transports ? '部分异常' : '无错误通道', icon: 'route', tab: 'external' },
+    { label: tr('API 配置'), value: R.api.model, foot: `${R.api.type} · ${R.api.configured ? tr('已配置') : tr('待配置')}`, icon: 'cpu', tab: 'api', smallValue: true },
+    { label: tr('上下文占用'), value: `${Number(R.context.percent).toFixed(1)}%`, foot: `${fmtNum(R.context.used_tokens)} / ${fmtNum(R.context.max_tokens)} tokens`, icon: 'gauge', tab: 'tokens' },
+    { label: tr('上下文卡片'), value: `${R.context.cards_active} / ${R.context.last_seq}`, foot: `压缩阈值 ${fmtNum(R.context.compression_threshold)} tokens`, icon: 'chat', tab: 'prompt' },
+    { label: tr('消息路由'), value: `${R.message_routes.summary.connected_transports} / ${R.message_routes.summary.total_transports}`, foot: R.message_routes.summary.error_transports ? tr('部分异常') : tr('无错误通道'), icon: 'route', tab: 'external' },
   ];
   cardDefs.forEach((c) => {
     const card = h('button.stat', {
@@ -90,22 +90,22 @@ export function renderStatusPage(ctx) {
     const names = {
       user_soul: '用户人格', global_soul: '全局人格', agents: '运行手册',
       global_agents: '全局子智能体', user_agents: '用户子智能体', plugins: '工具插件',
-      skills: '技能指令', knowledge: '知识库索引', permanent_memory: '永久记忆',
-      important_memory: '临时重要记忆', task_plan: '任务计划', expand_data: '拓展数据',
+      skills: '技能指令', knowledge: '知识库索引', permanent_memory: tr('永久记忆'),
+      important_memory: tr('临时重要记忆'), task_plan: tr('任务计划'), expand_data: '拓展数据',
       perception: '感知数据',
       agents_manual: '运行手册', global_subagent_registry: '全局子智能体',
       user_subagent_registry: '用户子智能体', knowledge_index: '知识库索引',
-      'temporary_memory:half_year': '半年记忆', 'temporary_memory:one_month': '月记忆',
+      'temporary_memory:half_year': tr('半年记忆'), 'temporary_memory:one_month': '月记忆',
       'temporary_memory:seven_days': '周记忆',
     };
     return h('div.card.runtime-prompt-panel',
       h('div.card-head',
         h('div.section-title', { style: { fontSize: 'var(--t-sm)' } },
-          h('span', { html: icon('fileCode', 'icon-sm') }), '系统提示词与拼接状态'),
+          h('span', { html: icon('fileCode', 'icon-sm') }), tr('系统提示词与拼接状态')),
         h('div.runtime-prompt-summary',
           h('span', `${fmtThousands(R.prompt.total_chars)} 字符`),
           h('span', `约 ${fmtThousands(R.prompt.estimated_tokens)} Tokens`),
-          h('span.badge', '估算值'),
+          h('span.badge', tr('估算值')),
         ),
       ),
       h('div.runtime-prompt-layout',
@@ -113,20 +113,20 @@ export function renderStatusPage(ctx) {
           renderMarkdownWithWidgets(R.prompt.content || '（本次提示词为空）', { readOnly: true })),
         h('div.runtime-prompt-components',
           h('table.table',
-            h('thead', h('tr', h('th', '模块'), h('th', tr('状态')), h('th.num', 'Tokens（估算）'), h('th', '来源'))),
+            h('thead', h('tr', h('th', tr('模块')), h('th', tr('状态')), h('th.num', 'Tokens（估算）'), h('th', tr('来源')))),
             h('tbody', (R.prompt.components || []).map(c => h('tr',
               h('td', h('div', names[c.name] || c.name),
                 h('small', `${c.injected_items}/${c.original_items} 项 · ${fmtThousands(c.chars)} 字符`)),
               h('td', runtimeBadge(c.state)),
               h('td.num', fmtThousands(c.tokens)),
               h('td', h('button.icon-btn', {
-                title: (c.source_files || []).join('\n') || '无来源文件',
+                title: (c.source_files || []).join('\n') || tr('无来源文件'),
                 'aria-label': `复制 ${names[c.name] || c.name} 来源文件`,
                 onclick: () => { void copyText((c.source_files || []).join('\n')); },
               }, h('span', { html: icon('copy', 'icon-sm') }))),
             ))),
           ),
-          !R.prompt.components?.length ? emptyState({ title: '本次暂无拼接组件' }) : null,
+          !R.prompt.components?.length ? emptyState({ title: tr('本次暂无拼接组件') }) : null,
         ),
       ),
     );
@@ -140,22 +140,22 @@ export function renderStatusPage(ctx) {
     wrap.appendChild(h('div.card.card-pad',
       h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 'var(--s-3)', marginBottom: 'var(--s-4)', flexWrap: 'wrap' } },
         h('div', { style: { fontSize: 'var(--t-sm)', fontWeight: '600' } }, `自然日 ${tk.date}（${tk.timezone}）`),
-        tk.estimated ? h('span.badge.badge-warning', '含估算值') : null,
+        tk.estimated ? h('span.badge.badge-warning', tr('含估算值')) : null,
         h('div', { style: { flex: '1' } }),
         h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } }, `共 ${tk.request_count} 次请求`),
       ),
       h('div.metric-grid',
         h('div.metric', h('div.metric-label', tr('发送')), h('div.metric-value', fmtThousands(tk.sent_tokens))),
-        h('div.metric', h('div.metric-label', '接收'), h('div.metric-value', fmtThousands(tk.received_tokens))),
-        h('div.metric', h('div.metric-label', '合计'), h('div.metric-value', fmtThousands(tk.total_tokens))),
-        h('div.metric', h('div.metric-label', '缓存命中'), h('div.metric-value', `${Number(tk.cache_rate).toFixed(1)}%`)),
-        h('div.metric', h('div.metric-label', '缓存 Token'), h('div.metric-value', fmtThousands(tk.cached_tokens))),
+        h('div.metric', h('div.metric-label', tr('接收')), h('div.metric-value', fmtThousands(tk.received_tokens))),
+        h('div.metric', h('div.metric-label', tr('合计')), h('div.metric-value', fmtThousands(tk.total_tokens))),
+        h('div.metric', h('div.metric-label', tr('缓存命中')), h('div.metric-value', `${Number(tk.cache_rate).toFixed(1)}%`)),
+        h('div.metric', h('div.metric-label', tr('缓存 Token')), h('div.metric-value', fmtThousands(tk.cached_tokens))),
       ),
     ));
 
     wrap.appendChild(h('div.card.card-pad',
       h('div.section-title', { style: { marginBottom: 'var(--s-3)' } },
-        h('span', { html: icon('activity', 'icon-sm') }), '24 小时趋势'),
+        h('span', { html: icon('activity', 'icon-sm') }), tr('24 小时趋势')),
       (() => {
         return buildTokenChart(tk.trend);
       })(),
@@ -164,10 +164,10 @@ export function renderStatusPage(ctx) {
     ));
 
     wrap.appendChild(h('div.card', { style: { overflow: 'hidden' } },
-      h('div.card-head', h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, '按小时明细')),
+      h('div.card-head', h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, tr('按小时明细'))),
       h('div.table-wrap', { style: { border: 'none', borderRadius: '0' } },
         h('table.table',
-          h('thead', h('tr', h('th', '小时'), h('th.num', 'Token 合计'))),
+          h('thead', h('tr', h('th', tr('小时')), h('th.num', tr('Token 合计')))),
           h('tbody', tk.trend.map((t, index) => h('tr',
             h('td.mono', index + ':00'),
             h('td.num', fmtThousands(t)),
@@ -197,53 +197,53 @@ export function renderStatusPage(ctx) {
     );
     return h('div.card.card-pad',
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-3)', marginBottom: 'var(--s-4)' } },
-        h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, h('span', { html: icon('cpu', 'icon-sm') }), '用户 API 配置'),
+        h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, h('span', { html: icon('cpu', 'icon-sm') }), tr('用户 API 配置')),
         h('div', { style: { flex: '1' } }),
-        R.api.configured ? h('span.badge.badge-success', '已配置') : h('span.badge.badge-warning', '待配置'),
+        R.api.configured ? h('span.badge.badge-success', tr('已配置')) : h('span.badge.badge-warning', tr('待配置')),
         h('button.btn.btn-ghost.btn-sm', { onclick: () => navigate('/settings', { tab: 'provider' }) },
-          h('span', { html: icon('settings', 'icon-sm') }), '编辑配置'),
+          h('span', { html: icon('settings', 'icon-sm') }), tr('编辑配置')),
       ),
       h('div.banner.banner-info', { style: { marginBottom: 'var(--s-4)' } },
         h('span', { html: icon('shield') }),
         h('div', '凭据按来源脱敏展示，占位符不代表真实密钥；实际密钥只在明确修改时提交。'),
       ),
       h('div.desc-list',
-        h('div.desc-row', h('span.desc-key', '协议类型'), h('span.desc-val', R.api.type + (R.api.type === 'kemo' ? '（Kemo 协议）' : '（OpenAI 兼容）'))),
+        h('div.desc-row', h('span.desc-key', tr('协议类型')), h('span.desc-val', R.api.type + (R.api.type === 'kemo' ? '（Kemo 协议）' : '（OpenAI 兼容）'))),
         h('div.desc-row', h('span.desc-key', 'Base URL'), h('span.desc-val.mono', R.api.base_url)),
-        h('div.desc-row', h('span.desc-key', '主模型'), h('span.desc-val.mono', R.api.model)),
-        h('div.desc-row', h('span.desc-key', '思考档位'), h('span.desc-val', h('span.badge.badge-accent', R.api.thinking_effort))),
-        h('div.desc-row', h('span.desc-key', '凭据来源'), h('span.desc-val',
-          h('span.badge', R.api.credential_source === 'inline' ? '配置文件内联' : R.api.credential_source === 'environment' ? '环境变量' : '缺失'))),
-        h('div.desc-row', h('span.desc-key', '流式'), h('span.desc-val', R.api.stream === undefined ? '未提供' : R.api.stream ? '已开启' : '已关闭')),
-        h('div.desc-row', h('span.desc-key', '请求超时'), h('span.desc-val', R.api.timeout == null ? '未提供' : `${R.api.timeout} 秒`)),
+        h('div.desc-row', h('span.desc-key', tr('主模型')), h('span.desc-val.mono', R.api.model)),
+        h('div.desc-row', h('span.desc-key', tr('思考档位')), h('span.desc-val', h('span.badge.badge-accent', R.api.thinking_effort))),
+        h('div.desc-row', h('span.desc-key', tr('凭据来源')), h('span.desc-val',
+          h('span.badge', R.api.credential_source === 'inline' ? tr('配置文件内联') : R.api.credential_source === 'environment' ? tr('环境变量') : tr('缺失')))),
+        h('div.desc-row', h('span.desc-key', tr('流式')), h('span.desc-val', R.api.stream === undefined ? tr('未提供') : R.api.stream ? tr('已开启') : tr('已关闭'))),
+        h('div.desc-row', h('span.desc-key', tr('请求超时')), h('span.desc-val', R.api.timeout == null ? tr('未提供') : `${R.api.timeout} 秒`)),
         h('div.desc-row', h('span.desc-key', '配置上下文上限'), h('span.desc-val.tnum', `${fmtThousands(R.api.context_tokens ?? R.context.max_tokens)} tokens`)),
         h('div.desc-row', h('span.desc-key', '配置输入模态'), h('span.desc-val', (R.api.input_modalities || []).join(' / ') || '未单独声明')),
       ),
       h('div.runtime-api-models',
-        modelGroup('子智能体模型', R.api.agent_models),
-        modelGroup('多模态模型', R.api.multimodal_models),
-        modelGroup('多模态路由', R.api.multimodal_routing),
+        modelGroup(tr('子智能体模型'), R.api.agent_models),
+        modelGroup(tr('多模态模型'), R.api.multimodal_models),
+        modelGroup(tr('多模态路由'), R.api.multimodal_routing),
       ),
       h('div', { style: { marginTop: 'var(--s-5)' } },
-        h('div.doc-label', { style: { marginBottom: '8px' } }, '模型能力声明'),
+        h('div.doc-label', { style: { marginBottom: '8px' } }, tr('模型能力声明')),
         !hasCapabilities ? h('div.runtime-muted', R.api.type === 'chat'
           ? 'Chat 协议未提供模型能力声明，以上为实际配置值。'
           : '模型能力声明暂不可用，以上为实际配置值。') : null,
         hasCapabilities ? 
         h('div.desc-list',
-          h('div.desc-row', h('span.desc-key', '输入模态'), h('span.desc-val',
+          h('div.desc-row', h('span.desc-key', tr('输入模态')), h('span.desc-val',
             h('div', { style: { display: 'flex', gap: '5px', flexWrap: 'wrap' } },
               (LIVE_CAPABILITIES.capabilities.input_modalities || []).map((m) => h('span.badge', m))))),
-          h('div.desc-row', h('span.desc-key', '输出模态'), h('span.desc-val',
+          h('div.desc-row', h('span.desc-key', tr('输出模态')), h('span.desc-val',
             h('div', { style: { display: 'flex', gap: '5px' } },
               (LIVE_CAPABILITIES.capabilities.output_modalities || []).map((m) => h('span.badge', m))))),
-          h('div.desc-row', h('span.desc-key', '推理支持'), h('span.desc-val',
+          h('div.desc-row', h('span.desc-key', tr('推理支持')), h('span.desc-val',
             LIVE_CAPABILITIES.capabilities.reasoning.supported
               ? `支持 · 档位 ${LIVE_CAPABILITIES.capabilities.reasoning.efforts.join(' / ')}`
-              : '不支持')),
-          h('div.desc-row', h('span.desc-key', '工具能力'), h('span.desc-val',
-            `并行调用 ${LIVE_CAPABILITIES.capabilities.tools.parallel_calls ? '支持' : '不支持'} · 多模态结果 ${LIVE_CAPABILITIES.capabilities.tools.multimodal_results ? '支持' : '不支持'}`)),
-          h('div.desc-row', h('span.desc-key', '模型上下文窗口'), h('span.desc-val.tnum', capability.metadata.context_window ? fmtThousands(capability.metadata.context_window) + ' tokens' : '模型未声明')),
+              : tr('不支持'))),
+          h('div.desc-row', h('span.desc-key', tr('工具能力')), h('span.desc-val',
+            `并行调用 ${LIVE_CAPABILITIES.capabilities.tools.parallel_calls ? tr('支持') : tr('不支持')} · 多模态结果 ${LIVE_CAPABILITIES.capabilities.tools.multimodal_results ? tr('支持') : tr('不支持')}`)),
+          h('div.desc-row', h('span.desc-key', tr('模型上下文窗口')), h('span.desc-val.tnum', capability.metadata.context_window ? fmtThousands(capability.metadata.context_window) + ' tokens' : tr('模型未声明'))),
         ) : null,
       ),
     );
@@ -271,20 +271,20 @@ export function renderStatusPage(ctx) {
       h('div.section-title', h('span', { html: icon(kind, 'icon-sm') }), title,
         h('span.badge', `${items.filter(item => item.health === 'healthy').length} / ${items.length} 健康`)),
       h('div.runtime-component-grid', items.map(item => componentCard(item, kind))),
-      !items.length ? emptyState({ title: '暂无模块', icon: kind }) : null,
+      !items.length ? emptyState({ title: tr('暂无模块'), icon: kind }) : null,
     );
     return h('div.runtime-external-layout',
       h('div.card.card-pad.runtime-component-panel',
-        h('div.section-title', '外部组件'),
+        h('div.section-title', tr('外部组件')),
         h('div.runtime-health-groups',
-          group('感知组件', R.components.sense || [], 'sense'),
-          group('拓展组件', R.components.expand || [], 'expand'),
+          group(tr('感知组件'), R.components.sense || [], 'sense'),
+          group(tr('拓展组件'), R.components.expand || [], 'expand'),
         ),
       ),
       h('div.runtime-route-column',
-        h('div.card.card-pad', group('消息路由', R.message_routes.routes || [], 'route')),
+        h('div.card.card-pad', group(tr('消息路由'), R.message_routes.routes || [], 'route')),
         h('div.card.card-pad',
-          h('div.section-title', h('span', { html: icon('server', 'icon-sm') }), '运行时宿主'),
+          h('div.section-title', h('span', { html: icon('server', 'icon-sm') }), tr('运行时宿主')),
           h('div.runtime-component-grid', Object.entries(R.runtime_host.components || {}).map(([key, value]) =>
             h('article.runtime-component-card', h('strong', key), statusBadge(value.state || 'unknown')))),
           !Object.keys(R.runtime_host.components || {}).length ? h('div.runtime-muted', '当前无宿主组件') : null,
@@ -299,15 +299,15 @@ export function renderStatusPage(ctx) {
     wrap.appendChild(ctx.mountCongestion(R.congestion));
 
     wrap.appendChild(h('div.card.card-pad',
-      h('div.section-title', { style: { marginBottom: 'var(--s-4)' } }, h('span', { html: icon('memory', 'icon-sm') }), '记忆更新'),
+      h('div.section-title', { style: { marginBottom: 'var(--s-4)' } }, h('span', { html: icon('memory', 'icon-sm') }), tr('记忆更新')),
       h('div.metric-grid',
-        h('div.metric', h('div.metric-label', '今日更新'), h('div.metric-value', String(R.memory.updated_today))),
-        h('div.metric', h('div.metric-label', '今日晋升'), h('div.metric-value', String(R.memory.upgraded_today))),
-        h('div.metric', h('div.metric-label', '晋升跟踪'), h('div.metric-value', String(R.memory.upgrade_tracking))),
+        h('div.metric', h('div.metric-label', tr('今日更新')), h('div.metric-value', String(R.memory.updated_today))),
+        h('div.metric', h('div.metric-label', tr('今日晋升')), h('div.metric-value', String(R.memory.upgraded_today))),
+        h('div.metric', h('div.metric-label', tr('晋升跟踪')), h('div.metric-value', String(R.memory.upgrade_tracking))),
       ),
       h('div.table-wrap', { style: { marginTop: 'var(--s-4)' } },
         h('table.table',
-          h('thead', h('tr', h('th', '层级'), h('th', '文件'), h('th.num', tr('权重')), h('th', tr('更新时间')))),
+          h('thead', h('tr', h('th', tr('层级')), h('th', tr('文件')), h('th.num', tr('权重')), h('th', tr('更新时间')))),
           h('tbody', (R.memory.updates || []).map((u) => h('tr',
             h('td', h('span', { class: 'scope-tag scope-user' }, u.tier)),
             h('td.mono', { style: { fontSize: 'var(--t-2xs)' } }, u.filename),
@@ -319,23 +319,23 @@ export function renderStatusPage(ctx) {
     ));
 
     wrap.appendChild(h('div.card.card-pad',
-      h('div.section-title', { style: { marginBottom: 'var(--s-4)' } }, h('span', { html: icon('tasks', 'icon-sm') }), '任务与调度'),
+      h('div.section-title', { style: { marginBottom: 'var(--s-4)' } }, h('span', { html: icon('tasks', 'icon-sm') }), tr('任务与调度')),
       h('div.metric-grid',
-        h('div.metric', h('div.metric-label', '执行中计划'), h('div.metric-value', String(R.tasks.summary.active_plans))),
-        h('div.metric', h('div.metric-label', '等待计划'), h('div.metric-value', String(R.tasks.summary.waiting_plans))),
-        h('div.metric', h('div.metric-label', '启用调度'), h('div.metric-value', String(R.tasks.summary.enabled_crons))),
+        h('div.metric', h('div.metric-label', tr('执行中计划')), h('div.metric-value', String(R.tasks.summary.active_plans))),
+        h('div.metric', h('div.metric-label', tr('等待计划')), h('div.metric-value', String(R.tasks.summary.waiting_plans))),
+        h('div.metric', h('div.metric-label', tr('启用调度')), h('div.metric-value', String(R.tasks.summary.enabled_crons))),
         h('div.metric', h('div.metric-label', tr('已完成')), h('div.metric-value', String(R.tasks.summary.completed_plans))),
       ),
       h('div', { style: { marginTop: 'var(--s-4)' } },
         h('div.doc-label', { style: { marginBottom: '8px' } }, '系统维护 Cron'),
         h('div.desc-list',
           h('div.desc-row', h('span.desc-key', '跟踪状态'), h('span.desc-val', R.system_cron.tracking ? h('span', { style: { color: 'var(--success)' } }, '已跟踪') : '未跟踪')),
-          h('div.desc-row', h('span.desc-key', '任务数'), h('span.desc-val.tnum', String(R.system_cron.tasks.length))),
+          h('div.desc-row', h('span.desc-key', tr('任务数')), h('span.desc-val.tnum', String(R.system_cron.tasks.length))),
           h('div.desc-row', h('span.desc-key', tr('执行记录')), h('span.desc-val.tnum', String(R.system_cron.executions.length))),
         ),
       ),
       h('button.btn.btn-ghost.btn-sm', { style: { marginTop: 'var(--s-3)' }, onclick: () => navigate('/tasks') },
-        '在任务中枢查看', h('span', { html: icon('arrowRight', 'icon-sm') })),
+        tr('在任务中枢查看'), h('span', { html: icon('arrowRight', 'icon-sm') })),
     ));
     return wrap;
   }
@@ -375,7 +375,7 @@ export function renderStatusPage(ctx) {
       const values = ['实时接收', `${info.loaded_items ?? entries.length} / ${info.window_size ?? 300}`,
         info.stdout_items ?? 0, info.stderr_items ?? 0];
       view.metrics.forEach((node, index) => { node.textContent = String(values[index]); });
-      view.followButton.textContent = follow ? '跟随最新输出' : '回到最新输出';
+      view.followButton.textContent = follow ? tr('跟随最新输出') : '回到最新输出';
       view.retention.textContent = `保留 ${info.retention_seconds ?? 3600} 秒 · 仅当前进程`;
       fill(view.errors, (LIVE_RUNTIME_LOGS.source_errors || []).map(error =>
         h('div.banner.banner-warning', { role: 'status' }, error)));
@@ -470,14 +470,14 @@ export function renderStatusPage(ctx) {
         const term = h('div.terminal.runtime-terminal', { role: 'region', 'aria-label': '启动终端输出', tabindex: '0' });
         const followButton = h('button.btn.btn-ghost.btn-sm', {
           onclick: () => { ctx.viewState.terminalFollow = true; term.scrollTop = term.scrollHeight; },
-        }, follow ? '跟随最新输出' : '回到最新输出');
+        }, follow ? tr('跟随最新输出') : '回到最新输出');
         term.addEventListener('scroll', () => {
           // Removing an old snapshot can dispatch a late scroll event with
           // zero dimensions. It must not overwrite the new window's state.
           if (!ctx.active || !term.isConnected) return;
           ctx.viewState.terminalScrollTop = term.scrollTop;
           ctx.viewState.terminalFollow = term.scrollHeight - term.clientHeight - term.scrollTop < 28;
-          followButton.textContent = ctx.viewState.terminalFollow ? '跟随最新输出' : '回到最新输出';
+          followButton.textContent = ctx.viewState.terminalFollow ? tr('跟随最新输出') : '回到最新输出';
         });
         const retention = h('span.runtime-muted');
         const errors = h('div.runtime-terminal-errors');

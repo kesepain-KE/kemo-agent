@@ -31,7 +31,7 @@ export function renderKnowledgePage(ctx) {
   const listHost = h('div');
   const categoryHost = h('div.knowledge-category-host');
   const editorHost = h('div');
-  const UNCATEGORIZED = '未分类';
+  const UNCATEGORIZED = tr('未分类');
 
   function drawCategories() {
     fill(categoryHost);
@@ -157,7 +157,7 @@ export function renderKnowledgePage(ctx) {
       h('colgroup', [28, 9, 12, 12, 17, 9, 13].map(width => h('col', { style: { width: `${width}%` } }))),
       h('thead', h('tr',
         h('th', tr('名称')),
-        h('th', '层级'),
+        h('th', tr('层级')),
         h('th', tr('分类')),
         h('th', '主智能体'),
         h('th', tr('路径')),
@@ -201,7 +201,7 @@ export function renderKnowledgePage(ctx) {
     fill(editorHost);
     if (!selected) {
       editorHost.appendChild(h('div.editor-panel',
-        h('div.editor-head', h('div.editor-title', '知识文件')),
+        h('div.editor-head', h('div.editor-title', tr('知识文件'))),
         h('div.editor-body', emptyState({ title: tr('选择知识文件'), desc: '点击左侧知识文件后，可在此处编辑或预览。', icon: 'penLine' })),
       ));
       return;
@@ -221,7 +221,7 @@ export function renderKnowledgePage(ctx) {
     if (isGlobal) {
       body.appendChild(h('div.banner.banner-warning', { style: { marginBottom: 'var(--s-4)' } },
         h('span', { html: icon('shield') }),
-        h('div', h('div', { style: { fontWeight: '600' } }, '界面只读'),
+        h('div', h('div', { style: { fontWeight: '600' } }, tr('界面只读')),
           '全局层在 UI 上不提供编辑入口，但 HTTP 层仍可写入。这不是权限缺失，而是界面约束。'),
       ));
     }
@@ -253,7 +253,7 @@ export function renderKnowledgePage(ctx) {
               value ? `已移动到“${value}”` : '已移出分类，归入未分类',
             );
           },
-        }, '保存分类'),
+        }, tr('保存分类')),
         h('button.btn.btn-ghost.btn-sm', {
           type: 'button',
           onclick: () => {
@@ -264,7 +264,7 @@ export function renderKnowledgePage(ctx) {
               '已移出分类，归入未分类',
             );
           },
-        }, '移出分类'),
+        }, tr('移出分类')),
       ),
     ));
     body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-2)', marginBottom: 'var(--s-3)' } },
@@ -303,7 +303,7 @@ export function renderKnowledgePage(ctx) {
         disabled: isGlobal,
         onclick: async () => {
           const ok = await Overlay.confirm({
-            title: '删除此知识文件',
+            title: tr('删除此知识文件'),
             description: '文件将被永久删除，相关索引也会失效。',
             detail: selected.relative_path, confirmLabel: tr('删除'), tone: 'danger',
           });
@@ -395,7 +395,7 @@ export function renderMemoryPage(ctx) {
       h('button.btn.btn-outline', { onclick: () => refresh() }, h('span', { html: icon('refresh', 'icon-sm') }), tr('重新读取')),
       h('button.btn.btn-primary', {
         onclick: () => openNewMemory(),
-      }, h('span', { html: icon('plus', 'icon-sm') }), '新建长期记忆'),
+      }, h('span', { html: icon('plus', 'icon-sm') }), tr('新建长期记忆')),
     ],
   }));
 
@@ -407,7 +407,7 @@ export function renderMemoryPage(ctx) {
   const drawTiers = () => {
     fill(tierPanel);
     tierPanel.appendChild(h('div.editor-head',
-      h('div.editor-title', '记忆分栏'),
+      h('div.editor-title', tr('记忆分栏')),
       h('span.badge', String(LIVE_MEMORY.summary.total) + ' 片段'),
     ));
     const body = h('div', { style: { padding: 'var(--s-2)' } });
@@ -441,7 +441,7 @@ export function renderMemoryPage(ctx) {
       const lifecycle = memory.lifecycle;
       listHost.appendChild(h('section.card.important-memory-detail', { 'aria-label': '临时重要记忆详情' },
         h('div.card-head', h('div.section-title', tr('临时重要记忆')),
-          statusBadge(lifecycle.status, lifecycle.status === 'valid' ? '有效' : statusText(lifecycle.status)),
+          statusBadge(lifecycle.status, lifecycle.status === 'valid' ? tr('有效') : statusText(lifecycle.status)),
         ),
         h('div.card-body',
           h('div.important-memory-summary',
@@ -515,9 +515,9 @@ export function renderMemoryPage(ctx) {
     }, input, clear, h('button.memory-search-submit', {
       type: 'submit', 'aria-label': tr('搜索'), title: tr('搜索'),
     }, h('span', { html: icon('search', 'icon-sm'), 'aria-hidden': 'true' })));
-    const sortSel = h('select.select', { 'aria-label': '记忆排序', style: { width: 'auto' }, onchange: (e) => { sortBy = e.target.value; drawList(); } },
+    const sortSel = h('select.select', { 'aria-label': tr('记忆排序'), style: { width: 'auto' }, onchange: (e) => { sortBy = e.target.value; drawList(); } },
       h('option', { value: 'updated_at', selected: sortBy === 'updated_at' }, tr('按更新时间')),
-      h('option', { value: 'created_at', selected: sortBy === 'created_at' }, '按最早时间'),
+      h('option', { value: 'created_at', selected: sortBy === 'created_at' }, tr('按最早时间')),
       WEIGHTED_MEMORY_TIERS.has(activeTier) ? h('option', { value: 'weight', selected: sortBy === 'weight' }, tr('按权重')) : null,
     );
     head.append(h('div.memory-list-controls', search, sortSel));
@@ -528,7 +528,7 @@ export function renderMemoryPage(ctx) {
     const slice = sorted.slice((page - 1) * PER_PAGE, page * PER_PAGE);
 
     if (!slice.length) {
-      listCard.appendChild(emptyState({ icon: 'memory', title: '当前记忆栏暂无内容', desc: '可以切换其他记忆栏或重新读取数据。' }));
+      listCard.appendChild(emptyState({ icon: 'memory', title: tr('当前记忆栏暂无内容'), desc: '可以切换其他记忆栏或重新读取数据。' }));
     } else {
       const list = h('div.list.memory-fragment-list', { style: { padding: 'var(--s-2)' } });
       slice.forEach((m) => {
@@ -574,8 +574,8 @@ export function renderMemoryPage(ctx) {
     if (activeTier === 'important') return;
     if (!selected) {
       editorHost.appendChild(h('div.editor-panel',
-        h('div.editor-head', h('div.editor-title', '记忆正文')),
-        h('div.editor-body', emptyState({ title: '选择一条记忆', desc: '点击左侧记忆后在此处查看和编辑。', icon: 'penLine' })),
+        h('div.editor-head', h('div.editor-title', tr('记忆正文'))),
+        h('div.editor-body', emptyState({ title: tr('选择一条记忆'), desc: '点击左侧记忆后在此处查看和编辑。', icon: 'penLine' })),
       ));
       return;
     }
@@ -593,15 +593,15 @@ export function renderMemoryPage(ctx) {
 
     /* 元数据 */
     const meta = [
-        ['记忆类型', MEMORY_TIERS.find((t) => t.key === selected.tier).label],
+        [tr('记忆类型'), MEMORY_TIERS.find((t) => t.key === selected.tier).label],
         ...(WEIGHTED_MEMORY_TIERS.has(selected.tier)
-          ? [['当前权重', String(selected.weight) + (selected.weighted_today ? ' · 今日已加权' : '')]]
+          ? [[tr('当前权重'), String(selected.weight) + (selected.weighted_today ? ' · 今日已加权' : '')]]
           : []),
-        ['创建时间', formatMemoryTime(selected.created_at) + '（UTC）'],
-        ['内容更新', formatMemoryTime(selected.content_updated_at) + '（UTC）'],
-        ['最近使用', formatMemoryTime(selected.last_used_at) + '（UTC）'],
-        ['进入本层', formatMemoryTime(selected.tier_entered_at) + '（UTC）'],
-        ['过期时间', selected.expires_at ? formatMemoryTime(selected.expires_at) + '（UTC）' : '不过期'],
+        [tr('创建时间'), formatMemoryTime(selected.created_at) + '（UTC）'],
+        [tr('内容更新'), formatMemoryTime(selected.content_updated_at) + '（UTC）'],
+        [tr('最近使用'), formatMemoryTime(selected.last_used_at) + '（UTC）'],
+        [tr('进入本层'), formatMemoryTime(selected.tier_entered_at) + '（UTC）'],
+        [tr('过期时间'), selected.expires_at ? formatMemoryTime(selected.expires_at) + '（UTC）' : tr('不过期')],
       ];
     body.appendChild(h('div.desc-list', { style: { marginBottom: 'var(--s-4)' } },
       meta.map(([k, v]) => h('div.desc-row', { style: { gridTemplateColumns: '104px 1fr', padding: '6px 0' } },
@@ -633,11 +633,11 @@ export function renderMemoryPage(ctx) {
           onclick: async () => {
             const target = selected;
             const ok = await Overlay.confirm({
-              title: '删除此记忆',
+              title: tr('删除此记忆'),
               description: '记忆文件、索引行与元数据将被一并清理。',
-              detail: target.filename, confirmLabel: '删除记忆', tone: 'danger',
+              detail: target.filename, confirmLabel: tr('删除记忆'), tone: 'danger',
             });
-            if (ok) await mutate(() => Api.deleteMemory(Store.user, target.tier, target.filename), '记忆已删除');
+            if (ok) await mutate(() => Api.deleteMemory(Store.user, target.tier, target.filename), tr('记忆已删除'));
           },
         }, h('span', { html: icon('trash', 'icon-sm') }), tr('删除')),
       h('div', { style: { flex: '1' } }),
@@ -653,7 +653,7 @@ export function renderMemoryPage(ctx) {
       h('button.btn.btn-primary.btn-sm', {
         onclick: () => {
           if (!draft.trim()) { toast('记忆内容不能为空', { kind: 'error' }); return; }
-          void mutate(() => Api.putMemory(Store.user, selected.filename, draft, selected.tier), '记忆已保存');
+          void mutate(() => Api.putMemory(Store.user, selected.filename, draft, selected.tier), tr('记忆已保存'));
         },
       }, tr('保存')),
     ));
@@ -668,7 +668,7 @@ export function renderMemoryPage(ctx) {
   function openNewMemory() {
     let content = '';
     Overlay.modal({
-      title: '新建长期记忆',
+      title: tr('新建长期记忆'),
       sub: '当前界面固定创建到永久层（permanent）',
       body: h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--s-4)' } },
         h('div.banner.banner-info',
@@ -676,7 +676,7 @@ export function renderMemoryPage(ctx) {
           h('div', '接口在省略 tier 时默认落到 seven_days，界面显式传 permanent，避免意图与结果不一致。'),
         ),
         h('div.field',
-          h('label.field-label', '记忆内容'),
+          h('label.field-label', tr('记忆内容')),
           h('textarea.textarea.mono', { rows: 8, placeholder: '要长期保留的事实、约定或结论…', oninput: (e) => { content = e.target.value; } }),
           h('div.field-hint', '非空，字符上限由服务端配置约束。'),
         ),
@@ -685,8 +685,8 @@ export function renderMemoryPage(ctx) {
         h('button.btn.btn-ghost', { onclick: () => Overlay.stack[Overlay.stack.length - 1].close() }, tr('取消')),
         h('button.btn.btn-primary', {
           onclick: () => {
-            if (!content.trim()) { toast('内容不能为空', { kind: 'error' }); return; }
-            void mutate(() => Api.putMemory(Store.user, `memory_${Date.now()}.md`, content.trim(), 'permanent'), '永久记忆已创建', closeOverlays);
+            if (!content.trim()) { toast(tr('内容不能为空'), { kind: 'error' }); return; }
+            void mutate(() => Api.putMemory(Store.user, `memory_${Date.now()}.md`, content.trim(), 'permanent'), tr('永久记忆已创建'), closeOverlays);
           },
         }, tr('创建')),
       ],

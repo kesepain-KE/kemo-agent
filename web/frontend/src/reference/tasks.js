@@ -30,9 +30,9 @@ export function renderTasksPage(ctx) {
   }));
 
   inner.appendChild(h('div.stat-row',
-    statTile('执行中计划', LIVE_TASKS.summary.active_plans, { icon: 'play', color: 'var(--accent-text)', foot: '正在推进步骤' }),
-    statTile('等待计划', LIVE_TASKS.summary.waiting_plans, { icon: 'clock', foot: '待确认或待开始' }),
-    statTile('启用调度', LIVE_TASKS.summary.enabled_crons, { icon: 'tasks', foot: '定时任务' }),
+    statTile(tr('执行中计划'), LIVE_TASKS.summary.active_plans, { icon: 'play', color: 'var(--accent-text)', foot: '正在推进步骤' }),
+    statTile(tr('等待计划'), LIVE_TASKS.summary.waiting_plans, { icon: 'clock', foot: '待确认或待开始' }),
+    statTile(tr('启用调度'), LIVE_TASKS.summary.enabled_crons, { icon: 'tasks', foot: tr('定时任务') }),
     statTile('已完成计划', LIVE_TASKS.summary.completed_plans, { icon: 'checkCircle', color: 'var(--success)', foot: '历史累计' }),
   ));
 
@@ -102,7 +102,7 @@ export function openPlanEditor(plan) {
   const modal=Overlay.modal({title:'修正任务计划',sub:`${plan.plan_id} · revision ${plan.revision}`,size:'lg',
     body:h('div.form-grid',
       h('div.field',h('label.field-label','标题'),title),
-      h('div.field',h('label.field-label','描述'),description),
+      h('div.field',h('label.field-label',tr('描述')),description),
       h('div.field',h('label.field-label','步骤补丁（可选 JSON 数组）'),steps),
       h('div.field-hint','提交携带原修订号与计划自己的会话/来源，冲突不会覆盖新版本。'),error),
     foot:[h('button.btn.btn-ghost',{onclick:()=>modal.close()},tr('取消')),
@@ -369,8 +369,8 @@ export function renderCronView(ctx) {
           h('div.desc-row', h('span.desc-key', '下次执行'), h('span.desc-val', t.next_run_at ? fmtDateTime(t.next_run_at) : '—')),
           h('div.desc-row', h('span.desc-key', '上次执行'), h('span.desc-val', t.latest_run_at ? fmtDateTime(t.latest_run_at) : '—')),
           h('div.desc-row', h('span.desc-key', '上次状态'), h('span.desc-val', statusBadge(t.last_state))),
-          h('div.desc-row', h('span.desc-key', '来源'), h('span.desc-val', t.user_defined ? '用户创建' : '系统维护（不可编辑）')),
-          h('div.desc-row', h('span.desc-key', '创建时间'), h('span.desc-val', fmtDateTime(t.created_at))),
+          h('div.desc-row', h('span.desc-key', tr('来源')), h('span.desc-val', t.user_defined ? '用户创建' : '系统维护（不可编辑）')),
+          h('div.desc-row', h('span.desc-key', tr('创建时间')), h('span.desc-val', fmtDateTime(t.created_at))),
         ),
         h('div',
           h('div.doc-label', { style: { marginBottom: '6px' } }, '执行内容'),
@@ -716,7 +716,7 @@ export function renderExecutionsView() {
           h('div.desc-row', h('span.desc-key', '记录类型'), h('span.desc-val', ex.kind === 'cron' ? '定时任务执行' : '计划步骤执行')),
           h('div.desc-row', h('span.desc-key', '任务 ID'), h('span.desc-val.mono', ex.task_id)),
           h('div.desc-row', h('span.desc-key', tr('状态')), h('span.desc-val', statusBadge(ex.status))),
-          h('div.desc-row', h('span.desc-key', '耗时'), h('span.desc-val', ex.duration_ms ? fmtDuration(ex.duration_ms) : '—')),
+          h('div.desc-row', h('span.desc-key', tr('耗时')), h('span.desc-val', ex.duration_ms ? fmtDuration(ex.duration_ms) : '—')),
           h('div.desc-row', h('span.desc-key', '执行时间'), h('span.desc-val', fmtDateTime(ex.updated_at))),
           h('div.desc-row', h('span.desc-key', '记录来源'), h('span.desc-val', ex.user_defined ? '用户创建' : '系统维护')),
         ),

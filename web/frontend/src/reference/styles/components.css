@@ -47,7 +47,7 @@
 
 .btn-danger { color: var(--danger); border-color: transparent; }
 .btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
-.btn-danger-solid { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn-danger-solid { background: var(--danger); color: var(--accent-contrast); border-color: var(--danger); }
 .btn-danger-solid:hover:not(:disabled) { filter: brightness(1.07); }
 
 .btn-sm { height: 26px; padding: 0 9px; font-size: var(--t-xs); border-radius: var(--r-xs); gap: 4px; }
@@ -146,8 +146,10 @@
   left: 2px; top: 2px;
   width: 15px; height: 15px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: var(--shadow-xs);
+  background: var(--accent-contrast);
+  /* 深色主题的开启态轨道是近白色，纯白滑块会"消失"；
+     用一圈反向描边让滑块在任何轨道上都可见。 */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-primary) 16%, transparent), var(--shadow-xs);
   transition: transform var(--dur) var(--ease-out);
 }
 .switch.is-on { background: var(--accent); }
@@ -162,7 +164,7 @@
   border-radius: 4px;
   background: var(--bg-surface);
   cursor: pointer;
-  transition: all var(--dur-fast) var(--ease);
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   color: transparent;
 }
 .checkbox:hover { border-color: var(--accent); }
@@ -175,7 +177,7 @@
   background: var(--bg-surface);
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer;
-  transition: all var(--dur-fast) var(--ease);
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
 .radio::after {
   content: ""; width: 7px; height: 7px; border-radius: 50%;
@@ -200,7 +202,7 @@
   font-weight: 540;
   color: var(--text-tertiary);
   border-radius: 6px;
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   white-space: nowrap;
 }
 .segment:hover { color: var(--text-primary); }
@@ -325,7 +327,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-full);
   white-space: nowrap;
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 button.chip:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border); }
 .chip.is-active { background: var(--accent-soft); border-color: transparent; color: var(--accent-text); font-weight: 560; }
@@ -342,7 +344,7 @@ button.chip:hover { background: var(--bg-hover); color: var(--text-primary); bor
   width: 28px; height: 28px;
   border-radius: var(--r-sm);
   background: linear-gradient(145deg, var(--accent), color-mix(in srgb, var(--accent) 62%, #3d3d3d));
-  color: #fff;
+  color: var(--accent-contrast);
   font-size: var(--t-xs);
   font-weight: 640;
   letter-spacing: 0.02em;
@@ -402,7 +404,7 @@ button.chip:hover { background: var(--bg-hover); color: var(--text-primary); bor
 .pill-tab {
   padding: 4px 10px; font-size: var(--t-xs); font-weight: 530;
   color: var(--text-tertiary); border-radius: 6px;
-  transition: all var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .pill-tab:hover { color: var(--text-primary); }
 .pill-tab.is-active { background: var(--bg-surface); color: var(--text-primary); box-shadow: var(--shadow-xs); }

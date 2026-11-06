@@ -48,7 +48,7 @@ export async function loadReferenceData(route: string, user: string, sessionId: 
       let capabilityError = ''
       if (runtime.api.type === 'kemo' && runtime.api.configured) {
         try { capabilities = await api.getKemoModelCapabilities(user, runtime.api.model) }
-        catch (error) { capabilityError = error instanceof Error ? error.message : '模型能力读取失败' }
+        catch (error) { capabilityError = error instanceof Error ? error.message : tr('模型能力读取失败') }
       }
       return { runtime, logs, capabilities, capabilityError }
     }
@@ -187,6 +187,16 @@ export function ReferencePage() {
         alert.className = 'banner banner-warning'; alert.textContent = pageQuery.data.capabilityError
         host.querySelector('.page-inner')?.prepend(alert)
       }
+      const pendingCount = pageQuery.data.runtime?.system_cron?.pending_confirmation_count
+      if (route === '/status' && Number.isSafeInteger(pendingCount) && pendingCount > 0) {
+        const notice = document.createElement('div')
+        notice.className = 'banner banner-warning'
+        notice.setAttribute('role', 'status')
+        notice.setAttribute('aria-label', tr('系统维护任务待确认'))
+        notice.textContent = tr('有 {count} 个系统维护任务因中断暂停，等待确认后恢复。', { count: pendingCount })
+          + ' ' + tr('请先核对已执行操作，再显式恢复任务。')
+        host.querySelector('.page-inner')?.prepend(notice)
+      }
     } catch (error) {
       const alert = document.createElement('div')
       alert.className = 'banner banner-danger'; alert.setAttribute('role', 'alert')
@@ -222,5 +232,5 @@ export function ReferencePage() {
     {pageQuery.error instanceof Error ? pageQuery.error.message : tr('读取失败')}
     <button className="btn btn-outline" onClick={() => void pageQuery.refetch()}>{tr("重试")}</button>
   </div></div></div>
-  return <>{pageQuery.isError && <div className="banner banner-warning" role="alert">刷新失败，当前显示上次成功读取的数据。<button onClick={() => void pageQuery.refetch()}>{tr("重试")}</button></div>}<div className="reference-page-host" ref={hostRef} /></>
+  return <>{pageQuery.isError && <div className="banner banner-warning" role="alert">{tr("刷新失败，当前显示上次成功读取的数据。")}<button onClick={() => void pageQuery.refetch()}>{tr("重试")}</button></div>}<div className="reference-page-host" ref={hostRef} /></>
 }

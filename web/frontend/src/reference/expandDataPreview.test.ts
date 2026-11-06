@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { expandDataContent, expandDataFragment } from './expandDataPreview.js'
 
 const collected = '# 数据\n\n## 操控能力\n操作说明：采集文本中也可以出现同名标题\n\n数据末尾😀'
-const prefix = '[global:example]\n## 数据采集\n数据来源：`global_expand/example/input_data.md`；以下是状态数据。\n'
+const prefix = '[global:example]\n## 数据采集\n数据来源：`expand/global/example/input_data.md`；以下是状态数据。\n'
 const dataPart = prefix + collected
 const module = {
   scope: 'global', name: 'example', open_input: true, input_health: '正常',
   collected_markdown: collected,
-  injected_markdown: dataPart + '\n\n## 操控能力\n操作说明：`global_expand/example/expand_control.md`\n真正的操控能力说明',
+  injected_markdown: dataPart + '\n\n## 操控能力\n操作说明：`expand/global/example/expand_control.md`\n真正的操控能力说明',
 }
 
 describe('拓展只读数据预览分类', () => {

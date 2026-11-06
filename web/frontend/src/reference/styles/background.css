@@ -4,6 +4,7 @@
   --background-solid-surface: var(--bg-surface);
   --background-solid-raised: var(--bg-raised);
   --background-solid-sunken: var(--bg-sunken);
+  --background-solid-sidebar: var(--bg-sidebar);
   --background-solid-inset: var(--bg-inset);
 }
 .app-shell { position: relative; isolation: isolate; }
@@ -18,6 +19,7 @@
   --bg-surface: color-mix(in srgb, var(--background-solid-surface) var(--background-ui-opacity, 94%), transparent);
   --bg-raised: color-mix(in srgb, var(--background-solid-raised) var(--background-ui-opacity, 94%), transparent);
   --bg-sunken: color-mix(in srgb, var(--background-solid-sunken) var(--background-ui-opacity, 94%), transparent);
+  --bg-sidebar: color-mix(in srgb, var(--background-solid-sidebar) var(--background-ui-opacity, 94%), transparent);
   --bg-inset: color-mix(in srgb, var(--background-solid-inset) var(--background-ui-opacity, 94%), transparent);
   /* Rebind the production aliases here, not at :root where they resolve as opaque. */
   --surface: var(--bg-surface); --surface-2: var(--bg-inset);

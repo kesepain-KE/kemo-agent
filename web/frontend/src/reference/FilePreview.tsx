@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import * as api from '../api/client'
@@ -46,6 +47,7 @@ function textDocument(text: string, ext: string) {
 export function FilePreview({ file, user, area, onClose, active = true }: {
   file: FileListEntry; user: string; area: FileArea; onClose: () => void; active?: boolean
 }) {
+  useLanguage()
   const media = fileKind(file)
   const ext = fileExtension(file)
   const url = area === 'tmp' ? api.getTmpFilePreviewUrl(file.relative_path)
@@ -139,14 +141,14 @@ export function FilePreview({ file, user, area, onClose, active = true }: {
               : <div className="reference-loading" role="status"><span className="spinner" />正在读取文件…</div>
               : <div className="empty"><ReferenceIcon name="file" /><div className="empty-title">此格式暂不支持预览</div><div className="empty-desc">下载后使用本地应用查看。</div></div>
   const footer = <><button className="btn btn-ghost btn-sm" onClick={() => void copyText(workspaceFilePath(user, area, file.relative_path))
-    .then(() => toast('已复制相对路径', { kind: 'success' })).catch(() => toast('复制失败', { kind: 'error' }))}>
+    .then(() => toast('已复制相对路径', { kind: 'success' })).catch(() => toast(tr('复制失败'), { kind: 'error' }))}>
     <ReferenceIcon name="copy" small />复制路径</button><div className="spacer" />
-    <a className="btn btn-outline btn-sm" href={download} download={file.name}><ReferenceIcon name="download" small />下载</a></>
+    <a className="btn btn-outline btn-sm" href={download} download={file.name}><ReferenceIcon name="download" small />{tr("下载")}</a></>
 
-  return <section className="editor-panel file-detail-panel" aria-label="文件详情">
+  return <section className="editor-panel file-detail-panel" aria-label={tr("文件详情")}>
     <div className="editor-head"><div className="reference-entry-copy"><div className="editor-title">{file.name}</div>
       <div className="file-path">{file.relative_path}</div></div>
-      <button ref={enlargeRef} className="icon-btn" aria-label="放大预览" onClick={() => setExpanded(true)}><ReferenceIcon name="maximize" /></button>
+      <button ref={enlargeRef} className="icon-btn" aria-label={tr("放大预览")} onClick={() => setExpanded(true)}><ReferenceIcon name="maximize" /></button>
       <button className="icon-btn" aria-label="关闭文件详情" onClick={onClose}><ReferenceIcon name="close" /></button></div>
     <div className="file-detail-meta"><span>{ext.toUpperCase() || 'FILE'} · {formatBytes(file.size)}</span><span>{formatDateTime(file.updated_at)}</span></div>
     <div className="file-detail-body reference-file-preview">{expanded

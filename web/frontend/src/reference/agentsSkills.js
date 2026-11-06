@@ -43,9 +43,9 @@ export function renderAgentsPage(ctx) {
 
   inner.appendChild(h('div.stat-row',
     statTile('已发现', LIVE_AGENTS.summary.total, { icon: 'agents', foot: '全局层 + 用户层' }),
-    statTile('已启用', LIVE_AGENTS.summary.enabled, { icon: 'checkCircle', color: 'var(--success)', foot: '参与主智能体调度' }),
-    statTile('全局层', LIVE_AGENTS.summary.global, { icon: 'globe', foot: '内置，不可删除' }),
-    statTile('用户层', LIVE_AGENTS.summary.user, { icon: 'user', foot: '可删除整包' }),
+    statTile(tr('已启用'), LIVE_AGENTS.summary.enabled, { icon: 'checkCircle', color: 'var(--success)', foot: '参与主智能体调度' }),
+    statTile(tr('全局层'), LIVE_AGENTS.summary.global, { icon: 'globe', foot: '内置，不可删除' }),
+    statTile(tr('用户层'), LIVE_AGENTS.summary.user, { icon: 'user', foot: '可删除整包' }),
   ));
 
   const split = h('div.split.agents-split');
@@ -103,7 +103,7 @@ export function renderAgentsPage(ctx) {
           ),
         ),
         h('button.chip-x', {
-          title: '复制名称', 'aria-label': '复制名称',
+          title: tr('复制名称'), 'aria-label': tr('复制名称'),
           onclick: (ev) => { ev.stopPropagation(); void copyText(a.name); },
         }, h('span', { html: icon('copy', 'icon-sm') })),
       );
@@ -118,7 +118,7 @@ export function renderAgentsPage(ctx) {
     fill(detailHost);
     if (!selected) {
       detailHost.appendChild(h('div.editor-panel',
-        h('div.editor-head', h('div.editor-title', '子智能体详情')),
+        h('div.editor-head', h('div.editor-title', tr('子智能体详情'))),
         h('div.editor-body', emptyState({ title: '暂无可查看的子智能体', desc: '当前层级中没有符合条件的子智能体。', icon: 'agents' })),
       ));
       return;
@@ -135,23 +135,23 @@ export function renderAgentsPage(ctx) {
       h('div.editor-body',
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--s-4)' } },
           h('div.desc-list',
-            h('div.desc-row', h('span.desc-key', '来源层级'), h('span.desc-val', a.source === 'global' ? '全局层（内置）' : tr('用户层'))),
-            h('div.desc-row', h('span.desc-key', '执行器'), h('span.desc-val', a.executor)),
-            h('div.desc-row', h('span.desc-key', '执行方式'), h('span.desc-val', a.execution)),
-            h('div.desc-row', h('span.desc-key', '模型档位'), h('span.desc-val', a.model_profile)),
-            h('div.desc-row', h('span.desc-key', '暴露方式'), h('span.desc-val', a.exposure)),
-            h('div.desc-row', h('span.desc-key', '注册目录'), h('span.desc-val.mono', a.root)),
+            h('div.desc-row', h('span.desc-key', tr('来源层级')), h('span.desc-val', a.source === 'global' ? '全局层（内置）' : tr('用户层'))),
+            h('div.desc-row', h('span.desc-key', tr('执行器')), h('span.desc-val', a.executor)),
+            h('div.desc-row', h('span.desc-key', tr('执行方式')), h('span.desc-val', a.execution)),
+            h('div.desc-row', h('span.desc-key', tr('模型档位')), h('span.desc-val', a.model_profile)),
+            h('div.desc-row', h('span.desc-key', tr('暴露方式')), h('span.desc-val', a.exposure)),
+            h('div.desc-row', h('span.desc-key', tr('注册目录')), h('span.desc-val.mono', a.root)),
           ),
           h('div.doc-block',
-            h('div.doc-label', '描述'),
+            h('div.doc-label', tr('描述')),
             h('div.doc-content', renderMarkdownWithWidgets(a.description)),
           ),
           h('div.doc-block',
-            h('div.doc-label', '触发文档'),
+            h('div.doc-label', tr('触发文档')),
             h('div.doc-content', renderMarkdownWithWidgets(a.trigger || '（未声明触发条件）')),
           ),
           h('div.doc-block',
-            h('div.doc-label', '配置与规则'),
+            h('div.doc-label', tr('配置与规则')),
             h('div.doc-content', renderMarkdownWithWidgets(a.rules || '（未声明规则）')),
           ),
         ),
@@ -161,9 +161,9 @@ export function renderAgentsPage(ctx) {
           ? h('button.btn.btn-danger.btn-sm', {
             onclick: async () => {
               const ok = await Overlay.confirm({
-                title: '删除用户子智能体',
+                title: tr('删除用户子智能体'),
                 description: '会永久删除该用户的整个包目录，包括配置文件与文档。内置全局层不可删除。',
-                detail: a.root, confirmLabel: '永久删除', tone: 'danger',
+                detail: a.root, confirmLabel: tr('永久删除'), tone: 'danger',
               });
               if (ok) await mutate(() => Api.deleteUserAgent(Store.user, a.name), '已删除用户子智能体');
             },
@@ -172,8 +172,8 @@ export function renderAgentsPage(ctx) {
         h('div', { style: { flex: '1' } }),
         h('button.btn.btn-ghost.btn-sm', {
           onclick: () => { void copyText(a.name); },
-        }, h('span', { html: icon('copy', 'icon-sm') }), '复制名称'),
-        h('button.btn.btn-ghost.btn-sm', { onclick: () => navigate('/chat', { prompt: `请使用子智能体 ${a.name}，先向我确认需要执行的目标。` }) }, '手动触发'),
+        }, h('span', { html: icon('copy', 'icon-sm') }), tr('复制名称')),
+        h('button.btn.btn-ghost.btn-sm', { onclick: () => navigate('/chat', { prompt: `请使用子智能体 ${a.name}，先向我确认需要执行的目标。` }) }, tr('手动触发')),
       ),
     ));
   }
@@ -217,16 +217,16 @@ export function renderSkillsPage(ctx) {
     actions: [
       h('button.btn.btn-outline', {
         onclick: () => chooseFile('.zip', 32, file => mutate(() => Api.uploadUserSkills(Store.user, file), '技能 ZIP 已导入')),
-      }, h('span', { html: icon('upload', 'icon-sm') }), '导入技能 ZIP'),
+      }, h('span', { html: icon('upload', 'icon-sm') }), tr('导入技能 ZIP')),
       h('button.btn.btn-outline', { onclick: () => { void refreshPage(); } },
         h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
     ],
   }));
 
   inner.appendChild(h('div.stat-row',
-    statTile('注册总数', LIVE_SKILLS.catalog_summary.total, { icon: 'package', foot: '工具 + Prompt 技能' }),
-    statTile('已启用', LIVE_SKILLS.catalog_summary.enabled, { icon: 'checkCircle', color: 'var(--success)' }),
-    statTile('可执行工具', LIVE_SKILLS.catalog_summary.builtin, { icon: 'terminal', foot: 'builtin 插件' }),
+    statTile(tr('注册总数'), LIVE_SKILLS.catalog_summary.total, { icon: 'package', foot: '工具 + Prompt 技能' }),
+    statTile(tr('已启用'), LIVE_SKILLS.catalog_summary.enabled, { icon: 'checkCircle', color: 'var(--success)' }),
+    statTile(tr('可执行工具'), LIVE_SKILLS.catalog_summary.builtin, { icon: 'terminal', foot: 'builtin 插件' }),
     statTile('Prompt 技能', LIVE_SKILLS.prompt_summary.registered, { icon: 'sparkles', foot: `${LIVE_SKILLS.prompt_summary.active} 项已激活` }),
   ));
 
@@ -257,7 +257,7 @@ export function renderSkillsPage(ctx) {
   });
   const card = h('div.card', { style: { overflow: 'hidden' } },
     h('div.card-head',
-      h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, '技能列表', count),
+      h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, tr('技能列表'), count),
       search,
     ),
   );
@@ -346,15 +346,15 @@ export function renderSkillsPage(ctx) {
           h('div', { style: { display: 'flex', gap: '5px', marginTop: '5px', flexWrap: 'wrap' } },
             h('span', { class: 'scope-tag ' + (s.category === 'builtin' ? 'scope-global' : s.category === 'shared' ? 'scope-shared' : 'scope-user') },
               (SKILL_CATEGORIES.find((c) => c.key === s.category) || {}).label || s.category),
-            s.editable ? h('span.badge', '可编辑') : null,
-            s.toggleable ? h('span.badge', '可切换') : null,
-            s.downloadable ? h('span.badge', '可下载') : null,
+            s.editable ? h('span.badge', tr('可编辑')) : null,
+            s.toggleable ? h('span.badge', tr('可切换')) : null,
+            s.downloadable ? h('span.badge', tr('可下载')) : null,
             s.memory_lifecycle?.status === 'stale' ? h('span.badge.badge-warning', '来源已失效 · 待复核') : null,
           ),
         ),
         s.toggleable
           ? makeSwitch(s.enabled, (v) => mutate(() => Api.setSkillEnabled(Store.user, s.category, s.name, v), v ? '技能已启用' : '技能已禁用'), { label: '启用开关' })
-          : h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)', flex: 'none' } }, s.enabled ? '内置' : '未启用'),
+          : h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)', flex: 'none' } }, s.enabled ? tr('内置') : tr('未启用')),
       );
       list.appendChild(row);
     });
@@ -367,7 +367,7 @@ export function renderSkillsPage(ctx) {
     fill(detailHost);
     if (!selected) {
       detailHost.appendChild(h('div.editor-panel',
-        h('div.editor-head', h('div.editor-title', '技能详情')),
+        h('div.editor-head', h('div.editor-title', tr('技能详情'))),
         h('div.editor-body', emptyState({ title: '暂无可查看的技能', desc: '从左侧选择一个技能查看说明与 SKILL.md。', icon: 'skills' })),
       ));
       return;
@@ -386,12 +386,12 @@ export function renderSkillsPage(ctx) {
     const body = h('div.editor-body');
     body.appendChild(h('div.desc-list', { style: { marginBottom: 'var(--s-4)' } },
       h('div.desc-row', h('span.desc-key', tr('分类')), h('span.desc-val', (SKILL_CATEGORIES.find((c) => c.key === s.category) || {}).label || s.category)),
-      h('div.desc-row', h('span.desc-key', '版本'), h('span.desc-val', s.version || '—')),
-      h('div.desc-row', h('span.desc-key', '当前状态'), h('span.desc-val', s.memory_lifecycle?.status === 'stale' ? '来源已失效 · 待复核' : s.enabled ? h('span', { style: { color: 'var(--success)' } }, tr('已启用')) : '未启用')),
-      s.memory_lifecycle ? h('div.desc-row', h('span.desc-key', '记忆来源'), h('span.desc-val',
+      h('div.desc-row', h('span.desc-key', tr('版本')), h('span.desc-val', s.version || '—')),
+      h('div.desc-row', h('span.desc-key', tr('当前状态')), h('span.desc-val', s.memory_lifecycle?.status === 'stale' ? '来源已失效 · 待复核' : s.enabled ? h('span', { style: { color: 'var(--success)' } }, tr('已启用')) : tr('未启用'))),
+      s.memory_lifecycle ? h('div.desc-row', h('span.desc-key', tr('记忆来源')), h('span.desc-val',
         s.memory_lifecycle.sources.map(source => source.filename).join('、'),
         s.memory_lifecycle.reason ? `；${s.memory_lifecycle.reason}` : '；来源有效')) : null,
-      h('div.desc-row', h('span.desc-key', '说明'), h('div.desc-val', renderMarkdownWithWidgets(s.description))),
+      h('div.desc-row', h('span.desc-key', tr('说明')), h('div.desc-val', renderMarkdownWithWidgets(s.description))),
     ));
 
     body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-2)', marginBottom: 'var(--s-3)' } },
@@ -432,15 +432,15 @@ export function renderSkillsPage(ctx) {
       h('div', { style: { flex: '1' } }),
       s.downloadable ? h('button.btn.btn-ghost.btn-sm', {
         onclick: () => downloadUrl(Api.getSkillDownloadUrl(Store.user, s.category, s.name)),
-      }, h('span', { html: icon('download', 'icon-sm') }), '下载 ZIP') : null,
+      }, h('span', { html: icon('download', 'icon-sm') }), tr('下载 ZIP')) : null,
       s.editable ? h('button.btn.btn-danger.btn-sm', {
         onclick: async () => {
           const ok = await Overlay.confirm({
-            title: '删除技能包',
+            title: tr('删除技能包'),
             description: '删除的是整个技能包目录，不只是 SKILL.md。',
-            detail: s.path, confirmLabel: '删除整包', tone: 'danger',
+            detail: s.path, confirmLabel: tr('删除整包'), tone: 'danger',
           });
-          if (ok) await mutate(() => Api.deleteSkill(Store.user, s.category, s.name), '技能包已删除');
+          if (ok) await mutate(() => Api.deleteSkill(Store.user, s.category, s.name), tr('技能包已删除'));
         },
       }, h('span', { html: icon('trash', 'icon-sm') }), tr('删除')) : null,
       h('button.btn.btn-primary.btn-sm', {

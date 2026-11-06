@@ -55,7 +55,7 @@ export function renderRuntimeModulesPage(ctx) {
         LIVE_MESSAGES.transports.map((t) => h('div.entry', { style: { cursor: 'default' } },
           h('div.entry-icon' + (t.state === 'running' ? '.accent' : ''), h('span', { html: icon('messages', 'icon-sm') })),
           h('div', { style: { flex: '1', minWidth: '0' } },
-            h('div.entry-title', t.display_name, statusBadge(t.state, t.state === 'running' ? '运行中' : statusText(t.state))),
+            h('div.entry-title', t.display_name, statusBadge(t.state, t.state === 'running' ? tr('运行中') : statusText(t.state))),
             h('div.entry-desc', t.description),
             h('div.entry-meta', h('span', '绑定 ' + t.bound_user), h('span', t.platform)),
           ),

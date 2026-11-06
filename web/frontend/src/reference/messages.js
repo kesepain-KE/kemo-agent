@@ -69,7 +69,7 @@ export function renderMessagesPage(ctx) {
           h('div.message-module-title',
             h('span', t.display_name),
             h('span.badge.badge-outline', t.platform),
-            statusBadge(t.state, t.state === 'running' ? '运行中' : statusText(t.state)),
+            statusBadge(t.state, t.state === 'running' ? tr('运行中') : statusText(t.state)),
           ),
           h('div.message-module-desc', t.description || t.name),
           h('div.message-module-meta',
@@ -109,7 +109,7 @@ export function renderMessagesPage(ctx) {
         h('div.editor-title', t.display_name),
         h('div.message-detail-path', t.path),
       ),
-      statusBadge(t.state, t.state === 'running' ? '运行中' : statusText(t.state)),
+      statusBadge(t.state, t.state === 'running' ? tr('运行中') : statusText(t.state)),
     ));
 
     const body = h('div.editor-body');
@@ -132,7 +132,7 @@ export function renderMessagesPage(ctx) {
         h('div.desc-row', h('span.desc-key', '允许工具'), h('span.desc-val', t.allowed_tools ? t.allowed_tools.join('、') : '不限制')),
       ),
       h('div.doc-block',
-        h('div.doc-label', '描述'),
+        h('div.doc-label', tr('描述')),
         h('div.doc-content', renderMarkdownWithWidgets(t.description || '（暂无模块说明）')),
       ),
 
@@ -141,7 +141,7 @@ export function renderMessagesPage(ctx) {
         h('div.doc-label', { style: { marginBottom: '8px' } }, '参数摘要'),
         h('div.message-parameters-grid',
           [['状态 API 已导入', t.api_imported ? '是' : '否'], ['轮询间隔', t.polling_interval + ' 秒'],
-            ['健康检测间隔', t.health_interval], ['文件中转', t.file_relay_enabled ? '开启' : '关闭'],
+            ['健康检测间隔', t.health_interval], ['文件中转', t.file_relay_enabled ? '开启' : tr('关闭')],
             ['日志轮转', t.log_rotation], ['消息缓冲', String(t.message_buffer)],
             ['临时文件', `${t.temporary_file_count} 个 · ${fmtBytes(t.temporary_file_bytes)}`],
             ['今日日志', String(t.today_log_count)],
@@ -169,7 +169,7 @@ export function renderMessagesPage(ctx) {
                 ev.currentTarget.classList.add('is-active');
                 drawDetail();
               },
-            }, k === 'all' ? tr('全部') : k === 'send' ? tr('发送') : k === 'receive' ? '接收' : '文件'),
+            }, k === 'all' ? tr('全部') : k === 'send' ? tr('发送') : k === 'receive' ? tr('接收') : tr('文件')),
           )),
         ),
         (() => {
