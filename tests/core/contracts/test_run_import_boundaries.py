@@ -9,13 +9,13 @@ ROOT = Path(__file__).resolve().parents[3]
 RUN_ROOT = ROOT / "run"
 DOMAINS = {
     "agents",
+    "cards",
     "config",
     "context",
     "conversation",
     "extensions",
     "history",
     "infra",
-    "long_task",
     "memory",
     "scheduler",
     "tasks",

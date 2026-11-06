@@ -12,11 +12,11 @@ import pytest
 MODULES = (
     "run.infra.cli",
     "run.engine",
+    "run.cards",
     "run.conversation",
     "run.history",
-    "run.history.commit_ops",
-    "run.history.runtime_window",
     "run.history.session_api",
+    "run.history.archive_reader",
 )
 
 

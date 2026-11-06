@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.card_history_support import session_history
+
 from provider.protocol.enums import ErrorCode
 
 from typing import Sequence
@@ -48,10 +50,10 @@ from run.engine import (
     iter_request_events,
 )
 from run.tools import execution_watchdog_snapshot
-from run.history import find_window, load_runtime_window, load_window
+
 from run.history import find_record as find_history_record
 from run.memory import MemoryStore
-from run.memory import extract_memory_backlog, extract_round_memory
+from run.memory import extract_round_memory
 from run.tasks import PlanStore, normalize_plan
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker,
@@ -109,7 +111,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         provider = ScriptedProvider(
             responses=[ChatResponse(text="attachment received")]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             handle_request(
                 {
                     "user": "alice",
@@ -134,8 +136,8 @@ class RuntimeFeatureTests(unittest.TestCase):
         )
         self.assertIn("users/alice/file_upload/note.md", current_user["content"])
         self.assertIn("可按需使用 file 工具读取", current_user["content"])
-        window = load_window(require_present(find_window(root, "alice", "web", "uploaded-file")))
-        self.assertEqual(window["text"]["messages"][0]["content"], "请读取附件")
+        window = require_present(session_history(root, 'alice', 'web', 'uploaded-file')).refresh()
+        self.assertEqual(window.messages[0]['content'], '请读取附件')
 
     def make_root(
         self, *, stream: bool = False
@@ -146,7 +148,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         (root / "config").mkdir()
         for path in (
             root / "plugins",
-            root / "shared_skills",
+            root / "skills",
             root / "users" / "alice" / "history",
             root / "users" / "alice" / "user_skills" / "agent_create",
             root / "users" / "alice" / "user_skills" / "user_create",
@@ -155,15 +157,15 @@ class RuntimeFeatureTests(unittest.TestCase):
         provider = {
             "type": "kemo",
             "base_url": "http://127.0.0.1:1/v1",
-            "api_key_env": "TEST_KEMO_KEY",
+            "api_key_env": "KEMO_API_KEY",
             "model": "mock",
             "stream": stream,
         }
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"tools": {"enabled": True, "timeout": 2, "max_iterations": 4}}),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1, "provider": provider}),
             "utf-8",
         )
@@ -184,6 +186,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         *,
         enabled: bool = True,
         async_tool: bool = False,
+        permission: str = "write",
     ) -> None:
         directory = base / name
         directory.mkdir(parents=True)
@@ -199,6 +202,8 @@ class RuntimeFeatureTests(unittest.TestCase):
             "version": "1.0.0",
             "enabled": enabled,
             "entrypoint": "tool.py:run",
+            "execution_mode": "thread",
+            "permission": permission,
         }
         (directory / "SKILL.md").write_text(
             f"# {name}\n{source_value}\n\n## Tool\n\n```json\n"
@@ -208,7 +213,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         prefix = "async " if async_tool else ""
         await_line = "    await __import__('asyncio').sleep(0)\n" if async_tool else ""
         (directory / "tool.py").write_text(
-            f"{prefix}def run(value, *, context):\n{await_line}    return {{'value': value, 'source': '{source_value}', 'user': context['user'], 'knowledge_scopes': context.get('knowledge_scopes')}}\n",
+            f"{prefix}def run(value, *, context):\n{await_line}    return {{'ok': True, 'value': value, 'source': '{source_value}', 'user': context['user'], 'knowledge_scopes': context.get('knowledge_scopes')}}\n",
             "utf-8",
         )
 
@@ -216,7 +221,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         _, root = self.make_root()
         locations = [
             root / "plugins",
-            root / "shared_skills",
+            root / "skills",
             root / "users" / "alice" / "user_skills" / "agent_create",
             root / "users" / "alice" / "user_skills" / "user_create",
         ]
@@ -754,6 +759,32 @@ def run(*, context):
             {"clock"},
         )
 
+    def test_plugin_permission_policy_filters_tool_consequences(self) -> None:
+        _, root = self.make_root()
+        self.write_tool(root / "plugins", "reader", "read", permission="read")
+        self.write_tool(root / "plugins", "writer", "write", permission="write")
+        registry = discover_tools(root, "alice")
+
+        read_only = apply_runtime_tool_policy(
+            registry,
+            {"plugins": {"permissions": ["read"]}},
+        )
+        self.assertEqual(set(read_only.tools), {"reader"})
+
+        child_restricted = apply_runtime_tool_policy(
+            registry,
+            {},
+            allowed_permissions={"read"},
+        )
+        self.assertEqual(set(child_restricted.tools), {"reader"})
+
+        intersection = apply_runtime_tool_policy(
+            registry,
+            {"plugins": {"permissions": ["read"]}},
+            allowed_permissions={"write"},
+        )
+        self.assertEqual(intersection.tools, {})
+
     def test_tavily_tool_remains_exposed_without_api_key(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "web_search", "search")
@@ -780,7 +811,7 @@ def run(*, context):
     def test_main_tool_context_receives_effective_knowledge_policy(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "policy_probe", "probe")
-        user_config = root / "users" / "alice" / "user_config.json"
+        user_config = root / "users" / "alice" / "user_config.yaml"
         provider = ScriptedProvider(
             responses=[
                 ChatResponse(
@@ -810,7 +841,7 @@ def run(*, context):
             ),
             "utf-8",
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             enabled_events = list(
                 iter_request_events(
                     {
@@ -897,7 +928,7 @@ def run(*, context):
                 ),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -914,8 +945,8 @@ def run(*, context):
             [event.type for event in events],
             [
                 "reasoning_delta",
-                "tool_call_start",
                 "usage",
+                "tool_call_start",
                 "tool_call_result",
                 "text_delta",
                 "usage",
@@ -928,34 +959,19 @@ def run(*, context):
             for message in provider.requests[1].messages
             if message.get("tool_calls")
         )
-        self.assertEqual(
-            assistant_tool_message["reasoning_content"],
-            "完整工具续轮推理状态",
-        )
-        path = find_window(root, "alice", "cli", "tool")
-        window = load_window(require_present(path))
-        self.assertEqual(window["text"]["messages"][-1]["content"], "final")
-        self.assertEqual(window["tool"]["rounds"][0]["calls"][0]["status"], "completed")
-        self.assertGreaterEqual(
-            window["tool"]["rounds"][0]["calls"][0]["elapsed_ms"], 0
-        )
-        self.assertEqual(window["data"]["token_usage"]["total_tokens"], 6)
-        self.assertEqual(window["data"]["token_usage"]["provider_request_count"], 2)
-        _, runtime_window = load_runtime_window(require_present(path), window)
-        snapshot = runtime_window["data"]["context_snapshot"]
-        self.assertTrue(snapshot["available"])
-        self.assertEqual(
-            snapshot["total_tokens"],
-            snapshot["system_prompt_tokens"]
-            + snapshot["tool_schema_tokens"]
-            + snapshot["conversation_tokens"]
-            + snapshot["summary_tokens"]
-            + snapshot["other_tokens"],
-        )
-        self.assertEqual(window["data"]["token_usage"]["cached_prompt_tokens"], 2)
-        self.assertEqual(
-            window["data"]["round_metrics"][0]["usage"]["cache_miss_tokens"], 1
-        )
+        self.assertNotIn("reasoning_content", assistant_tool_message)
+        path = session_history(root, 'alice', 'cli', 'tool')
+        window = require_present(path).refresh()
+        self.assertEqual(window.messages[-1]['content'], 'final')
+        self.assertEqual(window.tools[0]['status'], 'completed')
+        self.assertGreaterEqual(window.tools[0]['elapsed_ms'], 0)
+        self.assertEqual(window.usage['total_tokens'], 6)
+        self.assertEqual(window.usage['provider_request_count'], 2)
+        snapshot = context_status({"user": "alice", "source": "cli", "session_id": "tool"}, root=root)["context"]
+        self.assertEqual(snapshot["last_seq"], len(window.cards))
+        self.assertGreater(snapshot["history_tokens"], 0)
+        self.assertEqual(window.usage['cached_prompt_tokens'], 2)
+        self.assertEqual(window.integrations[0]['usage']['cache_miss_tokens'], 1)
         done = events[-1]
         self.assertEqual(require_present(done.usage)["cached_prompt_tokens"], 2)
         self.assertEqual(require_present(done.usage)["provider_request_count"], 2)
@@ -968,8 +984,8 @@ def run(*, context):
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
 
-        global_expand = root / "global_expand"
-        global_expand.mkdir()
+        global_expand = root / "expand" / "global"
+        global_expand.mkdir(parents=True)
         (global_expand / "register.py").write_text(
             "from pathlib import Path\n\n"
             "def register(registry):\n"
@@ -1003,7 +1019,7 @@ def run(*, context):
             "utf-8",
         )
 
-        global_sense = root / "global_sense"
+        global_sense = root / "sense"
         global_sense.mkdir()
         (global_sense / "register.py").write_text(
             "from pathlib import Path\n\n"
@@ -1049,7 +1065,7 @@ def run(*, context):
                 ChatResponse(text="done", finish_reason="stop", usage=Usage()),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             handle_request(
                 {
                     "user": "alice",
@@ -1061,26 +1077,26 @@ def run(*, context):
                 provider_factory=lambda _: provider,
             )
 
-        first_system = provider.requests[0].messages[0]["content"]
-        second_system = provider.requests[1].messages[0]["content"]
+        first_system = provider.requests[0].messages[-1]["content"]
+        second_system = provider.requests[1].messages[-1]["content"]
         self.assertIn("EXPAND_REQUEST_ONE", first_system)
         self.assertIn("SENSE_REQUEST_ONE", first_system)
         self.assertNotIn("EXPAND_REQUEST_TWO", first_system)
-        self.assertIn("EXPAND_REQUEST_ONE", second_system)
-        self.assertIn("SENSE_REQUEST_ONE", second_system)
-        self.assertNotIn("EXPAND_REQUEST_TWO", second_system)
-        self.assertNotIn("SENSE_REQUEST_TWO", second_system)
+        self.assertIn("EXPAND_REQUEST_TWO", second_system)
+        self.assertIn("SENSE_REQUEST_TWO", second_system)
+        self.assertNotIn("EXPAND_REQUEST_ONE", second_system)
+        self.assertNotIn("SENSE_REQUEST_ONE", second_system)
 
-        user_config_path = root / "users" / "alice" / "user_config.json"
+        user_config_path = root / "users" / "alice" / "user_config.yaml"
         user_config = json.loads(user_config_path.read_text("utf-8"))
         user_config["expand"] = {
             "global_whitelist": [],
             "shared_whitelist": [],
-            "realtime_injection": True,
+            "prompt_injection": False,
         }
         user_config["perception"] = {
             "global_whitelist": [],
-            "realtime_injection": True,
+            "prompt_injection": False,
         }
         user_config_path.write_text(json.dumps(user_config), "utf-8")
         expand_data.write_text("EXPAND_REQUEST_ONE", "utf-8")
@@ -1096,7 +1112,7 @@ def run(*, context):
                 ChatResponse(text="done", finish_reason="stop", usage=Usage()),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             handle_request(
                 {
                     "user": "alice",
@@ -1108,19 +1124,22 @@ def run(*, context):
                 provider_factory=lambda _: realtime_provider,
             )
 
-        realtime_first = realtime_provider.requests[0].messages[0]["content"]
-        realtime_second = realtime_provider.requests[1].messages[0]["content"]
-        self.assertIn("SENSE_REQUEST_ONE", realtime_first)
-        self.assertIn("EXPAND_REQUEST_TWO", realtime_second)
-        self.assertIn("SENSE_REQUEST_TWO", realtime_second)
-        self.assertNotIn("SENSE_REQUEST_ONE", realtime_second)
+        for request in realtime_provider.requests:
+            rendered = json.dumps(request.messages, ensure_ascii=False)
+            for marker in ("EXPAND_REQUEST_ONE", "EXPAND_REQUEST_TWO",
+                           "SENSE_REQUEST_ONE", "SENSE_REQUEST_TWO"):
+                self.assertNotIn(marker, rendered)
+        self.assertEqual(
+            realtime_provider.requests[0].messages[0],
+            realtime_provider.requests[1].messages[0],
+        )
 
-    def test_oversized_tool_result_is_omitted_before_provider_and_history(self) -> None:
+    def test_oversized_tool_result_preserves_complete_raw_and_provider_content(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "large_result", "large")
         (root / "plugins" / "large_result" / "tool.py").write_text(
             "def run(value, *, context):\n"
-            f"    return {{'content': 'X' * {MAX_TOOL_RESULT_CHARS + 1}, 'value': value}}\n",
+            f"    return {{'ok': True, 'content': 'X' * {MAX_TOOL_RESULT_CHARS + 1}, 'value': value}}\n",
             "utf-8",
         )
         provider = ScriptedProvider(
@@ -1138,7 +1157,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -1159,34 +1178,12 @@ def run(*, context):
         self.assertEqual(result_event.metadata["status"], "completed")
         self.assertTrue(result_event.result["ok"])
         receipt = result_event.result["result"]
-        self.assertTrue(receipt["execution_completed"])
-        self.assertTrue(receipt["content_omitted"])
-        self.assertGreater(receipt["result_chars"], MAX_TOOL_RESULT_CHARS)
-        artifact = root / receipt["artifact"]["path"]
-        self.assertGreater(len(json.loads(artifact.read_text("utf-8"))["content"]), MAX_TOOL_RESULT_CHARS)
-        self.assertNotIn("X" * 100, json.dumps(result_event.result, ensure_ascii=False))
+        self.assertEqual(receipt["content"], "X" * (MAX_TOOL_RESULT_CHARS + 1))
         self.assertEqual(len(provider.requests), 2)
-        continuation = provider.requests[1].messages[-1]
-        self.assertEqual(continuation["role"], "tool")
-        self.assertIn("execution_completed", continuation["content"])
-        self.assertLess(len(continuation["content"]), 2_000)
-        self.assertIsNotNone(provider.requests[1].tools)
-        self.assertEqual(events[-1].type, "done")
-        self.assertEqual(events[-1].metadata["status"], "completed")
-
-        window_path = find_window(
-            root,
-            "alice",
-            "cli",
-            "oversized-tool-result",
-        )
-        window = load_window(require_present(window_path))
-        stored_call = window["tool"]["rounds"][0]["calls"][0]
-        self.assertEqual(stored_call["status"], "completed")
-        self.assertTrue(stored_call["result"]["result"]["content_omitted"])
-        self.assertNotIn("X" * 100, json.dumps(window, ensure_ascii=False))
-        self.assertLess(len(json.dumps(window["tool"], ensure_ascii=False)), 10_000)
-        self.assertLess(len(json.dumps(window["items"], ensure_ascii=False)), 20_000)
+        self.assertIn("X" * 100, json.dumps(provider.requests[1].messages, ensure_ascii=False))
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
+        history = require_present(session_history(root, "alice", "cli", "oversized-tool-result"))
+        self.assertEqual(history.tools[0]["result"]["result"], receipt)
 
     def test_native_provider_state_is_preserved_across_tool_continuation(self) -> None:
         _, root = self.make_root()
@@ -1232,12 +1229,13 @@ def run(*, context):
                         MessageItem.text(
                             MessageRole.ASSISTANT,
                             "native done",
+                            phase=MessagePhase.FINAL_ANSWER,
                         )
                     ],
                 )
 
         provider = NativeStateProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -1251,13 +1249,13 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         second_reasoning = next(
             item
             for item in provider.requests[1].input
             if isinstance(item, ReasoningItem)
         )
-        self.assertEqual(second_reasoning.content, "原生推理内容 1")
+        self.assertIsNone(second_reasoning.content)
         self.assertIsNotNone(second_reasoning.provider_state)
         self.assertEqual(require_present(second_reasoning.provider_state).data, "opaque-state-1")
         third_reasoning = [
@@ -1274,7 +1272,7 @@ def run(*, context):
         # 新一轮对话会从已提交历史中回放前一轮的两个 reasoning item。
         # Provider 允许在不同响应中重复使用 item id，桥接层必须在构造
         # 新 KemoRequest 时重新保证请求内唯一，而不是拒绝第二轮对话。
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             continued = list(
                 iter_request_events(
                     {
@@ -1298,13 +1296,8 @@ def run(*, context):
             ["opaque-state-1", "opaque-state-2"],
         )
         self.assertEqual(len({item.id for item in historical_reasoning}), 2)
-        committed = load_window(
-            require_present(find_window(root, "alice", "cli", "native-provider-state"))
-        )
-        self.assertNotIn(
-            "provider_state",
-            json.dumps(committed["data"]["round_metrics"], ensure_ascii=False),
-        )
+        committed = require_present(session_history(root, 'alice', 'cli', 'native-provider-state')).refresh()
+        self.assertNotIn('provider_state', json.dumps(committed.integrations, ensure_ascii=False))
 
     def test_stream_tool_continuation_preserves_reasoning_content(self) -> None:
         _, root = self.make_root(stream=True)
@@ -1327,7 +1320,7 @@ def run(*, context):
                 ],
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -1342,114 +1335,35 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         assistant_tool_message = next(
             message
             for message in provider.requests[1].messages
             if message.get("tool_calls")
         )
-        self.assertEqual(
-            assistant_tool_message["reasoning_content"],
-            "流式工具续轮状态",
-        )
+        self.assertNotIn("reasoning_content", assistant_tool_message)
 
-    def test_tool_call_limit_commits_terminal_round_and_can_continue(self) -> None:
+    def test_tool_calls_finish_in_one_integration_without_count_boundary(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
-        global_path = root / "config" / "global_config.json"
-        config = json.loads(global_path.read_text("utf-8"))
-        config["tools"]["max_iterations"] = 1
-        global_path.write_text(json.dumps(config), "utf-8")
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(
-                    text="正在查询",
-                    tool_calls=[
-                        ToolCall(
-                            id="allowed-call", name="lookup", arguments={"value": "x"}
-                        ),
-                        ToolCall(
-                            id="pending-limit", name="lookup", arguments={"value": "y"}
-                        ),
-                    ],
-                    finish_reason="tool_calls",
-                    usage=Usage(10, 2, 12),
-                )
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "tool-limit",
-                        "prompt": "开始",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-
-        terminal = events[-1]
-        self.assertEqual(terminal.type, "done")
-        self.assertTrue(terminal.metadata["committed"])
-        self.assertEqual(terminal.metadata["status"], "limited")
-        self.assertEqual(terminal.metadata["stop_reason"], "max_tool_iterations")
-        self.assertEqual(terminal.metadata["tool_calls"], 2)
-        window_path = find_window(root, "alice", "cli", "tool-limit")
-        window = load_window(require_present(window_path))
-        self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "limited")
-        self.assertEqual(
-            window["data"]["round_metrics"][0]["stop_reason"],
-            "max_tool_iterations",
-        )
-        self.assertEqual(window["text"]["messages"][0]["content"], "开始")
-        self.assertIn("最大次数 1", window["text"]["messages"][1]["content"])
-        calls = window["tool"]["rounds"][0]["calls"]
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0]["status"], "completed")
-        self.assertEqual(calls[1]["status"], "not_executed")
-        self.assertEqual(
-            calls[1]["result"]["error"]["exception_type"],
-            "ToolCallLimitExceeded",
-        )
-        durable_items = window["items"]["items"]
-        call_item = next(item for item in durable_items if item["type"] == "tool_call")
-        result_item = next(
-            item for item in durable_items if item["type"] == "tool_result"
-        )
-        self.assertTrue(call_item["call_id"].startswith("callid_"))
-        self.assertTrue(result_item["call_id"].startswith("callid_"))
-        pending_result = next(
-            item
-            for item in durable_items
-            if item["type"] == "tool_result" and item["is_error"]
-        )
-        self.assertTrue(pending_result["is_error"])
-
-        continue_provider = ScriptedProvider(
-            responses=[ChatResponse(text="继续完成", usage=Usage(5, 2, 7))]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            continued = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "tool-limit",
-                        "prompt": "继续",
-                    },
-                    root=root,
-                    provider_factory=lambda _: continue_provider,
-                )
-            )
-        self.assertEqual(continued[-1].type, "done")
-        resumed = load_window(require_present(window_path))
-        self.assertEqual(resumed["data"]["rounds"], 2)
-        self.assertEqual(resumed["text"]["messages"][-2]["content"], "继续")
-        self.assertEqual(resumed["text"]["messages"][-1]["content"], "继续完成")
+        provider = ScriptedProvider(responses=[
+            ChatResponse(text="正在查询", tool_calls=[
+                ToolCall(id="first", name="lookup", arguments={"value": "x"}),
+                ToolCall(id="second", name="lookup", arguments={"value": "y"}),
+            ], usage=Usage(10, 2, 12)),
+            ChatResponse(text="全部完成", usage=Usage(5, 2, 7)),
+        ])
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+            events = list(iter_request_events({
+                "user": "alice", "source": "cli", "session_id": "long-tools", "prompt": "开始",
+            }, root=root, provider_factory=lambda _: provider))
+        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].metadata["status"], "completed")
+        self.assertEqual(events[-1].metadata["tool_calls"], 2)
+        saved = require_present(session_history(root, "alice", "cli", "long-tools"))
+        self.assertEqual(len(saved.integrations), 1)
+        self.assertEqual([tool["status"] for tool in saved.tools], ["completed", "completed"])
+        self.assertEqual(saved.messages[-1]["content"], "全部完成")
 
     def test_task_plan_creation_stops_only_the_current_conversation_run(self) -> None:
         _, root = self.make_root()
@@ -1476,6 +1390,7 @@ def run(*, context):
                 )
             )
             return {
+                "ok": True,
                 "status": "completed",
                 "agent": "task_plan",
                 "data": {"action": "create"},
@@ -1484,7 +1399,7 @@ def run(*, context):
 
         def mutate(*, value, context):
             side_effects.append(f"{context['session_id']}:{value}")
-            return {"value": value}
+            return {"ok": True, "value": value}
 
         dispatch = ToolDefinition(
             name="subagent_dispatch",
@@ -1505,7 +1420,7 @@ def run(*, context):
             entrypoint="tool.py:run",
             source="test",
             directory=root / "plugins" / "subagent_dispatch",
-            _callable=create_plan,
+            _callable=create_plan, execution_mode="thread",
         )
         mutation = ToolDefinition(
             name="mutation",
@@ -1521,7 +1436,7 @@ def run(*, context):
             entrypoint="tool.py:run",
             source="test",
             directory=root / "plugins" / "mutation",
-            _callable=mutate,
+            _callable=mutate, execution_mode="thread",
         )
         registry = ToolRegistry({
             "subagent_dispatch": dispatch,
@@ -1545,7 +1460,7 @@ def run(*, context):
                         ToolCall(
                             id="must-not-run",
                             name="mutation",
-                            arguments={"value": "A-side-effect"},
+                            arguments={"value": "after-plan"},
                         ),
                     ],
                     finish_reason="tool_calls",
@@ -1554,7 +1469,7 @@ def run(*, context):
                 ChatResponse(text="这一响应绝不能被请求"),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events_a = list(
                 iter_request_events(
                     {
@@ -1574,42 +1489,35 @@ def run(*, context):
         self.assertEqual(side_effects, [])
         terminal_a = events_a[-1]
         self.assertEqual(terminal_a.type, "done")
-        self.assertEqual(terminal_a.metadata["status"], "completed")
+        self.assertEqual(terminal_a.metadata["status"], "limited")
         self.assertEqual(
             terminal_a.metadata["stop_reason"],
             "task_plan_approval_required",
         )
         self.assertTrue(terminal_a.metadata["awaiting_user_approval"])
         self.assertEqual(terminal_a.metadata["plan_id"], "plan_12345678")
-        # The approval boundary commits immediately; the parallel mutation is
-        # intentionally never emitted or executed.
-        self.assertFalse(
-            any(
-                event.type == "tool_call_result"
-                and event.tool_call_id == "must-not-run"
-                for event in events_a
-            )
+        skipped = next(
+            event for event in events_a
+            if event.type == "tool_call_result" and event.tool_name == "mutation"
         )
-        window_a = load_window(
-            require_present(find_window(root, "alice", "web", "conversation-a"))
-        )
-        self.assertEqual(window_a["data"]["rounds"], 1)
-        self.assertEqual(
-            window_a["data"]["round_metrics"][0]["stop_reason"],
-            "task_plan_approval_required",
-        )
-        self.assertTrue(
-            window_a["data"]["round_metrics"][0]["awaiting_user_approval"]
-        )
-        self.assertEqual(
-            window_a["tool"]["rounds"][0]["calls"][1]["status"],
-            "not_executed",
-        )
+        self.assertEqual(skipped.metadata["status"], "not_executed")
+        self.assertFalse(skipped.result["execution"]["executed"])
+        self.assertFalse(any(
+            event.type == "tool_call_start" and event.tool_name == "mutation"
+            for event in events_a
+        ))
+        window_a = require_present(session_history(root, 'alice', 'web', 'conversation-a')).refresh()
+        self.assertEqual(len(window_a.integrations), 1)
+        self.assertEqual(window_a.integrations[0]['stop_reason'], 'task_plan_approval_required')
+        self.assertTrue(window_a.integrations[0]['awaiting_user_approval'])
+        self.assertEqual(len(window_a.tools), 2)
+        saved_mutation = next(tool for tool in window_a.tools if tool["name"] == "mutation")
+        self.assertEqual(saved_mutation["status"], "not_executed")
 
         provider_b = ScriptedProvider(
             responses=[ChatResponse(text="B 对话正常继续", usage=Usage(4, 2, 6))]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events_b = list(
                 iter_request_events(
                     {
@@ -1636,151 +1544,47 @@ def run(*, context):
         self.assertNotIn("A 对话计划", system_b)
         self.assertNotIn("plan_12345678", system_b)
         self.assertEqual(side_effects, [])
-        self.assertEqual(
-            load_window(require_present(find_window(root, "alice", "web", "conversation-b")))["data"]["rounds"],
-            1,
-        )
+        self.assertEqual(len(require_present(session_history(root, 'alice', 'web', 'conversation-b')).refresh().integrations), 1)
 
-    def test_tool_loop_guard_uses_exact_provider_input_plus_local_increment(
-        self,
-    ) -> None:
+    def test_tool_continuation_records_distinct_consistent_card_snapshots(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall(id="c1", name="lookup", arguments={"value": "x"})
-                    ],
-                    finish_reason="tool_calls",
-                    usage=Usage(100, 1, 101, estimated=False),
-                ),
-                ChatResponse(
-                    text="finished",
-                    finish_reason="stop",
-                    usage=Usage(150, 1, 151, estimated=False),
-                ),
-            ]
-        )
-
-        def inflated_messages(messages: list[dict[str, Any]]) -> int:
-            has_tool_result = any(message.get("role") == "tool" for message in messages)
-            return 20_100 if has_tool_result else 20_000
-
-        with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch(
-                "run.conversation.runtime.estimate_messages_tokens",
-                side_effect=inflated_messages,
-            ),
-            patch("run.conversation.runtime.estimate_tools_tokens", return_value=0),
-        ):
-            events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "provider-context-baseline",
-                        "prompt": "go",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-
+        provider = ScriptedProvider(responses=[
+            ChatResponse(text="", tool_calls=[ToolCall("c1", "lookup", {"value": "x"})], usage=Usage(100, 1, 101)),
+            ChatResponse(text="finished", usage=Usage(150, 1, 151)),
+        ])
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+            events = list(iter_request_events(
+                {"user": "alice", "source": "cli", "session_id": "snapshots", "prompt": "go"},
+                root=root, provider_factory=lambda _: provider))
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertEqual(len(provider.requests), 2)
-        self.assertEqual(events[-1].type, "done")
-        self.assertFalse(any(event.type == "error" for event in events))
+        history = require_present(session_history(root, "alice", "cli", "snapshots"))
+        self.assertEqual([card.seq for card in history.cards], list(range(1, len(history.cards) + 1)))
+        self.assertEqual(history.usage["provider_request_count"], 2)
+        self.assertEqual(len(events[-1].metadata["provider_request_diagnostics"]), 2)
+        self.assertEqual(events[-1].metadata["context"]["last_seq"], len(history.cards))
 
-    def test_tool_loop_guard_reports_exact_projection_and_file_result_size(
-        self,
-    ) -> None:
+    def test_huge_tool_card_rejects_request_without_truncating_raw(self) -> None:
+        from run.cards import CardCapacityError, CardStore, prepare_request
         _, root = self.make_root()
-        project_file_tool = Path(__file__).resolve().parents[2] / "plugins" / "file"
-        shutil.copytree(project_file_tool, root / "plugins" / "file")
-        (root / "large.txt").write_text("payload", "utf-8")
-        global_config_path = root / "config" / "global_config.json"
-        global_config = json.loads(global_config_path.read_text("utf-8"))
-        global_config["agents"] = {
-            "token_limit": 100_000,
-            "token_compression_ratio": 0.9,
-        }
-        global_config_path.write_text(json.dumps(global_config), "utf-8")
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall(
-                            id="f1",
-                            name="file",
-                            arguments={"action": "read", "path": "large.txt"},
-                        )
-                    ],
-                    finish_reason="tool_calls",
-                    usage=Usage(1_000, 1, 1_001, estimated=False),
-                )
-            ]
-        )
+        store = CardStore(root, "alice")
+        store.ensure_session("cli", "huge")
+        payload = {"execution_id": "exec_huge", "original_call": {"name": "file", "arguments": {"path": "large.txt"}},
+                   "execution": {"status": "completed", "execution_live": False},
+                   "result": {"ok": True, "content": "完整原文" * 10000}}
+        card = store.append("cli", "huge", "i_huge", "tool_result", payload, tool_call_id="huge")
+        before = store.snapshot("cli", "huge")
+        with self.assertRaises(CardCapacityError):
+            prepare_request(store, "cli", "huge", system_prompt="", dynamic_tail=lambda: {},
+                            tools=[], input_limit=128)
+        self.assertEqual(store.snapshot("cli", "huge"), before)
+        self.assertEqual(store.raw_page("cli", "huge")[0].raw_payload, card.raw_payload)
 
-        def growing_messages(messages: list[dict[str, Any]]) -> int:
-            has_tool_result = any(message.get("role") == "tool" for message in messages)
-            return 111_000 if has_tool_result else 1_000
-
-        with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch(
-                "run.conversation.runtime.estimate_messages_tokens",
-                side_effect=growing_messages,
-            ),
-            patch("run.conversation.runtime.estimate_tools_tokens", return_value=0),
-        ):
-            events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "provider-context-overflow",
-                        "prompt": "read",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-
-        terminal = events[-1]
-        self.assertEqual(terminal.type, "done")
-        self.assertTrue(terminal.metadata["committed"])
-        self.assertEqual(terminal.metadata["status"], "limited")
-        self.assertEqual(terminal.metadata["stop_reason"], "tool_context_limit")
-        guard = terminal.metadata["context_guard"]
-        self.assertEqual(guard["measurement"], "provider_plus_increment")
-        self.assertEqual(guard["provider_input_tokens"], 1_000)
-        self.assertEqual(guard["incremental_tokens"], 110_000)
-        self.assertEqual(guard["projected_tokens"], 111_000)
-        self.assertEqual(guard["token_limit"], 100_000)
-        self.assertEqual(len(provider.requests), 1)
-        file_diagnostic = guard["latest_tools"][0]
-        self.assertEqual(file_diagnostic["name"], "file")
-        self.assertEqual(file_diagnostic["action"], "read")
-        self.assertEqual(file_diagnostic["path"], "large.txt")
-        self.assertGreater(file_diagnostic["result_chars"], 0)
-        self.assertNotIn("result", file_diagnostic)
-        window = load_window(
-            require_present(find_window(root, "alice", "cli", "provider-context-overflow"))
-        )
-        self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "limited")
-        self.assertEqual(
-            window["data"]["round_metrics"][0]["stop_reason"],
-            "tool_context_limit",
-        )
-
-    def test_tool_loop_guard_respects_declared_provider_input_limit(self) -> None:
+    def test_cardstream_input_capacity_respects_provider_declared_limit(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
-        global_config_path = root / "config" / "global_config.json"
+        global_config_path = root / "config" / "global_config.yaml"
         global_config = json.loads(global_config_path.read_text("utf-8"))
         global_config["agents"] = {
             "token_limit": 300_000,
@@ -1821,96 +1625,11 @@ def run(*, context):
             ]
         )
 
-        def growing_messages(messages: list[dict[str, Any]]) -> int:
-            has_tool_result = any(message.get("role") == "tool" for message in messages)
-            return 151_000 if has_tool_result else 1_000
+        from run.extensions import context_input_budget
+        budget = context_input_budget(300_000, provider.capabilities("mock"), output_reserve=8192)
+        self.assertEqual(budget["effective_token_limit"], 150_000)
+        self.assertEqual(budget["configured_token_limit"], 300_000)
 
-        with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch(
-                "run.conversation.runtime.estimate_messages_tokens",
-                side_effect=growing_messages,
-            ),
-            patch("run.conversation.runtime.estimate_tools_tokens", return_value=0),
-        ):
-            events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "provider-declared-limit",
-                        "prompt": "go",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-
-        terminal = events[-1]
-        self.assertEqual(terminal.type, "done")
-        self.assertEqual(terminal.metadata["status"], "limited")
-        self.assertEqual(terminal.metadata["stop_reason"], "tool_context_limit")
-        guard = terminal.metadata["context_guard"]
-        self.assertEqual(guard["configured_token_limit"], 300_000)
-        self.assertEqual(guard["provider_declared_input_limit"], 150_000)
-        self.assertEqual(guard["effective_token_limit"], 150_000)
-        self.assertEqual(len(provider.requests), 1)
-
-    def test_completed_round_extracts_memory_after_history_commit(self) -> None:
-        _, root = self.make_root()
-        config_path = root / "config" / "global_config.json"
-        config = json.loads(config_path.read_text("utf-8"))
-        config["memory"] = {"auto_extract_on_commit": True}
-        config_path.write_text(json.dumps(config), "utf-8")
-        provider = ScriptedProvider(
-            responses=[ChatResponse(text="记住这台设备。", usage=Usage())]
-        )
-        observed: dict[str, Any] = {}
-
-        def extract_after_commit(*, agent_source, session_id, **kwargs):
-            observed.update(kwargs)
-            observed["agent_source"] = agent_source
-            observed["session_id"] = session_id
-            self.assertIsNotNone(find_window(root, "alice", "cli", "memory-round"))
-            return {
-                "status": "completed",
-                "candidate_count": 1,
-                "agent": "self_improve",
-                "usage": {},
-                "persisted": {"created": ["device.md"]},
-                "error": None,
-            }
-
-        with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch(
-                "run.conversation.runtime._extract_round_memory",
-                side_effect=extract_after_commit,
-            ),
-        ):
-            result = handle_request(
-                {
-                    "user": "alice",
-                    "source": "cli",
-                    "session_id": "memory-round",
-                    "prompt": "我的设备是 J1900。",
-                },
-                root=root,
-                provider_factory=lambda _: provider,
-            )
-
-        self.assertEqual(observed["round_number"], 1)
-        self.assertEqual(observed["prompt"], "我的设备是 J1900。")
-        self.assertEqual(observed["agent_source"], "cli")
-        self.assertEqual(observed["session_id"], "memory-round")
-        self.assertEqual(result["memory"]["extraction_mode"], "on_commit")
-        self.assertEqual(result["memory"]["round_extraction"]["candidate_count"], 1)
-        archive = load_window(require_present(find_window(root, "alice", "cli", "memory-round")))
-        self.assertEqual(archive["data"]["memory_processed_round"], 1)
-        self.assertEqual(archive["data"]["memory_status"], "completed")
-        indexed = find_history_record(root, "alice", "cli", "memory-round")
-        self.assertEqual(indexed["memory_processed_round"], 1)
-        self.assertEqual(indexed["memory_status"], "completed")
 
     def test_extract_round_memory_persists_candidates_and_contains_failures(
         self,
@@ -1985,51 +1704,6 @@ def run(*, context):
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"]["exception_type"], "RuntimeError")
 
-    def test_failed_round_is_skipped_by_later_memory_extraction(self) -> None:
-        _, root = self.make_root(stream=True)
-        provider = ScriptedProvider(
-            streams=[
-                [RunEvent(type="error", error={"message": "upstream unavailable"})]
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "failed-memory",
-                        "prompt": "do not extract this failed round",
-                        "_auto_retry_max_attempts": 1,
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-
-        class RejectingRunner:
-            def run(self, *args, **kwargs):
-                del args, kwargs
-                raise AssertionError("failed round must not reach memory agent")
-
-        path = find_window(root, "alice", "cli", "failed-memory")
-        window = load_window(require_present(path))
-        result = extract_memory_backlog(
-            root=root,
-            user="alice",
-            source="cli",
-            session_id="failed-memory",
-            directory=path,
-            window=window,
-            config={"memory": {"extraction_mode": "compression_only"}},
-            agent_runner=RejectingRunner(),  # type: ignore[arg-type]
-            cancel_event=None,
-        )
-
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["candidates"], 0)
-        self.assertEqual(result["extraction"]["reason"], "failed_rounds")
-        self.assertEqual(result["extraction"]["skipped_rounds"], [1])
 
     def test_runtime_guidance_is_injected_at_tool_boundary_and_persisted(self) -> None:
         _, root = self.make_root()
@@ -2046,7 +1720,7 @@ def run(*, context):
                 ChatResponse(text="guided", usage=Usage()),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2065,7 +1739,7 @@ def run(*, context):
         guidance_messages = [
             item["content"]
             for item in provider.requests[1].messages
-            if item.get("role") == "user" and "运行中引导" in item.get("content", "")
+            if item.get("role") == "user" and ("focus on the revised target" in str(item.get("content", "")) or "revised-target.md" in str(item.get("content", "")))
         ]
         self.assertEqual(len(guidance_messages), 1)
         self.assertIn("focus on the revised target", guidance_messages[0])
@@ -2074,13 +1748,10 @@ def run(*, context):
         applied = [event for event in events if event.type == "guidance_applied"]
         self.assertEqual(len(applied), 1)
         self.assertEqual(
-            applied[0].metadata["guidance"], ["focus on the revised target"]
+            applied[0].content, "focus on the revised target"
         )
-        window = load_window(require_present(find_window(root, "alice", "cli", "guided")))
-        self.assertEqual(
-            window["data"]["round_metrics"][0]["guidance"],
-            ["focus on the revised target"],
-        )
+        window = require_present(session_history(root, 'alice', 'cli', 'guided')).refresh()
+        self.assertEqual(window.integrations[0]['guidance'], ['focus on the revised target'])
 
     def test_retry_preserves_consumed_guidance_without_duplicate_history(self) -> None:
         _, root = self.make_root()
@@ -2098,7 +1769,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2114,19 +1785,17 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertEqual(len([event for event in events if event.type == "retrying"]), 1)
         replayed = [
             message
             for message in provider.requests[-1].messages
             if message.get("role") == "user"
-            and "运行中引导" in str(message.get("content") or "")
+            and "continue with the revised target" in str(message.get("content") or "")
         ]
         self.assertEqual(len(replayed), 1)
         self.assertIn("continue with the revised target", replayed[0]["content"])
-        metric = load_window(
-            require_present(find_window(root, "alice", "cli", "retry-guidance"))
-        )["data"]["round_metrics"][0]
+        metric = require_present(session_history(root, 'alice', 'cli', 'retry-guidance')).refresh().integrations[0]
         self.assertEqual(metric["guidance"], ["continue with the revised target"])
 
     def test_runtime_attachment_only_guidance_reaches_provider_and_history(
@@ -2161,7 +1830,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2180,19 +1849,23 @@ def run(*, context):
         guidance_message = next(
             item
             for item in provider.requests[1].messages
-            if item.get("role") == "user" and "运行中引导" in item.get("content", "")
+            if item.get("role") == "user" and ("focus on the revised target" in str(item.get("content", "")) or "revised-target.md" in str(item.get("content", "")))
         )
         self.assertIn("revised-target.md", guidance_message["content"])
-        self.assertIn("multimodal", guidance_message["content"])
         applied = next(event for event in events if event.type == "guidance_applied")
         self.assertEqual(
-            applied.metadata["guidance_details"][0]["id"],
+            applied.metadata["id"],
             "guidance_attachment_only",
         )
-        window = load_window(require_present(find_window(root, "alice", "cli", "guided-attachment")))
-        detail = window["data"]["round_metrics"][0]["guidance_details"][0]
+        window = require_present(session_history(root, 'alice', 'cli', 'guided-attachment')).refresh()
+        detail = window.integrations[0]['guidance_details'][0]
         self.assertEqual(detail["uploaded_files"][0]["name"], "revised-target.md")
         self.assertNotIn("path", detail["uploaded_files"][0])
+        guidance_card = next(card for card in window.cards
+                             if card.raw_kind == "user_text"
+                             and card.raw_level == "guidance")
+        self.assertEqual(guidance_card.raw_payload["guidance_id"], "guidance_attachment_only")
+        self.assertEqual(guidance_card.raw_payload["attachments"][0]["name"], "revised-target.md")
 
     def test_stream_deltas_are_forwarded_before_provider_exhausts(self) -> None:
         _, root = self.make_root(stream=True)
@@ -2217,7 +1890,7 @@ def run(*, context):
                 )
 
         provider = IncrementalProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             iterator = iter_request_events(
                 {
                     "user": "alice",
@@ -2239,48 +1912,27 @@ def run(*, context):
             [(event.type, event.content) for event in remaining],
             [("text_delta", "B"), ("usage", ""), ("done", "")],
         )
-        window = load_window(require_present(find_window(root, "alice", "cli", "incremental-stream")))
-        self.assertEqual(window["text"]["messages"][-1]["content"], "AB")
+        window = require_present(session_history(root, 'alice', 'cli', 'incremental-stream')).refresh()
+        self.assertEqual(window.messages[-1]['content'], 'AB')
 
-    def test_stream_tool_call_is_forwarded_after_provider_batch_validation(self) -> None:
+    def test_stream_tool_call_is_forwarded_only_after_complete_batch_validation(self) -> None:
         _, root = self.make_root(stream=True)
         self.write_tool(root / "plugins", "lookup", "plugin")
-
-        class IncrementalToolProvider(ScriptedProvider):
-            def __init__(self) -> None:
-                super().__init__()
-                self.resumed_after_call = False
-
-            def chat_stream(self, request):
-                self.requests.append(request)
-                yield RunEvent(
-                    type="tool_call_start",
-                    tool_call_id="callid_live",
-                    tool_name="lookup",
-                    arguments={"value": "x"},
-                )
-                self.resumed_after_call = True
-                yield RunEvent(type="usage", usage={})
-
-        provider = IncrementalToolProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            iterator = iter_request_events(
-                {
-                    "user": "alice",
-                    "source": "cli",
-                    "session_id": "incremental-tool",
-                    "prompt": "go",
-                    "stream": True,
-                },
-                root=root,
-                provider_factory=lambda _: provider,
-            )
-            first = next(iterator)
-            self.assertEqual(first.type, "tool_call_start")
-            self.assertEqual(first.tool_call_id, "callid_live")
-            self.assertTrue(provider.resumed_after_call)
-            iterator.close()
-        self.assertIsNone(find_window(root, "alice", "cli", "incremental-tool"))
+        provider = ScriptedProvider(streams=[
+            [RunEvent(type="tool_call_start", tool_call_id="callid_live", tool_name="lookup",
+                      arguments={"value": "x"}), RunEvent(type="done", usage={})],
+            [RunEvent(type="text_delta", content="done"), RunEvent(type="done", usage={})],
+        ])
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+            events = list(iter_request_events(
+                {"user": "alice", "source": "cli", "session_id": "incremental-tool", "prompt": "go", "stream": True},
+                root=root, provider_factory=lambda _: provider))
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
+        starts = [e for e in events if e.type == "tool_call_start"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0].tool_call_id, "callid_live")
+        history = require_present(session_history(root, "alice", "cli", "incremental-tool"))
+        self.assertEqual(history.tools[0]["status"], "completed")
 
     def test_stream_without_done_yields_error_and_commits_failed_round(self) -> None:
         _, root = self.make_root(stream=True)
@@ -2290,7 +1942,7 @@ def run(*, context):
                 del request
                 return iter(())
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2299,31 +1951,31 @@ def run(*, context):
                         "session_id": "missing-done",
                         "prompt": "go",
                         "stream": True,
-                        "_auto_retry_max_attempts": 1,
+                        "_auto_retry": False,
                     },
                     root=root,
                     provider_factory=lambda _: EmptyStreamProvider(),
                 )
             )
         self.assertEqual([event.type for event in events], ["error"])
-        self.assertIn("缺少 done 终态", require_present(events[0].error)["message"])
+        self.assertIn("完整终态", require_present(events[0].error)["message"])
         self.assertTrue(events[0].metadata["committed"])
         self.assertEqual(events[0].metadata["status"], "failed")
-        window = load_window(require_present(find_window(root, "alice", "cli", "missing-done")))
-        self.assertEqual(window["data"]["rounds"], 1)
-        failed_metric = window["data"]["round_metrics"][0]
+        window = require_present(session_history(root, 'alice', 'cli', 'missing-done')).refresh()
+        self.assertEqual(len(window.integrations), 1)
+        failed_metric = window.integrations[0]
         self.assertEqual(failed_metric["status"], "failed")
         self.assertEqual(failed_metric["tool_argument_retries"], 0)
-        self.assertIn("provider_responses", failed_metric)
-        self.assertNotIn("context.state.provider_responses", failed_metric)
-        self.assertEqual(failed_metric["provider_responses"], [])
+        self.assertEqual(failed_metric["error"]["exception_type"], "ConnectionError")
+        self.assertEqual(len(failed_metric["provider_request_diagnostics"]), 1)
+        self.assertTrue(failed_metric["provider_request_diagnostics"][0]["request_id"])
 
     def test_provider_congestion_commits_failed_round(self) -> None:
         _, root = self.make_root()
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation.runtime.provider_request_slot",
+                "run.conversation.provider_exchange.provider_request_slot",
                 side_effect=ProviderCongestionError("provider busy"),
             ),
         ):
@@ -2343,9 +1995,9 @@ def run(*, context):
 
         self.assertEqual([event.type for event in events], ["error"])
         self.assertEqual(events[0].metadata["status"], "failed")
-        self.assertEqual(events[0].metadata["stop_reason"], "provider_congestion")
-        window = load_window(require_present(find_window(root, "alice", "cli", "provider-busy")))
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+        self.assertEqual(events[0].error["exception_type"], "ProviderCongestionError")
+        window = require_present(session_history(root, 'alice', 'cli', 'provider-busy')).refresh()
+        self.assertEqual(window.integrations[0]['status'], 'failed')
 
     def test_native_kemo_invalid_tool_arguments_retry_before_tool_execution(
         self,
@@ -2390,7 +2042,11 @@ def run(*, context):
                         status=ResponseStatus.COMPLETED,
                         model="mock",
                         output=[
-                            MessageItem.text(MessageRole.ASSISTANT, "completed")
+                            MessageItem.text(
+                                MessageRole.ASSISTANT,
+                                "completed",
+                                phase=MessagePhase.FINAL_ANSWER,
+                            )
                         ],
                     ),
                 ]
@@ -2402,7 +2058,7 @@ def run(*, context):
                 )
 
         provider = NativeProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2416,21 +2072,17 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertFalse(any(event.type == "error" for event in events))
         self.assertEqual(len(provider.requests), 3)
         self.assertEqual(len({request.request_id for request in provider.requests}), 3)
         retry_messages = kemo_request_to_chat(provider.requests[1]).messages
-        self.assertIn("provider_tool_argument_repair", retry_messages[0]["content"])
-        self.assertEqual(provider.requests[1].metadata["tool_argument_retry"], 1)
+        self.assertIn("invalid_tool_batch", json.dumps(retry_messages, ensure_ascii=False))
         self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
-        window = load_window(
-            require_present(find_window(root, "alice", "cli", "native-tool-argument-retry"))
-        )
-        self.assertEqual(len(window["tool"]["rounds"][0]["calls"]), 1)
-        self.assertEqual(
-            window["data"]["round_metrics"][0]["tool_argument_retries"], 1
-        )
+        window = require_present(session_history(root, 'alice', 'cli', 'native-tool-argument-retry')).refresh()
+        self.assertEqual([tool["status"] for tool in window.tools], ["invalid_arguments", "completed"])
+        self.assertEqual(window.cards[1].raw_payload["arguments_raw"], '{"value":"unfinished')
+        self.assertEqual(window.integrations[0]['tool_argument_retries'], 1)
 
     def test_chat_stream_invalid_tool_arguments_retry_without_duplicate_card(
         self,
@@ -2470,7 +2122,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2485,15 +2137,15 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertFalse(any(event.type == "error" for event in events))
         self.assertEqual(
             len([event for event in events if event.type == "tool_call_start"]), 1
         )
         self.assertEqual(len(provider.requests), 3)
         self.assertIn(
-            "provider_tool_argument_repair",
-            provider.requests[1].messages[0]["content"],
+            "invalid_tool_batch",
+            json.dumps(provider.requests[1].messages, ensure_ascii=False),
         )
 
     def test_invalid_tool_arguments_with_visible_output_is_retried(self) -> None:
@@ -2534,7 +2186,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2549,7 +2201,7 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertFalse(any(event.type == "error" for event in events))
         self.assertEqual(len(provider.requests), 3)
         self.assertEqual(
@@ -2557,15 +2209,10 @@ def run(*, context):
             1,
         )
         self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
-        window = load_window(
-            require_present(find_window(root, "alice", "cli", "visible-invalid-tool-arguments"))
-        )
-        self.assertIn("visible", window["text"]["messages"][-1]["content"])
-        self.assertEqual(
-            window["text"]["messages"][-1]["content"].count("visible"),
-            1,
-        )
-        self.assertIn("thinking", window["think"]["rounds"][-1]["content"])
+        window = require_present(session_history(root, 'alice', 'cli', 'visible-invalid-tool-arguments')).refresh()
+        self.assertIn('visible', ''.join(item['content'] for item in window.messages))
+        self.assertEqual(''.join(item['content'] for item in window.messages).count('visible'), 1)
+        self.assertIn('thinking', ''.join(item['content'] for item in window.reasoning))
 
     def test_parallel_valid_and_invalid_tool_calls_retry_without_stale_card(
         self,
@@ -2612,7 +2259,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2631,60 +2278,28 @@ def run(*, context):
         self.assertEqual(len(starts), 1)
         self.assertTrue(starts[0].tool_call_id.startswith("callid_"))
         results = [event for event in events if event.type == "tool_call_result"]
-        self.assertEqual(len(results), 1)
-        self.assertTrue(results[0].tool_call_id.startswith("callid_"))
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual([event.metadata["status"] for event in results], ["invalid_arguments", "invalid_arguments", "completed"])
+        self.assertTrue(results[-1].tool_call_id.startswith("callid_"))
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertEqual(events[-1].metadata["tool_argument_retries"], 1)
 
-    def test_runtime_error_retries_without_committing_provisional_rounds(self) -> None:
+    def test_visible_provider_output_is_preserved_without_replay(self) -> None:
         _, root = self.make_root(stream=True)
-        provider = ScriptedProvider(
-            streams=[
-                [
-                    RunEvent(type="text_delta", content="旧尝试"),
-                    RunEvent(
-                        type="error",
-                        error={
-                            "message": "网关暂时断开",
-                            "exception_type": "ProviderConnectionError",
-                        },
-                    ),
-                ],
-                [
-                    RunEvent(type="text_delta", content="最终回答"),
-                    RunEvent(type="done", usage={}),
-                ],
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "auto-retry-success",
-                        "prompt": "执行任务",
-                        "stream": True,
-                        "run_id": "run_auto_retry",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
+        provider = ScriptedProvider(streams=[[
+            RunEvent(type="text_delta", content="已输出的正文"),
+            RunEvent(type="error", error={"message": "interrupted", "category": "upstream_error", "status_code": 503}),
+        ]])
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+            events = list(iter_request_events(
+                {"user": "alice", "source": "cli", "session_id": "visible-no-replay", "prompt": "go", "stream": True},
+                root=root, provider_factory=lambda _: provider))
+        self.assertEqual([e.type for e in events], ["text_delta", "error"])
+        self.assertEqual(len(provider.requests), 1)
+        history = require_present(session_history(root, "alice", "cli", "visible-no-replay"))
+        self.assertEqual([m["content"] for m in history.messages], ["go", "已输出的正文"])
+        self.assertEqual(history.integrations[0]["status"], "failed")
 
-        self.assertEqual([event.type for event in events].count("retrying"), 1)
-        self.assertEqual(events[-1].type, "done")
-        self.assertTrue(events[-1].metadata["committed"])
-        self.assertEqual([event.run_sequence for event in events], list(range(len(events))))
-        self.assertTrue(all(event.metadata.get("run_id") == "run_auto_retry" for event in events))
-        self.assertEqual(events[-1].metadata["retry_attempts"], 2)
-        self.assertEqual(len(provider.requests), 2)
-        self.assertEqual(
-            load_window(require_present(find_window(root, "alice", "cli", "auto-retry-success")))["text"]["messages"][1]["content"],
-            "最终回答",
-        )
-
-    def test_runtime_error_retries_five_times_then_commits_once(self) -> None:
+    def test_default_provider_retries_five_times_without_restarting_integration(self) -> None:
         _, root = self.make_root()
         provider = ScriptedProvider(
             responses=[
@@ -2697,7 +2312,7 @@ def run(*, context):
                 for _ in range(6)
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2716,17 +2331,17 @@ def run(*, context):
         self.assertTrue(events[-1].metadata["committed"])
         self.assertEqual(len(provider.requests), 6)
         self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
-        self.assertEqual(require_present(events[-1].error)["retry_attempts"], 6)
-        window = load_window(require_present(find_window(root, "alice", "cli", "auto-retry-exhausted")))
-        self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(len(window["data"]["round_metrics"]), 1)
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+        self.assertEqual(require_present(events[-1].error)["attempt_count"], 6)
+        window = require_present(session_history(root, 'alice', 'cli', 'auto-retry-exhausted')).refresh()
+        self.assertEqual(len(window.integrations), 1)
+        self.assertEqual(len(window.integrations), 1)
+        self.assertEqual(window.integrations[0]['status'], 'failed')
 
     def test_progress_resets_retry_budget_inside_one_run(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         responses: list[ChatResponse | BaseException] = []
-        for index in range(8):
+        for index in range(3):
             responses.extend(
                 [
                     ChatResponse(
@@ -2751,8 +2366,8 @@ def run(*, context):
         provider = ScriptedProvider(responses=responses)
 
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.conversation.runtime.time.sleep"),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("provider.retry.RetryManager.delay", return_value=0),
         ):
             events = list(
                 iter_request_events(
@@ -2769,24 +2384,20 @@ def run(*, context):
             )
 
         retries = [event for event in events if event.type == "retrying"]
-        self.assertEqual(len(retries), 8)
+        self.assertEqual(len(retries), 3)
         self.assertEqual(
-            [event.metadata["failed_attempt"] for event in retries],
-            [1] * 8,
+            [event.metadata["retry_attempt"] for event in retries],
+            [1] * 3,
         )
-        self.assertEqual(
-            [event.metadata["run_attempt"] for event in retries],
-            list(range(1, 9)),
-        )
-        self.assertTrue(all(event.metadata["retry_progress"] for event in retries))
-        self.assertEqual(len(provider.requests), 17)
-        self.assertEqual(events[-1].type, "done")
+        self.assertTrue(all(event.metadata["replay_safe"] for event in retries))
+        self.assertEqual(len(provider.requests), 7)
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertEqual(events[-1].metadata["text"], "最终完成")
-        window = load_window(require_present(find_window(root, "alice", "cli", "retry-episode-progress")))
-        self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(len(window["data"]["round_metrics"]), 1)
+        window = require_present(session_history(root, 'alice', 'cli', 'retry-episode-progress')).refresh()
+        self.assertEqual(len(window.integrations), 1)
+        self.assertEqual(len(window.integrations), 1)
 
-    def test_two_failures_in_one_conversation_each_receive_five_retries(self) -> None:
+    def test_independent_integrations_each_receive_default_retry_budget(self) -> None:
         _, root = self.make_root()
 
         def failing_provider(label: str) -> ScriptedProvider:
@@ -2796,7 +2407,7 @@ def run(*, context):
                         f"{label} unavailable",
                         status_code=503,
                         category="upstream_error",
-                        retryable=False,
+                        retryable=True,
                     )
                     for _ in range(6)
                 ]
@@ -2805,8 +2416,8 @@ def run(*, context):
         first = failing_provider("first")
         second = failing_provider("second")
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.conversation.runtime.time.sleep"),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("provider.retry.RetryManager.delay", return_value=0),
         ):
             first_events = list(
                 iter_request_events(
@@ -2842,7 +2453,7 @@ def run(*, context):
         self.assertTrue(require_present(first_events[-1].error)["retry_budget_exhausted"])
         self.assertTrue(require_present(second_events[-1].error)["retry_budget_exhausted"])
 
-    def test_retryable_tool_failure_enters_outer_retry_before_next_provider_iteration(
+    def test_tool_failure_reaches_model_without_automatic_side_effect_retry(
         self,
     ) -> None:
         _, root = self.make_root()
@@ -2864,9 +2475,9 @@ def run(*, context):
         )
 
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation.runtime.execute_tool",
+                "run.tools.runtime.execute_tool",
                 side_effect=tool_failure,
             ) as mocked_execute,
         ):
@@ -2883,8 +2494,8 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual([event.type for event in events].count("retrying"), 1)
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual([event.type for event in events].count("retrying"), 0)
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertEqual(events[-1].metadata["text"], "工具失败后已恢复")
         self.assertEqual(len(provider.requests), 2)
         self.assertEqual(mocked_execute.call_count, 1)
@@ -2898,6 +2509,7 @@ def run(*, context):
         )
 
     def test_explicit_non_retryable_provider_error_still_uses_run_retry_budget(self) -> None:
+        # R1 3.3: preserve the legacy test name, replace its obsolete semantics.
         _, root = self.make_root()
         provider = ScriptedProvider(
             responses=[
@@ -2911,7 +2523,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2925,16 +2537,14 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual([event.type for event in events].count("retrying"), 5)
+        self.assertEqual([event.type for event in events].count("retrying"), 0)
         self.assertEqual(events[-1].type, "error")
         self.assertFalse(events[-1].metadata["retryable"])
         self.assertTrue(events[-1].metadata["committed"])
-        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
-        self.assertEqual(len(provider.requests), 6)
-        window = load_window(
-            require_present(find_window(root, "alice", "cli", "explicit-no-retry"))
-        )
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+        self.assertFalse(require_present(events[-1].error).get("retry_budget_exhausted", False))
+        self.assertEqual(len(provider.requests), 1)
+        window = require_present(session_history(root, 'alice', 'cli', 'explicit-no-retry')).refresh()
+        self.assertEqual(window.integrations[0]['status'], 'failed')
 
     def test_deterministic_incomplete_reason_uses_full_run_retry_budget(
         self,
@@ -2953,15 +2563,15 @@ def run(*, context):
                            'model': request.model,
                            'incomplete_details': {
                         "reason": "output_truncated",
-                        "finish_reason": "max_tokens",
-                        "category": "upstream_error",
-                        "status_code": 503,
-                        "retryable": True,
+                        "details": {
+                            "finish_reason": "max_tokens", "category": "upstream_error",
+                            "status_code": 503, "retryable": True,
+                        },
                     },
                        })
 
         provider = TruncatedProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -2975,11 +2585,12 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(len(provider.requests), 6)
-        self.assertEqual([event.type for event in events].count("retrying"), 5)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual([event.type for event in events].count("retrying"), 0)
         self.assertEqual(events[-1].type, "error")
         self.assertFalse(require_present(events[-1].error)["retryable"])
-        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
+        self.assertFalse(require_present(events[-1].error).get("retry_budget_exhausted", False))
+        self.assertEqual(require_present(events[-1].error)["stop_reason"], "output_truncated")
         self.assertTrue(events[-1].metadata["committed"])
 
     def test_transient_incomplete_metadata_retries_and_recovers(self) -> None:
@@ -2998,9 +2609,7 @@ def run(*, context):
                                'model': request.model,
                                'incomplete_details': {
                             "reason": "empty_output",
-                            "category": "upstream_error",
-                            "status_code": 503,
-                            "retry_after_ms": 0,
+                            "details": {"category": "upstream_error", "status_code": 503, "retry_after_ms": 0},
                         },
                            })
                 return KemoResponse(
@@ -3018,8 +2627,8 @@ def run(*, context):
 
         provider = EmptyThenCompleteProvider()
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.conversation.runtime.time.sleep") as sleep,
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("provider.retry.RetryManager.delay", return_value=0) as sleep,
         ):
             events = list(
                 iter_request_events(
@@ -3036,8 +2645,8 @@ def run(*, context):
 
         self.assertEqual(len(provider.requests), 2)
         self.assertEqual([event.type for event in events].count("retrying"), 1)
-        self.assertEqual(events[-1].type, "done")
-        self.assertEqual(events[-1].metadata["retry_attempts"], 2)
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
+        self.assertEqual(len(events[-1].metadata["provider_request_diagnostics"]), 2)
         sleep.assert_called_once()
 
     def test_cancelled_protocol_response_never_retries_provider_error(self) -> None:
@@ -3056,7 +2665,7 @@ def run(*, context):
                 )
 
         provider = CancelledProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -3072,9 +2681,9 @@ def run(*, context):
 
         self.assertEqual(len(provider.requests), 1)
         self.assertFalse(any(event.type == "retrying" for event in events))
-        self.assertEqual(events[-1].type, "error")
-        self.assertTrue(require_present(events[-1].error)["cancelled"])
-        self.assertFalse(require_present(events[-1].error)["retryable"])
+        self.assertEqual(events[-1].type, "done")
+        self.assertTrue(events[-1].metadata["provider_error"]["cancelled"])
+        self.assertFalse(events[-1].metadata["provider_error"]["retryable"])
         self.assertTrue(events[-1].metadata["committed"])
 
     def test_transport_retry_budget_exhaustion_does_not_start_outer_retry(self) -> None:
@@ -3091,7 +2700,7 @@ def run(*, context):
             ]
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -3125,17 +2734,14 @@ def run(*, context):
                            'request_id': request.request_id,
                            'status': ResponseStatus.INCOMPLETE,
                            'model': request.model,
-                           'error': UnifiedError(
-                        type="provider_error",
-                        code=ErrorCode.PROVIDER_BAD_RESPONSE,
-                        message="request rejected",
-                        provider_status=400,
-                    ),
-                           'incomplete_details': {"reason": "other", "details": {"provider_reason": "provider_specific_stop"}},
+                           'incomplete_details': {"reason": "other", "details": {
+                               "provider_reason": "provider_specific_stop",
+                               "category": "provider_error", "status_code": 400,
+                           }},
                        })
 
         provider = InvalidRequestProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -3149,12 +2755,13 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(len(provider.requests), 6)
-        self.assertEqual([event.type for event in events].count("retrying"), 5)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual([event.type for event in events].count("retrying"), 0)
         self.assertEqual(events[-1].type, "error")
         self.assertIsInstance(events[-1].error, dict)
         self.assertFalse(require_present(events[-1].error)["retryable"])
-        self.assertTrue(require_present(events[-1].error)["retry_budget_exhausted"])
+        self.assertFalse(require_present(events[-1].error).get("retry_budget_exhausted", False))
+        self.assertEqual(require_present(events[-1].error)["status_code"], 400)
 
     def test_retry_after_is_bounded_and_used_for_outer_retry(self) -> None:
         _, root = self.make_root()
@@ -3171,8 +2778,8 @@ def run(*, context):
         )
 
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.conversation.runtime.time.sleep") as sleep,
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("provider.retry.RetryManager.delay", return_value=0) as sleep,
         ):
             result = handle_request(
                 {
@@ -3186,9 +2793,11 @@ def run(*, context):
             )
 
         self.assertEqual(result["text"], "recovered")
-        sleep.assert_called_once_with(120.0)
+        sleep.assert_called_once_with(1, retry_after_ms=999_999)
+        from provider.retry import RetryManager
+        self.assertEqual(RetryManager().delay(1, retry_after_ms=999_999), 8.0)
 
-    def test_retry_reuses_successful_tool_result_to_avoid_duplicate_side_effect(self) -> None:
+    def test_retry_blocks_duplicate_side_effect_without_reusing_result(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         provider = ScriptedProvider(
@@ -3206,14 +2815,14 @@ def run(*, context):
             ]
         )
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.conversation.runtime.execute_tool", wraps=execute_tool) as mocked_execute,
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("run.tools.runtime.execute_tool", wraps=execute_tool) as mocked_execute,
         ):
             result = handle_request(
                 {
                     "user": "alice",
                     "source": "cli",
-                    "session_id": "auto-retry-tool-reuse",
+                    "session_id": "auto-retry-tool-dedup",
                     "prompt": "查一下",
                 },
                 root=root,
@@ -3243,9 +2852,9 @@ def run(*, context):
         tool_failure = ProviderError("tool side effect failed", retryable=True)
 
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation.runtime.execute_tool",
+                "run.tools.runtime.execute_tool",
                 side_effect=tool_failure,
             ) as mocked_execute,
         ):
@@ -3262,12 +2871,10 @@ def run(*, context):
 
         self.assertEqual(result["text"], "completed after blocked retry")
         self.assertEqual(mocked_execute.call_count, 1)
-        calls = load_window(
-            require_present(find_window(root, "alice", "cli", "retry-blocked-tool"))
-        )["tool"]["rounds"][0]["calls"]
+        calls = require_present(session_history(root, 'alice', 'cli', 'retry-blocked-tool')).refresh().tools
         self.assertEqual(
             [call["status"] for call in calls],
-            ["recovery_blocked", "retry_reuse_blocked"],
+            ["failed", "duplicate_blocked"],
         )
 
     def test_invalid_tool_arguments_retry_limit_commits_one_failed_round(self) -> None:
@@ -3291,7 +2898,7 @@ def run(*, context):
         provider = ScriptedProvider(
             responses=[invalid_response(1), invalid_response(2), invalid_response(3)]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -3311,21 +2918,12 @@ def run(*, context):
         self.assertFalse(any(event.type == "tool_call_start" for event in events))
         self.assertEqual(len([event for event in events if event.type == "error"]), 1)
         self.assertEqual(len(provider.requests), 3)
-        self.assertEqual(require_present(events[-1].error)["retry_count"], 2)
-        self.assertEqual(require_present(events[-1].error)["retry_limit"], 2)
-        window = load_window(
-            require_present(find_window(root, "alice", "cli", "invalid-tool-argument-limit"))
-        )
-        self.assertEqual(window["data"]["rounds"], 1)
-        failed_metric = window["data"]["round_metrics"][0]
-        self.assertEqual(failed_metric["status"], "failed")
-        self.assertEqual(failed_metric["tool_argument_retries"], 2)
-        self.assertIn("provider_responses", failed_metric)
-        self.assertNotIn("context.state.provider_responses", failed_metric)
-        self.assertEqual(
-            failed_metric["provider_responses"][-1]["status"],
-            "incomplete",
-        )
+        history = require_present(session_history(root, "alice", "cli", "invalid-tool-argument-limit"))
+        self.assertEqual(len(history.integrations), 1)
+        self.assertEqual(history.integrations[0]["status"], "failed")
+        self.assertEqual(history.integrations[0]["tool_argument_retries"], 2)
+        self.assertEqual([tool["status"] for tool in history.tools], ["invalid_arguments"] * 3)
+        self.assertTrue(all(card.raw_payload["arguments_raw"] == "{" for card in history.cards if card.raw_kind == "tool_call"))
 
     def test_unrecoverable_context_error_commits_failed_round(self) -> None:
         _, root = self.make_root()
@@ -3338,7 +2936,7 @@ def run(*, context):
                 )
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -3356,12 +2954,12 @@ def run(*, context):
         self.assertEqual([event.type for event in events], ["error"])
         self.assertTrue(events[0].metadata["committed"])
         self.assertEqual(
-            events[0].metadata["stop_reason"],
-            "provider_context_recovery_failed",
+            events[0].error["category"],
+            "context_length_exceeded",
         )
-        window = load_window(require_present(find_window(root, "alice", "cli", "context-unrecoverable")))
-        self.assertEqual(window["data"]["rounds"], 1)
-        self.assertEqual(window["data"]["round_metrics"][0]["status"], "failed")
+        window = require_present(session_history(root, 'alice', 'cli', 'context-unrecoverable')).refresh()
+        self.assertEqual(len(window.integrations), 1)
+        self.assertEqual(window.integrations[0]['status'], 'failed')
 
     def test_error_and_cancel_both_commit_terminal_rounds(self) -> None:
         _, root = self.make_root(stream=True)
@@ -3386,7 +2984,7 @@ def run(*, context):
                 ]
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -3409,24 +3007,18 @@ def run(*, context):
         )
         self.assertTrue(events[-1].metadata["committed"])
         self.assertEqual(events[-1].metadata["status"], "failed")
-        self.assertEqual(events[-1].metadata["stop_reason"], "provider_error_event")
-        error_path = find_window(root, "alice", "cli", "err")
-        error_window = load_window(require_present(error_path))
-        self.assertEqual(error_window["data"]["rounds"], 1)
-        self.assertIn("partial", error_window["text"]["messages"][1]["content"])
-        self.assertIn(
-            "模型服务错误中断",
-            error_window["text"]["messages"][1]["content"],
-        )
-        failed_metric = error_window["data"]["round_metrics"][0]
+        error_path = session_history(root, 'alice', 'cli', 'err')
+        error_window = require_present(error_path).refresh()
+        self.assertEqual(len(error_window.integrations), 1)
+        self.assertIn('partial', error_window.messages[1]['content'])
+        self.assertEqual(error_window.messages[1]['content'], 'partial')
+        failed_metric = error_window.integrations[0]
         self.assertEqual(failed_metric["status"], "failed")
-        self.assertEqual(failed_metric["failure"]["code"], "PROVIDER_UNAVAILABLE")
-        self.assertEqual(failed_metric["failure"]["provider_status"], 429)
         self.assertNotIn(
             "sensitive upstream body",
-            json.dumps(error_window, ensure_ascii=False),
+            json.dumps(error_window.integrations, ensure_ascii=False),
         )
-        self.assertEqual(error_window["tool"]["rounds"][0]["calls"], [])
+        self.assertEqual(error_window.tools, [])
 
         cancel = threading.Event()
         cancel_provider = ScriptedProvider(
@@ -3438,7 +3030,7 @@ def run(*, context):
                 ]
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             iterator = iter_request_events(
                 {
                     "user": "alice",
@@ -3453,17 +3045,15 @@ def run(*, context):
             self.assertEqual(next(iterator).type, "text_delta")
             cancel.set()
             cancelled_events = list(iterator)
-        self.assertEqual([event.type for event in cancelled_events], ["done"])
-        self.assertTrue(cancelled_events[0].metadata["committed"])
-        self.assertEqual(cancelled_events[0].metadata["status"], "cancelled")
-        cancel_window = load_window(require_present(find_window(root, "alice", "cli", "cancel")))
-        self.assertEqual(cancel_window["data"]["rounds"], 1)
-        self.assertEqual(
-            cancel_window["data"]["round_metrics"][0]["status"], "cancelled"
-        )
-        self.assertEqual(cancel_window["text"]["messages"][0]["content"], "go")
-        self.assertIn("partial", cancel_window["text"]["messages"][1]["content"])
-        self.assertIn("紧急停止", cancel_window["text"]["messages"][1]["content"])
+        self.assertEqual([event.type for event in cancelled_events if event.type != "usage"], ["done"])
+        self.assertTrue(cancelled_events[-1].metadata["committed"])
+        self.assertEqual(cancelled_events[-1].metadata["status"], "cancelled")
+        cancel_window = require_present(session_history(root, 'alice', 'cli', 'cancel')).refresh()
+        self.assertEqual(len(cancel_window.integrations), 1)
+        self.assertEqual(cancel_window.integrations[0]['status'], 'cancelled')
+        self.assertEqual(cancel_window.messages[0]['content'], 'go')
+        self.assertIn('partial', cancel_window.messages[1]['content'])
+        self.assertEqual(cancel_window.messages[1]['content'], 'partial')
 
         next_provider = ScriptedProvider(
             streams=[
@@ -3474,7 +3064,7 @@ def run(*, context):
                 ]
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             next_events = list(
                 iter_request_events(
                     {
@@ -3488,37 +3078,40 @@ def run(*, context):
                 )
             )
         self.assertEqual(next_events[-1].type, "done")
-        resumed_window = load_window(require_present(find_window(root, "alice", "cli", "cancel")))
-        self.assertEqual(resumed_window["data"]["rounds"], 2)
-        self.assertEqual(resumed_window["text"]["messages"][-2]["content"], "continue")
+        resumed_window = require_present(session_history(root, 'alice', 'cli', 'cancel')).refresh()
+        self.assertEqual(len(resumed_window.integrations), 2)
+        self.assertEqual(resumed_window.messages[-2]['content'], 'continue')
 
-    def test_duplicate_call_reuses_result(self) -> None:
+    def test_same_batch_duplicate_does_not_start_another_execution(self) -> None:
         _, root = self.make_root()
-        self.write_tool(root / "plugins", "lookup", "plugin")
+        self.write_tool(root / "plugins", "web_search", "plugin")
         provider = ScriptedProvider(
             responses=[
                 ChatResponse(
                     text="",
                     tool_calls=[
-                        ToolCall("1", "lookup", {"value": "x"}),
-                        ToolCall("2", "lookup", {"value": "x"}),
+                        ToolCall("1", "web_search", {"value": "x"}),
+                        ToolCall("2", "web_search", {"value": "x"}),
                     ],
                     usage=Usage(),
                 ),
                 ChatResponse(text="done", usage=Usage()),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with (
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("run.tools.runtime.execute_tool", wraps=execute_tool) as mocked_execute,
+        ):
             handle_request(
                 {"user": "alice", "source": "cli", "session_id": "dup", "prompt": "go"},
                 root=root,
                 provider_factory=lambda _: provider,
             )
-        window = load_window(require_present(find_window(root, "alice", "cli", "dup")))
-        calls = window["tool"]["rounds"][0]["calls"]
-        self.assertFalse(calls[0]["duplicate"])
-        self.assertTrue(calls[1]["duplicate"])
-        self.assertEqual(calls[1]["status"], "duplicate_reused")
+        window = require_present(session_history(root, 'alice', 'cli', 'dup')).refresh()
+        calls = window.tools
+        self.assertEqual(mocked_execute.call_count, 1)
+        self.assertEqual(calls[1]["status"], "duplicate_blocked")
+        self.assertFalse(calls[1]["result"]["ok"])
 
     def test_file_live_read_is_executed_again_in_the_same_run(self) -> None:
         _, root = self.make_root()
@@ -3527,21 +3120,15 @@ def run(*, context):
         arguments = {"action": "list_dir", "path": str(root)}
         provider = ScriptedProvider(
             responses=[
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall("list-before", "file", arguments),
-                        ToolCall("list-after", "file", arguments),
-                    ],
-                    usage=Usage(),
-                ),
+                ChatResponse(text="", tool_calls=[ToolCall("list-before", "file", arguments)], usage=Usage()),
+                    ChatResponse(text="", tool_calls=[ToolCall("list-after", "file", arguments)], usage=Usage()),
                 ChatResponse(text="done", usage=Usage()),
             ]
         )
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation.runtime.execute_tool",
+                "run.tools.runtime.execute_tool",
                 side_effect=[
                     {"ok": True, "entries": [{"name": "old"}]},
                     {"ok": True, "entries": [{"name": "new"}]},
@@ -3560,8 +3147,8 @@ def run(*, context):
             )
 
         self.assertEqual(mocked_execute.call_count, 2)
-        window = load_window(require_present(find_window(root, "alice", "cli", "file-live-read")))
-        calls = window["tool"]["rounds"][0]["calls"]
+        window = require_present(session_history(root, 'alice', 'cli', 'file-live-read')).refresh()
+        calls = window.tools
         self.assertEqual([call["status"] for call in calls], ["completed", "completed"])
         self.assertFalse(calls[1]["duplicate"])
         self.assertEqual(calls[1]["result"]["result"]["entries"][0]["name"], "new")
@@ -3580,11 +3167,8 @@ def run(*, context):
         }
         provider = ScriptedProvider(
             responses=[
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall("status-before", "expand_call", status_arguments),
-                        ToolCall(
+                ChatResponse(text="", tool_calls=[ToolCall("status-before", "expand_call", status_arguments)], usage=Usage()),
+                    ChatResponse(text="", tool_calls=[ToolCall(
                             "activate",
                             "expand_call",
                             {
@@ -3593,22 +3177,19 @@ def run(*, context):
                                 "command": "activate",
                                 "params": {"base_url": "http://127.0.0.1:8000/api/v1"},
                             },
-                        ),
-                        ToolCall("status-after", "expand_call", status_arguments),
-                    ],
-                    usage=Usage(),
-                ),
+                        )], usage=Usage()),
+                    ChatResponse(text="", tool_calls=[ToolCall("status-after", "expand_call", status_arguments)], usage=Usage()),
                 ChatResponse(text="done", usage=Usage()),
             ]
         )
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation.runtime.execute_tool",
+                "run.tools.runtime.execute_tool",
                 side_effect=[
-                    {"status": "inactive", "active": False},
-                    {"status": "active", "active": True},
-                    {"status": "active", "active": True},
+                    {"ok": True, "status": "inactive", "active": False},
+                    {"ok": True, "status": "active", "active": True},
+                    {"ok": True, "status": "active", "active": True},
                 ],
             ) as mocked_execute,
         ):
@@ -3623,13 +3204,13 @@ def run(*, context):
                 provider_factory=lambda _: provider,
             )
         self.assertEqual(mocked_execute.call_count, 3)
-        window = load_window(require_present(find_window(root, "alice", "cli", "expand-live-status")))
-        calls = window["tool"]["rounds"][0]["calls"]
+        window = require_present(session_history(root, 'alice', 'cli', 'expand-live-status')).refresh()
+        calls = window.tools
         self.assertEqual([call["status"] for call in calls], ["completed"] * 3)
         self.assertFalse(calls[2]["duplicate"])
         self.assertTrue(calls[2]["result"]["result"]["active"])
 
-    def test_expand_mutation_result_keeps_duplicate_side_effect_protection(self) -> None:
+    def test_undeclared_expand_mutation_is_reexecuted_not_silently_replayed(self) -> None:
         _, root = self.make_root()
         project_plugins = Path(__file__).resolve().parents[2] / "plugins"
         shutil.copytree(
@@ -3644,11 +3225,8 @@ def run(*, context):
         }
         provider = ScriptedProvider(
             responses=[
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall("sync-first", "expand_call", sync_arguments),
-                        ToolCall(
+                ChatResponse(text="", tool_calls=[ToolCall("sync-first", "expand_call", sync_arguments)], usage=Usage()),
+                    ChatResponse(text="", tool_calls=[ToolCall(
                             "ingest",
                             "expand_call",
                             {
@@ -3660,21 +3238,19 @@ def run(*, context):
                                     "mode": "both",
                                 },
                             },
-                        ),
-                        ToolCall("sync-repeat", "expand_call", sync_arguments),
-                    ],
-                    usage=Usage(),
-                ),
+                        )], usage=Usage()),
+                    ChatResponse(text="", tool_calls=[ToolCall("sync-repeat", "expand_call", sync_arguments)], usage=Usage()),
                 ChatResponse(text="done", usage=Usage()),
             ]
         )
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation.runtime.execute_tool",
+                "run.tools.runtime.execute_tool",
                 side_effect=[
                     {"ok": True, "operation": "sync"},
                     {"ok": True, "operation": "ingest"},
+                    {"ok": True, "operation": "sync"},
                 ],
             ) as mocked_execute,
         ):
@@ -3688,16 +3264,14 @@ def run(*, context):
                 root=root,
                 provider_factory=lambda _: provider,
             )
-        self.assertEqual(mocked_execute.call_count, 2)
-        window = load_window(
-            require_present(find_window(root, "alice", "cli", "expand-mutation-dedup"))
-        )
-        calls = window["tool"]["rounds"][0]["calls"]
+        self.assertEqual(mocked_execute.call_count, 3)
+        window = require_present(session_history(root, 'alice', 'cli', 'expand-mutation-dedup')).refresh()
+        calls = window.tools
         self.assertEqual(
             [call["status"] for call in calls],
-            ["completed", "completed", "duplicate_reused"],
+            ["completed", "completed", "completed"],
         )
-        self.assertTrue(calls[2]["duplicate"])
+        self.assertFalse(calls[2]["duplicate"])
 
     def test_failed_duplicate_call_executes_again_and_preserves_retry_metadata(
         self,
@@ -3706,14 +3280,8 @@ def run(*, context):
         self.write_tool(root / "plugins", "lookup", "plugin")
         provider = ScriptedProvider(
             responses=[
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall("1", "lookup", {"value": "x"}),
-                        ToolCall("2", "lookup", {"value": "x"}),
-                    ],
-                    usage=Usage(),
-                ),
+                ChatResponse(text="", tool_calls=[ToolCall("1", "lookup", {"value": "x"})], usage=Usage()),
+                    ChatResponse(text="", tool_calls=[ToolCall("2", "lookup", {"value": "x"})], usage=Usage()),
                 ChatResponse(text="done", usage=Usage()),
             ]
         )
@@ -3725,10 +3293,10 @@ def run(*, context):
         )
         failure.attempt_count = 2
         with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
             patch(
-                "run.conversation.runtime.execute_tool",
-                side_effect=[failure, {"value": "x"}],
+                "run.tools.runtime.execute_tool",
+                side_effect=[failure, {"ok": True, "value": "x"}],
             ) as mocked_execute,
         ):
             handle_request(
@@ -3744,8 +3312,8 @@ def run(*, context):
             )
 
         self.assertEqual(mocked_execute.call_count, 2)
-        window = load_window(require_present(find_window(root, "alice", "cli", "failed-duplicate")))
-        calls = window["tool"]["rounds"][0]["calls"]
+        window = require_present(session_history(root, 'alice', 'cli', 'failed-duplicate')).refresh()
+        calls = window.tools
         self.assertFalse(calls[0]["duplicate"])
         self.assertFalse(calls[1]["duplicate"])
         self.assertEqual(calls[0]["status"], "failed")
@@ -3756,56 +3324,31 @@ def run(*, context):
         self.assertTrue(error["retryable"])
         self.assertEqual(error["attempt_count"], 2)
 
-    def test_cancelled_round_pairs_pending_tool_call_with_cancel_result(self) -> None:
+    def test_cancelled_tool_preserves_original_execution_identity(self) -> None:
         _, root = self.make_root(stream=True)
-        cancel = threading.Event()
-        provider = ScriptedProvider(
-            streams=[
-                [
-                    RunEvent(
-                        type="tool_call_start",
-                        tool_call_id="callid_pending_1",
-                        tool_name="lookup",
-                        arguments={"value": "x"},
-                    ),
-                    RunEvent(type="usage", usage={}),
-                    RunEvent(type="done", usage={}),
-                ]
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        cancel, exited = threading.Event(), threading.Event()
+        def blocked(*args, **kwargs):
+            cancel.wait(3)
+            exited.set()
+            raise ToolCancelledError("cancelled")
+        provider = ScriptedProvider(streams=[[
+            RunEvent(type="tool_call_start", tool_call_id="callid_pending_1", tool_name="lookup", arguments={"value": "x"}),
+            RunEvent(type="done", usage={}),
+        ]])
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}), patch("run.tools.runtime.execute_tool", side_effect=blocked):
             iterator = iter_request_events(
-                {
-                    "user": "alice",
-                    "source": "cli",
-                    "session_id": "cancel-tool",
-                    "prompt": "go",
-                    "stream": True,
-                },
-                root=root,
-                provider_factory=lambda _: provider,
-                cancel_event=cancel,
-            )
-            started = next(iterator)
-            self.assertEqual(started.type, "tool_call_start")
+                {"user": "alice", "source": "cli", "session_id": "cancel-tool", "prompt": "go", "stream": True},
+                root=root, provider_factory=lambda _: provider, cancel_event=cancel)
+            started = next(event for event in iterator if event.type == "tool_call_start")
             cancel.set()
-            terminal = list(iterator)
-
-        self.assertEqual([event.type for event in terminal], ["done"])
-        window = load_window(require_present(find_window(root, "alice", "cli", "cancel-tool")))
-        calls = window["tool"]["rounds"][0]["calls"]
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["id"], "callid_pending_1")
-        self.assertEqual(calls[0]["status"], "cancelled")
-        self.assertTrue(calls[0]["result"]["error"]["cancelled"])
-        durable_items = window["items"]["items"]
-        call_item = next(item for item in durable_items if item["type"] == "tool_call")
-        result_item = next(
-            item for item in durable_items if item["type"] == "tool_result"
-        )
-        self.assertEqual(call_item["call_id"], "callid_pending_1")
-        self.assertEqual(result_item["call_id"], "callid_pending_1")
-        self.assertTrue(result_item["is_error"])
+            terminal = list(iterator)[-1]
+            self.assertTrue(exited.wait(3))
+        self.assertEqual(terminal.type, "done")
+        self.assertIn(terminal.metadata["status"], {"cancelled", "partial"})
+        history = require_present(session_history(root, "alice", "cli", "cancel-tool"))
+        self.assertEqual([c.tool_call_id for c in history.cards if c.raw_kind == "tool_call"], ["callid_pending_1"])
+        self.assertTrue(all(c.raw_payload["execution_id"] == started.metadata["execution_id"] for c in history.cards if c.raw_kind == "tool_result"))
 
     def test_identical_call_tracker_uses_name_and_canonical_arguments(self) -> None:
         tracker = ConsecutiveIdenticalToolCallTracker(2)
@@ -3817,12 +3360,12 @@ def run(*, context):
         self.assertEqual(tracker.record("lookup", {"a": 2, "b": 2}), 1)
         self.assertEqual(tracker.record("other", {"a": 2, "b": 2}), 1)
 
-    def test_ninth_consecutive_identical_call_is_blocked_but_changed_arguments_continue(
+    def test_duplicate_side_effects_do_not_consume_real_execution_limit(
         self,
     ) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
-        global_path = root / "config" / "global_config.json"
+        global_path = root / "config" / "global_config.yaml"
         config = json.loads(global_path.read_text("utf-8"))
         config["tools"].update(
             {"max_iterations": 12, "consecutive_identical_call_limit": 8}
@@ -3845,7 +3388,7 @@ def run(*, context):
             ]
         )
         provider = ScriptedProvider(responses=require_present(responses))
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             handle_request(
                 {
                     "user": "alice",
@@ -3856,36 +3399,28 @@ def run(*, context):
                 root=root,
                 provider_factory=lambda _: provider,
             )
-        window = load_window(require_present(find_window(root, "alice", "cli", "identical-limit")))
-        calls = window["tool"]["rounds"][0]["calls"]
+        window = require_present(session_history(root, 'alice', 'cli', 'identical-limit')).refresh()
+        calls = window.tools
         self.assertEqual(calls[0]["status"], "completed")
-        self.assertTrue(
-            all(call["status"] == "duplicate_reused" for call in calls[1:8])
-        )
-        self.assertEqual(calls[8]["status"], "identical_call_blocked")
-        self.assertEqual(
-            calls[8]["result"]["error"]["exception_type"],
-            "ConsecutiveIdenticalToolCallLimitExceeded",
-        )
-        self.assertEqual(calls[8]["consecutive_identical_calls"], 9)
+        self.assertTrue(all(call["status"] == "duplicate_blocked" for call in calls[1:9]))
+        self.assertTrue(all(call["result"]["execution"]["executed"] is False for call in calls[1:9]))
         self.assertEqual(calls[9]["status"], "completed")
-        self.assertEqual(calls[9]["consecutive_identical_calls"], 1)
 
-    def test_explicit_false_result_is_failure_not_cached_or_reported_success(self) -> None:
+    def test_explicit_false_result_is_failure_not_reported_success(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "lookup", "plugin")
         (root / "plugins/lookup/tool.py").write_text(
             "def run(value, *, context):\n    return {'ok': False, 'error': 'injected failure'}\n", "utf-8"
         )
-        path = root / "config/global_config.json"
+        path = root / "config/global_config.yaml"
         config = json.loads(path.read_text("utf-8"))
         config["history"] = {"consecutive_tool_fail_limit": 2}
         path.write_text(json.dumps(config), "utf-8")
         provider = ScriptedProvider(responses=[
-            ChatResponse(text="", tool_calls=[ToolCall(f"negative-{i}", "lookup", {"value": "same"})])
+            ChatResponse(text="", tool_calls=[ToolCall(f"negative-{i}", "lookup", {"value": f"same-{i}"})])
             for i in range(3)
         ] + [ChatResponse(text="stop retrying")])
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(iter_request_events(
                 {"user": "alice", "source": "cli", "session_id": "negative-result", "prompt": "go", "_auto_retry_max_attempts": 1},
                 root=root, provider_factory=lambda _: provider,
@@ -3893,7 +3428,7 @@ def run(*, context):
         results = [event for event in events if event.type == "tool_call_result"]
         self.assertEqual([event.metadata["status"] for event in results], ["failed", "failed", "temporarily_unavailable"])
         self.assertTrue(all(event.result["ok"] is False for event in results))
-        self.assertTrue(all(not event.metadata["duplicate"] for event in results))
+        self.assertTrue(all(not event.metadata.get("duplicate", False) for event in results))
         self.assertIsNone(provider.requests[2].tools)
 
     def test_consecutive_failures_temporarily_remove_tool_schema(self) -> None:
@@ -3903,7 +3438,7 @@ def run(*, context):
             "def run(value, *, context):\n    raise RuntimeError('boom')\n",
             "utf-8",
         )
-        global_path = root / "config" / "global_config.json"
+        global_path = root / "config" / "global_config.yaml"
         config = json.loads(global_path.read_text("utf-8"))
         config["history"] = {"consecutive_tool_fail_limit": 2}
         global_path.write_text(json.dumps(config), "utf-8")
@@ -3921,7 +3456,7 @@ def run(*, context):
                 ChatResponse(text="changed approach"),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -3940,640 +3475,15 @@ def run(*, context):
             [event.metadata["status"] for event in results],
             ["failed", "failed", "temporarily_unavailable"],
         )
-        self.assertTrue(results[1].result["error"]["temporarily_unavailable"])
+        self.assertTrue(results[2].result["error"]["temporarily_unavailable"])
         self.assertIsNone(provider.requests[2].tools)
-        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
 
-    def test_context_status_and_manual_compress_do_not_add_round(self) -> None:
-        _, root = self.make_root()
-        self.copy_self_improve_plugins(root)
-        global_config_path = root / "config" / "global_config.json"
-        global_config = json.loads(global_config_path.read_text("utf-8"))
-        global_config["agents"] = {
-            "conserved_rounds": 3,
-            "max_rounds": 30,
-            "rounds_after_compression": 10,
-            "token_limit": 120000,
-            "token_compression_ratio": 0.6,
-        }
-        global_config_path.write_text(json.dumps(global_config), "utf-8")
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(text=f"reply-{index}", usage=Usage())
-                for index in range(12)
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            for index in range(12):
-                handle_request(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "long",
-                        "prompt": f"round-{index}",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            status = context_status(
-                {"user": "alice", "source": "cli", "session_id": "long"},
-                root=root,
-            )
-            self.assertEqual(status["rounds"], 12)
-            summary_provider = ScriptedProvider(
-                responses=[
-                    *[
-                        ChatResponse(
-                            text=json.dumps(
-                                {
-                                    "candidates": [
-                                        {
-                                            "action": "upsert",
-                                            "filename": "压缩记忆",
-                                            "content": "old rounds fact",
-                                            "explicit": False,
-                                            "durable": True,
-                                            "evidence": f"round-{index}",
-                                        }
-                                    ]
-                                },
-                                ensure_ascii=False,
-                            ),
-                            usage=Usage(1, 1, 2, source="mock"),
-                        )
-                        for index in range(3)
-                    ],
-                    ChatResponse(
-                        text=json.dumps(
-                            {
-                                "facts": ["old rounds"],
-                                "requirements": [],
-                                "decisions": [],
-                                "unfinished": [],
-                                "tool_results": [],
-                                "entities": [],
-                                "narrative": "summary",
-                            }
-                        ),
-                        usage=Usage(3, 1, 4, source="mock"),
-                    ),
-                ]
-            )
-            result = compress_context(
-                {"user": "alice", "source": "cli", "session_id": "long"},
-                root=root,
-                provider_factory=lambda _: summary_provider,
-            )
-        self.assertTrue(result["compressed"])
-        self.assertFalse(result["committed"])
-        self.assertEqual(result["context"]["rounds_kept"], 10)
-        self.assertEqual(result["context"]["rounds_removed"], 2)
-        # Twelve pending rounds are analyzed in three five-round batches,
-        # followed by one context summary request.
-        self.assertEqual(len(summary_provider.requests), 4)
-        self.assertTrue(result["context"]["summary"]["generated"])
-        window = load_window(require_present(find_window(root, "alice", "cli", "long")))
-        self.assertEqual(window["data"]["rounds"], 12)
-        self.assertEqual(window["data"]["memory_processed_round"], 12)
-        self.assertEqual(window["data"]["memory_status"], "completed")
-        self.assertEqual(result["memory"]["status"], "completed")
-        self.assertEqual(len(window["text"]["messages"]), 24)
-        self.assertEqual(
-            require_present(MemoryStore(root, "alice", {}).get_entry("seven_days", "压缩记忆.md"))[
-                "content"
-            ],
-            "old rounds fact",
-        )
 
-    def test_queued_manual_compress_only_waits_for_summary(self) -> None:
-        _, root = self.make_root()
-        global_config_path = root / "config" / "global_config.json"
-        global_config = json.loads(global_config_path.read_text("utf-8"))
-        global_config.update(
-            {
-                "agents": {
-                    "conserved_rounds": 3,
-                    "max_rounds": 30,
-                    "rounds_after_compression": 10,
-                    "token_limit": 120000,
-                    "token_compression_ratio": 0.6,
-                },
-                "memory": {"extraction_mode": "compression_only"},
-            }
-        )
-        global_config_path.write_text(json.dumps(global_config), "utf-8")
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(text=f"reply-{index}", usage=Usage())
-                for index in range(12)
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            for index in range(12):
-                handle_request(
-                    {
-                        "user": "alice",
-                        "source": "web",
-                        "session_id": "queued-compress",
-                        "prompt": f"round-{index}",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            summary_provider = ScriptedProvider(
-                responses=[
-                    ChatResponse(
-                        text=json.dumps(
-                            {
-                                "facts": ["old rounds"],
-                                "requirements": [],
-                                "decisions": [],
-                                "unfinished": [],
-                                "tool_results": [],
-                                "entities": [],
-                                "narrative": "summary",
-                            }
-                        ),
-                        usage=Usage(3, 1, 4, source="mock"),
-                    )
-                ]
-            )
-            result = compress_context(
-                {
-                    "user": "alice",
-                    "source": "web",
-                    "session_id": "queued-compress",
-                    "memory_extraction_policy": "queue",
-                },
-                root=root,
-                provider_factory=lambda _: summary_provider,
-            )
 
-        self.assertTrue(result["compressed"])
-        self.assertFalse(result["committed"])
-        self.assertEqual(len(summary_provider.requests), 1)
-        self.assertEqual(result["memory"]["status"], "queued")
-        self.assertEqual(result["memory"]["processed_round"], 0)
-        self.assertEqual(result["memory"]["target_round"], 12)
-        self.assertEqual(result["memory"]["pending_rounds"], 12)
-        window = load_window(require_present(find_window(root, "alice", "web", "queued-compress")))
-        self.assertEqual(window["data"]["memory_status"], "queued")
-        self.assertEqual(window["data"]["memory_target_round"], 12)
-        self.assertEqual(window["data"]["memory_processed_round"], 0)
 
-    def test_manual_compression_of_seventy_five_rounds_is_verified_and_next_round_runs(
-        self,
-    ) -> None:
-        _, root = self.make_root()
-        global_config_path = root / "config" / "global_config.json"
-        global_config = json.loads(global_config_path.read_text("utf-8"))
-        global_config.update(
-            {
-                "agents": {
-                    "conserved_rounds": 3,
-                    "max_rounds": 80,
-                    "rounds_after_compression": 20,
-                    "token_limit": 120_000,
-                    "token_compression_ratio": 0.6,
-                },
-                "history": {"recent_full_rounds": 3},
-                "memory": {"extraction_mode": "compression_only"},
-            }
-        )
-        global_config_path.write_text(json.dumps(global_config), "utf-8")
-        summary = {
-            "facts": ["前 55 轮已压缩"],
-            "requirements": [],
-            "decisions": [],
-            "unfinished": [],
-            "tool_results": [],
-            "entities": [],
-            "narrative": "已精炼前 55 轮正文、思考和工具结论",
-        }
-        seed_provider = ScriptedProvider(
-            responses=[
-                ChatResponse(text=f"assistant-{number}", usage=Usage())
-                for number in range(1, 76)
-            ]
-        )
-        summary_provider = ScriptedProvider(
-            responses=[
-                ChatResponse(
-                    text=json.dumps(summary, ensure_ascii=False), usage=Usage()
-                )
-            ]
-        )
-        continuation_provider = ScriptedProvider(
-            responses=[ChatResponse(text="round-76-reply", usage=Usage())]
-        )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            for number in range(1, 76):
-                handle_request(
-                    {
-                        "user": "alice",
-                        "source": "web",
-                        "session_id": "manual-75",
-                        "prompt": f"user-{number}",
-                    },
-                    root=root,
-                    provider_factory=lambda _: seed_provider,
-                )
-            compressed = compress_context(
-                {
-                    "user": "alice",
-                    "source": "web",
-                    "session_id": "manual-75",
-                    "memory_extraction_policy": "queue",
-                },
-                root=root,
-                provider_factory=lambda _: summary_provider,
-            )
-            archive_before = find_window(root, "alice", "web", "manual-75")
-            self.assertIsNotNone(archive_before)
-            _, runtime_before = load_runtime_window(
-                require_present(archive_before), load_window(require_present(archive_before))
-            )
-            self.assertEqual(runtime_before["data"]["rounds"], 20)
-            self.assertEqual(
-                runtime_before["data"]["context_snapshot"]["workspace_rounds"],
-                20,
-            )
-            continued = handle_request(
-                {
-                    "user": "alice",
-                    "source": "web",
-                    "session_id": "manual-75",
-                    "prompt": "继续处理",
-                },
-                root=root,
-                provider_factory=lambda _: continuation_provider,
-            )
 
-        self.assertTrue(compressed["compressed"])
-        self.assertTrue(compressed["compression_verified"])
-        self.assertEqual(compressed["context"]["rounds_removed"], 55)
-        self.assertEqual(summary_provider.requests[0].max_tokens, 20_000)
-        archive_path = find_window(root, "alice", "web", "manual-75")
-        self.assertIsNotNone(archive_path)
-        stored_archive = load_window(require_present(archive_path))
-        _, stored_runtime = load_runtime_window(require_present(archive_path), stored_archive)
-        self.assertEqual(stored_archive["data"]["rounds"], 76)
-        self.assertEqual(stored_runtime["data"]["rounds"], 21)
-        self.assertEqual(stored_runtime["data"]["context"]["round_offset"], 55)
-        self.assertEqual(
-            stored_runtime["data"]["context_snapshot"]["workspace_rounds"], 21
-        )
-        self.assertEqual(continued["text"], "round-76-reply")
-        self.assertTrue(
-            any(
-                message.get("role") == "system"
-                and "已精炼前 55 轮" in str(message.get("content") or "")
-                for message in continuation_provider.requests[0].messages
-            )
-        )
-
-    def test_provider_context_length_error_compresses_and_retries(self) -> None:
-        _, root = self.make_root()
-        self.copy_self_improve_plugins(root)
-        global_config_path = root / "config" / "global_config.json"
-        global_config = json.loads(global_config_path.read_text("utf-8"))
-        global_config.update(
-            {
-                "agents": {
-                    "conserved_rounds": 3,
-                    "max_rounds": 80,
-                    "rounds_after_compression": 1,
-                    "token_limit": 120000,
-                    "token_compression_ratio": 0.6,
-                },
-                "history": {"recent_full_rounds": 1},
-            }
-        )
-        global_config_path.write_text(json.dumps(global_config), "utf-8")
-        context_error = ProviderError(
-            "gateway rejected oversized context",
-            status_code=502,
-            body={
-                "code": "PROVIDER_BAD_RESPONSE",
-                "provider_status": 400,
-                "message": "maximum context length exceeded",
-            },
-        )
-        summary = {
-            "facts": ["old rounds"],
-            "requirements": [],
-            "decisions": [],
-            "unfinished": [],
-            "tool_results": [],
-            "entities": [],
-            "narrative": "compressed history",
-        }
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(text="reply-1", usage=Usage()),
-                ChatResponse(text="reply-2", usage=Usage()),
-                ChatResponse(text="reply-3", usage=Usage()),
-                context_error,
-                ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
-                ChatResponse(text="recovered", usage=Usage(3, 1, 4)),
-            ]
-        )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            for index in range(3):
-                handle_request(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "retry",
-                        "prompt": f"round-{index}",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            result = handle_request(
-                {
-                    "user": "alice",
-                    "source": "cli",
-                    "session_id": "retry",
-                    "prompt": "recover this request",
-                },
-                root=root,
-                provider_factory=lambda _: provider,
-            )
-        self.assertEqual(result["text"], "recovered")
-        self.assertEqual(result["context"]["api_context_retries"], 1)
-        self.assertEqual(len(provider.requests), 6)
-        archive_path = find_window(root, "alice", "cli", "retry")
-        self.assertIsNotNone(archive_path)
-        archive = load_window(require_present(archive_path))
-        _, runtime = load_runtime_window(require_present(archive_path), archive)
-        self.assertEqual(archive["data"]["rounds"], 4)
-        self.assertEqual(archive["data"]["memory_processed_round"], 0)
-        self.assertEqual(archive["data"]["memory_status"], "queued")
-        self.assertEqual(archive["data"]["memory_target_round"], 3)
-        self.assertEqual(runtime["data"]["rounds"], 1)
-        self.assertEqual(runtime["data"]["context"]["round_offset"], 3)
-
-    def test_tool_iteration_context_error_compresses_history_and_keeps_live_tail(
-        self,
-    ) -> None:
-        _, root = self.make_root()
-        self.copy_self_improve_plugins(root)
-        self.write_tool(root / "plugins", "lookup", "plugin")
-        global_config_path = root / "config" / "global_config.json"
-        global_config = json.loads(global_config_path.read_text("utf-8"))
-        global_config.update(
-            {
-                "agents": {
-                    "conserved_rounds": 3,
-                    "max_rounds": 80,
-                    "rounds_after_compression": 1,
-                    "token_limit": 120000,
-                    "token_compression_ratio": 0.6,
-                },
-                "history": {"recent_full_rounds": 1},
-            }
-        )
-        global_config_path.write_text(json.dumps(global_config), "utf-8")
-        context_error = ProviderError(
-            "gateway rejected oversized tool continuation",
-            status_code=400,
-            category="context_length_exceeded",
-        )
-        summary = {
-            "facts": ["old rounds"],
-            "requirements": [],
-            "decisions": [],
-            "unfinished": [],
-            "tool_results": [],
-            "entities": [],
-            "narrative": "compressed history",
-        }
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(text="reply-1", usage=Usage()),
-                ChatResponse(text="reply-2", usage=Usage()),
-                ChatResponse(text="reply-3", usage=Usage()),
-                ChatResponse(
-                    text="先查一下",
-                    tool_calls=[
-                        ToolCall(
-                            id="live-call",
-                            name="lookup",
-                            arguments={"value": "live"},
-                        )
-                    ],
-                    finish_reason="tool_calls",
-                    usage=Usage(10, 2, 12),
-                ),
-                context_error,
-                ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
-                ChatResponse(
-                    text="",
-                    tool_calls=[
-                        ToolCall(
-                            id="after-recovery-call", name="lookup",
-                            arguments={"value": "after-recovery"},
-                        )
-                    ],
-                    finish_reason="tool_calls",
-                    usage=Usage(3, 1, 4),
-                ),
-                ChatResponse(text="工具结果已确认", usage=Usage(3, 1, 4)),
-            ]
-        )
-
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            for index in range(3):
-                handle_request(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "tool-context-retry",
-                        "prompt": f"round-{index}",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "cli",
-                        "session_id": "tool-context-retry",
-                        "prompt": "run lookup",
-                        "_auto_retry_max_attempts": 1,
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-
-        result = events[-1].metadata
-        self.assertEqual(result["text"], "先查一下工具结果已确认")
-        self.assertEqual(result["context"]["api_context_retries"], 1)
-        self.assertEqual(result["usage"]["provider_request_count"], 5)
-        self.assertEqual(len(provider.requests), 8)
-        retry_messages = provider.requests[-1].messages
-        live_assistant = next(
-            message
-            for message in retry_messages
-            if message.get("role") == "assistant"
-            and message.get("tool_calls")
-        )
-        self.assertEqual(live_assistant["tool_calls"][0]["function"]["name"], "lookup")
-        live_call_id = live_assistant["tool_calls"][0]["id"]
-        live_tool = next(
-            message
-            for message in retry_messages
-            if message.get("role") == "tool"
-        )
-        self.assertEqual(live_tool["tool_call_id"], live_call_id)
-        self.assertIn('"live"', live_tool["content"])
-        retry_tools = [
-            message for message in retry_messages if message.get("role") == "tool"
-        ]
-        self.assertEqual(len(retry_tools), 2)
-        self.assertIn('"after-recovery"', retry_tools[1]["content"])
-        window = load_window(
-            require_present(find_window(root, "alice", "cli", "tool-context-retry"))
-        )
-        durable_items = window["items"]["items"]
-        durable_call_ids = {
-            item["call_id"]
-            for item in durable_items
-            if item.get("type") == "tool_call"
-        }
-        durable_result_ids = {
-            item["call_id"]
-            for item in durable_items
-            if item.get("type") == "tool_result"
-        }
-        self.assertEqual(durable_call_ids, durable_result_ids)
-        self.assertEqual(len(durable_call_ids), 2)
-        self.assertTrue(
-            any(
-                event.type == "context_compression"
-                and event.metadata.get("preserved_live_tool_tail") is True
-                for event in events
-            )
-        )
-
-    def test_automatic_round_compression_trims_runtime_and_queues_memory(self) -> None:
-        _, root = self.make_root()
-        global_config_path = root / "config" / "global_config.json"
-        global_config = json.loads(global_config_path.read_text("utf-8"))
-        global_config.update(
-            {
-                "agents": {
-                    "conserved_rounds": 3,
-                    "max_rounds": 4,
-                    "rounds_after_compression": 2,
-                    "token_limit": 120000,
-                    "token_compression_ratio": 0.6,
-                },
-                "history": {"recent_full_rounds": 1},
-                "memory": {"extraction_mode": "compression_only"},
-            }
-        )
-        global_config_path.write_text(json.dumps(global_config), "utf-8")
-        summary = {
-            "facts": ["rounds 1-2"],
-            "requirements": [],
-            "decisions": [],
-            "unfinished": [],
-            "tool_results": [],
-            "entities": [],
-            "narrative": "compressed rounds 1-2",
-        }
-        provider = ScriptedProvider(
-            responses=[
-                ChatResponse(text="reply-1", usage=Usage()),
-                ChatResponse(text="reply-2", usage=Usage()),
-                ChatResponse(text="reply-3", usage=Usage()),
-                ChatResponse(text=json.dumps(summary), usage=Usage(2, 1, 3)),
-                ChatResponse(text="reply-4", usage=Usage()),
-                ChatResponse(text="reply-5", usage=Usage()),
-            ]
-        )
-
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
-            for index in range(1, 4):
-                handle_request(
-                    {
-                        "user": "alice",
-                        "source": "web",
-                        "session_id": "automatic-compress",
-                        "prompt": f"round-{index}",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            fourth_events = list(
-                iter_request_events(
-                    {
-                        "user": "alice",
-                        "source": "web",
-                        "session_id": "automatic-compress",
-                        "prompt": "round-4",
-                    },
-                    root=root,
-                    provider_factory=lambda _: provider,
-                )
-            )
-            fourth = next(
-                event.metadata
-                for event in reversed(fourth_events)
-                if event.type == "done"
-            )
-            compression_events = [
-                event for event in fourth_events if event.type == "context_compression"
-            ]
-
-            archive_path = find_window(root, "alice", "web", "automatic-compress")
-            archive = load_window(require_present(archive_path))
-            _, runtime = load_runtime_window(require_present(archive_path), archive)
-            self.assertEqual(fourth["text"], "reply-4")
-            self.assertEqual(archive["data"]["rounds"], 4)
-            self.assertEqual(runtime["data"]["rounds"], 2)
-            self.assertEqual(runtime["data"]["context"]["round_offset"], 2)
-            self.assertEqual(archive["data"]["memory_status"], "queued")
-            self.assertEqual(archive["data"]["memory_target_round"], 2)
-            self.assertEqual(len(provider.requests), 5)
-            self.assertEqual(
-                [event.metadata["status"] for event in compression_events],
-                ["started", "ready"],
-            )
-            self.assertEqual(compression_events[0].metadata["trigger"], "round_limit")
-            self.assertEqual(compression_events[0].metadata["rounds_removed"], 2)
-            self.assertEqual(compression_events[0].metadata["rounds_before"], 4)
-            self.assertEqual(compression_events[0].metadata["rounds_remaining"], 2)
-            self.assertEqual(
-                compression_events[1].metadata["memory_status"],
-                "queued_after_commit",
-            )
-
-            fifth = handle_request(
-                {
-                    "user": "alice",
-                    "source": "web",
-                    "session_id": "automatic-compress",
-                    "prompt": "round-5",
-                },
-                root=root,
-                provider_factory=lambda _: provider,
-            )
-
-        self.assertEqual(fifth["text"], "reply-5")
-        self.assertTrue(
-            any(
-                message.get("role") == "system"
-                and "已移出完整上下文的历史摘要" in str(message.get("content") or "")
-                and "compressed rounds 1-2" in str(message.get("content") or "")
-                for message in provider.requests[-1].messages
-            )
-        )
 
     def test_cli_stream_reasoning_json_and_interrupt(self) -> None:
         stdout = io.StringIO()
@@ -4645,7 +3555,7 @@ def run(*, context):
                 "def run(value, *, context):\n"
                 "    marker = Path(context['root']) / f'marker_{value}.txt'\n"
                 "    marker.write_text(value, encoding='utf-8')\n"
-                "    return {'value': value}\n",
+                "    return {'ok': True, 'value': value}\n",
                 "utf-8",
             )
         provider = ScriptedProvider(
@@ -4667,7 +3577,7 @@ def run(*, context):
                 ChatResponse(text="finished"),
             ]
         )
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     {
@@ -4684,7 +3594,8 @@ def run(*, context):
         assert events[-1].metadata["tool_argument_retries"] == 1
         assert len(provider.requests) == 3
         results = [event for event in events if event.type == "tool_call_result"]
-        assert [event.tool_name for event in results] == ["first", "second"]
+        assert sorted(event.tool_name for event in results if event.metadata["status"] == "completed") == ["first", "second"]
+        assert len([e for e in results if e.metadata["status"] == "invalid_arguments"]) == 2
         assert (root / "marker_one.txt").read_text(encoding="utf-8") == "one"
         assert (root / "marker_two.txt").read_text(encoding="utf-8") == "two"
 

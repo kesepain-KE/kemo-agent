@@ -3,7 +3,7 @@
 `tests/` 随源代码上传，是每次发布必须通过的发布红线。测试按业务领域组织，新增断言应放入
 对应领域，避免把无关系统行为堆入单一“上帝测试文件”。
 
-当前源码定档基线为 **1.5.2（2026-10-26）**，所有主框架版本仍以根目录 `version.json` 为准。
+当前源码稳定版本为 **2.0.0**，所有主框架版本仍以根目录 `version.json` 为准。
 本次重点回归包括空间公平调度/共享 API 池、子代理完成屏障与超时续跑、Chat 自动兼容、
 原生媒体装载、历史归档与标记、迁移备份及网页工作面板；测试中的旧版升级输入不是待替换的当前版本。
 `contracts/test_release_versions.py` 用隔离副本验证版本门禁能拒绝遗漏的版本入口；
@@ -27,19 +27,27 @@
 
 ## 与开发期系统验收的边界
 
-1.5.2 统一整体上下文压缩专项（2026-10-28）：
+CardStream 上下文与持久化专项（2026-11-03）：
 
-- `core/test_unified_compression.py` 覆盖手动/轮数/Token/API 统一轮数优先、Token 后备、
-  API 最终响应实际输入量与跨轮失败恢复、基线隔离/失效及不误用累计成本。
-- 摘要专项覆盖完整预算、超大单轮无丢字分片、已有摘要预算、输入/413 自适应缩小、
-  片段中途失败保留旧摘要；所有测试使用临时用户与假 Provider。
-- 进一步覆盖主请求 413 的字节下降验证、两次恢复不被外层重试放大、摘要模型实际容量
-  与格式修复的 native 输入闸门、取消/宿主中断、已完成请求计费及摘要落盘失败分类。
+- `cards/test_store.py`、`test_control_plane.py` 覆盖 RAW 不可变、seq/事件幂等、版本冲突、
+  软删除、旧历史隔离与维护认领。
+- `cards/test_compaction.py` 覆盖请求前唯一自动压缩屏障、全历史 Token 目标、
+  单份滚动摘要、候选验证和原子 VIEW 替换；失败保留原文、有效视图与计量。
+- `cards/test_compression_budget_chain.py` 覆盖输出上限与输入预留衔接、摘要请求分片、
+  共用 deadline/额外重试额度、临时摘要不提前提交、完整请求容量失败回滚、
+  无收益自动压缩跳过、原生媒体计量与校准隔离、摘要消息封装/转义、失败响应 usage 及真实主调用预算。
+- `web/test_prompt_accounting.py` 验证诊断、上下文窗口和请求屏障使用同一 Prompt 及原生工具 Schema 口径。
+- `agents/test_subagent_input_capacity.py` 验证子代理的模型输出上限、完整输入预算及参数修复后的再次校验。
+- `cards/test_runtime.py`、`test_runtime_completion.py`、`test_execution_failures.py` 覆盖
+  动态尾部、异步结果自描述、引导投递、完成屏障、取消与迟到结果。
+- `memory/test_memory_redesign.py` 验证候选分页待办与 RAW seq 游标：候选全部完成才推进，
+  分批恢复不重复调用分析模型。测试均使用临时用户和假 Provider，不访问真实模型或用户库。
 
 1.5.2 页面租约与子代理默认并行专项（2026-10-27）：
 
 - `history/test_ordered_presence.py` 验证刷新释放、真实多窗口、跨进程乱序、
-  BFCache 再激活、旧客户端保守兼容、Web/App 来源隔离及 history 7→8 备份/回滚。
+  BFCache 再激活、旧客户端保守兼容及 Web/App 来源隔离；CardStream schema 升级备份/回滚
+  由 `persistence/test_sqlite_migration_safety.py` 独立覆盖。
 - `agents/test_dispatch_defaults.py` 使用真实主工具循环、调度器和隔离假 Provider：
   同批五次缺省调用在首项完成前全部登记，容量三时真实重叠，不提前越过完成屏障；
   同时验证显式同步、特殊入口缺省、resume 和 list.default_wait。
@@ -108,3 +116,5 @@ python -m tests --suite kemo-contract -q
 
 协议模型、SSE、Asset、工具、多模态、Usage、Embedding、Rerank 或能力声明发生变化时，必须先
 重建固定制品并让双仓摘要一致；禁止只改一侧、降低校验或恢复旧协议测试作为默认门禁。
+
+默认长任务与一次性交付专项：`cards/test_unlimited_run.py`覆盖340次顺序调用、批量调用、原请求轮数上限与取消；`agents/test_subagent_budgets.py`验证子代理自身额度不再读取旧全局上限；`core/test_transient_inputs.py`覆盖Chat/Kemo上传、引导、inline与子代理循环、网络重试和安全历史；`web/test_prompt_accounting.py`对齐诊断页、上下文窗口与真实请求屏障估算。`core/test_long_task.py`和`web/test_plan_long_task.py`验证单Run终态与计划，不维护旧开关/跨Run续跑测试。

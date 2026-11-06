@@ -25,6 +25,11 @@ class TestSuiteBoundaryTests(unittest.TestCase):
         gitignore = (ROOT / ".gitignore").read_text("utf-8")
         self.assertIn("开发临时目录/", gitignore.splitlines())
 
+    def test_root_environment_uses_only_the_yaml_example(self) -> None:
+        lines = (ROOT / ".gitignore").read_text("utf-8").splitlines()
+        self.assertIn("!kemo.yaml.example", lines)
+        self.assertNotIn("!.env.example", lines)
+
     def test_deployment_assertions_have_a_formal_release_gate(self) -> None:
         canonical = ROOT / "tests" / "deploy" / "test_deploy.py"
         compatibility = ROOT / "deploy" / "tests" / "test_deploy.py"
@@ -38,11 +43,11 @@ class TestSuiteBoundaryTests(unittest.TestCase):
         self,
     ) -> None:
         lines = (ROOT / ".gitignore").read_text("utf-8").splitlines()
-        private_rule = lines.index("global_expand/**/.env")
-        variant_rule = lines.index("global_expand/**/.env.*")
-        example_rule = lines.index("!global_expand/**/.env.example")
+        private_rule = lines.index("expand/global/**/.env")
+        variant_rule = lines.index("expand/global/**/.env.*")
+        example_rule = lines.index("!expand/global/**/.env.example")
         for module in ("kemo_graph", "kemo_app"):
-            source_rule = lines.index(f"!global_expand/{module}/**")
+            source_rule = lines.index(f"!expand/global/{module}/**")
             self.assertGreater(private_rule, source_rule)
             self.assertGreater(variant_rule, source_rule)
         self.assertGreater(example_rule, variant_rule)

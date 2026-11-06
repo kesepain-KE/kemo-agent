@@ -1,7 +1,7 @@
 # 感知验收标准
 
 ```powershell
-python -m tests.template_tests.sense --target global_sense/<name>
+python -m tests.template_tests.sense --target sense/<name>
 ```
 
 ## 必须成立

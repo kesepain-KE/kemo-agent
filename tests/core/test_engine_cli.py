@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.card_history_support import session_history
+
 from tests.type_assertions import require_present
 
 import io
@@ -21,8 +23,7 @@ from provider.protocol.models import (
 )
 from run.engine import handle_request
 from run.extensions import describe_uploaded_asset
-from run.history import find_window, load_runtime_window, load_window, runtime_window_path
-import run.history.runtime_cache as runtime_cache
+
 
 
 class MockProvider:
@@ -77,15 +78,15 @@ class EngineAndCLITests(unittest.TestCase):
         provider = {
             "type": "kemo",
             "base_url": "http://127.0.0.1:1",
-            "api_key_env": "TEST_KEMO_KEY",
+            "api_key_env": "KEMO_API_KEY",
             "model": "mock-model",
             "stream": False,
         }
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({}),
             "utf-8",
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1, "provider": provider}),
             "utf-8",
         )
@@ -104,7 +105,7 @@ class EngineAndCLITests(unittest.TestCase):
             "session_id": "s1",
             "prompt": "one",
         }
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             first = handle_request(request, root=root, provider_factory=factory)
             request["prompt"] = "two"
             second = handle_request(request, root=root, provider_factory=factory)
@@ -120,11 +121,11 @@ class EngineAndCLITests(unittest.TestCase):
         self.assertLess(
             seen[1].system_prompt.index("GLOBAL"), seen[1].system_prompt.index("AGENTS")
         )
-        path = find_window(root, "alice", "cli", "s1")
-        window = load_window(require_present(path))
-        self.assertEqual(window["data"]["rounds"], 2)
-        self.assertEqual(window["data"]["token_usage"]["total_tokens"], 10)
-        self.assertEqual(len(window["text"]["messages"]), 4)
+        path = session_history(root, 'alice', 'cli', 's1')
+        window = require_present(path).refresh()
+        self.assertEqual(len(window.integrations), 2)
+        self.assertEqual(window.usage['total_tokens'], 10)
+        self.assertEqual(len(window.messages), 4)
 
     def test_closed_conversation_cannot_be_silently_resumed(self) -> None:
         _, root = self.make_root()
@@ -132,15 +133,15 @@ class EngineAndCLITests(unittest.TestCase):
         from run.infra import EngineError
 
         request = {"user": "alice", "source": "cli", "session_id": "ended", "prompt": "one"}
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             handle_request(request, root=root, provider_factory=lambda _: MockProvider([]))
         queue_memory_extraction(root, "alice", "cli", "ended")
         close_session(root, "alice", "cli", "ended")
         request["prompt"] = "must not append"
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaisesRegex(EngineError, "已经结束"):
                 handle_request(request, root=root, provider_factory=lambda _: MockProvider([]))
-        self.assertEqual(load_window(require_present(find_window(root, "alice", "cli", "ended")))["data"]["rounds"], 1)
+        self.assertEqual(len(require_present(session_history(root, 'alice', 'cli', 'ended')).refresh().integrations), 1)
 
     def test_deleted_conversation_is_rejected_before_provider_execution(self) -> None:
         _, root = self.make_root()
@@ -148,12 +149,12 @@ class EngineAndCLITests(unittest.TestCase):
         from run.infra import EngineError
 
         request = {"user": "alice", "source": "cli", "session_id": "deleted", "prompt": "one"}
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             handle_request(request, root=root, provider_factory=lambda _: MockProvider([]))
         self.assertEqual(delete_session(root, "alice", "cli", "deleted"), 1)
         invoked = []
         request["prompt"] = "must not execute"
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaisesRegex(EngineError, "已经删除"):
                 handle_request(
                     request, root=root,
@@ -161,97 +162,6 @@ class EngineAndCLITests(unittest.TestCase):
                 )
         self.assertEqual(invoked, [])
 
-    def test_archive_is_unbounded_while_temp_is_bounded_and_recoverable(self) -> None:
-        from run.context import get_or_create_summary
-        from tests.core.test_context_lifecycle import SummaryRunner
-
-        _, root = self.make_root()
-        (root / "config" / "global_config.json").write_text(
-            json.dumps(
-                {
-                    "agents": {
-                        "max_rounds": 2,
-                        "rounds_after_compression": 2,
-                    },
-                    "history": {"recent_full_rounds": 2},
-                }
-            ),
-            "utf-8",
-        )
-        seen: list = []
-
-        def factory(_):
-            return MockProvider(seen)
-
-        request = {
-            "user": "alice",
-            "source": "cli",
-            "session_id": "bounded-temp",
-            "prompt": "",
-        }
-
-        summary_runner = SummaryRunner()
-
-        def summarize_history(**kwargs):
-            return get_or_create_summary(**{**kwargs, "agent_runner": summary_runner})
-
-        with (
-            patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False),
-            patch("run.conversation.runtime.get_or_create_summary", side_effect=summarize_history),
-        ):
-            for number in range(1, 5):
-                request["prompt"] = f"round-{number}"
-                handle_request(request, root=root, provider_factory=factory)
-
-            archive_path = find_window(root, "alice", "cli", "bounded-temp")
-            self.assertIsNotNone(archive_path)
-            assert archive_path is not None
-            temp_path = runtime_window_path(archive_path)
-            archive = load_window(archive_path)
-            _temp_path, temp = load_runtime_window(
-                archive_path, archive, max_rounds=2
-            )
-
-            self.assertEqual(archive["data"]["rounds"], 4)
-            self.assertEqual(len(archive["text"]["messages"]), 8)
-            self.assertEqual(
-                [item["round"] for item in archive["data"]["round_metrics"]],
-                [1, 2, 3, 4],
-            )
-            self.assertNotIn("context", archive["data"])
-            self.assertEqual(temp["data"]["rounds"], 2)
-            self.assertEqual(len(temp["text"]["messages"]), 4)
-            self.assertEqual(
-                [item["content"] for item in temp["text"]["messages"]],
-                ["round-3", "reply:round-3", "round-4", "reply:round-4"],
-            )
-            self.assertEqual(temp["data"]["context"]["round_offset"], 2)
-
-            self.assertGreater(summary_runner.calls, 0)
-            runtime_cache.clear()
-            request["prompt"] = "round-5"
-            handle_request(request, root=root, provider_factory=factory)
-
-        archive = load_window(archive_path)
-        _temp_path, temp = load_runtime_window(archive_path, archive, max_rounds=2)
-        self.assertEqual(archive["data"]["rounds"], 5)
-        self.assertEqual(len(archive["text"]["messages"]), 10)
-        self.assertEqual(
-            [item["round"] for item in archive["data"]["round_metrics"]],
-            [1, 2, 3, 4, 5],
-        )
-        self.assertEqual(
-            [item["round"] for item in archive["think"]["rounds"]],
-            [1, 2, 3, 4, 5],
-        )
-        self.assertNotIn("context", archive["data"])
-        self.assertEqual(temp["data"]["rounds"], 2)
-        self.assertEqual(len(temp["text"]["messages"]), 4)
-        self.assertEqual(
-            [item["content"] for item in temp["text"]["messages"]],
-            ["round-4", "reply:round-4", "round-5", "reply:round-5"],
-        )
-        self.assertEqual(temp["data"]["context"]["round_offset"], 3)
 
     def test_provider_failure_commits_round_and_next_request_continues(self) -> None:
         _, root = self.make_root()
@@ -261,7 +171,7 @@ class EngineAndCLITests(unittest.TestCase):
             def create(self, request):
                 raise RuntimeError("failed")
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaises(RuntimeError):
                 handle_request(
                     {
@@ -273,27 +183,23 @@ class EngineAndCLITests(unittest.TestCase):
                     root=root,
                     provider_factory=lambda _: FailingProvider([]),
                 )
-        path = find_window(root, "alice", "cli", "fail")
+        path = session_history(root, 'alice', 'cli', 'fail')
         self.assertIsNotNone(path)
-        failed_window = load_window(require_present(path))
-        self.assertEqual(failed_window["data"]["rounds"], 1)
-        self.assertEqual(failed_window["text"]["messages"][0]["content"], "one")
-        self.assertIn(
-            "模型服务错误中断",
-            failed_window["text"]["messages"][1]["content"],
-        )
-        failed_metric = failed_window["data"]["round_metrics"][0]
+        failed_window = require_present(path).refresh()
+        self.assertEqual(len(failed_window.integrations), 1)
+        self.assertEqual(failed_window.messages[0]['content'], 'one')
+        self.assertEqual(len(failed_window.messages), 1)
+        failed_metric = failed_window.integrations[0]
         self.assertEqual(failed_metric["status"], "failed")
-        self.assertEqual(failed_metric["failure"]["exception_type"], "RuntimeError")
-        self.assertEqual(failed_metric["failure"]["message"], "模型服务调用未完成")
-        self.assertNotIn("failed", json.dumps(failed_metric["failure"]))
+        self.assertEqual(failed_metric["error"]["exception_type"], "RuntimeError")
+        self.assertNotIn("failed", json.dumps(failed_metric["error"]))
         self.assertTrue(failed_metric["provider_request_diagnostics"])
         self.assertEqual(
             failed_metric["provider_request_diagnostics"][0]["scope"],
             "agent_before_provider_mapping",
         )
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = handle_request(
                 {
                     "user": "alice",
@@ -306,19 +212,16 @@ class EngineAndCLITests(unittest.TestCase):
             )
 
         self.assertEqual(result["text"], "reply:continue")
-        resumed_window = load_window(require_present(path))
-        self.assertEqual(resumed_window["data"]["rounds"], 2)
+        resumed_window = require_present(path).refresh()
+        self.assertEqual(len(resumed_window.integrations), 2)
         history_messages = [
             item for item in seen[0].input if isinstance(item, MessageItem)
         ]
         self.assertEqual(
             [str(item.role) for item in history_messages],
-            ["user", "assistant", "user"],
+            ["user", "user"],
         )
-        self.assertIn(
-            "模型服务错误中断",
-            text_from_content(history_messages[1].content),
-        )
+        self.assertEqual(text_from_content(history_messages[0].content), "one")
 
     def test_provider_failure_with_attachment_only_keeps_valid_history(self) -> None:
         _, root = self.make_root()
@@ -332,7 +235,7 @@ class EngineAndCLITests(unittest.TestCase):
             def create(self, request):
                 raise RuntimeError("failed")
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaises(RuntimeError):
                 handle_request(
                     {
@@ -346,35 +249,25 @@ class EngineAndCLITests(unittest.TestCase):
                     provider_factory=lambda _: FailingProvider([]),
                 )
 
-        path = find_window(root, "alice", "web", "attachment-fail")
+        path = session_history(root, 'alice', 'web', 'attachment-fail')
         self.assertIsNotNone(path)
         assert path is not None
-        failed_window = load_window(path)
-        user_item = next(
-            item
-            for item in failed_window["items"]["items"]
-            if item.get("type") == "message" and item.get("role") == "user"
-        )
+        failed_window = path.refresh()
+        user_item = next((item for item in failed_window.items if item.get('type') == 'message' and item.get('role') == 'user'))
         self.assertTrue(user_item["content"])
         self.assertIn(
             descriptor["path"],
             json.dumps(user_item["content"], ensure_ascii=False),
         )
-        failed_attachment = user_item["metadata"]["input_attachments"][0]
+        failed_attachment = failed_window.cards[0].raw_payload["attachments"][0]
         self.assertEqual(failed_attachment["asset_id"], descriptor["asset_id"])
         self.assertEqual(failed_attachment["relative_path"], "failure-note.txt")
-        self.assertEqual(
-            failed_window["text"]["messages"][0]["attachments"],
-            [failed_attachment],
-        )
-        self.assertEqual(
-            failed_window["data"]["round_metrics"][0]["input_attachments"],
-            [failed_attachment],
-        )
+        self.assertEqual(failed_window.messages[0]['attachments'], [failed_attachment])
+        self.assertEqual(failed_window.cards[0].raw_payload["attachments"], [failed_attachment])
         self.assertNotIn("path", failed_attachment)
 
         seen: list = []
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = handle_request(
                 {
                     "user": "alice",
@@ -392,7 +285,7 @@ class EngineAndCLITests(unittest.TestCase):
         ]
         self.assertEqual(
             [str(item.role) for item in history_messages],
-            ["user", "assistant", "user"],
+            ["user", "user"],
         )
         self.assertIn(
             descriptor["path"],
@@ -409,7 +302,7 @@ class EngineAndCLITests(unittest.TestCase):
         def handler(request):
             return handle_request(request, root=root, provider_factory=factory)
 
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             text_out = io.StringIO()
             self.assertEqual(
                 cli.main(
@@ -458,8 +351,8 @@ class EngineAndCLITests(unittest.TestCase):
                 0,
             )
             self.assertEqual(interactive_out.getvalue(), "reply:a\nreply:b\n")
-            window = load_window(require_present(find_window(root, "alice", "cli", "chat")))
-            self.assertEqual(window["data"]["rounds"], 2)
+            window = require_present(session_history(root, 'alice', 'cli', 'chat')).refresh()
+            self.assertEqual(len(window.integrations), 2)
 
     def test_default_cli_owns_and_retires_its_own_session(self) -> None:
         _, root = self.make_root()
@@ -503,7 +396,7 @@ class EngineAndCLITests(unittest.TestCase):
             )
 
         output = io.StringIO()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             self.assertEqual(
                 cli.main(
                     ["--user", "alice", "--interactive", "--session", "first"],

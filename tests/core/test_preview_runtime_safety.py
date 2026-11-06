@@ -10,7 +10,6 @@ from provider.schema import ChatResponse, ProviderError, ToolCall
 from run.agents import AgentRunner, AgentScheduler
 from run.engine import iter_request_events
 from run.retry import HOST_CONTROL_EXCEPTIONS, RetryLedger, run_attempts
-from run.retry.recovery import reuse_allowed
 from run.tools import execution_watchdog_snapshot
 from tests.agents.test_general_worker import workspace, OUTPUT  # noqa: F401
 from tests.agents.test_subagent_hotplug import ScriptedProvider
@@ -102,30 +101,13 @@ def test_main_registration_host_exception_is_not_a_best_effort_warning(workspace
     root, _ = workspace
     error = kind("offline registration")
     provider = ScriptedProvider([ChatResponse(text="done")])
-    monkeypatch.setattr("run.conversation.runtime.update_run_state", Mock(side_effect=error))
+    monkeypatch.setattr("run.cards.IntegrationStore.start", Mock(side_effect=error))
     with pytest.raises(kind) as caught:
         list(iter_request_events(
             {"user": "alice", "source": "web", "session_id": "isolated", "prompt": "test"},
             root=root, provider_factory=lambda _: provider))
     assert caught.value is error
     assert not provider.requests
-
-
-@pytest.mark.parametrize("kind", HOST_CONTROL_EXCEPTIONS)
-def test_compression_rollback_does_not_replace_host_exception(tmp_path, monkeypatch, kind):
-    from run.conversation import runtime
-    error = kind("offline compression")
-    monkeypatch.setattr(runtime, "load_window", lambda _: {})
-    monkeypatch.setattr(runtime.runtime_cache, "archive_version", lambda _: "test")
-    restore = Mock(side_effect=[error, RuntimeError("rollback also failed")])
-    monkeypatch.setattr(runtime, "restore_summary_cache", restore)
-    with pytest.raises(kind) as caught:
-        runtime._commit_verified_manual_compression(
-            runtime_path=tmp_path / "cache" / "window", original_window={}, compacted_window={},
-            summary_cache={}, previous_summary_cache=None, removed_round_numbers=[],
-            previous_round_offset=0, expected_rounds=0, expected_round_offset=0)
-    assert caught.value is error
-    assert restore.call_count == 2
 
 
 LIVE = [("subagent_dispatch", {"action": action}) for action in ("list", "status")]
@@ -142,20 +124,19 @@ OPERATIONS += [("file", {"action": "write"}), ("custom_plugin", {})]
 
 
 @pytest.mark.parametrize("name,args", LIVE + OPERATIONS)
-def test_shared_reuse_policy_is_action_specific(name, args):
-    from run.conversation.helpers import _tool_result_reuse_allowed
-    from run.agents.retry_policy import _agent_tool_result_reuse_allowed
+def test_shared_dedup_policy_is_action_specific(name, args):
+    from run.agents.retry_policy import _agent_tool_result_dedup_required
+    from run.retry.tool_dedup import attempt_dedup_policy
     expected = (name, args) in OPERATIONS
-    assert reuse_allowed(name, args) is expected
-    assert _tool_result_reuse_allowed(name, args) is expected
-    assert _agent_tool_result_reuse_allowed(name, args) is expected
+    assert (attempt_dedup_policy(name, args) == "block") is expected
+    assert _agent_tool_result_dedup_required(name, args) is expected
 
 
 @pytest.mark.parametrize("name,args,agent", [
     (name, args, agent) for name, args in LIVE + OPERATIONS for agent in ("main", "child")
     if agent == "main" or name != "subagent_dispatch"
 ])
-def test_real_tool_loops_refresh_queries_and_reuse_effects_across_retry(workspace, monkeypatch, name, args, agent):
+def test_real_tool_loops_refresh_queries_and_block_repeated_effects_across_retry(workspace, monkeypatch, name, args, agent):
     root, config = workspace
     tool(root, name)
     final = json.dumps(OUTPUT) if agent == "child" else "done"
@@ -165,20 +146,24 @@ def test_real_tool_loops_refresh_queries_and_reuse_effects_across_retry(workspac
         ChatResponse(text="", tool_calls=[ToolCall("call-two", name, args)]),
         ChatResponse(text=final),
     ])
-    executed = Mock(side_effect=[{"status": "running"}, {"status": "completed"}])
+    executed = Mock(side_effect=[{"ok": True, "status": "running"}, {"ok": True, "status": "completed"}])
     if agent == "child":
         # Child cannot dispatch other agents; these cases are only run on main.
-        monkeypatch.setattr("run.agents.runner.execute_tool", executed)
+        monkeypatch.setattr("run.agents.model_loop.execute_tool", executed)
         monkeypatch.setattr("run.agents.runner._agent_retry_delay_seconds", lambda *a: 0)
         result = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider).run(
             "general_worker", {"task": "test"}, timeout=10)
         assert result.data == OUTPUT
     else:
-        monkeypatch.setattr("run.conversation.runtime.execute_tool", executed)
+        monkeypatch.setattr("run.tools.runtime.execute_tool", executed)
         events = list(iter_request_events(
             {"user": "alice", "source": "web", "session_id": "isolated", "prompt": "test"},
             root=root, provider_factory=lambda _: provider))
         assert any(e.type == "done" for e in events)
     assert executed.call_count == (1 if (name, args) in OPERATIONS else 2)
     last = provider.requests[-1].messages
-    assert ("completed" in json.dumps(last)) if (name, args) in LIVE else ("running" in json.dumps(last))
+    serialized = json.dumps(last)
+    if (name, args) in LIVE:
+        assert "completed" in serialized
+    else:
+        assert "duplicate_blocked" in serialized

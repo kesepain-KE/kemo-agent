@@ -21,7 +21,7 @@ from tests.template_tests.common import (
     PROJECT_ROOT,
     copy_candidate,
     prepare_user,
-    read_json_object,
+    read_yaml_object,
     sandbox,
 )
 from tests.template_tests.contracts import ContractReport
@@ -175,9 +175,9 @@ def _validate(
         prepare_user(root, user)
 
         try:
-            raw_config = read_json_object(
-                destination / "user_config.json",
-                label="user_config.json",
+            raw_config = read_yaml_object(
+                destination / "user_config.yaml",
+                label="user_config.yaml",
             )
             config = load_config(user, root)
         except BaseException as exc:

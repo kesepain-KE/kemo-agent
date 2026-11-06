@@ -176,7 +176,7 @@ class WebBackpressureTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         (root / "config").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -195,7 +195,7 @@ class WebBackpressureTests(unittest.TestCase):
         for user in ("alice", "bob"):
             directory = root / "users" / user
             (directory / "history").mkdir(parents=True)
-            (directory / "user_config.json").write_text("{}", "utf-8")
+            (directory / "user_config.yaml").write_text("{}", "utf-8")
         return root
 
     def test_user_gate_has_bounded_waiting_and_releases_all_counts(self) -> None:
@@ -342,7 +342,7 @@ class MessageRouterBackpressureTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         (root / "users" / "alice").mkdir(parents=True)
-        (root / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")
         registry = TransportRegistry()
         transport = MockTransport()
         registry.register(transport, TransportPolicy(allowed_tools=frozenset()))

@@ -109,8 +109,8 @@ class ReadCacheTests(unittest.TestCase):
 
     def test_env_is_not_cached(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / '.env'
-            path.write_text('EXAMPLE=1', encoding='utf-8')
+            path = Path(tmp) / 'kemo.yaml'
+            path.write_text('EXAMPLE: 1', encoding='utf-8')
             with patch.object(Path, 'read_text', autospec=True, side_effect=Path.read_text) as read:
                 cached_read_text(path); cached_read_text(path)
                 self.assertEqual(read.call_count, 2)

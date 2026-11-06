@@ -12,7 +12,6 @@ import pytest
 
 from run.agents.task_ledger import TaskLedger
 from run.conversation import runtime
-from run.conversation.loop_cleanup import cleanup_run_registration
 from run.tools import _enforce_tool_result_limit
 from web.auth import WebAuthConfig, WebAuthConfigError, validate_web_bind
 
@@ -39,27 +38,6 @@ def test_access_denied_is_not_process_death(monkeypatch):
     assert TaskLedger.reconcile(record)["status"] == "running"
     monkeypatch.setattr(psutil, "Process", Mock(side_effect=psutil.NoSuchProcess(123)))
     assert TaskLedger.reconcile(record)["status"] == "interrupted"
-
-
-def test_cleanup_failures_remain_visible_when_history_storage_fails(tmp_path, caplog):
-    (tmp_path / "users/alice").mkdir(parents=True)
-    request = {"run_id": "run_injected"}
-    cancel = threading.Event()
-    cancel.set()
-    fail = Mock(side_effect=OSError("injected"))
-    cleanup_run_registration(
-        terminal_committer=SimpleNamespace(commit_cancelled_round=fail),
-        round_state=SimpleNamespace(finalized=False, history_run_registered=True, retry_follows=False),
-        cancel_event=cancel, request=request, update_run_state=fail, base=tmp_path,
-        user="alice", source="web", session_id="scope", run_id="run_injected",
-    )
-    assert request["_cleanup_diagnostics"] == {
-        "cancel_commit_failed": True, "run_state_update_failed": True,
-    }
-    files = list((tmp_path / "users/alice/history/run_failures").glob("*.json"))
-    assert len(files) == 2
-    assert all(json.loads(p.read_text())["run_id"] == "run_injected" for p in files)
-    assert "cancel_commit_failed" in caplog.text
 
 
 def test_large_completed_result_is_a_success_receipt_with_full_artifact(tmp_path):

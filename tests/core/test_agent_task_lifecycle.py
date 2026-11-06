@@ -4,7 +4,6 @@ import json
 import threading
 import time
 from concurrent.futures import Future
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +11,7 @@ import pytest
 from provider.schema import ChatResponse, ToolCall
 from provider.protocol.models import ToolCallItem, ToolResultItem
 from run.agents import AgentScheduler, AgentTimeoutError
-from run.agents.task_ledger import TaskCoordinator, TaskLedger, safe
+from run.agents import TaskCoordinator, TaskLedger, safe
 from run.engine import iter_request_events
 from tests.media_input_support import make_root, MediaProvider
 
@@ -45,11 +44,11 @@ def setup(tmp_path, monkeypatch):
 def run(action, agent, wait=False, *, context):
     scheduler = SCHEDULERS[context['root']]
     task_id = scheduler.submit_callable(agent, {}, JOBS[agent], source=context['source'],
-        session_id=context['session_id'], ownership=context['task_ownership'])
+        session_id=context['session_id'], ownership=context['task_ownership_factory']())
     if wait:
         value = scheduler.wait(task_id, timeout=3, source=context['source'], session_id=context['session_id'])
-        return {'status': 'completed', 'task_id': task_id, 'data': value}
-    return {'status': 'queued', 'task_id': task_id}
+        return {'ok': True, 'status': 'completed', 'task_id': task_id, 'data': value}
+    return {'ok': True, 'status': 'queued', 'task_id': task_id}
 ''', 'utf-8')
     scheduler = AgentScheduler(SimpleNamespace(root=tmp_path, user='alice', config={}))
     SCHEDULERS[str(tmp_path)] = scheduler
@@ -139,6 +138,96 @@ def test_sync_result_does_not_create_a_duplicate_notification(setup):
     assert not thread.is_alive() and not errors
     assert len(provider.requests) == 2
     assert root_record(root)['status'] == 'completed'
+
+
+def test_sync_child_failure_allows_replacement_while_parent_waits(setup, monkeypatch):
+    root, _ = setup
+    registrations = []
+    original = TaskLedger.register
+
+    def register(ledger, task, ownership):
+        if registrations:
+            # Preparation runs in the tool worker. The main loop can already
+            # be waiting for this very dispatch when the child is registered.
+            eventually(lambda: root_record(root).get('status') == 'waiting_children', timeout=3)
+        registrations.append(root_record(root)['status'])
+        return original(ledger, task, ownership)
+
+    monkeypatch.setattr(TaskLedger, 'register', register)
+
+    def fail(cancel):
+        raise ValueError('first child input rejected')
+
+    JOBS['bad'] = fail
+    JOBS['corrected'] = lambda cancel: {'answer': 'replacement-output'}
+    provider = MediaProvider([
+        ChatResponse(text='', tool_calls=[ToolCall(id=f'call_{agent}', name='subagent_dispatch',
+            arguments={'action': 'call', 'agent': agent, 'wait': True})])
+        for agent in ('bad', 'corrected')
+    ] + [ChatResponse(text='replacement final')])
+    thread, _, _, errors, _ = launch(root, provider=provider)
+    thread.join(10)
+    assert not thread.is_alive() and not errors
+    assert registrations[-1] == 'waiting_children'
+    assert 'replacement-output' in provider.requests[-1].model_dump_json()
+    ledger = TaskLedger(root, 'alice')
+    children, _ = ledger.records('web', 'scope', parent=root_record(root)['id'])
+    assert [child['status'] for child in children] == ['failed', 'completed']
+    assert all(child['handled'] for child in children)
+    assert root_record(root)['status'] == 'completed'
+
+
+@pytest.mark.parametrize('status', ['running', 'merging', 'waiting_children'])
+def test_open_parent_accepts_children_in_each_execution_phase(tmp_path, status):
+    from run.agents.queue import AgentTask
+
+    (tmp_path / 'users/alice').mkdir(parents=True)
+    coordinator = TaskCoordinator(tmp_path, 'alice', 'web', 'scope', 'run', {})
+    owner = coordinator.ownership('call')
+    coordinator.ledger.update(coordinator.id, status=status)
+    child = AgentTask('child', 'worker', {}, source='web', session_id='scope')
+    coordinator.ledger.register(child, owner)
+    assert coordinator.ledger.get(child.id, 'web', 'scope')['root_task_id'] == coordinator.id
+    from run.agents.controls import _owned_record
+    with coordinator.ledger.db() as db:
+        record = _owned_record(coordinator.ledger, db, child.id, 'web', 'scope', owner, active=True)
+    assert record['id'] == child.id
+
+
+@pytest.mark.parametrize('status', [
+    'finalizing', 'cancelling', 'completed', 'limited', 'partial',
+    'failed', 'cancelled', 'interrupted', 'timed_out', 'tool_limit',
+])
+def test_closing_or_closed_parent_rejects_children(tmp_path, status):
+    from run.agents.queue import AgentTask
+
+    (tmp_path / 'users/alice').mkdir(parents=True)
+    coordinator = TaskCoordinator(tmp_path, 'alice', 'web', 'scope', 'run', {})
+    owner = coordinator.ownership('call')
+    coordinator.ledger.update(coordinator.id, status=status)
+    child = AgentTask('late-child', 'worker', {}, source='web', session_id='scope')
+    with pytest.raises(ValueError, match='主任务已收束或子任务归属无效'):
+        coordinator.ledger.register(child, owner)
+    assert coordinator.children() == []
+
+
+@pytest.mark.parametrize('mismatch', ['source', 'session_id', 'attempt_id'])
+def test_waiting_parent_still_rejects_wrong_ownership(tmp_path, mismatch):
+    from run.agents.queue import AgentTask
+
+    (tmp_path / 'users/alice').mkdir(parents=True)
+    coordinator = TaskCoordinator(tmp_path, 'alice', 'web', 'scope', 'run', {})
+    owner = coordinator.ownership('call')
+    coordinator.ledger.update(coordinator.id, status='waiting_children')
+    fields = {'source': 'web', 'session_id': 'scope'}
+    if mismatch == 'attempt_id':
+        owner['attempt_id'] = 'stale-attempt'
+    else:
+        fields[mismatch] = 'other'
+    child = AgentTask('wrong-child', 'worker', {}, **fields)
+    with pytest.raises(ValueError, match='主任务已收束或子任务归属无效'):
+        coordinator.ledger.register(child, owner)
+    assert coordinator.children() == []
 
 
 def test_cancel_waits_for_real_exit_and_never_resumes_provider(setup):

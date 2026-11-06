@@ -54,7 +54,7 @@ def _validate(
     runtime_probe: bool,
 ) -> None:
     with sandbox(repository_root=repository_root) as root:
-        module = copy_candidate(target, root / "global_sense" / target.name)
+        module = copy_candidate(target, root / "sense" / target.name)
         meta = _read_sense_meta(module)
         if not meta.valid:
             report.failed("sense.manifest", meta.error)

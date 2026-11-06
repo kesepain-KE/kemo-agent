@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import yaml
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -40,6 +41,18 @@ def read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     return value
 
 
+def read_yaml_object(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        value = yaml.safe_load(path.read_text("utf-8-sig"))
+    except FileNotFoundError:
+        raise ContractValidationError(f"{label}不存在：{path.name}") from None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ContractValidationError(f"{label}不可读或 YAML 无效：{exc}") from exc
+    if not isinstance(value, dict):
+        raise ContractValidationError(f"{label}顶层必须是 YAML 映射")
+    return value
+
+
 def ensure_plain_directory(path: Path) -> Path:
     target = path.resolve()
     if not target.is_dir():
@@ -68,33 +81,33 @@ def prepare_root_layout(root: Path, *, repository_root: Path = PROJECT_ROOT) -> 
     for relative in (
         "agents",
         "plugins",
-        "shared_skills",
-        "shared_knowledge",
-        "global_knowledge",
-        "global_expand",
-        "shared_expand",
-        "global_sense",
+        "skills",
+        "knowledge/share",
+        "knowledge/global",
+        "expand/global",
+        "expand/share",
+        "sense",
         "message/out",
         "config",
         "users",
     ):
         (root / relative).mkdir(parents=True, exist_ok=True)
     _copy_if_file(
-        repository_root / "config" / "global_config.json",
-        root / "config" / "global_config.json",
+        repository_root / "config" / "global_config.yaml",
+        root / "config" / "global_config.yaml",
     )
-    if not (root / "config" / "global_config.json").is_file():
-        (root / "config" / "global_config.json").write_text("{}\n", "utf-8")
+    if not (root / "config" / "global_config.yaml").is_file():
+        (root / "config" / "global_config.yaml").write_text("{}\n", "utf-8")
     _copy_if_file(
         repository_root / "config" / "global_soul.md",
         root / "config" / "global_soul.md",
     )
     _copy_if_file(repository_root / "agents.md", root / "agents.md")
     for relative in (
-        "global_expand/register.py",
-        "shared_expand/register.py",
-        "shared_skills/register.py",
-        "global_sense/register.py",
+        "expand/global/register.py",
+        "expand/share/register.py",
+        "skills/register.py",
+        "sense/register.py",
     ):
         _copy_if_file(repository_root / relative, root / relative)
 
@@ -119,7 +132,7 @@ def prepare_user(
         "tools",
     ):
         (directory / relative).mkdir(parents=True, exist_ok=True)
-    config_path = directory / "user_config.json"
+    config_path = directory / "user_config.yaml"
     if not config_path.exists():
         config_path.write_text(
             json.dumps(config or {}, ensure_ascii=False, indent=2) + "\n",

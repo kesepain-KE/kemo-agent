@@ -26,7 +26,8 @@ def spawn(context):
         ownership=context["shell_ownership"],
     )
     STARTED[str(root)] = record["job_id"]
-    return {"job_id": record["job_id"], "status": "starting"}
+    (root / "test-shell-job.json").write_text(json.dumps({"job_id": record["job_id"]}), "utf-8")
+    return {"ok": True, "job_id": record["job_id"], "status": "starting"}
 
 
 def plugin(root):
@@ -54,11 +55,16 @@ def eventually(predicate):
 
 
 def finish(root) -> str:
-    jid = STARTED.get(str(root))
+    jid = job_id(root)
     if jid:
         _finish(root, "alice", jid, exit_code=0, output_tail=["[stdout] verified-five-line-tail"],
                 output_tail_complete=True)
     return jid or ""
+
+
+def job_id(root) -> str:
+    path = root / "test-shell-job.json"
+    return json.loads(path.read_text("utf-8"))["job_id"] if path.exists() else ""
 
 
 def test_main_loop_waits_then_processes_receipt_without_replaying_tool(tmp_path):
@@ -67,6 +73,7 @@ def test_main_loop_waits_then_processes_receipt_without_replaying_tool(tmp_path)
     provider = MediaProvider([
         ChatResponse(text="", tool_calls=[ToolCall(id="call_shell", name="shell", arguments={})]),
         ChatResponse(text="preliminary"),
+        ChatResponse(text="final after Shell completion"),
         ChatResponse(text="final after Shell completion"),
     ])
     events, errors = [], []
@@ -83,13 +90,15 @@ def test_main_loop_waits_then_processes_receipt_without_replaying_tool(tmp_path)
     thread.start()
     try:
         eventually(lambda: any(e.type == "background_job_progress" for e in events))
-        assert thread.is_alive() and len(provider.requests) == 2
+        requests_before_finish = len(provider.requests)
+        assert thread.is_alive() and 2 <= requests_before_finish <= 3
         assert not any(e.type == "done" for e in events)
     finally:
         jid = finish(tmp_path)
     thread.join(8)
     assert not thread.is_alive() and not errors
-    assert len(provider.requests) == 3
+    assert len(provider.requests) == requests_before_finish + 1
+    assert len([event for event in events if event.type == "tool_call_start"]) == 1
     final = provider.requests[-1].model_dump_json()
     assert "verified-five-line-tail" in final
     assert "not-stored-command" not in final
@@ -118,7 +127,7 @@ def test_subagent_waits_for_own_shell_and_receives_only_tail(workspace):
     try:
         eventually(lambda: len(provider.requests) == 2)
         assert thread.is_alive()
-        jid = STARTED[str(root)]
+        jid = job_id(root)
         assert read_background_job(root, "alice", jid)["owner_task_id"] == "sub-shell-test"
     finally:
         jid = finish(root)
@@ -156,7 +165,7 @@ def test_subagent_last_model_budget_still_processes_required_shell(workspace, st
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     try:
-        eventually(lambda: str(root) in STARTED)
+        eventually(lambda: bool(job_id(root)))
         assert thread.is_alive() and len(provider.requests) == 1
     finally:
         jid = finish(root)

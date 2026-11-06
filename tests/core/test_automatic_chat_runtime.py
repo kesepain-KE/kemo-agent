@@ -12,17 +12,20 @@ import pytest
 from run.agents import AgentRunner
 from provider.request_scope import current_request_scope
 from run.engine import iter_request_events
-from run.history import find_window, load_window
+from run.cards import CardStore
 from tests.media_input_support import make_root, PROJECT
 from tests.provider.test_chat_profiles import response
 
 
 def workspace(root: Path, model: str, stream: bool = False) -> dict[str, Any]:
+    from run.extensions import clear_model_capability_cache
+    clear_model_capability_cache()
     cfg, _ = make_root(root)
     cfg["provider"].update({"model": model, "stream": stream,
                             "base_url": "https://relay.test/proxy/api"})
     cfg["provider"].pop("input_modalities", None)
-    for path in (root / "config/global_config.json", root / "users/alice/user_config.json"):
+    cfg["provider_security"] = {"allowed_hosts": ["relay.test"]}
+    for path in (root / "config/global_config.yaml", root / "users/alice/user_config.yaml"):
         path.write_text(json.dumps(cfg), encoding="utf-8")
     tool = root / "plugins/echo"
     tool.mkdir()
@@ -30,7 +33,7 @@ def workspace(root: Path, model: str, stream: bool = False) -> dict[str, Any]:
                 "enabled": True, "entrypoint": "tool.py:run", "input_schema": {
                     "type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}
     (tool / "SKILL.md").write_text(f"# echo\n\n## Tool\n```json\n{json.dumps(manifest)}\n```\n", encoding="utf-8")
-    (tool / "tool.py").write_text("def run(value, *, context):\n    return {'value': value}\n", encoding="utf-8")
+    (tool / "tool.py").write_text("def run(value, *, context):\n    return {'ok': True, 'value': value}\n", encoding="utf-8")
     return cfg
 
 
@@ -49,26 +52,31 @@ def test_default_factory_chat_tool_execution_and_history_without_capabilities(tm
         if model == "deepseek-flash":
             assert body["thinking"]["type"] == "enabled" and body["reasoning_effort"] == "high"
         else:
-            assert "reasoning_enabled" not in body and "reasoning_effort" not in body
+            assert "reasoning_enabled" not in body and body["reasoning_effort"] == "medium"
         if len(seen) == 1:
             return response({"reasoning_content": "Need lookup" if model == "deepseek-flash" else "",
                              "tool_calls": [{"index": 0, "id": "first", "type": "function", "function": {
                                  "name": "echo", "arguments": '{"value":"checked"}'}}]}, stream=stream, tool=True)
-        assert body["messages"][-1]["role"] == "tool"
-        assert "checked" in body["messages"][-1]["content"]
-        if model == "deepseek-flash":
-            assert next(m for m in body["messages"] if m.get("tool_calls"))["reasoning_content"] == "Need lookup"
+        # A no-call response can precede a late required receipt. The next
+        # request retains that body as commentary after the committed receipt;
+        # role-at-tail is not proof that the result was delivered.
+        results = [message for message in body["messages"]
+                   if message["role"] in {"tool", "user"} and "execution_id" in str(message.get("content"))]
+        assert results and "checked" in json.dumps(results[-1])
+        tool_message = next((m for m in body["messages"] if m.get("tool_calls")), None)
+        if model == "deepseek-flash" and tool_message is not None:
+            assert tool_message["reasoning_content"] == "Need lookup"
         return response({"content": "Finished"}, stream=stream)
 
     with patch("urllib.request.urlopen", side_effect=endpoint):
         events = list(iter_request_events({"user": "alice", "source": "web", "session_id": "auto-chat",
                                            "prompt": "Echo checked"}, root=tmp_path))
-    assert len(seen) == 2
+    assert len(seen) >= 2
     assert any(event.type == "tool_call_result" for event in events)
-    assert events[-1].type == "done" and events[-1].metadata.get("status", "completed") == "completed"
-    path = find_window(tmp_path, "alice", "web", "auto-chat")
-    assert path is not None
-    assert load_window(path)["text"]["messages"][-1]["content"] == "Finished"
+    assert events[-1].type == "done" and events[-1].metadata.get("status", "completed") == "completed", events[-1].error
+    cards = CardStore(tmp_path, "alice").raw_page("web", "auto-chat")
+    assert cards[-1].raw_level == "final"
+    assert cards[-1].raw_payload["text"] == "Finished"
 
 
 @pytest.mark.parametrize("model", ["deepseek-flash", "generic-cheap-model"])
@@ -85,7 +93,7 @@ def test_real_subagent_factory_resolves_its_model_without_manual_detection(tmp_p
         assert current_request_scope()[-3:] == ("alice", "web", "child-auto")
         assert body["model"] == model
         if model == "generic-cheap-model":
-            assert "reasoning_effort" not in body
+            assert body["reasoning_effort"] == "medium"
         else:
             assert body["thinking"]["type"] == "enabled"
         if len(seen) == 1:

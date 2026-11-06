@@ -4,7 +4,6 @@ import base64
 import hashlib
 import json
 import random
-import shutil
 
 import pytest
 from PIL import Image
@@ -14,11 +13,10 @@ from provider.adapters.chat_bridge import ChatBridgeProvider
 from provider.adapters.compat import kemo_request_to_chat
 from provider.protocol.models import ImageContent, MAX_INLINE_IMAGE_BYTES, ToolResultItem
 from provider.schema import ChatResponse, ProviderError, ToolCall
-from run.agents import AgentRunner
 from run.engine import handle_request
 from run.extensions import AttachmentError, describe_local_asset
-from run.history import find_window, load_window
-from tests.media_input_support import PROJECT, MediaProvider, enqueue, make_host, make_root, native_blocks
+from run.cards import CardStore
+from tests.media_input_support import MediaProvider, enqueue, make_host, make_root, native_blocks
 
 
 def large_image(root, provider_type="chat"):
@@ -44,7 +42,7 @@ def test_large_tool_image_reaches_next_request_and_retry_losslessly(tmp_path, mo
         *([ProviderError("offline", category="connection_error", retryable=True)] if retry else []),
         ChatResponse(text="done"),
     ])
-    monkeypatch.setattr("run.conversation.runtime.backoff_seconds", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("provider.retry.RetryManager.delay", lambda *args, **kwargs: 0)
     result = handle_request({
         "user": "alice", "source": "web", "session_id": "large", "prompt": "inspect image",
     }, root=tmp_path, provider_factory=lambda _: provider)
@@ -63,32 +61,15 @@ def test_large_tool_image_reaches_next_request_and_retry_losslessly(tmp_path, mo
         else:
             assert blocks[0].source is None and blocks[0].asset_id.startswith("asset_remote_")
     assert len(provider.uploads) == (1 if provider_type == "kemo" else 0)
-    window = find_window(tmp_path, "alice", "web", "large")
-    assert window is not None
-    saved = json.dumps(load_window(window))
-    assert '"status": "included"' in saved
-    assert "inline_base64" not in saved and "data:image" not in saved
-
-
-@pytest.mark.parametrize("provider_type", ["chat", "kemo"])
-def test_large_subagent_image_is_projected_with_correct_transport(tmp_path, provider_type):
-    config, path = large_image(tmp_path, provider_type)
-    shutil.copytree(PROJECT / "agents/context_manage", tmp_path / "agents/context_manage")
-    agent_config_path = tmp_path / "agents/context_manage/agent-config.json"
-    agent_config = json.loads(agent_config_path.read_text("utf-8"))
-    agent_config["tools"]["plugins"]["allow"] = ["attach_media"]
-    agent_config_path.write_text(json.dumps(agent_config), "utf-8")
-    summary = {"facts": [], "requirements": [], "decisions": [], "unfinished": [],
-               "tool_results": [], "entities": [], "narrative": "done"}
-    provider = MediaProvider([attach(path), ChatResponse(text=json.dumps(summary))])
-    result = AgentRunner(tmp_path, "alice", config=config, provider_factory=lambda _: provider).run(
-        "context_manage", {"previous_summary": None, "rounds": [], "trigger": "manual"},
-        task_id="task_large",
-    )
-    assert result.data == summary
-    assert len(native_blocks(provider.requests[-1])) == 1
-    assert result.metadata["media_inputs"][0]["status"] == "included"
-    assert path.stat().st_size > MAX_INLINE_IMAGE_BYTES
+    cards = CardStore(tmp_path, "alice").raw_page("web", "large")
+    store = CardStore(tmp_path, "alice")
+    with store.db() as db:
+        saved = db.execute(
+            "SELECT record_json FROM card_integrations ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()[0]
+    assert any(item["status"] == "included" for item in json.loads(saved)["media_inputs"])
+    assert all("inline_base64" not in card.raw_payload_json for card in cards)
+    assert all("data:image" not in card.raw_payload_json for card in cards)
 
 
 @pytest.mark.parametrize("delivery", ["upload", "tool"])

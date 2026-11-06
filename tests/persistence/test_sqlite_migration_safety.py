@@ -8,23 +8,24 @@ from unittest.mock import patch
 
 import pytest
 
-from run.history import store_core as history
+from run.cards import CardStore
+from run.cards import schema as cards
 from run.infra import log_store as logs
 from run.infra.sqlite_migrations import SchemaMigrationError
 from run.memory import store as memory
 from run.tasks import store as tasks
 
 
-KINDS = ("history", "tasks", "logs", "memory")
-VERSIONS = {"history": 8, "tasks": 1, "logs": 3, "memory": 2}
+KINDS = ("cards", "tasks", "logs", "memory")
+VERSIONS = {"cards": cards.SCHEMA_VERSION, "tasks": 1, "logs": 3, "memory": memory.MEMORY_DB_SCHEMA_VERSION}
 META = {
-    "history": "history_meta", "tasks": "task_plan_meta", "memory": "memory_meta",
+    "tasks": "task_plan_meta", "memory": "memory_meta",
 }
 
 
 def db_path(root: Path, kind: str) -> Path:
     return {
-        "history": root / "users/alice/history/history.sqlite3",
+        "cards": root / "users/alice/cards.sqlite3",
         "tasks": root / "users/alice/task_plan/task_plans.sqlite3",
         "logs": root / "runtime/logs.sqlite3",
         "memory": root / "users/alice/improve/memory.sqlite3",
@@ -33,10 +34,12 @@ def db_path(root: Path, kind: str) -> Path:
 
 def open_store(root: Path, kind: str) -> None:
     path = db_path(root, kind)
+    if kind == "cards":
+        path.parent.mkdir(parents=True, exist_ok=True)
     key = str(path.resolve()).casefold()
-    if kind == "history":
-        history._READY_DATABASES.discard(key)
-        history._ensure_database(path)
+    if kind == "cards":
+        with CardStore(root, "alice").db():
+            pass
     elif kind == "tasks":
         tasks._READY_DATABASES.discard(key)
         tasks.PlanStore(root, "alice")._ensure_database()
@@ -55,7 +58,7 @@ def seed_version(root: Path, kind: str, version: object) -> Path:
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE TABLE audit_sentinel(body TEXT NOT NULL)")
         db.execute("INSERT INTO audit_sentinel VALUES('keep original data')")
-        if kind == "logs":
+        if kind in {"cards", "logs"}:
             db.execute(f"PRAGMA user_version={int(str(version))}")
         else:
             db.execute(f"CREATE TABLE {META[kind]}(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -72,7 +75,7 @@ def snapshot(path: Path) -> tuple[str, str]:
 
 def stored_version(path: Path, kind: str) -> int:
     with closing(sqlite3.connect(path)) as db:
-        if kind == "logs":
+        if kind in {"cards", "logs"}:
             return db.execute("PRAGMA user_version").fetchone()[0]
         return int(db.execute(
             f"SELECT value FROM {META[kind]} WHERE key='schema_version'"
@@ -90,7 +93,7 @@ def test_future_schema_is_rejected_before_ddl_or_journal_changes(tmp_path, kind)
     assert not list(path.parent.glob(path.name + ".bak.*"))
 
 
-@pytest.mark.parametrize("kind", ("history", "tasks", "memory"))
+@pytest.mark.parametrize("kind", ("tasks", "memory"))
 @pytest.mark.parametrize("version", ("broken", "-1"))
 def test_invalid_schema_is_not_silently_treated_as_unversioned(tmp_path, kind, version):
     path = seed_version(tmp_path, kind, version)
@@ -191,69 +194,14 @@ def test_log_legacy_input_state_columns_are_added_without_losing_state(tmp_path)
     assert state["input_restart_count"] == 0
 
 
-@pytest.mark.parametrize("version", (1, 2, 3, 4, 5, 6))
-def test_history_additive_versions_preserve_existing_data(tmp_path, version):
-    path = seed_version(tmp_path, "history", version)
-    open_store(tmp_path, "history")
-    with closing(sqlite3.connect(path)) as db:
-        assert db.execute("SELECT body FROM audit_sentinel").fetchone()[0] == "keep original data"
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"history_deleted_sessions", "history_deleted_windows",
-                "history_web_leases", "history_session_marks"} <= tables
-    assert stored_version(path, "history") == 8
-    assert len(list(path.parent.glob(path.name + f".bak.v{version}.*"))) == 1
-
-
-@pytest.mark.parametrize("version", (1, 2))
-def test_history_legacy_archive_body_and_rounds_survive_migration(tmp_path, version):
-    path = seed_version(tmp_path, "history", version)
-    message = {"role": "user", "content": "original message"}
-    body = {"schema_version": 1, "messages": [message]}
-    with closing(sqlite3.connect(path)) as db, db:
-        db.execute("""
-            CREATE TABLE history_windows(
-                window_name TEXT NOT NULL, window_kind TEXT NOT NULL, source TEXT NOT NULL,
-                session_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, rounds INTEGER NOT NULL DEFAULT 0,
-                data_json TEXT NOT NULL, text_json TEXT NOT NULL, think_json TEXT NOT NULL,
-                tool_json TEXT NOT NULL, items_json TEXT NOT NULL,
-                PRIMARY KEY(window_kind,window_name))
-        """)
-        db.execute(
-            "INSERT INTO history_windows VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("archive", "archive", "web", "old", "title", "2026-01-01", "2026-01-01", 1,
-             json.dumps({"rounds": 1, "round_metrics": [{"round": 1, "tokens": 7}]}),
-             json.dumps(body), json.dumps({"schema_version": 1, "rounds": [
-                 {"round": 1, "content": "original thought"}]}),
-             json.dumps({"schema_version": 1, "rounds": []}),
-             json.dumps({"schema_version": 2, "items": []})),
-        )
-        if version == 2:
-            # v2 already made message rows authoritative, but still kept round
-            # partitions in the window JSON. Do not replay a v1 text migration.
-            db.execute("""
-                CREATE TABLE history_messages(
-                    window_name TEXT NOT NULL, message_index INTEGER NOT NULL,
-                    source TEXT NOT NULL, session_id TEXT NOT NULL,
-                    round_number INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL,
-                    content_text TEXT NOT NULL, message_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    PRIMARY KEY(window_name,message_index))
-            """)
-            db.execute(
-                "INSERT INTO history_messages VALUES(?,?,?,?,?,?,?,?,?,?)",
-                ("archive", 0, "web", "old", 1, "user", "original message",
-                 json.dumps(message), "2026-01-01", "2026-01-01"),
-            )
-            db.execute(
-                "UPDATE history_windows SET text_json=?",
-                (json.dumps({"schema_version": 1, "storage": "history_messages"}),),
-            )
-    open_store(tmp_path, "history")
-    with closing(sqlite3.connect(path)) as db:
-        assert db.execute("SELECT content_text FROM history_messages").fetchone()[0] == "original message"
-        assert "original thought" in db.execute("SELECT think_json FROM history_rounds").fetchone()[0]
-        assert json.loads(db.execute("SELECT text_json FROM history_windows").fetchone()[0])["storage"] == "history_messages"
+def test_cardstream_initialization_never_reads_or_migrates_legacy_history(tmp_path):
+    legacy = tmp_path / "users/alice/history/history.sqlite3"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"opaque legacy history; leave untouched")
+    open_store(tmp_path, "cards")
+    assert legacy.read_bytes() == b"opaque legacy history; leave untouched"
+    assert db_path(tmp_path, "cards").is_file()
+    assert not list(legacy.parent.glob("*.bak.*"))
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -272,7 +220,7 @@ def test_backup_failure_stops_all_schema_changes_and_is_retryable(tmp_path, kind
 def test_migration_failure_rolls_back_ddl_and_version_then_can_retry(tmp_path, kind):
     path = seed_version(tmp_path, kind, 0)
     before = snapshot(path)
-    module = {"history": history, "tasks": tasks, "logs": logs, "memory": memory}[kind]
+    module = {"cards": cards, "tasks": tasks, "logs": logs, "memory": memory}[kind]
 
     def fail_after_ddl(database, script):
         database.execute("CREATE TABLE must_rollback(body TEXT)")
@@ -291,7 +239,7 @@ def test_migration_failure_rolls_back_ddl_and_version_then_can_retry(tmp_path, k
     assert stored_version(path, kind) == VERSIONS[kind]
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", ("tasks", "logs", "memory"))
 def test_current_version_with_missing_structures_is_backed_up_before_repair(tmp_path, kind):
     path = seed_version(tmp_path, kind, VERSIONS[kind])
     before, _ = snapshot(path)
@@ -301,6 +249,15 @@ def test_current_version_with_missing_structures_is_backed_up_before_repair(tmp_
     assert snapshot(backups[0])[0] == before
     open_store(tmp_path, kind)
     assert len(list(path.parent.glob(path.name + ".bak.*"))) == 1
+
+
+def test_cardstream_current_incomplete_schema_is_rejected_without_repair(tmp_path):
+    path = seed_version(tmp_path, "cards", VERSIONS["cards"])
+    before = snapshot(path)
+    with pytest.raises(SchemaMigrationError, match="不完整"):
+        open_store(tmp_path, "cards")
+    assert snapshot(path) == before
+    assert not list(path.parent.glob(path.name + ".bak.*"))
 
 
 @pytest.mark.parametrize("kind", KINDS)

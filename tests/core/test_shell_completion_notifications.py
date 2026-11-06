@@ -1,7 +1,6 @@
 """Shell receipts are bounded, durable, scoped, and acknowledged after model IO."""
 import json
 import threading
-from unittest.mock import Mock
 
 import pytest
 
@@ -9,7 +8,6 @@ from run.tools.background_jobs import prepare_background_job, update_background_
 from run.tools.background_notifications import ShellInbox
 from run.tools.background_output import OutputTail
 from run.tools.background_worker import _finish, _capture_stream
-from run.conversation.provider_tasks import settle_shell
 
 
 @pytest.fixture
@@ -124,16 +122,11 @@ def test_required_shell_waits_before_final_and_adds_only_receipt(root):
     timer = threading.Timer(.05, lambda: _finish(root, "alice", jid, exit_code=0,
                                               output_tail=["[stdout] final"], output_tail_complete=True))
     timer.start()
-    messages = []
-    iterator = settle_shell(inbox, messages=messages, iteration_text=["preliminary"],
-                            cancel_event=threading.Event(), commit_cancelled_round=Mock())
-    assert next(iterator).metadata["status"] == "waiting_shell"
-    with pytest.raises(StopIteration) as done:
-        next(iterator)
+    assert inbox.wait(threading.Event()) is True
     timer.join()
-    assert done.value.value == "continue"
-    assert jid in messages[-1]["content"]
-    assert "not-a-command" not in messages[-1]["content"]
+    value = receipt(inbox)
+    assert jid in value["content"]
+    assert "not-a-command" not in value["content"]
 
 
 @pytest.mark.parametrize("status", ["timed_out", "tool_limit", "failed"])

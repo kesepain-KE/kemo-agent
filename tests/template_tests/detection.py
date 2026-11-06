@@ -21,7 +21,7 @@ def detect_kind(target: Path) -> str:
         markers.append("message")
     if (directory / "sense.json").is_file():
         markers.append("sense")
-    if (directory / "user_config.json").is_file() and (
+    if (directory / "user_config.yaml").is_file() and (
         directory / "user_soul.md"
     ).is_file():
         markers.append("user")

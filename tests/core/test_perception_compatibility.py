@@ -17,7 +17,7 @@ class PerceptionCompatibilityTests(unittest.TestCase):
         name: str = "sensor",
         create_start_update: bool = True,
     ) -> Path:
-        module = root / "global_sense" / name
+        module = root / "sense" / name
         module.mkdir(parents=True)
         (module / "sense.md").write_text("SENSOR_DATA", "utf-8")
         if create_start_update:
@@ -40,7 +40,7 @@ class PerceptionCompatibilityTests(unittest.TestCase):
     def test_perception_module_dir_unreadable_skips_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            perception_root = root / "global_sense"
+            perception_root = root / "sense"
             perception_root.mkdir()
             registry = PromptSourceRegistry(root, "alice")
             registry.add_perception(perception_root)
@@ -51,7 +51,7 @@ class PerceptionCompatibilityTests(unittest.TestCase):
             self.assertEqual(selection.text, "")
             diagnostics = registry.selection_diagnostics()["perception"]["global"]
             self.assertEqual(diagnostics["discovered"], [])
-            self.assertEqual(diagnostics["scan_errors"], ["global_sense: 目录不可读"])
+            self.assertEqual(diagnostics["scan_errors"], ["sense: 目录不可读"])
 
     def test_sense_meta_start_update_missing_marks_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -83,12 +83,12 @@ class PerceptionCompatibilityTests(unittest.TestCase):
             self.assertTrue(meta.valid)
 
             registry = PromptSourceRegistry(root, "alice")
-            registry.add_perception(root / "global_sense")
+            registry.add_perception(root / "sense")
             selection = registry.select_perception(max_chars=1000)
 
             self.assertTrue(selection.text.startswith("[sensor]\n"))
             self.assertIn("SENSOR_DATA", selection.text)
-            self.assertIn("global_sense/sensor/sense.md", selection.text)
+            self.assertIn("sense/sensor/sense.md", selection.text)
             diagnostics = registry.selection_diagnostics()["perception"]["global"]
             self.assertEqual(diagnostics["scan_errors"], [])
 
