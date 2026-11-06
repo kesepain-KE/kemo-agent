@@ -434,7 +434,7 @@ export function HistorySearchDrawer({
           <span>{selectedDateText ? `${selectedDateText} · ` : ''}{sessions.length} 条历史对话 · {webSessions.length} 条 Web{appSessions.length ? ` · ${appSessions.length} 条 APP` : ''}</span>
           <button
             type="button"
-            disabled={loading || error || (sessions.length === 0 && !selectedDate && !favoritesOnly && !normalizedQuery) || chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction)}
+            disabled={loading || error || chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction)}
             onClick={() => {
               setPendingSessionId('')
               setDeleteSessionId('')

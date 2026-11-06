@@ -82,7 +82,7 @@ export interface AgentTask {
   }
   origin_task_id?: string
   result?: unknown
-  error?: { message?: string } | null
+  error?: { message?: string; code?: string; process_terminated?: boolean } | null
   usage?: Record<string, number>
   events?: AgentTaskEvent[]
   children?: AgentTask[]

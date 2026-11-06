@@ -38,6 +38,8 @@ export const runtimeSchema = z.object({
   }).passthrough(),
 }).passthrough()
 export const knowledgeSchema = z.object({
+  roots: z.array(z.object({ scope: z.string(), relative_path: z.string(), absolute_path: z.string(), active_for_main_agent: z.boolean() })),
+  directories: z.array(z.object({ scope: z.string(), relative_path: z.string(), name: z.string(), updated_at: number })),
   user: z.string(), summary: z.object({ documents: number, user_documents: number,
     shared_documents: number, global_documents: number }).passthrough(),
   documents: z.array(z.object({ scope: z.string(), relative_path: z.string(),

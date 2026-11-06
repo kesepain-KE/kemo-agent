@@ -311,6 +311,38 @@ it('shows budget stops as resumable partial work with segment and cumulative cou
   }
 })
 
+it('identifies only resumable output truncation failures', async () => {
+  const stopped: AgentTask = {
+    ...task, status: 'failed', resumable: true, execution_live: false,
+    error: { message: 'Provider response incomplete', code: 'output_truncated', process_terminated: true },
+  }
+  server.use(http.get('/api/users/alice/workspace/agents/agent-task-1', () => HttpResponse.json({ task: stopped })))
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}>
+    <AgentTaskView user="alice" taskId={task.id} source="web" sessionId="s1" active />
+  </QueryClientProvider>)
+  const hint = '输出达到上限，已保存安全点；主智能体可显式续跑，不会重放已完成工具。'
+  expect(await screen.findByText(hint)).toBeVisible()
+  for (const language of languages) {
+    if (language.code !== 'zh-CN') expect(translate(hint, language.code)).not.toBe(hint)
+  }
+})
+
+it('does not show a resume hint for other failed tasks', async () => {
+  const failed: AgentTask = {
+    ...task, status: 'failed', resumable: false,
+    error: { message: 'Other failure', code: 'provider_error' },
+  }
+  server.use(http.get('/api/users/alice/workspace/agents/agent-task-1', () => HttpResponse.json({ task: failed })))
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}>
+    <AgentTaskView user="alice" taskId={task.id} source="web" sessionId="s1" active />
+  </QueryClientProvider>)
+  await screen.findByText('失败')
+  const hint = '输出达到上限，已保存安全点；主智能体可显式续跑，不会重放已完成工具。'
+  expect(screen.queryByText(hint)).toBeNull()
+})
+
 it('integrates the detail view without raw metric names or duplicate tool cards', async () => {
   server.use(http.get('/api/users/alice/workspace/agents/agent-task-1', () => HttpResponse.json({ task })))
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })

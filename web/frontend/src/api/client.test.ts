@@ -108,7 +108,7 @@ describe('deleteAllSessions', () => {
     let requestedUrl = ''
     server.use(http.delete('/api/users/qa-user/sessions', ({ request }) => {
       requestedUrl = request.url
-      return HttpResponse.json({ user: 'qa-user', source: 'all', deleted: true, deleted_sessions: 29, raw_preserved: true })
+      return HttpResponse.json({ user: 'qa-user', source: 'all', deleted: true, deleted_sessions: 29, raw_preserved: false })
     }))
     const result = await deleteAllSessions('qa-user', 'page + / 1')
     const url = new URL(requestedUrl)
@@ -116,7 +116,7 @@ describe('deleteAllSessions', () => {
     expect(url.searchParams.get('client_id')).toBe('page + / 1')
     expect([...url.searchParams.keys()].sort()).toEqual(['client_id', 'source'])
     expect(result.deleted_sessions).toBe(29)
-    expect(result.raw_preserved).toBe(true)
+    expect(result.raw_preserved).toBe(false)
   })
 })
 

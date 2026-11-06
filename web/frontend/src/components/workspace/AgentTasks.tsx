@@ -149,6 +149,7 @@ export function AgentTaskView({ user, taskId, source, sessionId, active }: {
         </div>}
         {task.status === 'timed_out' && task.resumable && <p className={styles.hint}>{t('已保存进度，主智能体可继续此任务并重新计时。')}</p>}
         {task.status === 'tool_limit' && task.resumable && <p className={styles.hint}>{t('已保存进度，主智能体可继续此任务并分配新一段工具额度。')}</p>}
+        {task.status === 'failed' && task.resumable && task.error?.code === 'output_truncated' && <p className={styles.hint}>{t('输出达到上限，已保存安全点；主智能体可显式续跑，不会重放已完成工具。')}</p>}
         {task.status === 'timed_out_running' && <p className={styles.hint}>{t('正在等待执行真实退出，暂不能继续任务。')}</p>}
         {task.budget && typeof task.budget.tool_calls_used === 'number' && <div className={styles.meta}>
           <span>{t('本段工具调用')}：{task.budget.tool_calls_used} / {task.budget.unlimited ? t('不限次数') : task.budget.max_tool_calls}</span>

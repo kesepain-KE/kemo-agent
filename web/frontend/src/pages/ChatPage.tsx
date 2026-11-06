@@ -307,12 +307,20 @@ export function ChatPage() {
     () => mergeHistoryPages(historyQuery.data?.pages),
     [historyQuery.data?.pages],
   )
-  const historyItems = useMemo<ChatItem[]>(() => buildHistoryItems(historyData), [historyData])
   const persistedUserMessages = historyData?.pagination?.integration_count
     ?? historyData?.messages.filter((message) => message.role === 'user').length
     ?? 0
   const handoffReady = liveRun?.phase === 'awaiting_history' && persistedUserMessages > liveRun.historyUserMessages
   const visibleLiveItems = handoffReady ? EMPTY_CHAT_ITEMS : liveItems
+  const liveIntegrationNumbers = useMemo(() => new Set(visibleLiveItems.flatMap((item) => (
+    item.kind === 'message' && item.role === 'user' && item.integrationNumber !== undefined
+      ? [item.integrationNumber] : []
+  ))), [visibleLiveItems])
+  const historyItems = useMemo<ChatItem[]>(
+    () => buildHistoryItems(historyData, liveIntegrationNumbers),
+    [historyData, liveIntegrationNumbers],
+  )
+  const conversationIntegrationCount = Math.max(persistedUserMessages, ...liveIntegrationNumbers)
   const items = useMemo(() => [...historyItems, ...visibleLiveItems], [historyItems, visibleLiveItems])
   useEffect(() => {
     const conversationKey = `${user}\u0000${sessionId}`
@@ -691,9 +699,7 @@ export function ChatPage() {
   const editAndResend = (id: string, content: string) => {
     if (running || conversationBusy || !lastUserMessage || lastUserMessage.id !== id) return
     const targetSession = sessionId || lastAttemptSessionRef.current
-    const persistedRounds = persistedUserMessages
-    const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
-    const expectedIntegrationCount = persistedRounds + liveRounds
+    const expectedIntegrationCount = conversationIntegrationCount
     if (!targetSession || expectedIntegrationCount < 1) return
     setConversationFeedback(null)
     setEditingSource({
@@ -836,9 +842,7 @@ export function ChatPage() {
     if (running || conversationBusy || editingSource || !lastUserMessage || lastUserMessage.kind !== 'message') return
     const prompt = lastUserMessage.content
     const targetSession = sessionId || lastAttemptSessionRef.current
-    const persistedRounds = persistedUserMessages
-    const liveRounds = visibleLiveItems.filter((item) => item.kind === 'message' && item.role === 'user').length
-    const expectedIntegrationCount = persistedRounds + liveRounds
+    const expectedIntegrationCount = conversationIntegrationCount
     if (expectedIntegrationCount < 1) return
     setConversationBusy('retry')
     setConversationFeedback(null)

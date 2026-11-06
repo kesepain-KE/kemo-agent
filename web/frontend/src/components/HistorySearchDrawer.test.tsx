@@ -107,13 +107,17 @@ describe('HistorySearchDrawer', () => {
     expect(onDeleteAllSessions).toHaveBeenCalledTimes(2)
   })
 
-  it('空历史和运行中的只读列表不可全部删除', () => {
+  it('列表为空时仍可清理后端隐藏历史，运行中的只读列表禁止全部删除', async () => {
     const props = {
       open: true, activeSessionId: '', onClose: vi.fn(), onSelectSession: vi.fn(),
       onDeleteSession: vi.fn(), onDeleteAllSessions: vi.fn(), onRetrySummary: vi.fn(),
     }
     const { rerender } = render(<HistorySearchDrawer {...props} sessions={[]} />)
-    expect(screen.getByRole('button', { name: '全部删除' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '全部删除' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: '全部删除' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认全部删除' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(props.onDeleteAllSessions).toHaveBeenCalledTimes(1)
     rerender(<HistorySearchDrawer {...props} sessions={[{ ...sessions[0], source: 'cli' }]} chatRunning />)
     expect(screen.getByRole('button', { name: '全部删除' })).toBeDisabled()
   })
@@ -303,11 +307,13 @@ describe('HistorySearchDrawer', () => {
     expect(screen.getByRole('button', { name: '打开对话 项目复盘' })).toBeDisabled()
   })
 
-  it('单条删除和全部删除使用独立按钮及确认层，不触发会话切换', async () => {
+  it('置顶收藏对话可以直接删除，单条和全部删除均确认且不触发会话切换', async () => {
     const onSelectSession = vi.fn()
     const onDeleteSession = vi.fn()
     const onDeleteAllSessions = vi.fn()
-    render(<HistorySearchDrawer open sessions={sessions} activeSessionId="s1" onClose={() => undefined} onSelectSession={onSelectSession} onDeleteSession={onDeleteSession} onDeleteAllSessions={onDeleteAllSessions} onRetrySummary={() => undefined} />)
+    render(<HistorySearchDrawer open sessions={[
+      sessions[0], { ...sessions[1], pinned: true, favorite: true },
+    ]} activeSessionId="s1" onClose={() => undefined} onSelectSession={onSelectSession} onDeleteSession={onDeleteSession} onDeleteAllSessions={onDeleteAllSessions} onRetrySummary={() => undefined} />)
 
     fireEvent.click(screen.getByRole('button', { name: '删除对话 项目复盘' }))
     const deleteDialog = screen.getByRole('alertdialog', { name: '确认删除这条历史对话？' })

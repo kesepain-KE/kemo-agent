@@ -2,8 +2,7 @@ import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { BookOpen, FileText, Layers3, LoaderCircle, Quote, Search, Share2, UserRound, X } from 'lucide-react'
-import type { KnowledgeDocumentSummary, KnowledgeResponse } from '../types/api'
-import { getKnowledgeCategoryFilters, knowledgeCategoryKey } from '../knowledgeCategories'
+import type { KnowledgeDocumentSummary } from '../types/api'
 import { formatBytes, formatDateTime } from './ModuleUi'
 import styles from './KnowledgeReferenceDrawer.module.css'
 
@@ -24,7 +23,6 @@ const scopeIcons = {
 export interface KnowledgeReferenceDrawerProps {
   open: boolean
   documents: KnowledgeDocumentSummary[]
-  categories?: KnowledgeResponse['categories']
   loading?: boolean
   error?: boolean
   onClose: () => void
@@ -34,7 +32,6 @@ export interface KnowledgeReferenceDrawerProps {
 export function KnowledgeReferenceDrawer({
   open,
   documents,
-  categories,
   loading = false,
   error = false,
   onClose,
@@ -42,40 +39,28 @@ export function KnowledgeReferenceDrawer({
 }: KnowledgeReferenceDrawerProps) {
   useLanguage()
   const [scope, setScope] = useState<KnowledgeScope>('all')
-  const [categoryFilter, setCategoryFilter] = useState('all')
   const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const resultsRef = useRef<HTMLDivElement>(null)
-  const categoryFilters = useMemo(
-    () => getKnowledgeCategoryFilters({ documents, categories }, scope),
-    [documents, categories, scope],
-  )
-  const activeCategory = categoryFilters.some((category) => category.value === categoryFilter) ? categoryFilter : 'all'
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const filteredDocuments = useMemo(() => documents.filter((document) => (
     (scope === 'all' || document.scope === scope)
-    && (activeCategory === 'all' || knowledgeCategoryKey(document.scope, document.category) === activeCategory)
     && (!normalizedQuery || `${document.title} ${document.relative_path}`.toLocaleLowerCase().includes(normalizedQuery))
-  )), [documents, normalizedQuery, scope, activeCategory])
-  const filtering = scope !== 'all' || activeCategory !== 'all' || Boolean(normalizedQuery)
+  )), [documents, normalizedQuery, scope])
+  const filtering = scope !== 'all' || Boolean(normalizedQuery)
   const countLabel = filtering && !loading && !error
     ? tr('匹配 {matched} / 共 {count} 个知识文件', { matched: filteredDocuments.length, count: documents.length })
     : tr('{count} 个可见知识文件', { count: documents.length })
 
   useEffect(() => {
-    if (!loading && activeCategory !== categoryFilter) setCategoryFilter('all')
-  }, [activeCategory, categoryFilter, loading])
-
-  useEffect(() => {
     if (resultsRef.current) resultsRef.current.scrollTop = 0
-  }, [open, scope, activeCategory, normalizedQuery])
+  }, [open, scope, normalizedQuery])
 
   useEffect(() => {
     if (open) requestAnimationFrame(() => searchRef.current?.focus())
     else {
       setQuery('')
       setScope('all')
-      setCategoryFilter('all')
     }
   }, [open])
 
@@ -84,7 +69,7 @@ export function KnowledgeReferenceDrawer({
       <div className="drawer-head">
         <div className={styles.headerLead}>
           <span className={styles.headerIcon}><BookOpen size={18} /></span>
-          <span className="context-drawer-heading"><strong>引用知识库</strong><span aria-live="polite" title={countLabel}>{countLabel}</span></span>
+          <span className="context-drawer-heading"><strong>{tr("引用知识库")}</strong><span aria-live="polite" title={countLabel}>{countLabel}</span></span>
         </div>
         <button type="button" className="icon-btn" onClick={onClose} aria-label={tr("关闭知识库引用")}><X size={17} /></button>
       </div>
@@ -96,10 +81,10 @@ export function KnowledgeReferenceDrawer({
             ref={searchRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索知识库名称或路径…"
-            aria-label="搜索知识库"
+            placeholder={tr("搜索知识库名称或路径…")}
+            aria-label={tr("搜索知识库")}
           />
-          {query && <button type="button" onClick={() => setQuery('')} aria-label="清空知识库搜索"><X size={15} /></button>}
+          {query && <button type="button" onClick={() => setQuery('')} aria-label={tr("清空知识库搜索")}><X size={15} /></button>}
         </label>
 
         <nav className={styles.scopeTabs} aria-label={tr("知识库层级")}>
@@ -108,28 +93,9 @@ export function KnowledgeReferenceDrawer({
             type="button"
             className={scope === value ? styles.activeTab : ''}
             aria-pressed={scope === value}
-            onClick={() => {
-              setScope(value)
-              setCategoryFilter('all')
-            }}
+            onClick={() => setScope(value)}
           >{value === 'all' ? tr('全部') : tr(scopeLabels[value])}</button>)}
         </nav>
-
-        <label className={styles.categoryRow}>
-          <span>{tr("分类")}</span>
-          <select
-            className={`select ${styles.categorySelect}`}
-            aria-label={tr("知识库分类")}
-            value={activeCategory}
-            disabled={loading || error || documents.length === 0}
-            onChange={(event) => setCategoryFilter(event.target.value)}
-          >
-            <option value="all">{tr("全部分类")}</option>
-            {categoryFilters.map((category) => <option key={category.value} value={category.value}>
-              {category.label}（{category.count}）
-            </option>)}
-          </select>
-        </label>
 
         <div className={styles.results} ref={resultsRef}>
           {loading && <div className={styles.empty}><LoaderCircle className={styles.spinning} size={22} /><strong>{tr("正在加载知识库")}</strong></div>}
@@ -142,7 +108,6 @@ export function KnowledgeReferenceDrawer({
               <span className={styles.cardCopy}>
                 <strong title={document.title}>{document.title}</strong>
                 <span title={document.relative_path}>{document.relative_path}</span>
-                <span className={styles.categoryBadge} title={document.category || tr('未分类')}>{document.category || tr('未分类')}</span>
                 <small>{formatBytes(document.size)} · {formatDateTime(document.updated_at)}</small>
               </span>
               <span className={`${styles.scopeBadge} ${styles[normalizedScope]}`}>{tr(scopeLabels[normalizedScope])}</span>
@@ -154,7 +119,7 @@ export function KnowledgeReferenceDrawer({
           {!loading && !error && filteredDocuments.length === 0 && <div className={styles.empty}>
             <FileText size={22} />
             <strong>{documents.length === 0 ? tr('暂无知识文件') : tr('没有匹配的知识文件')}</strong>
-            <span>{documents.length === 0 ? tr('可前往知识库页面导入知识文件。') : tr('请调整搜索词、分类或知识层级。')}</span>
+            <span>{documents.length === 0 ? tr('可前往知识库页面导入知识文件。') : tr('请调整搜索词或知识层级。')}</span>
           </div>}
         </div>
       </div>

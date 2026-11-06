@@ -171,4 +171,39 @@ Token 合计|Total tokens|Tokens totales|Total des tokens|Tokens gesamt|Total de
 删除技能包|Delete skill package|Eliminar paquete|Supprimer le paquet|Fähigkeitspaket löschen|Excluir pacote|Удалить пакет навыка|スキルパッケージを削除|스킬 패키지 삭제
 删除整包|Delete entire package|Eliminar paquete completo|Supprimer tout le paquet|Gesamtes Paket löschen|Excluir pacote inteiro|Удалить весь пакет|パッケージ全体を削除|전체 패키지 삭제
 技能包已删除|Skill package deleted|Paquete eliminado|Paquet supprimé|Fähigkeitspaket gelöscht|Pacote excluído|Пакет навыка удалён|スキルパッケージを削除しました|스킬 패키지 삭제됨
+知识目录|Knowledge folders|Carpetas de conocimiento|Dossiers de connaissances|Wissensordner|Pastas de conhecimento|Папки знаний|ナレッジフォルダー|지식 폴더
+知识文件预览|Document preview|Vista previa del documento|Aperçu du document|Dokumentvorschau|Prévia do documento|Просмотр документа|ドキュメントプレビュー|문서 미리보기
+从目录中选择文件，在此预览或编辑。|Select a file to preview or edit it here.|Selecciona un archivo para verlo o editarlo aquí.|Sélectionnez un fichier à afficher ou modifier ici.|Datei zum Anzeigen oder Bearbeiten auswählen.|Selecione um arquivo para visualizar ou editar aqui.|Выберите файл для просмотра или редактирования.|ファイルを選んでプレビューまたは編集できます。|파일을 선택하여 미리 보거나 편집하세요.
+按名称或路径搜索…|Search by name or path…|Buscar por nombre o ruta…|Rechercher par nom ou chemin…|Nach Name oder Pfad suchen…|Buscar por nome ou caminho…|Поиск по имени или пути…|名前やパスで検索…|이름 또는 경로로 검색…
+目录操作|Folder actions|Acciones de carpeta|Actions du dossier|Ordneraktionen|Ações da pasta|Действия с папкой|フォルダーの操作|폴더 작업
+更多操作|More actions|Más acciones|Autres actions|Weitere Aktionen|Mais ações|Другие действия|その他の操作|추가 작업
+操作 {name}|Actions for {name}|Acciones para {name}|Actions pour {name}|Aktionen für {name}|Ações de {name}|Действия: {name}|{name} の操作|{name} 작업
+文件夹|Folder|Carpeta|Dossier|Ordner|Pasta|Папка|フォルダー|폴더
+此文件夹为空|This folder is empty|Esta carpeta está vacía|Ce dossier est vide|Dieser Ordner ist leer|Esta pasta está vazia|Эта папка пуста|このフォルダーは空です|폴더가 비어 있습니다
+正在加载知识文件|Loading document|Cargando documento|Chargement du document|Dokument wird geladen|Carregando documento|Загрузка документа|ドキュメントを読み込み中|문서 불러오는 중
+知识文件内容|Document content|Contenido del documento|Contenu du document|Dokumentinhalt|Conteúdo do documento|Содержимое документа|ドキュメントの内容|문서 내용
+知识文件已保存|Document saved|Documento guardado|Document enregistré|Dokument gespeichert|Documento salvo|Документ сохранён|ドキュメントを保存しました|문서 저장됨
+知识文件已导入|Document imported|Documento importado|Document importé|Dokument importiert|Documento importado|Документ импортирован|ドキュメントをインポートしました|문서 가져옴
+导入文件|Import file|Importar archivo|Importer un fichier|Datei importieren|Importar arquivo|Импортировать файл|ファイルをインポート|파일 가져오기
+新建文件|New file|Nuevo archivo|Nouveau fichier|Neue Datei|Novo arquivo|Новый файл|新しいファイル|새 파일
+新建文件夹|New folder|Nueva carpeta|Nouveau dossier|Neuer Ordner|Nova pasta|Новая папка|新しいフォルダー|새 폴더
+复制相对路径|Copy relative path|Copiar ruta relativa|Copier le chemin relatif|Relativen Pfad kopieren|Copiar caminho relativo|Копировать относительный путь|相対パスをコピー|상대 경로 복사
+复制绝对路径|Copy absolute path|Copiar ruta absoluta|Copier le chemin absolu|Absoluten Pfad kopieren|Copiar caminho absoluto|Копировать абсолютный путь|絶対パスをコピー|절대 경로 복사
+移动|Move|Mover|Déplacer|Verschieben|Mover|Переместить|移動|이동
+相对路径|Relative path|Ruta relativa|Chemin relatif|Relativer Pfad|Caminho relativo|Относительный путь|相対パス|상대 경로
+目标知识库|Destination library|Biblioteca de destino|Bibliothèque de destination|Zielbibliothek|Biblioteca de destino|Целевая библиотека|移動先のナレッジ|대상 지식 라이브러리
+知识目录已更新|Knowledge folders updated|Carpetas actualizadas|Dossiers mis à jour|Wissensordner aktualisiert|Pastas atualizadas|Папки знаний обновлены|ナレッジフォルダーを更新しました|지식 폴더 업데이트됨
+知识条目已删除|Knowledge item deleted|Elemento eliminado|Élément supprimé|Wissenseintrag gelöscht|Item excluído|Элемент удалён|項目を削除しました|지식 항목 삭제됨
+知识条目操作|Knowledge item actions|Acciones del elemento|Actions de l’élément|Aktionen für Wissenseintrag|Ações do item|Действия с элементом|ナレッジ項目の操作|지식 항목 작업
+名称不能包含路径分隔符|The name cannot contain path separators|El nombre no puede contener separadores de ruta|Le nom ne peut pas contenir de séparateurs de chemin|Der Name darf keine Pfadtrenner enthalten|O nome não pode conter separadores de caminho|Имя не может содержать разделители пути|名前にパス区切り文字は使用できません|이름에 경로 구분자를 포함할 수 없습니다
+路径相对于所选知识库根目录；同名目标不会被覆盖。|Paths are relative to the selected library root. Existing destinations are kept.|Las rutas son relativas a la raíz elegida. No se sobrescriben destinos existentes.|Les chemins sont relatifs à la racine choisie. Les destinations existantes sont conservées.|Pfade gelten relativ zur gewählten Bibliothek. Vorhandene Ziele bleiben erhalten.|Os caminhos são relativos à raiz selecionada. Destinos existentes são preservados.|Пути отсчитываются от корня библиотеки. Существующие файлы не перезаписываются.|パスは選択したナレッジのルートからの相対パスです。同名の項目は上書きしません。|경로는 선택한 지식 라이브러리 루트 기준입니다. 같은 이름의 대상은 덮어쓰지 않습니다.
+删除此文件夹？|Delete this folder?|¿Eliminar esta carpeta?|Supprimer ce dossier ?|Diesen Ordner löschen?|Excluir esta pasta?|Удалить эту папку?|このフォルダーを削除しますか？|이 폴더를 삭제할까요?
+将永久删除此文件夹及其全部内容。|This folder and all its contents will be permanently deleted.|Esta carpeta y todo su contenido se eliminarán permanentemente.|Ce dossier et tout son contenu seront supprimés définitivement.|Dieser Ordner und sein gesamter Inhalt werden endgültig gelöscht.|Esta pasta e todo o conteúdo serão excluídos permanentemente.|Папка и всё её содержимое будут удалены безвозвратно.|フォルダーとその内容を完全に削除します。|이 폴더와 모든 내용이 영구적으로 삭제됩니다.
+文件将被永久删除，相关索引也会失效。|The file will be permanently deleted and its index references will become invalid.|El archivo se eliminará permanentemente y sus referencias quedarán inválidas.|Le fichier sera supprimé définitivement et ses références d’index seront invalides.|Die Datei wird endgültig gelöscht und ihre Indexverweise werden ungültig.|O arquivo será excluído permanentemente e suas referências ficarão inválidas.|Файл будет удалён безвозвратно, ссылки индекса станут недействительными.|ファイルを完全に削除すると、関連する索引の参照も無効になります。|파일이 영구 삭제되며 관련 색인 참조가 무효화됩니다.
+放弃未保存的修改？|Discard unsaved changes?|¿Descartar cambios sin guardar?|Abandonner les modifications non enregistrées ?|Ungespeicherte Änderungen verwerfen?|Descartar alterações não salvas?|Отменить несохранённые изменения?|未保存の変更を破棄しますか？|저장하지 않은 변경 사항을 버릴까요?
+离开后将丢弃当前文件的未保存修改。|Leaving will discard unsaved changes to this file.|Al salir se descartarán los cambios sin guardar.|Les modifications non enregistrées seront perdues en quittant.|Beim Verlassen gehen ungespeicherte Änderungen verloren.|Sair descartará as alterações não salvas neste arquivo.|При выходе несохранённые изменения файла будут потеряны.|移動すると、このファイルの未保存の変更は失われます。|이동하면 이 파일의 저장하지 않은 변경 사항이 사라집니다.
+放弃修改|Discard changes|Descartar cambios|Abandonner les modifications|Änderungen verwerfen|Descartar alterações|Отменить изменения|変更を破棄|변경 사항 버리기
+覆盖已有文件？|Overwrite existing file?|¿Sobrescribir el archivo existente?|Remplacer le fichier existant ?|Vorhandene Datei überschreiben?|Sobrescrever arquivo existente?|Перезаписать существующий файл?|既存のファイルを上書きしますか？|기존 파일을 덮어쓸까요?
+覆盖|Overwrite|Sobrescribir|Remplacer|Überschreiben|Sobrescrever|Перезаписать|上書き|덮어쓰기
+请调整搜索词或知识层级。|Adjust the search term or knowledge scope.|Ajusta la búsqueda o el nivel de conocimiento.|Modifiez la recherche ou le niveau de connaissances.|Suchbegriff oder Wissensebene anpassen.|Ajuste a busca ou o nível de conhecimento.|Измените запрос или область знаний.|検索語またはナレッジ階層を変更してください。|검색어나 지식 범위를 조정하세요.
 `

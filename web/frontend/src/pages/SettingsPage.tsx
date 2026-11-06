@@ -813,21 +813,6 @@ export function SettingsPage() {
             <SettingRow title="全局拓展白名单" description="expand/global 中允许加载的模块" source="user" control={<TagInput label="全局拓展白名单" value={userDraft.expand.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, global_whitelist: value } })} />} />
             <SettingRow title="全局感知白名单" description="sense 中允许注入的模块" source="user" control={<TagInput label="全局感知白名单" value={userDraft.perception.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, global_whitelist: value } })} />} />
             <SettingRow title="插件白名单" description="控制 Provider 工具 Schema 与插件 Prompt 清单" source="user" control={<TagInput label="插件白名单" value={userDraft.plugins.whitelist} onChange={(value) => setUserDraft({ ...userDraft, plugins: { ...userDraft.plugins, whitelist: value } })} />} />
-            <SettingRow title="插件权限级别" description="只向智能体开放选中的工具类别；新配置默认全部开放" source="user" control={<div className="setting-checkboxes">{([
-              ['read', '读取'],
-              ['write', '写入'],
-              ['delete', tr('删除')],
-              ['external', '外部操作'],
-            ] as const).map(([permission, label]) => <label key={permission}><input
-              type="checkbox"
-              checked={userDraft.plugins.permissions.includes(permission)}
-              onChange={(event) => {
-                const permissions = event.target.checked
-                  ? [...userDraft.plugins.permissions, permission]
-                  : userDraft.plugins.permissions.filter((item) => item !== permission)
-                setUserDraft({ ...userDraft, plugins: { ...userDraft.plugins, permissions } })
-              }}
-            />{label}</label>)}</div>} />
           </article>
         </> : null}
 

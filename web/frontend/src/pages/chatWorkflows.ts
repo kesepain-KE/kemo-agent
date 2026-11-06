@@ -184,6 +184,7 @@ return async (
     id: userMessageId,
     kind: 'message',
     role: 'user',
+    integrationNumber: historyUserMessages + 1,
     content: displayedPrompt,
     attachments: uploadedFiles.map(pendingInputAttachment),
     edited: Boolean(editingSource),

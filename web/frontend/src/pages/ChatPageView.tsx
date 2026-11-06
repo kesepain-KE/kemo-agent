@@ -602,7 +602,6 @@ return (
     <KnowledgeReferenceDrawer
       open={knowledgeDrawerOpen}
       documents={knowledgeQuery.data?.documents ?? []}
-      categories={knowledgeQuery.data?.categories}
       loading={knowledgeQuery.isLoading || knowledgeQuery.isFetching}
       error={knowledgeQuery.isError}
       onClose={() => setKnowledgeDrawerOpen(false)}

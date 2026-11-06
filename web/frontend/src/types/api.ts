@@ -289,7 +289,7 @@ export interface SessionWithdrawIntegrationResponse {
 
 export interface SessionDeleteAllResponse {
   user: string
-  source: 'web'
+  source: 'all'
   deleted: boolean
   deleted_sessions: number
   raw_preserved: boolean
@@ -386,13 +386,21 @@ export interface KnowledgeDocumentSummary {
   title: string
   size: number
   updated_at: number
-  category?: string
   active_for_main_agent: boolean
 }
 
-export interface KnowledgeCategorySummary {
+export interface KnowledgeRoot {
+  scope: string
+  relative_path: string
+  absolute_path: string
+  active_for_main_agent: boolean
+}
+
+export interface KnowledgeDirectory {
+  scope: string
+  relative_path: string
   name: string
-  count: number
+  updated_at: number
 }
 
 export interface NamePolicySummary {
@@ -421,9 +429,8 @@ export interface KnowledgeResponse {
   }
   summary: { documents: number; user_documents: number; shared_documents: number; global_documents: number }
   documents: KnowledgeDocumentSummary[]
-  categories: Record<string, KnowledgeCategorySummary[]>
-  classification_file: string
-  classification_errors: string[]
+  roots: KnowledgeRoot[]
+  directories: KnowledgeDirectory[]
   source_policy: MainAgentSourcePolicySummary
 }
 
@@ -434,7 +441,6 @@ export interface KnowledgeDocumentResponse {
   content: string
   size: number
   updated_at?: number
-  category?: string
 }
 
 export interface SkillSummary {

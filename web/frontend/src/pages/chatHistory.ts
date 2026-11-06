@@ -22,7 +22,10 @@ function historyToolStatus(status: string): Extract<ChatItem, { kind: 'tool' }>[
   if (status === 'completed' || status === 'success' || status === 'duplicate_reused') return 'success'
   return 'error'
 }
-export function buildHistoryItems(history: HistoryResponse | undefined): ChatItem[] {
+export function buildHistoryItems(
+  history: HistoryResponse | undefined,
+  liveIntegrationNumbers?: ReadonlySet<number>,
+): ChatItem[] {
   const integrations = history?.integrations || []
   const metrics = new Map(integrations.map((item) => [item.integration_id, item]))
   const withdrawn = new Set(integrations.filter((item) => item.withdrawn).map((item) => item.integration_id))
@@ -51,6 +54,7 @@ export function buildHistoryItems(history: HistoryResponse | undefined): ChatIte
     const message = card.message
     const selected = metrics.get(card.integration_id)
     const round = message?.integration_number ?? selected?.integration_number ?? 0
+    if (liveIntegrationNumbers?.has(round)) continue
     if (message?.role === 'user' && card.raw_level !== 'guidance') {
       activeReasoningPosition = -1
     }

@@ -1893,6 +1893,79 @@ describe('AppShell navigation', () => {
     expect(screen.queryByText(/运行出现问题，正在自动重试/)).not.toBeInTheDocument()
   })
 
+  it('自动重试期间刷新历史只显示一次本轮输入，保留同文的上一轮和实时回复', async () => {
+    const prompt = '再次检查这个任务'
+    let currentStored = false
+    let closed = false
+    let chatRequests = 0
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder()
+    server.use(http.get('/api/users/kesepain/sessions/s1/history', () => {
+      const history = cardHistory({
+        user: 'kesepain', session_id: 's1',
+        messages: [
+          { role: 'user', content: prompt },
+          { role: 'assistant', content: '上一轮结果' },
+          ...(currentStored ? [
+            { role: 'user', content: prompt },
+            { role: 'assistant', content: '失败尝试正文', level: 'interim' as const },
+            ...(closed ? [{ role: 'assistant', content: '重试后的实时正文' }] : []),
+          ] : []),
+        ],
+        integrations: [
+          { integration_number: 1 },
+          ...(currentStored ? [{ integration_number: 2, response_closed: closed }] : []),
+        ],
+      })
+      return HttpResponse.json({
+        ...history,
+        user_messages: history.cards.filter((card) => card.raw_level === 'initial').map((card, index) => ({
+          ...card.message, card_id: card.card_id, seq: card.seq, integration_number: index + 1,
+        })),
+      })
+    }))
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      chatRequests += 1
+      currentStored = true
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { streamController = controller },
+      }), { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('上一轮结果')
+    const composer = screen.getByRole('textbox', { name: '消息内容' })
+    fireEvent.change(composer, { target: { value: prompt } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(chatRequests).toBe(1))
+    streamController.enqueue(encoder.encode(
+      'event: text_delta\ndata: {"type":"text_delta","content":"失败尝试正文"}\n\n'
+      + 'event: retrying\ndata: {"type":"retrying","metadata":{"phase":"provider","partial_response":true,"failed_attempt":1,"next_attempt":2,"failed_request_id":"failed-request"}}\n\n'
+      + 'event: text_delta\ndata: {"type":"text_delta","content":"重试后的实时正文"}\n\n',
+    ))
+    await screen.findByText('重试后的实时正文')
+    await act(async () => {
+      await app.client.invalidateQueries({ queryKey: ['history', 'kesepain', 's1'] })
+      await delay(0)
+    })
+    expect(screen.getAllByText(prompt)).toHaveLength(2)
+    expect(screen.getAllByText('失败尝试正文')).toHaveLength(1)
+    expect(screen.getByRole('progressbar', { name: '当前预选轮次' })).toHaveAttribute('aria-valuemax', '2')
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
+
+    closed = true
+    streamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n'))
+    streamController.close()
+    await waitFor(() => expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument())
+    expect(screen.getByText('重试后的实时正文')).toBeInTheDocument()
+    await waitFor(() => expect(document.querySelector('[data-user-message-id="history_card_s1_3_user"]')).not.toBeNull())
+    expect(screen.getAllByText(prompt)).toHaveLength(2)
+    expect(screen.getAllByText('重试后的实时正文')).toHaveLength(1)
+    expect(chatRequests).toBe(1)
+  })
+
   it('从剪贴板粘贴多个文件后允许不输入文字直接发送附件', async () => {
     let chatBody: { prompt?: string; uploaded_files?: string[] } | undefined
     const interceptedFetch = globalThis.fetch.bind(globalThis)
@@ -2938,8 +3011,8 @@ describe('AppShell navigation', () => {
     let deleted = false
     const requests: URL[] = []
     const mixed = [
-      { ...session('s1', '当前工作', 3), source: 'web' },
-      { ...session('shared', '桌宠只读历史', 2), source: 'message:nya_desk_pet' },
+      { ...session('s1', '当前工作', 3), source: 'web', title_source: 'manual' },
+      { ...session('shared', '桌宠只读历史', 2), source: 'message:nya_desk_pet', title_source: 'manual' },
     ]
     server.use(
       http.get('/api/users/kesepain/sessions', ({ request }) => {
@@ -2956,7 +3029,7 @@ describe('AppShell navigation', () => {
         }, { status: 409 })
         deleted = true
         return HttpResponse.json({
-          user: 'kesepain', source: 'all', deleted: true, deleted_sessions: 29, raw_preserved: true,
+          user: 'kesepain', source: 'all', deleted: true, deleted_sessions: 29, raw_preserved: false,
         })
       }),
     )
@@ -3092,27 +3165,25 @@ describe('AppShell navigation', () => {
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
   })
 
-  it('聊天知识引用可叠加分类和搜索，引用仍写入原始路径标记', async () => {
+  it('聊天知识引用可叠加层级和路径搜索，引用仍写入原始路径标记', async () => {
     const documents = [
-      { scope: 'user', relative_path: 'notes.md', title: '个人笔记', category: '开发规范', size: 120, updated_at: 1, active_for_main_agent: true },
-      { scope: 'shared', relative_path: 'team.md', title: '共享规范', category: '开发规范', size: 90, updated_at: 1, active_for_main_agent: true },
-      { scope: 'shared', relative_path: 'other.md', title: '其他资料', category: '其他分类', size: 90, updated_at: 1, active_for_main_agent: true },
+      { scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, active_for_main_agent: true },
+      { scope: 'shared', relative_path: 'team.md', title: '共享规范', size: 90, updated_at: 1, active_for_main_agent: true },
+      { scope: 'shared', relative_path: 'other.md', title: '其他资料', size: 90, updated_at: 1, active_for_main_agent: true },
     ]
     server.use(http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({
       user: 'kesepain', documents, summary: { documents: 3, user_documents: 1, shared_documents: 2, global_documents: 0 },
-      categories: {
-        user: [{ name: '开发规范', count: 1 }],
-        shared: [{ name: '开发规范', count: 1 }, { name: '其他分类', count: 1 }],
-      },
+      roots: ['user', 'shared', 'global'].map(scope => ({ scope, relative_path: `knowledge/${scope}`,
+        absolute_path: `/project/knowledge/${scope}`, active_for_main_agent: true })), directories: [],
     })))
     renderApp('/chat?user=kesepain&session=s1')
     const composer = await screen.findByRole('textbox', { name: '消息内容' })
     fireEvent.change(composer, { target: { value: '请参考规范' } })
     fireEvent.click(screen.getByRole('button', { name: '打开知识库' }))
     const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
-    const select = within(drawer).getByRole('combobox', { name: '知识库分类' })
-    const option = await within(select).findByRole('option', { name: '共享层 · 开发规范（1）' })
-    fireEvent.change(select, { target: { value: option.getAttribute('value') } })
+    fireEvent.click(within(drawer).getByRole('button', { name: '共享' }))
+    await within(drawer).findByText('共享规范')
+    expect(within(drawer).queryByRole('combobox')).not.toBeInTheDocument()
     fireEvent.change(within(drawer).getByRole('textbox', { name: '搜索知识库' }), { target: { value: 'team.md' } })
     expect(within(drawer).getByText('匹配 1 / 共 3 个知识文件')).toBeInTheDocument()
     expect(within(drawer).queryByText('个人笔记')).not.toBeInTheDocument()
@@ -3269,6 +3340,7 @@ describe('AppShell navigation', () => {
     const perceptionMaster = screen.getByRole('switch', { name: '感知数据注入' })
     expect(expandMaster).toBeChecked()
     expect(perceptionMaster).toBeChecked()
+    expect(screen.queryByText('插件权限级别')).not.toBeInTheDocument()
     expect(screen.queryByRole('switch', { name: '拓展数据实时注入' })).not.toBeInTheDocument()
     expect(screen.queryByRole('switch', { name: '感知数据实时注入' })).not.toBeInTheDocument()
     fireEvent.click(expandMaster)

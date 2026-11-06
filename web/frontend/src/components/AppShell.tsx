@@ -675,7 +675,7 @@ export function AppShell() {
   const navigationCommands = useMemo(() => [
     { id: 'chat', label: '打开对话', detail: '回到当前聊天与消息输入界面', keywords: 'chat conversation 对话', icon: Bot, action: () => navigate(withContext('/chat')) },
     { id: 'tasks', label: '查看任务中枢', detail: '计划、Cron 与执行记录', keywords: 'task plan cron 任务', icon: ListChecks, action: () => navigate(withContext('/tasks')) },
-    { id: 'knowledge', label: '查询文件知识库', detail: '用户、共享与全局知识索引', keywords: 'knowledge file search 知识库', icon: BookOpen, action: () => navigate(withContext('/knowledge')) },
+    { id: 'knowledge', label: '查询文件知识库', detail: '用户、共享与全局知识文件', keywords: 'knowledge file search 知识库', icon: BookOpen, action: () => navigate(withContext('/knowledge')) },
     { id: 'memory', label: '打开记忆管理', detail: '查看和管理全部记忆层级', keywords: 'memory improve 记忆', icon: Brain, action: () => navigate(withContext('/memory')) },
     { id: 'agents', label: '查看子智能体', detail: '内置与用户子代理', keywords: 'agents subagent 子智能体', icon: Bot, action: () => navigate(withContext('/agents')) },
     { id: 'skills', label: '查看工具与技能', detail: '工具与技能注册来源', keywords: 'skills tools 技能 工具', icon: Wrench, action: () => navigate(withContext('/skills')) },

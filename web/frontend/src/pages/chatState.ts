@@ -81,7 +81,7 @@ export function buildUserMessageMarkers(
   firstRound = 1,
   indexedMessages: NonNullable<HistoryResponse['user_messages']> = [],
 ): UserMessageMarker[] {
-  const markers = new Map<string, UserMessageMarker>()
+  const markers = new Map<number, UserMessageMarker>()
   const indexedItems: ChatItem[] = indexedMessages.map((message) => ({
     id: `history_${message.card_id}_user`, kind: 'message', role: 'user',
     integrationNumber: message.integration_number,
@@ -97,7 +97,7 @@ export function buildUserMessageMarkers(
     if (item.kind !== 'message' || item.role !== 'user') continue
     const historicalRound = /^history_(\d+)_user$/.exec(item.id)?.[1]
     const round = item.integrationNumber ?? (historicalRound ? Number(historicalRound) : nextRound)
-    markers.set(item.id, {
+    markers.set(round, {
       id: item.id,
       content: item.content || item.attachments?.map((attachment) => `[附件] ${attachment.name}`).join('；') || '附件消息',
       integration_number: round,

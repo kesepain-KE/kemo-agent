@@ -450,17 +450,20 @@ export async function putKnowledgeDocument(user: string, scope: string, path: st
   })
 }
 
-export async function setKnowledgeCategory(
-  user: string,
-  scope: string,
-  path: string,
-  category: string,
-): Promise<Record<string, unknown>> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/classification?path=${encodeURIComponent(path)}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ category }),
+export async function createKnowledgeEntry(user: string, scope: string, path: string, kind: 'file' | 'directory'): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/entry?path=${encodeURIComponent(path)}`, {
+    method: 'POST', body: JSON.stringify({ kind }),
   })
+}
+
+export async function transferKnowledgeEntry(user: string, scope: string, path: string, action: 'copy' | 'move', targetScope: string, targetPath: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/entry?path=${encodeURIComponent(path)}`, {
+    method: 'PATCH', body: JSON.stringify({ action, target_scope: targetScope, target_path: targetPath }),
+  })
+}
+
+export async function deleteKnowledgeEntry(user: string, scope: string, path: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/entry?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
 }
 
 export async function deleteKnowledgeDocument(user: string, scope: string, path: string): Promise<Record<string, unknown>> {
