@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-1.5.2-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-2.0.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -139,7 +139,7 @@ The project does not claim that every model service is inherently private. What 
 
 ### Choose an installation method
 
-Windows, Linux, npm, and Docker share the framework version. The current formally finalized version is **1.5.2**; the compatible gateway baseline is **1.0.0**.
+Windows, Linux, npm, and Docker share the framework version. The current source version is **2.0.0**; the compatible gateway baseline is **1.0.0**. Remote distribution artifacts are published separately.
 
 > **Publication prerequisite:** The remote commands below work only after the installer scripts and the corresponding distribution artifacts are published. Native installation needs `kemo-agent-release-<version>.zip` and its `.zip.sha256` in a Release; npm needs a published distribution package; Docker needs a published image tag. Pushing code alone does not publish these artifacts. This guide does not claim they are already available online. The Release ZIP is not GitHub's automatically generated source archive.
 
@@ -243,7 +243,7 @@ python start_web.py
 
 The default web address is `http://127.0.0.1:1357`. Start with the web interface and configure model services, the user, and access credentials.
 
-See the [deployment guide](deploy/README.md) for options, custom paths, offline archives, recovery, and publication, and the [deployment knowledge reference](global_knowledge/deployment-and-release.md) for the agent-facing contract. Both detailed guides are currently in Chinese.
+See the [deployment guide](deploy/README.md) for options, custom paths, offline archives, recovery, and publication, and the [deployment knowledge reference](knowledge/global/deployment-and-release.md) for the agent-facing contract. Both detailed guides are currently in Chinese.
 
 ---
 
@@ -266,32 +266,42 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `1.5.2` (source finalized on October 26, 2026; remote distribution artifacts are published separately)
+Current version: `2.0.0` (source finalized on November 5, 2026; remote distribution artifacts are published separately)
 
 Confirmed compatible Kemo gateway: `kemo-adapter-api 1.0.0` (Kemo 2.0 wire protocol matched).
 
-### 1.5.2 release notes (October 26, 2026)
+### 2.0.0 release notes (November 5, 2026)
 
-- Makes subagent collaboration observable: adds the `general_worker` execution assistant, parent/child task groups, expandable tool arguments/results, and conclusion-only delivery to the main agent. Time- or tool-budget stops preserve checkpoints, partial conclusions and usage. The main agent can explicitly resume with a fresh segment budget, set tool limits (0 means unlimited calls) and runtime, receive budget warnings, guide running work or explicitly split remaining tasks; live work retains its ownership and completion barrier.
-- Adds conversation-space fairness to subagent dispatch and the shared API request pool. Multiple windows of one space share accounting; less-occupied spaces receive priority, ties rotate, and idle execution capacity remains borrowable. The default backlog is 50 overall, at most 25 per space, with five protected first-entry positions for other spaces; in-flight requests are not preempted.
-- Adds `attach_media` to enqueue acquired media for the next native model request, with file, tool-card, and history linkage. Chat accepts original images up to 20 MiB; Kemo keeps its 1 MiB inline limit and uses Asset for larger images. The framework selects basic Chat tools and compatibility profiles without requiring users to probe capabilities; dedicated DeepSeek behavior and advanced-capability boundaries remain intact.
-- Adds a right-side multi-tab workspace for file previews, current-space background Shell jobs, and subagent details. Its default scratchpad saves locally and transfers text to the composer or uses the existing send/queue flow; closing a tab does not cancel work. Individual terminal cards show ownership, finish time and duration. Refines live API-pool status, per-space cache-hit statistics, workspace-relative path copying, and bounded, scrollable related-file records.
-- Adds owner-scoped background Shell completion receipts containing status, time, exit code and the last five captured lines, with detailed logs queried on demand. Finite jobs keep a completion barrier by default; explicitly detached service jobs do not block delivery. Completion alone never starts a new model request.
-- Adds pinned/favorite conversations, context menus, and date-based archive lookup; deleting all history includes read-only sources. Knowledge references gain category filtering, memory search uses an explicit magnifier/Enter action, and permanent memory no longer displays a weight field.
-- Adds nine interface languages, per-user image/video backgrounds, UI opacity, and backdrop blur. Background limits are 100 MB for images and 400 MB for videos; playback does not depend on Windows animation preferences. Refines two-stage authentication and subagent rendering while retaining scrollable guidance/task plans and the current UI build entry.
-- Hardens SSE heartbeats and disconnect cleanup, SQLite pre-migration and update backups, transactions and concurrent writes, session leases, and background-task terminal states. Updates manuals, shared knowledge, formal tests, local system acceptance, and post-build isolated distribution checks together.
-- Keeps compatibility baselines at `kemo-adapter-api 1.0.0`, `kemo-graph 1.6.0`, and Kemo 2.0. Source finalization does not publish Release, npm, or GHCR artifacts, and historical evidence or packages are not relabeled as the new version.
+- Plugins now have locally enforced permission categories configurable per user; permission metadata is not sent to the Provider.
+- `file.search` now uses only `name` and `content`; `web_search.search` uses semantic `answer` and `raw_content` enums.
+- The graph guide is split into `kemo_graph_read` and `kemo_graph_write`; read permission no longer exposes write operations.
+- Duplicate parameter tables were removed from plugin guides. Old tool names and parameter semantics are intentionally incompatible.
+
+### 1.5.3 release notes (November 2, 2026)
+
+A bug-fix-only release with no new features, focused on the correctness of both the KEMO and Chat protocol paths.
+
+- Clarifies subagent stop, live guidance, and cascading cancellation semantics: an ordinary stop leaves running child tasks intact, while cancellation is requested only for an explicit cascade. Web controls require an execution handle held by the current process and do not support cross-process takeover.
+- Fixes terminal phase backfill for streamed Chat messages. Message start does not predict later tool calls or buffer text; the terminal phase is set to `commentary` or `final_answer` from the final tool-call state, consistent with non-streaming behavior.
+- Improves subagent input preflight diagnostics by identifying field type mismatches and reporting counts for unknown field names that cannot be safely exposed. It does not echo input values or unsafe names, relax strict schemas, or change the 400/600-character response budgets.
+- Corrects Chat request normalization and thinking-parameter mapping so the compatibility layer cannot weaken Kemo protocol invariants.
+- This is a source finalization, not confirmation that Release, npm, or GHCR artifacts have been built, verified, or published. Historical validation records and older artifacts are not relabeled as 1.5.3.
+
+The current `kemo-preview` branch builds on this baseline with the CardStream refactor: complete immutable RAW
+history and a rolling VIEW summary. Each main request freezes history and the dynamic tail, compacting above
+80% of effective input capacity toward a fraction of historical tokens. Validated candidates replace the prefix
+atomically; failures preserve the existing view. This work has not been published as a new remote release.
 
 ### Available today
 
 - a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
-- a per-user SQLite history store with transactional commits, table-backed content search, and cursor pagination;
+- a per-user `cards.sqlite3` history store with RAW/VIEW, transactional commits, original-content search, and RAW-sequence cursor pagination;
 - a per-user SQLite Tidal Engram store that transactionally keeps content, lifecycle state, daily weight evidence, and hot-view sources; archived user evidence now finds existing fragments through confidence-gated keyword coverage before applying at most one weight increase per day, reducing duplicate-fragment growth;
 - temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories; both the Prompt injection budget and the independent runaway-output guard are currently 20,000 characters;
 - personal, shared, and global knowledge layers grounded in real source material;
-- task plans that move from creation and approval to step-by-step execution, with pause, resume, and audit support; successful creation terminates only the current conversation run rather than letting it bypass the plan state machine or pausing another session;
-- an explicitly enabled, conversation-scoped long-task mode that can continue across runs after the per-run tool ceiling while showing the original request, total elapsed time, run count, tool activity, and token usage above the composer;
-- visible context-compression progress above the composer, with queued memory analysis continuing after the current run commits and validly producing no new fragments when trimmed rounds contain no durable candidates;
+- task plans that move from creation and approval to step-by-step execution, with pause, resume, audit support, and scrollable guidance and plan details; successful creation terminates only the current conversation run rather than letting it bypass the plan state machine or pausing another session;
+- long tasks run by default in one Run without a total tool-call or model-request count ceiling, while preserving cancellation and completion checks for required background work;
+- continuous-prefix card compaction covering user text, guidance, assistant text, and tool events; background memory analysis reads complete RAW history and advances its independent cursor only after all candidates are processed, with zero new fragments allowed when no durable facts exist;
 - one-time and recurring scheduled tasks that wake automatically at the agreed time;
 - background collection for extension and perception data, with every logical Provider request reloading the latest published snapshots without adding collection latency to model calls;
 - subagent collaboration for memory organization, planning, summarization, and scheduling;

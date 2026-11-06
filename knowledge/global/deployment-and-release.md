@@ -3,12 +3,12 @@
 ## 范围与发布状态
 
 本文是 `deploy/` 独立部署系统的知识合同；源码业务更新器另见 `version-and-update-modules.md`。
-当前主框架稳定版本为 **1.5.2（2026-10-26 正式定档）**，配套 `kemo-adapter-api 1.0.0`，并与 `kemo-graph 1.6.0` 使用已核对的 Kemo 2.0 协议。
+当前源码定档版本为 **2.0.0**（2026-11-05），配套 `kemo-adapter-api 1.0.0`，并与 `kemo-graph 1.6.0` 使用已核对的 Kemo 2.0 协议。
 版本唯一真值是根目录 `version.json.version`。Windows、Linux、npm、Docker 不另设部署版本。
 
 **安装入口实现不等于线上已发布。** 原生远程安装须先推送安装脚本，并上传对应 Release 资产；
 npm 与 Docker 须分别发布分发包和镜像。Git push 不会自动完成这些发布。
-不能把之前 1.3.2 或 1.5.1 的本地验收包重命名为 1.5.2；必须按新版本重新构建和打包。
+不能把之前 1.3.2、1.5.1、1.5.2 或 1.5.3 的本地验收包重命名为 2.0.0；必须按新版本重新构建和打包。
 已完成的验收范围与未完成的远程/容器验收见 `deploy/VALIDATION.md`，不要声称全部渠道已经上线。
 
 ## 选择渠道与安装根
@@ -185,7 +185,7 @@ ZIP 顶层是 `release-manifest.json` 和 `tree/`，包含主框架、部署器�
 包名、manifest、`tree/version.json` 和默认 `v<version>` Release 标签须一致。
 官方 Release digest 或官方 `.sha256` 用于校验；镜像仅回退 ZIP 下载，不提供可信校验值。
 
-发布包额外携带 `global_knowledge/classify.sqlite3` 与 `shared_knowledge/classify.sqlite3` 两张默认分类表
+发布包额外携带 `knowledge/global/classify.sqlite3` 与 `knowledge/share/classify.sqlite3` 两张默认分类表
 （`deploy/core/policy.py` 的 `RELEASE_DATA_FILES` 精确清单）。它们属于"随包分发但不覆盖本机"的数据：
 安装时目标不存在才写入，已存在一律保留本机内容且不登记进托管清单，更新时也不会被当作过期文件删除。
 托管清单之外的其他 `*.sqlite3`、`*.db` 仍由 `protected()` 统一排除，旧格式 `classify.sql` 不再进包。

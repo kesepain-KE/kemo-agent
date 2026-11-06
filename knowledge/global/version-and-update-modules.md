@@ -6,7 +6,7 @@
 
 ## 先选择更新入口
 
-当前代码稳定版本为 **1.5.2（2026-10-26 正式定档）**，网关兼容基线为 **1.0.0**，知识图谱基线为 **1.6.0**。源码定档不等于 Release、npm 或 GHCR 产物已经发布。
+当前代码稳定版本为 **2.0.0**，网关兼容基线为 **1.0.0**，知识图谱基线为 **1.6.0**。源码版本定义不等于 Release、npm 或 GHCR 产物已经发布。
 本页后续命令和业务迁移描述只适用于源码安装的旧更新器，不适用于 `deploy/`：
 
 | 安装方式 | 更新操作（均先停止应用） |
@@ -27,16 +27,16 @@ Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故�
 ```json
 {
   "name": "kemo-agent",
-  "version": "1.5.2",
+  "version": "2.0.0",
   "schema_version": 1,
   "compatibility": {
     "kemo-adapter-api": "1.0.0"
   },
   "components": {
-    "core": {"version": "1.5.2"},
-    "agents": {"version": "1.5.2"},
-    "plugins": {"version": "1.5.2"},
-    "web": {"version": "1.5.2"}
+    "core": {"version": "2.0.0"},
+    "agents": {"version": "2.0.0"},
+    "plugins": {"version": "2.0.0"},
+    "web": {"version": "2.0.0"}
   }
 }
 ```
@@ -45,7 +45,7 @@ Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故�
 
 组件版本不要求始终与根版本相同；只修改某个板块时，可以只推进对应组件版本。更新器以 `version.json` 中的根版本和所选组件版本为准，并拒绝降级。
 
-本次 1.5.2 为全仓源码定档，core、agents、plugins、web 四个组件统一推进至 1.5.2；
+本次 2.0.0 为全仓源码版本定义，core、agents、plugins、web 四个组件统一推进至 2.0.0；
 前端 package/lock、CLI、操作手册和当前版本文档同步更新，第三方依赖与网关协议版本不随之改号。
 历史验收、旧版迁移夹具和已生成产物保留其原版本，不通过批量替换伪造新版本证据。
 
@@ -71,7 +71,7 @@ python -m update --check
 | `--dry-run` | 展示将执行的操作，不写文件 |
 | `--skip-web-build` | 仅用于 `--dry-run` 预览；正式更新不允许跳过 Web 构建 |
 | `--skip-deps` | 仅用于 `--dry-run` 预览；正式更新不允许跳过 Python 依赖刷新 |
-| `--replace-global-config` | 明确允许覆盖本地 `global_config.json`；默认不覆盖 |
+| `--replace-global-config` | 明确允许覆盖本地 `global_config.yaml`；默认不覆盖 |
 | `--repo-url` / `--branch` | 覆盖远程仓库和分支 |
 
 ## 全量流程
@@ -82,18 +82,35 @@ python -m update --check
   → 拒绝根版本或任一所选组件降级
   → 用户确认
   → 浅克隆远程仓库并校验克隆中的 version.json 与检查结果完全一致
+  → 只读检查本安装活跃写进程，存在或无法核实则拒绝并提示先停止服务
   → 取得全局更新锁并写入维护标记
   → 创建可恢复的源码备份
   → 从克隆源码加载最新 update/ 板块实现
   → 按 core → agents → plugins → web 执行选中板块；首个 failed/partial 立即停止
   → web：有 lockfile 时 npm ci，否则 npm install；随后 npm run build
   → core：刷新 pip 依赖
-  → core：前面的源码、构建和依赖步骤成功后，再补齐用户骨架并初始化记忆、任务计划、消息幂等和运行日志数据库
+  → core：前面的源码、构建和依赖步骤成功后，再次检查写进程，备份数据库后补齐用户骨架并初始化数据库
   → 全部成功后原子提交 version.json
   → 输出逐板块汇总并释放更新锁
 ```
 
 任一板块、迁移、前端构建、依赖刷新或版本提交失败时，本轮立即停止，保留旧版本号，并使用更新前备份自动恢复受版本管理的源码路径。`users/`、运行时数据库、Cron 运行状态、本地拓展凭据和采集数据不会因恢复而被覆盖；内置拓展的 `expand.json`、`input_data.md` 等运行状态也按部署机状态前向保留，失败后不保证回滚到旧采集快照。数据库迁移仍是向前操作，因此生产环境仍应独立备份用户数据。
+
+### 在线写者拒绝与停机边界
+
+源码更新器在源码事务之前，以及 core 数据库备份/骨架/迁移之前，通过既有依赖 `psutil`
+只读查询操作系统活跃进程。以进程工作目录、绝对入口/参数路径及打开的本安装数据库定位，
+不凭残留 PID 文件或旧状态字样认定服务在线。Python/Web 宿主、独立 cron/消息 worker、
+CLI 及本安装内的自定义解释器进程均保守视为可能写者；其他安装不因目录字符串前缀相同而误判。
+查询期间已经退出的进程忽略；可能写者权限不足、无法核实或缺少查询依赖则拒绝，不视为“已停止”。
+提示只含 PID 与处理指引，不打印命令行、令牌或打开文件清单。
+原生文件句柄枚举放在独立检查进程，15秒有界等待，并核对PID与启动时间以防复用；
+检查崩溃、超时、身份变化或回执无效均拒绝更新，不让原生异常终止更新宿主，也不按无写者放行。
+
+检测到写者返回失败并提示“请先停止服务”，不执行自动 kill/stop，不改变消息
+`processing` 状态或迁移表结构/版本戳。`--check` 与 `--dry-run` 不扫描或停止进程。
+这是两次活进程检查，不是阻止服务启动的跨进程租约；操作者仍须在整个更新期间保持全部写者停止，
+不能把检查通过当作允许并行启动服务或任意自定义外部写者都已受控。独立 `deploy/` 渠道不由此改写。
 
 ## core — 核心与公共资源
 
@@ -108,14 +125,14 @@ python -m update --check
 | `cron/` | 定时任务执行和调度代码；`task_cron_system/` 使用合并更新 |
 | `template/` | 各类创建模板 |
 | `tests/` | 后端测试 |
-| `global_knowledge/` | 全局知识库文档 |
+| `knowledge/global/` | 全局知识库文档 |
 | `update/` | 更新器板块实现 |
 
-因此，本地直接修改 `global_knowledge/` 或 `template/` 会在 core 更新时被远程版本覆盖；长期自定义内容应提交到自己的分支或放入不受 core 覆盖的用户/共享数据层。
+因此，本地直接修改 `knowledge/global/` 或 `template/` 会在 core 更新时被远程版本覆盖；长期自定义内容应提交到自己的分支或放入不受 core 覆盖的用户/共享数据层。
 
 ### 覆盖的根文件
 
-`cli.py`、`events.py`、`setup.py`、`update.py`、`requirements.txt`、`requirements-dev.txt`、`config/global_soul.md`、`.env.example`、`LICENSE`、`README.md`（兼容小写名）、`README_EN.md`、`kemo-agent.ico`、`kemo-agent.jpg`、`kemo-web-UI.png`、`agents.md`、`restart.py`、`start_web.py`、`user_create.py`。
+`cli.py`、`events.py`、`setup.py`、`update.py`、`requirements.txt`、`requirements-dev.txt`、`config/global_soul.md`、`kemo.yaml.example`、`LICENSE`、`README.md`（兼容小写名）、`README_EN.md`、`kemo-agent.ico`、`kemo-agent.jpg`、`kemo-web-UI.png`、`agents.md`、`restart.py`、`start_web.py`、`user_create.py`。
 
 `version.json` 不由 core 提前覆盖，而是由总调度器在所选板块、迁移、依赖刷新和 Web 构建全部成功后单独提交。
 
@@ -123,9 +140,9 @@ python -m update --check
 
 - `message/` 同步框架消息路由代码，但保留本地 `message/out/` 平台模块和运行数据。
 - `cron/task_cron_system/*.json` 更新静态任务定义时保留部署机的 `next_run_at`、`latest_run_at` 和 `status`；本地独有系统任务及日志不删除。
-- `config/global_config.json` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。1.3.2 有一个窄范围旧默认迁移：当本地框架版本不高于 1.3.1、目标版本不低于 1.3.2，且 `cron.session_idle_close_seconds` 仍精确等于旧默认值 `86400`、新版本默认值为 `5400` 时，自动改为 `5400`；其他自定义值不变。
-- 更新 `global_expand/register.py`、`global_sense/register.py`、`shared_expand/register.py`、`shared_skills/register.py`，不会删除这些资源根目录中的自定义模块。
-- `global_expand/kemo_app/`、`global_expand/kemo_gateway_status/` 与 `global_expand/kemo_graph/` 是三个系统内置拓展：core 同步其全部运行代码、`module/panel.json` 和模块说明；新增 Python 文件若未进入内置清单，正式基准测试会失败。`expand.json` 按本地激活状态合并，`module/panel.values.json` 只在缺失时用发布默认值初始化；真实配置、凭据、`module/status.json`、状态摘要、采集数据、图表、数据库和运行锁继续保留。
+- `config/global_config.yaml` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。1.3.2 有一个窄范围旧默认迁移：当本地框架版本不高于 1.3.1、目标版本不低于 1.3.2，且 `cron.session_idle_close_seconds` 仍精确等于旧默认值 `86400`、新版本默认值为 `5400` 时，自动改为 `5400`；其他自定义值不变。
+- 更新 `expand/global/register.py`、`sense/register.py`、`expand/share/register.py`、`skills/register.py`，不会删除这些资源根目录中的自定义模块。
+- `expand/global/kemo_app/`、`expand/global/kemo_gateway_status/` 与 `expand/global/kemo_graph/` 是三个系统内置拓展：core 同步其全部运行代码、`module/panel.json` 和模块说明；新增 Python 文件若未进入内置清单，正式基准测试会失败。`expand.json` 按本地激活状态合并，`module/panel.values.json` 只在缺失时用发布默认值初始化；真实配置、凭据、`module/status.json`、状态摘要、采集数据、图表、数据库和运行锁继续保留。
 - core 源码同步成功后先执行 `pip install -r requirements.txt`；依赖刷新成功后才补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。这样，前端构建或依赖安装失败时不会先改用户数据库。初始化失败时自动进入恢复流程；更新器不扫描或导入其他存储格式。
 
 ## agents — 内置子智能体
@@ -168,10 +185,10 @@ python -m update --check
 
 下列路径不在四个板块当前清单中，也不应被文档误认为会随 core 更新：
 
-- `shared_knowledge/`
+- `knowledge/share/`
 - 根目录 `.gitignore`
-- `config/` 中除 `global_soul.md` 和交互处理的 `global_config.json` 之外的文件
-- `global_expand/`、`global_sense/`、`shared_expand/`、`shared_skills/` 中除根 `register.py` 和三个内置拓展的受管程序/面板定义之外的模块数据
+- `config/` 中除 `global_soul.md` 和交互处理的 `global_config.yaml` 之外的文件
+- `expand/global/`、`sense/`、`expand/share/`、`skills/` 中除根 `register.py` 和三个内置拓展的受管程序/面板定义之外的模块数据
 - `users/`、`tmp/`、`message/out/` 等运行数据
 
 如这些框架路径发生版本变化，需要先扩展更新板块实现，或由维护者使用其他明确方式更新。不要假设 `--module all` 会覆盖未列出的路径。
@@ -185,8 +202,8 @@ python -m update --check
 ## 更新前检查
 
 1. 提交或另行备份本地代码改动和自定义插件。
-2. 单独备份 `users/`、`.env` 和 `message/out/`。
+2. 单独备份 `users/`、`kemo.yaml` 和 `message/out/`。
 3. 先运行 `--check`，重大更新再运行 `--dry-run`。
-4. 查看 `global_config.json` 差异，不盲目覆盖本地运行参数。
+4. 查看 `global_config.yaml` 差异，不盲目覆盖本地运行参数。
 5. 更新后运行后端测试、前端测试和生产构建，并重启 RuntimeHost。
 6. 暂存前检查 `git status --short`，排除 Cron 时间、拓展 `recent_update`、本地激活状态和采集正文。
