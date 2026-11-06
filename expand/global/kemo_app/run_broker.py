@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -27,7 +26,6 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"
 MAX_REPLAY_EVENTS = 20_000
 DEFAULT_TERMINAL_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_TERMINAL_RUN_LIMIT = 500
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 
 @dataclass(frozen=True)
@@ -84,14 +82,6 @@ class RunStore:
                     PRIMARY KEY(run_id, event_id),
                     FOREIGN KEY(run_id) REFERENCES app_runs(run_id) ON DELETE CASCADE
                 );
-                CREATE TABLE IF NOT EXISTS app_run_aliases (
-                    alias_run_id TEXT PRIMARY KEY,
-                    canonical_run_id TEXT NOT NULL,
-                    username TEXT NOT NULL,
-                    FOREIGN KEY(canonical_run_id) REFERENCES app_runs(run_id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_app_run_aliases_canonical
-                    ON app_run_aliases(canonical_run_id, username);
                 """
             )
             columns = {
@@ -144,61 +134,12 @@ class RunStore:
             if str(direct["username"]) != username:
                 raise PermissionError("run_user_mismatch")
             return normalized
-        alias = self._connection.execute(
-            "SELECT canonical_run_id, username FROM app_run_aliases WHERE alias_run_id=?",
-            (normalized,),
-        ).fetchone()
-        if alias is None:
-            raise KeyError(run_id)
-        if str(alias["username"]) != username:
-            raise PermissionError("run_user_mismatch")
-        canonical = str(alias["canonical_run_id"])
-        owner = self._connection.execute(
-            "SELECT username FROM app_runs WHERE run_id=?",
-            (canonical,),
-        ).fetchone()
-        if owner is None:
-            raise KeyError(run_id)
-        if str(owner["username"]) != username:
-            raise PermissionError("run_user_mismatch")
-        return canonical
+        raise KeyError(run_id)
 
     def canonical_id(self, username: str, run_id: str) -> str:
         with self._lock:
             return self._resolve_run_id_locked(username, run_id)
 
-    def _register_alias_locked(
-        self,
-        username: str,
-        alias_run_id: str,
-        canonical_run_id: str,
-    ) -> None:
-        alias = str(alias_run_id or "").strip()
-        canonical = str(canonical_run_id or "").strip()
-        if (
-            not alias
-            or alias == canonical
-            or not _RUN_ID_RE.fullmatch(alias)
-            or not canonical
-        ):
-            return
-        direct = self._connection.execute(
-            "SELECT run_id FROM app_runs WHERE run_id=?",
-            (alias,),
-        ).fetchone()
-        if direct is not None:
-            # Never replace a real run id with an upstream-provided alias.
-            return
-        existing = self._connection.execute(
-            "SELECT canonical_run_id, username FROM app_run_aliases WHERE alias_run_id=?",
-            (alias,),
-        ).fetchone()
-        if existing is not None:
-            return
-        self._connection.execute(
-            "INSERT INTO app_run_aliases(alias_run_id, canonical_run_id, username) VALUES(?,?,?)",
-            (alias, canonical, username),
-        )
 
     def create(self, username: str, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         run_id = str(payload.get("run_id") or "").strip()
@@ -215,23 +156,6 @@ class RunStore:
                 value = dict(existing)
                 if value["username"] != username:
                     raise PermissionError("run_user_mismatch")
-                if value["session_id"] != session_id:
-                    raise ValueError("run_session_mismatch")
-                return value, False
-            alias = self._connection.execute(
-                "SELECT canonical_run_id, username FROM app_run_aliases WHERE alias_run_id=?",
-                (run_id,),
-            ).fetchone()
-            if alias is not None:
-                if str(alias["username"]) != username:
-                    raise PermissionError("run_user_mismatch")
-                canonical = self._connection.execute(
-                    "SELECT * FROM app_runs WHERE run_id=?",
-                    (str(alias["canonical_run_id"]),),
-                ).fetchone()
-                if canonical is None:
-                    raise KeyError(run_id)
-                value = dict(canonical)
                 if value["session_id"] != session_id:
                     raise ValueError("run_session_mismatch")
                 return value, False
@@ -306,8 +230,6 @@ class RunStore:
                 "INSERT INTO app_run_events(run_id,event_id,data,created_at) VALUES(?,?,?,?)",
                 (canonical, event_id, data, now),
             )
-            continuation_id = _continuation_run_id(data)
-            self._register_alias_locked(username, continuation_id, canonical)
             status = terminal_status or ("cancelling" if row["status"] == "cancelling" else "running")
             finished_at = now if terminal_status else 0
             self._connection.execute(
@@ -685,29 +607,6 @@ class RunBroker:
             condition.notify_all()
 
 
-def _continuation_run_id(data: str) -> str:
-    """Extract a long-task replacement run id from one upstream event."""
-
-    try:
-        value = json.loads(data)
-    except (TypeError, ValueError):
-        return ""
-    if not isinstance(value, dict):
-        return ""
-    nested = (checked_697 if isinstance(checked_697 := value.get("data"), dict) else value)
-    event_type = str(
-        value.get("type")
-        or value.get("event")
-        or nested.get("type")
-        or nested.get("event")
-        or ""
-    )
-    if event_type != "long_task_update":
-        return ""
-    metadata = (checked_707 if isinstance(checked_707 := nested.get("metadata"), dict) else {})
-    candidate = metadata.get("next_run_id") or nested.get("next_run_id") or value.get("next_run_id")
-    rendered = str(candidate or "").strip()
-    return rendered if _RUN_ID_RE.fullmatch(rendered) else ""
 
 
 def _terminal_status(data: str) -> tuple[str | None, str]:

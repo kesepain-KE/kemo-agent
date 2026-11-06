@@ -19,7 +19,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_ROOT = ROOT / "global_expand" / "kemo_app"
+MODULE_ROOT = ROOT / "expand" / "global" / "kemo_app"
 
 
 def _load_module(name: str, filename: str):
@@ -264,34 +264,6 @@ class KemoAppExpandTests(unittest.TestCase):
                 store.get("bob", "run_scope")
             store.close()
 
-    def test_long_task_replacement_run_ids_are_durable_aliases_in_one_session(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            store = bridge_run_broker.RunStore(Path(directory) / "runs.sqlite3")
-            store.create(
-                "alice",
-                {"run_id": "run-initial", "session_id": "app-session", "client_id": "phone"},
-            )
-            store.append(
-                "alice",
-                "run-initial",
-                json.dumps(
-                    {
-                        "type": "long_task_update",
-                        "metadata": {"next_run_id": "run-next-123"},
-                    }
-                ),
-            )
-            self.assertEqual(store.get("alice", "run-next-123")["run_id"], "run-initial")
-            self.assertEqual(
-                len(store.events_after("alice", "run-next-123", 0)),
-                1,
-            )
-            broker = bridge_run_broker.RunBroker(object(), store)
-            with self.assertRaises(KeyError):
-                broker.snapshot("alice", "run-next-123", session_id="other-session")
-            with self.assertRaises(KeyError):
-                store.get("bob", "run-next-123")
-            store.close()
 
     def test_chat_streams_the_broker_issued_run_id_for_legacy_clients(self) -> None:
         source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))

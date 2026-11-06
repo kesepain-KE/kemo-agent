@@ -171,7 +171,7 @@ between installations or committed:
 - PID, lock, connection, runtime and log files
 - `_app_runs.sqlite3` and its WAL/SHM files (detached App run journal)
 
-The deployed instance under `D:\kemo-agent\global_expand\kemo_app` remains a
+The deployed instance under `D:\kemo-agent\expand\global\kemo_app` remains a
 runtime copy. Changes should be developed here and deployed explicitly; copying
 the runtime credential files back into source is forbidden.
 
