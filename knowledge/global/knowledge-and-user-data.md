@@ -11,8 +11,8 @@ kemo-agent 使用三层 Markdown 知识库。知识库保存可长期复用的�
 | 层级 | 路径 | 可见范围 | 默认优先级 |
 |------|------|----------|------------|
 | 用户 | `users/<user>/knowledge/` | 当前用户私有 | 最高 |
-| 共享 | `shared_knowledge/` | 多用户共享 | 中 |
-| 全局 | `global_knowledge/` | 框架级公共知识 | 最低 |
+| 共享 | `knowledge/share/` | 多用户共享 | 中 |
+| 全局 | `knowledge/global/` | 框架级公共知识 | 最低 |
 
 用户配置 `knowledge.use_shared` 和 `knowledge.use_global` 控制是否启用共享、全局索引；用户知识始终属于当前用户。检索和注入顺序为用户 → 共享 → 全局。
 
@@ -22,8 +22,8 @@ kemo-agent 使用三层 Markdown 知识库。知识库保存可长期复用的�
 
 三层知识库都支持逻辑分类：
 
-- `global_knowledge/`
-- `shared_knowledge/`
+- `knowledge/global/`
+- `knowledge/share/`
 - `users/<user>/knowledge/`
 
 每个知识根目录最多有一个 `classify.sqlite3`。这是一个可搬运的 SQLite 分类数据库，
@@ -164,7 +164,7 @@ knowledge-root/
 
 ```text
 users/<name>/
-├── user_config.json                    # Provider、白名单与用户级配置
+├── user_config.yaml                    # Provider、白名单与用户级配置
 ├── user_soul.md                        # 用户人格与工作偏好
 ├── background.webp                     # 新用户复制的默认网页背景；可换图片/视频，默认不启用
 ├── memory_temporary_important.md       # 临时重要记忆，子智能体维护
@@ -199,16 +199,20 @@ Web 启动自检和更新迁移都通过同一个幂等补齐函数处理：只�
 |------|------|----------|
 | A 必需目录 | `agents/`、`avatar/`、`download/`、`expand/`、`file_upload/`、`history/`、`improve/`、`improve/expired_memory/`、`knowledge/`、`task_cron/`、`task_plan/`、`user_skills/`、`user_skills/agent_create/`、`user_skills/user_create/`、`runtime/`、`tools/` | 模板带 `.gitkeep`；创建器、Web 启动自检和更新迁移只增不减地幂等补齐 |
 | B 运行期生成 | `runtime/background_jobs/`、`history/thumbnails/`、`web_preferences.json`、`completion_sound.*`、`failure_sound.*` | 不预置、不从模板复制；由对应运行时或 Web 上传流程按需生成 |
-| C 数据库 | `improve/memory.sqlite3`、`history/history.sqlite3`、`task_plan/task_plans.sqlite3` 及其 WAL/SHM | 由各自数据库模块按当前 schema 初始化；不作为静态模板文件。已有 `memory.backup_*.sqlite3*` 只保留为备份，不导入当前运行库 |
+| C 数据库 | 根目录 `cards.sqlite3`、`improve/memory.sqlite3`、`task_plan/task_plans.sqlite3`、`runtime/agent_tasks.sqlite3` 及其 WAL/SHM | 由各自数据库模块按当前 schema 初始化；不作为静态模板文件。旧 history/window 文件和 `memory.backup_*.sqlite3*` 保留原样，不导入当前运行库 |
 | D 可选静态媒体 | 根目录 `background.{jpg,jpeg,png,webp,mp4,webm}`；模板为 `background.webp` | 新用户从模板复制轻量默认背景、默认不启用；已有用户修复/升级不补入、不覆盖。用户可通过网页上传替换或手工放入，读取不修改文件 |
 
 运行中还可能生成：
 
 ```text
 users/<name>/
+├── cards.sqlite3                      # CardStream RAW/VIEW、会话、整合、工具执行及维护状态
+├── cards.sqlite3-wal                  # 运行时 WAL
+├── cards.sqlite3-shm                  # 运行时共享内存索引
 ├── web_preferences.json                # Web 主题、字号等外观偏好
 ├── runtime/
-│   └── background_jobs/                 # 受管理 Shell 后台作业记录和日志
+│   ├── agent_tasks.sqlite3             # 业务父子任务账本，按需创建
+│   └── background_jobs/                # 受管理 Shell 后台作业记录和日志
 ├── task_plan/
 │   ├── task_plans.sqlite3              # 计划、步骤、依赖的唯一权威数据库
 │   ├── task_plans.sqlite3-wal          # 运行时 WAL
@@ -220,23 +224,21 @@ users/<name>/
 ├── completion_sound.{mp3,wav,ogg,webm}  # 可选；Windows 网页端成功结束音效，未设置时不存在
 ├── failure_sound.{mp3,wav,ogg,webm}     # 可选；Windows 网页端最终失败音效，未设置时不存在
 └── history/
-    ├── history.sqlite3                  # 会话、正文、状态和检索的权威数据库
-    ├── thumbnails/                      # 附件缩略图
-    ├── history.sqlite3-wal              # 运行时 WAL，正常关闭后自动合并
-    └── history.sqlite3-shm              # SQLite 共享内存索引，运行时自动生成
+    └── thumbnails/                    # 附件缩略图；用户既有历史文件保持原样
 ```
 
 ### 目录所有权
 
 | 路径 | 主要写入方 | 注意事项 |
 |------|------------|----------|
-| `user_config.json` | 用户、配置界面 | 密钥可放用户配置，但不得写入知识或记忆 |
+| `user_config.yaml` | 用户、配置界面 | 密钥可放用户配置，但不得写入知识或记忆 |
 | `user_soul.md` | 用户、人格编辑界面 | 只描述偏好，不能覆盖安全底线 |
 | `memory_temporary_important.md` | `memory_temporary_important` 子智能体 | 单文件重要记忆，不应删除 |
 | `knowledge/` | 用户或明确授权的智能体 | 私有知识默认写这里，并同步索引 |
 | `file_upload/` | Web/外部入口 | 同名上传自动防覆盖；不能当临时目录 |
 | `download/` | 智能体工具 | 只放需要交给用户的最终产物 |
-| `history/history.sqlite3` | 历史引擎 | 不手工修改表；备份运行中数据库时使用 SQLite backup，而不是只复制主文件 |
+| `cards.sqlite3` | CardStream 与会话/工具运行时 | RAW 只追加、VIEW 压缩原子提交；运行中备份使用 SQLite backup，不只复制主文件 |
+| `history/` 中的旧历史 | 用户既有数据 | 当前引擎不读取、迁移、覆写或删除 |
 | `history/thumbnails/` | Web 文件服务 | 只保存由附件校验流程生成的缩略图，不作为用户上传原件目录 |
 | `improve/memory.sqlite3` | 记忆引擎与记忆子智能体 | 不手工改表；备份运行中数据库应使用 SQLite backup，而不是只复制主文件 |
 | `task_plan/task_plans.sqlite3` | `PlanStore`、任务计划工具 | 使用状态机和 revision 事务，不直接编辑表或放置 JSON |
@@ -260,7 +262,7 @@ users/<name>/
 python user_create.py
 ```
 
-创建流程会复制 `template/user/`，初始化知识索引、记忆库、历史库和任务计划库，并调用
+创建流程会复制 `template/user/`，初始化知识索引、记忆库、CardStream 库和任务计划库，并调用
 `ensure_user_skeleton()` 补齐缺失的 A 类目录。启动 Web 和更新迁移也会复用这个函数处理已经存在
 的用户；它只使用 `mkdir(parents=True, exist_ok=True)`，遇到符号链接或目录联接会跳过并记录异常，
 不会重定向写入用户目录之外。
@@ -269,8 +271,8 @@ python user_create.py
 ### 备份建议
 
 网页背景 `background.*` 不进入上传/下载文件列表、知识库或模型输入。显示配置归
-`user_config.json → web_ui.background`；格式、安全读取和视频降级见
+`user_config.yaml → web_ui.background`；格式、安全读取和视频降级见
 `frontend-conventions.md` 的“用户网页背景”。默认背景为项目原创程序绘制的静态 WebP，
 不依赖远程素材或外部图片版权；模板验收检查默认文件可正常解码。
 
-备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.json`、`user_soul.md`、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/`、`expand/`、`runtime/` 和约定式 `tools/`；若用户已设置音效或背景，也一并保留用户根目录的 `completion_sound.*`、`failure_sound.*` 和 `background.*`。
+备份至少包含整个 `users/`。若只做最小备份，也必须包含 `user_config.yaml`、`user_soul.md`、根目录 `cards.sqlite3` 及其 WAL/SHM、`knowledge/`、`improve/`、`history/`、`task_plan/`、`task_cron/`、`agents/`、`user_skills/`、`expand/`、`runtime/` 和约定式 `tools/`；运行中的数据库须使用 SQLite backup。若用户已设置音效或背景，也一并保留用户根目录的 `completion_sound.*`、`failure_sound.*` 和 `background.*`。

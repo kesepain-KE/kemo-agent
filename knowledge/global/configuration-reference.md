@@ -1,17 +1,16 @@
 # 配置参考功能说明
 
-本文集中说明 `.env` 环境变量、部署级 `global_config.json` 和用户级 `user_config.json`。配置的默认值、字段校验和实际生效范围以当前加载器和配置 Schema 为准。
+本文集中说明 `kemo.yaml` 环境变量、部署级 `global_config.yaml` 和用户级 `user_config.yaml`。配置的默认值、字段校验和实际生效范围以当前加载器和配置 Schema 为准。
+
+这三类文件均使用 YAML，支持缩进、列表与 `#` 注释。根配置 `kemo.yaml` 使用扁平的环境变量映射；全局和用户配置按节嵌套，布尔值写为 `true`/`false`，数字可直接填写。Web 设置保存或更新器合并配置时会重新序列化 YAML，手写注释不会保留。
 
 ## web_ui.language — 用户网页语言
 
-在 `users/<name>/user_config.json` 中配置：
+在 `users/<name>/user_config.yaml` 中配置：
 
-```json
-{
-  "web_ui": {
-    "language": "zh-CN"
-  }
-}
+```yaml
+web_ui:
+  language: zh-CN
 ```
 
 支持 `zh-CN`（简体中文）、`en`（英语）、`es`（西班牙语）、`fr`（法语）、
@@ -32,20 +31,16 @@
 
 ## web_ui.background — 用户网页背景
 
-配置唯一存于 `users/<name>/user_config.json`，与 `web_ui.language` 并列：
+配置唯一存于 `users/<name>/user_config.yaml`，与 `web_ui.language` 并列：
 
-```json
-{
-  "web_ui": {
-    "background": {
-      "enabled": false,
-      "overlay_opacity": 0.65,
-      "blur": 0,
-      "ui_opacity": 0.94,
-      "ui_blur": 0
-    }
-  }
-}
+```yaml
+web_ui:
+  background:
+    enabled: false
+    overlay_opacity: 0.65
+    blur: 0
+    ui_opacity: 0.94
+    ui_blur: 0
 ```
 
 | 字段 | 默认值 | 合同 |
@@ -65,19 +60,19 @@
 `web_ui` 不继承全局同名节，背景不能通过全局配置或 `PATCH preferences` 保存；
 `GET preferences` 可返回生效背景参数，但不在 `web_preferences.json` 建立第二份配置真值。
 
-## `.env` 环境变量参数说明
+## `kemo.yaml` 环境变量参数说明
 
-项目根目录 `.env` 保存本机启动参数和密钥兜底。无密钥模板是 `.env.example`。框架使用内置解析器读取简单 `KEY=VALUE`，支持空行、`#` 注释、可选 `export ` 前缀以及单/双引号包裹的值。
+项目根目录 `kemo.yaml` 保存本机启动参数和密钥兜底；无密钥模板为 `kemo.yaml.example`。文件使用 YAML 映射，例如 `OPENAI_API_KEY: "..."`。建议将值写成引号包裹的字符串，避免数字、布尔值被 YAML 转成其他类型；空行与 `#` 注释可正常使用。
 
 ### 加载与优先级
 
-- 已存在于进程环境中的变量默认优先，`.env` 不覆盖它。
-- Provider 密钥优先级：`user_config.json → provider.api_key` > `provider.api_key_env` 指向的环境变量 > 类型默认环境变量。
+- 已存在于进程环境中的变量默认优先，`kemo.yaml` 不覆盖它。
+- Provider 密钥优先级：`user_config.yaml → provider.api_key` > `provider.api_key_env` 指向的环境变量 > 类型默认环境变量。
 - Provider 模型优先级：`provider.model` > `KEMO_MODEL`/`OPENAI_MODEL`。
 - Provider 地址优先级：`provider.base_url` > 环境变量 > 内置默认地址。
 - Web 地址优先级：启动命令显式参数 > `WEB_HOST`/`WEB_PORT` > 内置默认值。
 
-根目录 `.env` 影响框架进程、Provider 和框架自带工具。为避免 Provider/Web 密钥泄漏或同名占位值污染，Expand 与 Sense 的目录模块不会继承整套框架环境；它们使用运行所需的基础系统变量，并从各自模块目录的私有 `.env` 读取模块专用配置。修改任何已经载入的环境配置后，已启动的 RuntimeHost 通常需要重启才能完整生效。
+根目录 `kemo.yaml` 影响框架进程、Provider 和框架自带工具。为避免 Provider/Web 密钥泄漏或同名占位值污染，Expand 与 Sense 的目录模块不会继承整套框架环境；它们使用运行所需的基础系统变量，并从各自模块目录的私有 `.env` 读取模块专用配置。修改任何已经载入的环境配置后，已启动的 RuntimeHost 通常需要重启才能完整生效。
 
 ### Provider
 
@@ -90,7 +85,38 @@
 | `OPENAI_BASE_URL` | chat | 默认 `https://api.openai.com/v1`；裸根地址沿用 `/v1` 默认，自定义 API 前缀、完整路径及查询参数保留 |
 | `OPENAI_MODEL` | chat | 仅当用户配置 `provider.model` 为空时使用 |
 
-`provider.api_key_env` 可以指定任意自定义环境变量名，例如 `MY_TEAM_API_KEY`。该自定义变量无需写入 `.env.example`，但应在部署说明中记录变量名，不能记录真实值。
+`provider.api_key_env` 仅允许 `KEMO_API_KEY`、`OPENAI_API_KEY`、
+`DEEPSEEK_API_KEY`、`ANTHROPIC_API_KEY` 四个显式常量；留空仍按 Provider 类型选择默认变量。
+即使配置了内联 `api_key`，不允许的变量名也会在加载/运行配置解析时抛出 `ConfigError`，
+且不会读取该变量。旧自定义别名（例如 `MY_TEAM_API_KEY`）须由管理员将 **Provider 密钥**
+迁移到允许变量并更新配置；不要迁移其他服务 Token，不在报错、日志或文档中记录真实值。
+
+### Provider 目的地址边界（实例级）
+
+`provider.base_url`（含环境变量兜底）必须为有效 HTTPS URL；只有精确的
+`localhost`、`127.0.0.1` 允许 HTTP。拒绝 URL 用户名/密码、无效端口、反斜线及原始空白/控制字符；
+合法自定义 API 路径和 query 保留，Chat 裸根地址仍补 `/v1`。
+内置 host 为上述本机地址和 `api.openai.com`、`api.deepseek.com`、`api.anthropic.com`，
+大小写不敏感，不按后缀、子域或通配符匹配。
+
+自建网关需要实例管理员在 **`config/global_config.yaml`** 显式追加：
+
+```yaml
+provider_security:
+  allowed_hosts:
+    - gateway.example.com
+```
+
+数组只接受精确 ASCII 主机名，不含协议、端口、路径、query 或通配符。新增 host 不放开 HTTP。
+`users/<name>/user_config.yaml` 的同名 `provider_security` 节在合并时被丢弃，
+只能继承实例节，不能增删或替换允许列表；全局 `provider` 仍不作为用户 Provider 路由兜底。
+此边界是配置选择器校验，不是 DNS、重定向或网络沙箱。
+
+加载用户 `provider` 段时产生 `provider_config_override` 事件，成功/安全校验拒绝分别标为
+`success`/`failed`；仅保留事件名与状态，不记录密钥、URL、query 或配置正文。
+使用既有有界进程内诊断通道（最多 2048 条、1 小时 TTL），不是持久审计账本。
+缺少密钥或模型时仍允许先编辑草稿；密钥别名、显式地址和实例允许列表先执行安全校验，
+实际环境兜底地址在 `provider_runtime_config` 解析时再次校验，不改变凭据/模型优先级。
 
 ### 网络代理
 
@@ -107,7 +133,7 @@ Provider 可使用根目录代理配置。隔离运行的 Expand/Sense 模块如
 |------|------|
 | `TAVILY_API_KEY` | `web_search` 使用的 Tavily 密钥；工具始终可被发现，为空时调用会返回配置引导且不会发起网络请求，配置后需重启智能体 |
 
-其他热插拔模块可以定义自己的环境变量，但必须使用清晰、避免冲突的前缀，并在模块文档中说明。Expand/Sense 的密钥和代理应放在对应模块目录中由 Git 忽略的 `.env`，不能依赖根目录 Provider `.env` 的隐式继承。平台 Token 不应写入 `message.json`、知识库、技能或日志。
+其他热插拔模块可以定义自己的环境变量，但必须使用清晰、避免冲突的前缀，并在模块文档中说明。Expand/Sense 的密钥和代理应放在对应模块目录中由 Git 忽略的 `.env`，不能依赖根目录 Provider `kemo.yaml` 的隐式继承。平台 Token 不应写入 `message.json`、知识库、技能或日志。
 
 ### Web 服务
 
@@ -125,7 +151,7 @@ Provider 可使用根目录代理配置。隔离运行的 Expand/Sense 模块如
 | `WEB_AUTH_IP_WINDOW_SECONDS` | `600` | 失败次数统计窗口，单位秒，必须大于 `0` |
 | `WEB_AUTH_IP_LOCK_SECONDS` | `900` | 达到失败上限后的锁定时间，单位秒，必须大于 `0` |
 | `WEB_AUTH_TRUSTED_PROXIES` | 空 | 可信反向代理 IP/CIDR，逗号分隔；认证限流及免认证本机访问校验共用，只有可信代理可提供来源 IP |
-| `KEMO_LOG_RETENTION_DAYS` | `90` | Cron 与外部消息 SQLite 结构化日志保留天数；`0` 表示不自动清理 |
+| `KEMO_LOG_RETENTION_DAYS` | 未设置 | 优先覆盖实例 `cron.log_retention_days`（仓库为 30 天）；两者缺失/无效时兜底 90 天。Cron 与外部消息 SQLite 结构化日志共用；`0` 表示不自动清理 |
 
 认证流程按配置确定：只配置 Token 时验证 Token 后进入；只配置用户名密码时登录后进入；两者同时配置时必须先验证 Token，再验证用户名和密码，不能任选其一。双重认证的 Token 中间状态有效 5 分钟，完整签名会话默认有效 2 小时。
 
@@ -135,45 +161,45 @@ Token 与密码只出现在对应 POST 请求体中；浏览器所有者仍可�
 
 ### 示例
 
-```dotenv
-KEMO_API_KEY=replace-with-local-secret
-KEMO_BASE_URL=http://127.0.0.1:8741
-KEMO_MODEL=my-model
+```yaml
+KEMO_API_KEY: "replace-with-local-secret"
+KEMO_BASE_URL: "http://127.0.0.1:8741"
+KEMO_MODEL: "my-model"
 
-WEB_HOST=127.0.0.1
-WEB_PORT=1357
-WEB_USERNAME=
-WEB_PASSWORD=
-WEB_SESSION_SECRET=
-WEB_SESSION_COOKIE_NAME=kemo_agent_session
-WEB_SESSION_COOKIE_SECURE=false
-WEB_AUTH_IP_MAX_FAILURES=
-WEB_AUTH_IP_WINDOW_SECONDS=600
-WEB_AUTH_IP_LOCK_SECONDS=900
-WEB_AUTH_TRUSTED_PROXIES=
+WEB_HOST: "127.0.0.1"
+WEB_PORT: "1357"
+WEB_USERNAME: ""
+WEB_PASSWORD: ""
+WEB_SESSION_SECRET: ""
+WEB_SESSION_COOKIE_NAME: "kemo_agent_session"
+WEB_SESSION_COOKIE_SECURE: "false"
+WEB_AUTH_IP_MAX_FAILURES: ""
+WEB_AUTH_IP_WINDOW_SECONDS: "600"
+WEB_AUTH_IP_LOCK_SECONDS: "900"
+WEB_AUTH_TRUSTED_PROXIES: ""
 
-HTTP_PROXY=
-HTTPS_PROXY=
-TAVILY_API_KEY=
+HTTP_PROXY: ""
+HTTPS_PROXY: ""
+TAVILY_API_KEY: ""
 ```
 
 ### 安全规则
 
-1. `.env` 不提交版本库；只提交不含真实值的 `.env.example`。
-2. 不把 `.env` 内容复制到知识库、记忆、截图、日志或错误报告。
+1. `kemo.yaml` 不提交版本库；只提交不含真实值的 `kemo.yaml.example`。
+2. 不把 `kemo.yaml` 内容复制到知识库、记忆、截图、日志或错误报告。
 3. 怀疑泄露时立即轮换密钥，不能只删除文件记录。
 4. 对外监听 Web 时必须同时考虑认证、防火墙、反向代理和 HTTPS；HTTPS 部署必须设置 `WEB_SESSION_COOKIE_SECURE=true`。
 5. 自动化部署优先使用操作系统或平台的 Secret 管理，而不是把生产密钥写入镜像。
 
 ---
 
-## global_config.json 配置项手册
+## global_config.yaml 配置项手册
 
-> 文档版本：v2.4
-> 最后核对：2026-08-07
-> 事实来源：`config/global_config.json`、`run/config/`、`run/engine.py`、`run/conversation/`、`run/context/`、`run/scheduler/`
+> 文档版本：CardStream v1
+> 最后核对：2026-11-03
+> 事实来源：`config/global_config.yaml`、`run/config/`、`run/engine.py`、`run/conversation/`、`run/context/`、`run/scheduler/`
 
-kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用户共享这些默认值，用户级 `user_config.json` 可覆盖其中非 `USER_ONLY_SECTIONS` 的字段。
+kemo-agent 全局配置文件，位于 `config/global_config.yaml`。所有用户共享这些默认值，用户级 `user_config.yaml` 可覆盖其中非 `USER_ONLY_SECTIONS` 的字段。
 
 修改配置前先查本手册；部署级密钥和 Web 启动参数见 本文“环境变量”章节，用户覆盖规则见 本文“用户配置”章节。未知字段是否生效以当前加载器和使用方代码为准，不应仅因 JSON 能保存就视为受支持。
 
@@ -193,8 +219,9 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 |------|------|--------|------|
 | `max_concurrent_requests` | int | `10` | 进程级总闸，Web、外部消息、Cron、维护任务和子代理共享；每一次真实 LLM API 请求独立占槽，工具执行期间释放槽位 |
 | `request_semaphore_timeout` | float | `300.0` | 获取并发槽位的超时秒数；超时后抛出 `ProviderCongestionError` |
+| `max_retries` | int | `5` | 主模型一次推理恢复序列及 CardStream 摘要请求的额外重试次数，不含首次；有效范围 0–5。Kemo 同一请求的传输续传另有独立限额，详见 Provider 专题 |
 
-> 用户 `user_config.json` 中独立配置的 `provider_runtime` 会覆盖此全局值。
+> 用户 `user_config.yaml` 中独立配置的 `provider_runtime` 会覆盖此全局值。
 
 ---
 
@@ -204,13 +231,12 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 |------|------|--------|------|
 | `enabled` | bool | `true` | 全局工具开关。`false` 时所有 Provider 工具 schema 均不注册，智能体只能纯文本对话 |
 | `timeout` | int | `240` | 单次工具调用未提供 `timeout` 参数时的默认秒数；工具 Schema 声明且调用方显式提供有效 `timeout` 时，以显式值为准，插件内部期限与框架看门狗使用同一有效值 |
-| `max_iterations` | int | `80` | 单轮对话允许处理的最大工具调用次数。每个调用分别计数，同一 Provider 响应中的并行调用也计入总数；达到上限后停止本轮，超出部分不执行 |
-| `consecutive_identical_call_limit` | int | `8` | 同一工具使用完全相同参数连续请求的允许次数；工具或参数变化后重新计数。超过后阻止继续执行 |
+| `consecutive_identical_call_limit` | int | `3` | 同一签名连续真实执行的上限；副作用重复拦截及闸门拒绝不计数，其他签名真实执行后重置。达到后阻止下一次执行 |
 | `invalid_tool_arguments_retries` | int | `2` | 主智能体或子智能体收到 Provider 的 `invalid_tool_arguments` 时，使用新 `request_id` 重新请求完整 JSON object 的次数。失败尝试的文本与思考会保留，工具调用须整批校验后才发布和执行；已经发布媒体时不重试。`0` 表示禁用恢复 |
 
 > 用户配置 `tools` 为对象深合并，可覆盖其中任意字段。
 
-单次工具内联 JSON 结果有不可配置的 100,000 字符核心硬限制。超限时框架丢弃正文，只向智能体、事件和历史写入 `ToolResultTooLargeError`、原始字符数与缩小范围提示；文件内容应改用 `file.stat` 和 `file.read_range` 分段读取。该受控拒绝不计入 `consecutive_tool_fail_limit`。该限制只约束工具回传到模型上下文的结果，不改变工具读取、写入或处理文件的实际容量。
+主整合工具结果完整追加到 CardStream RAW，包含调用快照、执行 ID、状态和结果；有效 VIEW 由普通历史压缩与主请求容量屏障管理，不做静默截断。异常巨大单卡无法装入请求时明确报容量错误。子代理内联结果仍受 100,000 字符预算约束，超限优先保存完整结果文件并返回有界回执，无法保存时返回 `ToolResultTooLargeError`；工具已执行不等于业务成功，不能因结果处理失败盲目重跑副作用。
 
 ---
 
@@ -218,15 +244,13 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `schema_version` | int | `1` | 历史数据格式版本号 |
-| `recent_full_rounds` | int | `3` | 保留完整工具日志和思考过程的最近轮数。超过此数的旧轮次会被 `context_manage` 逐轮压缩 |
 | `consecutive_tool_fail_limit` | int | `5` | 同名工具连续失败的容忍上限。达到后本轮从 Provider 工具 schema 中临时移除该工具；其他工具穿插执行会重置连续失败计数 |
 
 ---
 
 ### history_summary — 历史摘要后台调度
 
-历史摘要使用独立持久调度线程，不占用 Web 请求线程，也不进入有容量上限的子代理内存队列。会话关闭并排队后，即使用户关闭网页，任务仍会由运行中的 RuntimeHost 继续处理。
+历史摘要用于会话列表的标题和简介，使用独立持久调度线程，不占用 Web 请求线程，也不进入有容量上限的子代理内存队列。会话关闭并排队后，即使用户关闭网页，任务仍会由运行中的 RuntimeHost 继续处理。它读取 CardStream RAW 并更新会话元数据，不是写入 VIEW 的滚动上下文摘要。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -235,7 +259,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `max_attempts` | int | `5` | 单个摘要任务的自动尝试上限；达到上限后进入 `exhausted`，等待用户手动重试 |
 | `retry_delays_seconds` | int[] | `[30, 120, 600, 1800]` | 各次失败后的退避时间；超出数组长度时沿用最后一个值。Provider 拥塞和服务停止只推迟任务，不消耗失败次数 |
 
-长对话按保守 Token 预算分块生成摘要；即使单轮正文超过预算，也会无损拆成多个片段。每块完成后写入持久断点，进程重启或中途失败后从最近断点继续，不重复处理已经成功的分块。
+长对话按保守 Token 预算分块生成简介；即使单张 RAW 卡片正文超过预算，也会无损拆成多个片段。每块完成后写入持久断点，进程重启或中途失败后从最近断点继续，不重复处理已经成功的分块。
 
 摘要结果优先通过受 Schema 约束的内部提交工具返回，不依赖模型自行拼写 JSON。若 Provider 不支持或模型没有遵循工具调用，系统会依次兼容文本 JSON、带“标题/摘要”标签的普通文本，并在连续格式失败时生成不含敏感凭据的本地保底卡片；Provider 网络、鉴权或服务错误仍进入持久重试，不会被格式保底掩盖。修改本段配置后需要重启运行时宿主才能应用到调度线程。
 
@@ -249,13 +273,18 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
+| `user_soul` | `12000` | 用户人格段注入上限 |
+| `agents_manual` | `26000` | 运行手册段注入上限 |
+| `knowledge_index` | `40000` | 知识索引段注入上限 |
 | `task_plan` | `6000` | 任务计划段注入上限 |
 | `perception` | `20000` | 感知模块数据注入上限 |
 | `expand_data` | `20000` | 拓展模块数据注入上限 |
 | `skill_prompts` | `80000` | 技能提示词（共享技能 + 用户技能）注入上限 |
 | `plugin_prompts` | `80000` | 插件提示词注入上限 |
 
-> 以下 Prompt 段不使用 char_limits 字段控制：用户人格、全局人格、运行手册、子代理注册、知识库索引、四层记忆（永久 + 重要 + 三层临时）分别由各自独立的字符控制逻辑管理。各 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项。
+> `global_soul`、子代理注册和四层记忆仍由各自独立逻辑控制；`user_soul`、`agents_manual`、`knowledge_index` 现在统一使用上述 `char_limits`。启用的 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项；整体记忆注入由全局 `memory.prompt_injection` 控制。
+
+固定段顺序由 `run/config/prompt.py::PROMPT_SECTION_ORDER` 定义：用户人格、全局人格、手册、知识索引、内置/用户子代理注册、插件、技能、拓展能力说明、永久记忆、热画像及三层临时记忆。有效历史置于固定段之后；任务计划、最新感知和实时拓展数据按此顺序在每个主 Provider 请求前重新读取并组成动态尾部，不进入固定段或历史卡片。相应字符预算仍有效。旧 `realtime_injection` 不再控制刷新时机；记忆修订时只替换记忆段，不借动态状态刷新重排固定历史前缀。
 
 ---
 
@@ -263,18 +292,31 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `storage_schema_version` | int | `2` | `improve/memory.sqlite3` 表结构版本号；运行时以数据库 `memory_meta` 为准 |
-| `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许 Maintenance 每轮后台提取；`on_commit` 每轮同步提取 |
-| `recovery_max_rounds_per_scan` | int | `10` | Maintenance 每轮扫描最多补提取的总轮数。运行时限制为 1–20 |
-| `extraction_batch_rounds` | int | `5` | 一次 `self_improve` 模型运行最多分析的连续轮数。运行时限制为 1–20 |
-| `extraction_max_candidates_per_batch` | int | `30` | 每批实际处理的独立记忆候选，硬上限 40；其余持久待办续处理，满页继续提取未返回事实；不再按对话轮数设置额外上限，单轮包含多个独立长期事实时可分别保留 |
+| `storage_schema_version` | int | `3` | `improve/memory.sqlite3` 表结构版本号；运行时以数据库 `memory_meta` 为准 |
+| `prompt_injection` | bool | `true` | 仅全局配置；控制永久记忆、热画像及三层临时记忆的自动注入。关闭后只提示可通过工具检索，记忆存储、提取和工具授权保持原有规则 |
+| `profile` | string | `companion` | 个人智能默认模式，开放 fact/relation/state；用户明确选择 work 时仅保留 fact。按用户覆盖，非法值加载失败 |
+| `domain_rules` | object | 见下文 | companion 的关系晋升和状态续期规则；仅允许 relation/state，键或类型错误加载失败 |
+| `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 关闭自动提取；`compression_only` 在会话关闭或 CardStream 压缩成功后登记 RAW seq 范围；`background` 允许 Maintenance 领取 pending RAW；兼容值 `on_commit` 当前也只允许后台领取 pending RAW，不在请求线程同步提取 |
+| `extraction_input_tokens` | int | `12000` | 后台/手动共用的正文提取预算，512..64000；按同一整合组织用户、引导、最终正文，工具卡片不计入正文；超大正文再分页 |
+| `extraction_max_candidates_per_batch` | int | `30` | 每批实际处理的主题记忆候选，硬上限 40；其余持久待办续处理，满页继续提取未返回主题；不按每句话创建候选 |
 | `important_memory_max_chars` | int | `20000` | 临时重要热画像的 Prompt 注入字符预算。注入时由 `run/config/` 的 Prompt 门面按该值截断 |
 | `important_memory_output_max_chars` | int | `20000` | 临时重要热画像模型输出的防失控硬上限；与注入预算语义独立，超过后拒绝本次更新且不覆盖旧热画像 |
 | `history_read_enabled` | bool | `true` | 是否允许智能体使用 `history_search` 工具读取历史对话 |
 
+全局配置示例：
+
+```yaml
+memory:
+  prompt_injection: false
+```
+
+省略该字段时默认开启。关闭后，固定记忆段只保留“当前记忆没有开启注入，可以通过工具进行记忆检索”，不加载记忆正文；`memory_manage` 仍可按需检索。配置在下一次 Run 构建提示词时生效，不回改正在执行的请求。
+
 #### temporary_injection_limits — 临时记忆注入上限
 
-按**文件数量**截断，优先保留高权重层级。仅限制单次 Prompt 注入，不限制磁盘存储数量。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入。
+按**文件数量**截断。work 层内按权重降序与文件名排序，companion 临时层内先 state、再 relation、再 fact，
+各域内仍按权重降序与文件名排序；永久层排序保持原状。数量和字符预算不因 profile 改变。
+仅限制单次 Prompt 注入，不限制磁盘存储数量。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入。
 
 `memory_important_sources` 只记录热画像的来源关系和内容摘要，用于判断热画像是否仍然有效，不会改变普通临时记忆的 Prompt 注入资格。进入热画像的碎片仍按 `temporary_injection_limits` 在原层正常注入、加权、到期和晋升；热画像作为更高优先级的概括层额外强化这些事实，而不是替换权威碎片正文。任一来源正文或层级变化时旧热画像暂停注入，普通临时层始终保持正常注入，直到下次巡检重建热画像。
 
@@ -285,6 +327,19 @@ kemo-agent 全局配置文件，位于 `config/global_config.json`。所有用�
 | `seven_days` | `300` | 周层最多注入 300 个记忆文件 |
 
 #### tiers — 记忆层级与晋升规则
+
+fact 始终使用下表；companion 的非 fact 规则：
+
+| `memory.domain_rules` 字段 | 默认值 | 语义 |
+|---|---|---|
+| `relation.upgrade_threshold` | `1` | 到期后按不同自然日证实累计权重晋升；创建日为 0，第二个证据日为 1；null 表示不晋升 |
+| `state.upgrade_threshold` | `null` | state 固定 seven_days，不晋升；此保留配置项不能将 state 改成可晋升记忆 |
+| `state.refresh_expiry_on_update` | `true` | companion 中 state 正文实际变化时，刷新进入时间及到期时间，保留创建时间；false 保持原期限 |
+
+阈值校验只接受 null 或非负整数（bool 不算整数），续期字段只接受 bool。
+work 不应用域规则，但仍检查配置拼写和类型。fact 或未知域名不能写进 domain_rules。
+state 正文限 B 类 150 字，同主题 revise；explicit 不会使 state 进入永久层。
+profile/domains 由宿主传给 self_improve，不放入参与幂等摘要的 source。
 
 | 层级 | `days` | `upgrade_threshold` | `next` | 说明 |
 |------|-------|---------------------|--------|------|
@@ -346,6 +401,8 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 |------|------|--------|------|
 | `enabled` | bool | `true` | 是否启用 cron 调度器 |
 | `history_retention_days` | int | `7` | `agent` 模式定时任务生成的历史对话保留天数，范围 0–3650；`0` 表示永久保留。该字段只接受全局配置，用户配置不能覆盖 |
+| `log_retention_days` | int | `30` | 实例级 Cron 与外部消息结构化日志保留天数；环境变量优先，0 不自动清理，缺失/非法值兜底 90 天。每次写入重新读取，策略变更不受同日已清理限制；每表每批最多删除 1000 条，余量在后续写入继续处理。与历史会话保留期独立 |
+| `task_cron_system.expand_update.interval_seconds` | int | `30` | 独立采集进程的拓展刷新周期，正整数秒；优先于旧顶层别名，新键非法则拒绝配置 |
 | `session_idle_close_seconds` | int | `5400` | 有数据会话无活动后进入记忆队列并归档的闲置阈值（默认 90 分钟）；范围为至少 3600 秒。该字段只接受全局配置，用户配置不能覆盖；空 Web 会话仍使用独立的 90 秒删除宽限 |
 | `poll_interval` | int | `30` | 任务轮询间隔（秒）。运行时会自动取它与 `sense_update_rate`、`expand_update_rate` 的最小值，保证短周期任务按时被扫描 |
 | `avoid_congestion` | bool | `true` | 是否启用 Provider 拥塞避免 |
@@ -358,16 +415,16 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `sense_update_rate` | int | `5` | 全局感知模块数据刷新间隔（秒）。缺失或非法值回退到 5 |
-| `expand_update_rate` | int | `5` | 全局、共享和各用户拓展模块的统一刷新间隔（秒）。缺失或非法值回退到 5 |
+| `expand_update_rate` | int | `30` | 旧兼容别名；仅 `cron.task_cron_system.expand_update.interval_seconds` 缺失时使用。缺失或非法值回退30秒 |
 | `module_update_timeout` | number | `120` | 每个感知/拓展采集脚本的独立子进程超时（秒）；非法值回退到 120，最大 3600 |
 | `runtime_checkpoint_seconds` | number | `300` | 高频系统任务的 `latest_run_at/next_run_at` 内存状态写回任务 JSON 的检查点间隔（秒，1..3600）；后台调度器通过跨进程租约保证每个 root 只有一个系统任务领导者，前台单次扫描在释放租约前写回位置，异常与正常停机仍会立即落盘 |
-| `success_log_flush_seconds` | number | `300` | 高频系统任务成功日志的内存聚合窗口（秒，1..3600）；调度循环按真实截止时间冲刷，不依赖下一次成功事件，失败日志独立立即落盘，停机时强制冲刷剩余成功聚合 |
+| `success_log_flush_seconds` | number | `3600` | 系统任务统计的内存聚合窗口（秒，1..3600）；仅明确无变化的成功省略逐次日志，变化未知/为真、每次 partial/failed 均即时写入并计入统计。循环按截止时间冲刷，正常停机强制冲刷，异常退出可丢未冲刷统计 |
 
 > 两个刷新间隔也影响 `cron.poll_interval` 的最小轮询粒度；单模块超时不改变轮询频率。
 >
 > 感知 Web API 使用与调度器相同的校验逻辑读取全局 `sense_update_rate`，返回 `update_interval_seconds` 和兼容显示文本。频率不写入单个 `sense.json`；用户配置中的同名字段也不作为全局调度或页面展示来源。
 >
-> 高频采集仍按 5 秒执行；两个持久化间隔只减少无变化状态和成功日志的写盘次数，不会降低采集频率，也不会延迟失败诊断。
+> 感知默认5秒、拓展默认30秒，由独立采集进程的两条调度分别执行。同根拓展模块最多4个并行，主宿主只读快照；不迁移 WebSocket 服务。两个持久化间隔只减少无变化状态和成功日志的写盘次数，不延迟失败诊断。进程监护与真实退出语义见 `task-automation.md`。
 
 ---
 
@@ -410,36 +467,41 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enable_mid_context_compression` | bool | `true` | 是否启用中途上下文压缩：同时控制超过 `conserved_rounds` 后的单轮工具/思考摘要和请求组装时的旧工具结果缩略；关闭时两种历史格式均保留未压缩的原始工具结果，不影响工具结果硬上限、普通轮数、Token 超限、Provider 超限兜底或手动上下文压缩 |
-| `conserved_rounds` | int | `3` | 开启中途上下文压缩时，保留完整工具日志和思考过程的最近轮数；更早轮次可逐轮生成摘要并在请求组装时缩略工具结果 |
-| `max_rounds` | int | `80` | 上下文最大对话轮数。达到后触发压缩。此值限制 SQLite runtime 窗口及 Provider 上下文的轮次上限，不限制用户可见 archive 归档 |
-| `rounds_after_compression` | int | `20` | 压缩后保留的轮数 |
-| `token_limit` | int | `1000000` | 上下文 Token 上限。预估总 token 超过此值时触发压缩 |
-| `token_compression_ratio` | float | `0.3` | Token 后备阶段的目标比例。所有整体压缩先按轮数整理；轮数阶段已解决上限则停止，无法解决才尝试 `input_budget = token_limit × ratio` |
+| `token_limit` | int | `1000000` | 配置总容量；扣除实际输出预留后，输入还受 Provider 声明限制约束 |
+| `token_compression_ratio` | float | `0.3` | 有效历史 Token 的软目标比例；必须实际缩减并装入请求容量，但不因略超比例丢弃有用检查点 |
+| `output_reserve` | int | `8192` | 主模型输出预留；先取 provider.max_tokens 与模型 max_output_tokens 的较小有效上限，再计算输入容量 |
+| `compression_timeout_seconds` | number | `180` | 一次完整 CardStream 压缩的总时长上限（秒），所有片段与重试共享，不逐请求重置 |
 | `important_memory_review_hours` | int | `3` | 宿主级临时重要记忆巡检间隔（小时）。Cron 据此创建唯一系统 recurring 任务，到期后按用户分别执行；不支持用户级时间表 |
 | `daily_memory_review_time` | str | `"02:00"` | 宿主级每日记忆整理时间（北京时间 HH:MM）。Cron 据此创建唯一系统 daily 任务，到期后按用户分别执行；不支持用户级时间表 |
 
-`context_manage` 的摘要输入会合并正文、reasoning/think 和工具结论；核心运行时为每次摘要请求提供最多 20000 tokens 的输出预算，并要求非空、完整的结构化 JSON。网页端手动压缩只有在摘要缓存、SQLite runtime 窗口轮数、绝对轮次偏移和摘要覆盖范围重新读取校验通过后才报告成功；用户可见 archive 归档仍保留完整轮次。
+CardStream 将所有历史事件保存在 `users/<user>/cards.sqlite3`。RAW 在追加后不可变；VIEW 可被滚动摘要替换。每次主 Provider 请求前统一计算固定 Prompt、有效历史、动态尾部和工具 Schema；总占用超过有效输入上限的 80% 时压缩，手动压缩也走同一请求屏障。摘要失败或提交冲突时保留原 VIEW。旧轮数/window 配置已退出运行时，不应重新添加。
 
-关闭中途上下文压缩后，历史增长不会仅因旧轮次超出 `conserved_rounds` 而把工具结果改写为缩略预览或目录省略摘要；已经压缩保存的历史不会自动恢复。关闭不保证缓存命中率恒定，其他上下文压缩、系统提示词变化和服务端缓存状态仍可能影响命中率。
+输入容量取 `token_limit - 实际输出预留`、声明的 `max_input_tokens`、声明的
+`context_window - 实际输出预留` 三者中已知项的最小值；独立输入上限不再扣输出。
+摘要请求使用自身输出额度重新计算容量，同一模型的输出上限仍生效。历史目标为有效历史
+Token × 压缩比例，并受固定段、动态尾部和 Schema 占用后剩余容量约束；这些固定内容不参与比例基数。
+摘要 Token 包含其历史消息标签及 JSON 字符串转义；摘要消息封装和保留后缀投影另行核对，
+避免摘要本体符合预算却在原生消息组装后超限。
+摘要最小结构都装不下时不调用模型；原请求能装下且仅自动阈值触发时跳过无收益压缩，
+手动请求或真实超容量仍报错。
 
-轮数压缩沿用基础保留轮数；Token 压缩可以越过 `recent_full_rounds`、
-`conserved_rounds` 和 `rounds_after_compression`，直到含摘要和固定内容的上下文不超过
-目标比例，或只剩一轮。当前正在运行的一轮计入保留轮次，其工具消息组不拆分。
-手动、轮数、本地 Token、API 实际输入用量及 API 上下文错误都优先轮数压缩，
-轮数没有可移除历史或整理后仍超限时进入 Token 压缩；不因压缩前曾超限就无条件追逐比例。
-最后一轮仍高于目标时返回 `target_reached=false`、
-`minimum_rounds_reached=true`，不继续丢弃该轮。正常轮末也检查完整输出后的轮数和 Token。
-
-摘要单次输入默认最多约 64000 估算 Token，包含完整请求固定开销与已有摘要；摘要模型有可靠容量声明时再扣除输出预留收紧。超大单轮内部拆片，不截断或丢弃历史。413 尺寸恢复与模型 Token 超限分别记录，不把单独状态码认定为模型容量声明。
+过大的连续历史前缀按完整卡片分片，临时滚动摘要仅存在内存中；全部成功后，在一次事务中
+检查候选摘要、保留后缀及完整请求容量，再提交 VIEW。中途失败保留旧 VIEW 及独立新到卡片。
+片段共用 `provider_runtime.max_retries` 规定的额外失败重试额度和一次总 deadline。
+usage 累计所有已收到的响应，包括无效候选和后续失败前的成功片段，不把失败当零消耗。
+原生媒体的二进制载荷不按文字计量，每块暂用 1024 Token 本地预留并结合实际 usage 校准；
+它不是厂商精确的图像、音频或视频 tokenizer，也不截断原媒体。普通 JSON/工具结果字符串按文字计量。
+usage 校准按模型、计量版本及原生媒体类型集合隔离，不把媒体消耗造成的估算偏差套到后续纯文字请求。
+只读状态页复用同地址、凭据身份和模型的有效能力缓存计算输入/输出预算，不主动发起能力查询；
+无有效声明时明确标为能力未知，不把配置容量冒充模型实际窗口。
 
 ---
 
-### 与 user_config.json 的关系
+### 与 user_config.yaml 的关系
 
-`global_config.json` 提供全局默认值。用户可在 `user_config.json` 中覆盖部分字段。
+`global_config.yaml` 提供全局默认值。用户可在 `user_config.yaml` 中覆盖部分字段。
 
-| 维度 | global_config.json | user_config.json |
+| 维度 | global_config.yaml | user_config.yaml |
 |------|-------------------|-----------------|
 | 作用域 | 所有用户 | 单个用户 |
 | 覆盖性 | 默认值 | 可覆盖全局值 |
@@ -462,13 +524,13 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 
 ---
 
-## user_config.json 配置项手册
+## user_config.yaml 配置项手册
 
 > 文档版本：v2.4
 > 最后核对：2026-08-07
-> 事实来源：`template/user/user_config.json`、`run/config/`、`provider/protocol/models.py`
+> 事实来源：`template/user/user_config.yaml`、`run/config/`、`provider/protocol/models.py`
 
-kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`。用户可在此覆盖全局默认值，也可通过 Web UI 配置面板修改。
+kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.yaml`。用户可在此覆盖全局默认值，也可通过 Web UI 配置面板修改。
 
 目录和数据文件职责见 `knowledge-and-user-data.md`；环境变量兜底和密钥优先级见本文“环境变量”章节。配置保存后，当前 Run 不会中途改变 Provider 或权限，下一次 Run 才使用新的合并结果；需要重建 RuntimeHost 组件的参数应重启服务。
 
@@ -495,7 +557,7 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 | `type` | string | — | Provider 类型。`"kemo"` = Kemo 网关原生模式，`"chat"` = 标准 Chat Completions 模式。启动前选择，运行中不自动回退 |
 | `base_url` | string | — | API 基础地址。Kemo 默认 `http://127.0.0.1:8741`；Chat 默认 `https://api.openai.com/v1`，仅裸根地址补 `/v1`，自定义路径保留 |
 | `api_key` | string | — | API 密钥。优先级高于 `api_key_env` |
-| `api_key_env` | string | — | 从环境变量读取密钥的变量名。当 `api_key` 为空时生效，如 `"KEMO_API_KEY"` |
+| `api_key_env` | string | — | 仅允许 KEMO_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY / ANTHROPIC_API_KEY；未命中抛 ConfigError，内联密钥不豁免。留空按类型默认；密钥读取仍以 api_key 优先 |
 | `model` | string | — | 默认对话模型名，如 `"deepseek-chat"` |
 | `stream` | bool | `true` | 是否启用流式输出 |
 | `timeout` | number | `120` | 普通 Provider 请求超时秒数。专用多模态调用未显式配置时会改用当前工具期限并预留 5 秒收尾；显式配置后仍受工具期限上限约束 |
@@ -504,11 +566,11 @@ kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.json`�
 
 #### 密钥优先级
 
-`api_key`（明文） > `api_key_env`（环境变量名） > 全局 `.env` 兜底
+`api_key`（明文） > `api_key_env`（环境变量名） > 全局 `kemo.yaml` 兜底
 
 #### 地址优先级
 
-1. `user_config.json → provider.base_url`
+1. `user_config.yaml → provider.base_url`
 2. `KEMO_BASE_URL` / `OPENAI_BASE_URL` 环境变量
 3. Provider 类型对应的内置默认地址（chat → OpenAI 默认，kemo → `http://127.0.0.1:8741`）
 
@@ -580,18 +642,19 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 图片文件在后端经过来源目录约束或显式本地路径登记、完整解码、真实格式与大小检查后，Chat 请求才会临时内联；Chat 图片仅接受 JPEG、PNG、WEBP 和 GIF，Base64 不写入 Web 状态或文本历史。Kemo 输入先通过认证 Asset API 流式上传，再以远端 `asset_id` 进入请求；生成结果经下载和 SHA-256 校验后防重名保存到用户 `download` 目录。专用插件不重复携带主对话历史。
 
-识别类动作（图片理解、音频转写、视频理解）只对明确标记为可重试的瞬时错误进行一次额外尝试。生成、编辑和转换类动作不自动重试，避免重复计费或产生重复产物。失败结果不会进入同参数工具结果缓存，因此智能体根据错误分类决定再次调用时会真正发起新请求；同名工具连续失败保护仍然生效。
+识别类动作（图片理解、音频转写、视频理解）只对明确标记为可重试的瞬时错误进行一次额外尝试。生成、编辑和转换类动作不自动重试，避免重复计费或产生重复产物。失败结果不会作为下一次调用的结果；智能体根据错误分类再次调用时会真正发起新请求，同名工具连续失败保护仍然生效。
 
 ---
 
 ### provider_runtime — Provider 运行时并发控制
 
-覆盖全局 `global_config.json → provider_runtime`。按对象深合并。
+覆盖全局 `global_config.yaml → provider_runtime`。按对象深合并。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `max_concurrent_requests` | int | 10 | 进程级总闸，所有 LLM API 请求共享；工具执行期间释放槽位 |
 | `request_semaphore_timeout` | float | 300.0 | 获取并发槽位的超时秒数 |
+| `max_retries` | int | 5 | 主模型一次推理恢复序列及 CardStream 摘要请求的额外重试次数，0–5；首次不计入 |
 
 ---
 
@@ -606,41 +669,39 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### tools — 工具调用
 
-覆盖全局 `global_config.json → tools`。按对象深合并。
+覆盖全局 `global_config.yaml → tools`。按对象深合并。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `timeout` | int | 240 | 工具未显式提供 `timeout` 时的默认秒数；显式有效参数会覆盖此值，并同时作用于插件内部期限和框架看门狗 |
-| `max_iterations` | int | 80 | 单轮对话允许处理的最大工具调用次数；并行工具调用分别计数 |
-| `consecutive_identical_call_limit` | int | 8 | 相同参数连续调用同一工具的容忍上限 |
+| `consecutive_identical_call_limit` | int | 3 | 相同参数连续真实执行同一工具的上限，副作用重复拦截/闸门拒绝不计数 |
 | `invalid_tool_arguments_retries` | int | 2 | 主智能体或子智能体收到不完整工具参数时，使用新请求 ID 自动重新生成参数的次数；文本与思考保留，工具调用整批校验后才发布和执行，已经发布媒体时不重试；`0` 表示禁用 |
 
 > 注意：`tools.enabled` 不在用户配置中覆盖，仅全局配置控制。
 
-单次工具内联 JSON 结果的 100,000 字符硬限制由核心统一执行，不是用户配置字段。超限正文不会进入 Provider 或历史；文件工具会提示使用 `stat` 和 `read_range` 分段读取，且本次受控拒绝不计入连续工具失败。该限制不改变文件实际读写和插件内部处理上限。
+主整合工具结果由 CardStream 完整保存 RAW，再通过 VIEW 压缩和请求容量检查处理。子代理的 100,000 字符内联预算不是用户配置字段；超限优先保存完整文件并返回回执，无法保存才返回受控错误。文件读取可使用 `stat` 和 `read_range` 主动分段；结果处理失败不能作为重跑已执行副作用的依据。
 
 ---
 
 ### history — 对话历史
 
-覆盖全局 `global_config.json → history`。按对象深合并。
+覆盖全局 `global_config.yaml → history`。按对象深合并。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
-| `recent_full_rounds` | int | 3 | 保留完整工具/思考日志的最近轮数 |
 | `consecutive_tool_fail_limit` | int | 5 | 同名工具连续失败后临时移除的容忍上限 |
 
 ---
 
 ### prompt — System Prompt 注入控制
 
-覆盖全局 `global_config.json → prompt`。按对象深合并。
+覆盖全局 `global_config.yaml → prompt`。按对象深合并。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `char_limits` | object | 各 Prompt 段字符上限。同全局结构：`task_plan`、`perception`、`expand_data`、`skill_prompts`、`plugin_prompts` |
+| `char_limits` | object | 各 Prompt 段字符上限。同全局结构：`user_soul`、`agents_manual`、`knowledge_index`、`task_plan`、`perception`、`expand_data`、`skill_prompts`、`plugin_prompts`；超限在段诊断中标记 `truncated=true`。 |
 
-各 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项。旧配置中全部为 `full` 的声明可兼容读取，但不会再影响运行时。
+启用的 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项；整体记忆注入由全局 `memory.prompt_injection` 控制。旧配置中全部为 `full` 的声明可兼容读取，但不会再影响运行时。
 
 ---
 
@@ -671,10 +732,9 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 |------|------|--------|------|
 | `shared_whitelist` | array | `[]` | 共享拓展白名单。空 = 全部启用 |
 | `global_whitelist` | array | `[]` | 全局拓展白名单。空 = 全部启用 |
-| `prompt_injection` | bool | `true` | 总注入闸门。`false` 时整个 `[expand_data]` 段不进入系统提示词，但不影响后台更新或主动调用拓展 |
-| `realtime_injection` | bool | `false` | `false` 时每轮对话开始读取一次拓展快照；`true` 时每次逻辑 Provider 请求前重读最新快照。开启会降低 Prompt Cache 命中率 |
+| `prompt_injection` | bool | `true` | 实时数据注入闸门。`false` 时动态尾部省略拓展数据，不影响后台更新、能力说明或主动调用 |
 
-> 用户拓展（`users/<name>/expand/`）始终按当前用户目录动态解析，不受白名单控制。
+> 用户拓展（`users/<name>/expand/`）始终按当前用户目录动态解析，不受白名单控制。实时数据每次主请求前读取最新已发布快照；旧 `realtime_injection` 不再决定刷新时机。
 
 ---
 
@@ -683,10 +743,9 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `global_whitelist` | array | `[]` | 全局感知模块白名单。空 = 全部启用 |
-| `prompt_injection` | bool | `true` | 总注入闸门。`false` 时整个 `[perception]` 段不进入系统提示词，但后台采集仍可继续 |
-| `realtime_injection` | bool | `false` | `false` 时每轮对话开始读取一次感知快照，工具续轮保持不变；`true` 时每次逻辑 Provider 请求前重读后台已发布的最新快照。开启会降低 Prompt Cache 命中率 |
+| `prompt_injection` | bool | `true` | 动态尾部的感知注入闸门；关闭后后台采集仍可继续 |
 
-> 感知模块位于 `global_sense/`，只采集系统数据，通过 `sense.md` 单向注入 system prompt，不提供操控接口。
+> 感知模块位于 `sense/`，只采集系统数据，不提供操控接口。每次主请求前读取最新已发布快照，携带来源及时间信息进入动态尾部；旧 `realtime_injection` 不再决定刷新时机。
 
 ---
 
@@ -700,14 +759,15 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### memory — 记忆系统
 
-覆盖全局 `global_config.json → memory`。按对象深合并。
+覆盖全局 `global_config.yaml → memory`，按对象深合并；`prompt_injection` 仅由全局控制，用户配置不能覆盖，用户配置 API 拒绝写入该字段。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
-| `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 完全关闭；`compression_only` 仅上下文压缩/保存时提取；`background` 允许后台提取；`on_commit` 每轮同步提取 |
-| `recovery_max_rounds_per_scan` | int | 10 | Maintenance 每次扫描最多补提取的总轮数，范围 1–20 |
-| `extraction_batch_rounds` | int | 5 | 每次模型分析的连续轮数，范围 1–20 |
-| `extraction_max_candidates_per_batch` | int | 30 | 每批实际入库候选上限，硬上限 40；超限排队不丢弃，全部完成才推进源游标 |
+| `profile` | string | `companion` | 默认个人模式开放 fact/relation/state；选择 work 时仅保留 fact |
+| `domain_rules` | object | relation 阈值1；state 不晋升、正文更新续期 | 字段校验和生命周期边界见全局 memory 节 |
+| `extraction_mode` | string | `compression_only` | `disabled` 关闭自动提取；`compression_only` 在会话关闭或 CardStream 压缩成功后登记 RAW seq；`background` 与兼容值 `on_commit` 允许 Maintenance 领取 pending RAW |
+| `extraction_input_tokens` | int | 12000 | 后台/手动共用正文 token 预算，512..64000；同一整合不按工具卡片数拆批，超大正文无损分页 |
+| `extraction_max_candidates_per_batch` | int | 30 | 每批实际入库主题候选上限，硬上限 40；超限排队不丢弃，全部完成才推进源游标 |
 | `temporary_injection_limits` | object | 100/200/300 | 三层临时记忆注入数量上限：`half_year`、`one_month`、`seven_days`。Kemo Graph 外挂不读取或改写这些上限，也不会减少本地记忆注入 |
 | `important_memory_max_chars` | int | 20000 | 临时重要热画像的 Prompt 注入字符预算；注入时按该值截断 |
 | `important_memory_output_max_chars` | int | 20000 | 临时重要热画像输出防失控硬上限；与注入预算语义独立，超过后拒绝且不覆盖旧热画像 |
@@ -717,7 +777,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### agent_runtime — 智能体运行时
 
-覆盖全局 `global_config.json → agent_runtime`。按对象深合并。
+覆盖全局 `global_config.yaml → agent_runtime`。按对象深合并。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
@@ -729,7 +789,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### web — Web 服务
 
-覆盖全局 `global_config.json → web`。按对象深合并。
+覆盖全局 `global_config.yaml → web`。按对象深合并。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
@@ -742,7 +802,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### message — 外部消息路由
 
-覆盖全局 `global_config.json → message`。按对象深合并。
+覆盖全局 `global_config.yaml → message`。按对象深合并。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
@@ -753,7 +813,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### cron — 定时调度
 
-覆盖全局 `global_config.json → cron`。按对象深合并。
+覆盖全局 `global_config.yaml → cron`。按对象深合并。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
@@ -770,33 +830,33 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### task_cron_system — 系统定时任务
 
-按对象深合并全局 `global_config.json → task_cron_system`。刷新频率由 RuntimeHost 的全局配置统一调度；用户层只适合覆盖自己的模块执行超时。
+按对象深合并全局 `global_config.yaml → task_cron_system`。刷新频率由 RuntimeHost 的全局配置统一调度；用户层只适合覆盖自己的模块执行超时。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `sense_update_rate` | int | 5 | 系统级感知刷新间隔；用户配置中的值不改变全局任务频率 |
-| `expand_update_rate` | int | 5 | 三层拓展统一刷新间隔；用户配置中的值不改变全局任务频率 |
+| `expand_update_rate` | int | 30 | 三层拓展刷新周期的旧兼容别名，新嵌套键优先；用户配置不改变全局任务频率 |
 | `module_update_timeout` | number | 120 | 当前用户拓展的单模块子进程超时（秒），最大 3600 |
 
 ---
 
 ### agents — 智能体上下文与压缩
 
-覆盖全局 `global_config.json → agents`。按对象深合并，但系统 Cron 的两个宿主级调度字段除外。
+覆盖全局 `global_config.yaml → agents`。按对象深合并，但系统 Cron 的两个宿主级调度字段除外。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
-| `enable_mid_context_compression` | bool | true | 同时控制超过 `conserved_rounds` 后的单轮工具/思考摘要和旧工具结果缩略；关闭后保留未压缩的原始内容，工具结果硬上限和其他上下文压缩路径不变，已压缩历史不自动恢复 |
-| `conserved_rounds` | int | 3 | 开启中途上下文压缩时保留完整工具/思考日志的最近轮数 |
-| `max_rounds` | int | 80 | 上下文最大对话轮数（触发压缩） |
-| `rounds_after_compression` | int | 20 | 压缩后保留的轮数 |
-| `token_limit` | int | 1000000 | 上下文 Token 上限 |
-| `token_compression_ratio` | float | 0.3 | Token 后备阶段目标比例。手动/自动/API 恢复均先整理轮数；轮数整理已解决上限则停止，无进展或仍超限才尝试此比例 |
+| `token_limit` | int | 1000000 | 配置总容量，按实际输出预留计算有效输入预算 |
+| `token_compression_ratio` | float | 0.3 | 有效历史卡片压缩软目标；最终按实际缩减及完整请求容量验收 |
+| `output_reserve` | int | 8192 | 主模型输出预留 |
+| `compression_timeout_seconds` | number | 180 | 一次完整压缩的总时长上限（秒），分片和重试不重置 |
 
-上下文摘要由 `context_manage` 统一处理，输入包含正文、reasoning/think 与工具结论，核心运行时的单次摘要输出预算为 20000 tokens。手动压缩会在 SQLite runtime 窗口和摘要缓存完成落盘校验后才返回成功；该输出预算不是用户配置字段。
+旧的 `max_rounds`、`conserved_rounds`、`rounds_after_compression`、
+`recent_full_rounds`、`enable_mid_context_compression`、`compression_max_attempts` 与
+`context_engine` 不再读取或接受写入。历史上下文现由 CardStream 管理，不按对话轮次裁剪。
 
 `important_memory_review_hours` 与 `daily_memory_review_time` 只允许在
-`config/global_config.json → agents` 中配置。系统只创建一份全局时间表，任务到期后再按用户分别执行；在 `user_config.json` 中填写这两个字段不会创建用户专属调度，不应声明。
+`config/global_config.yaml → agents` 中配置。系统只创建一份全局时间表，任务到期后再按用户分别执行；在 `user_config.yaml` 中填写这两个字段不会创建用户专属调度，不应声明。
 
 ---
 
@@ -812,8 +872,8 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `multimodal_routing` | vision |
 | `knowledge` | use_shared, use_global |
 | `skills` | shared_whitelist |
-| `expand` | global_whitelist, shared_whitelist, prompt_injection, realtime_injection |
-| `perception` | global_whitelist, prompt_injection, realtime_injection |
+| `expand` | global_whitelist, shared_whitelist, prompt_injection |
+| `perception` | global_whitelist, prompt_injection |
 | `plugins` | whitelist |
 | `task_plan` | auto_accept, auto_retry_on_fix |
 
@@ -844,3 +904,5 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 - 白名单配置过滤主智能体的 Prompt 选择和知识检索，不收缩子代理 `agent-config.json` 已授予的能力
 
 > 注意：这些白名单不控制子代理。子代理只服从各自 `agent-config.json`，不与主智能体策略求交集。
+
+主智能体默认长任务：全局 `tools.max_iterations` 已移除，工具调用总数与模型请求轮数不设上限。网页运行限制不再提供该配置，旧字段的 PATCH 请求会明确拒绝。子代理使用自己的 `agent-config.json` 工具额度与 call/resume 段预算，不再读取全局旧字段。
