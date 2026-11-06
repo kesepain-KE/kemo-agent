@@ -15,7 +15,7 @@
     "receive_file",
     "send_file"
   ],
-  "allowed_tools": null,
+  "allowed_tools": ["history_search"],
   "message_buffer": "message.md",
   "files_dir": "files"
 }
