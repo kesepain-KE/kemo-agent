@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         errors.append(f"CLI 版本未指向 {version}")
 
     project_introduction = (
-        ROOT / "global_knowledge" / "project-introduction.md"
+        ROOT / "knowledge" / "global" / "project-introduction.md"
     ).read_text(encoding="utf-8")
     if not any(
         f"当前{status}版本为 `{version}`" in project_introduction
@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         errors.append(f"项目介绍中的稳定或暂定版本未指向 {version}")
 
     version_guide = (
-        ROOT / "global_knowledge" / "version-and-update-modules.md"
+        ROOT / "knowledge" / "global" / "version-and-update-modules.md"
     ).read_text(encoding="utf-8")
     example_match = re.search(r"```json\s*\n(.*?)\n```", version_guide, re.DOTALL)
     try:
@@ -160,14 +160,14 @@ def main(argv: list[str] | None = None) -> int:
         gateway_markers = {
             "agents.md": agents_manual,
             "config/global_soul.md": global_soul,
-            "global_knowledge/project-introduction.md": project_introduction,
-            "global_knowledge/version-and-update-modules.md": version_guide,
+            "knowledge/global/project-introduction.md": project_introduction,
+            "knowledge/global/version-and-update-modules.md": version_guide,
             "readme.md": readme,
             "README_EN.md": readme_en,
         }
         optional_gateway_docs = (
-            "global_knowledge/provider-reliability.md",
-            "global_knowledge/builtin-expansions.md",
+            "knowledge/global/provider-reliability.md",
+            "knowledge/global/builtin-expansions.md",
         )
         for relative in optional_gateway_docs:
             path = ROOT / relative

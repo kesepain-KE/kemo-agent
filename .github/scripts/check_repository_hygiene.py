@@ -45,6 +45,10 @@ def blocked_reason(path: str) -> str | None:
     normalized = path.casefold()
     name = PurePosixPath(path).name.casefold()
 
+    if name == "kemo.yaml" or (
+        name.startswith("kemo.yaml.") and normalized != "kemo.yaml.example"
+    ):
+        return "实例环境凭据文件"
     if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
         return "环境变量凭据文件"
     if normalized == "config/message_config.json":

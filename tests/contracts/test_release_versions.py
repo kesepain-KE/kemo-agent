@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SURFACES = (
     "version.json", "cli.py", "web/frontend/package.json",
     "web/frontend/package-lock.json", "readme.md", "README_EN.md", "agents.md",
-    "config/global_soul.md", "global_knowledge/project-introduction.md",
-    "global_knowledge/version-and-update-modules.md",
-    "global_knowledge/provider-reliability.md", "global_knowledge/builtin-expansions.md",
+    "config/global_soul.md", "knowledge/global/project-introduction.md",
+    "knowledge/global/version-and-update-modules.md",
+    "knowledge/global/provider-reliability.md", "knowledge/global/builtin-expansions.md",
 )
 
 
@@ -58,8 +58,8 @@ def test_old_release_tag_cannot_validate_new_source(version_guard, capsys):
     ("README_EN.md", "Current version: `{version}`"),
     ("agents.md", "当前稳定版本：`kemo-agent {version}`"),
     ("config/global_soul.md", "kemo-agent {version}"),
-    ("global_knowledge/project-introduction.md", "当前稳定版本为 `{version}`"),
-    ("global_knowledge/version-and-update-modules.md", '"version": "{version}"'),
+    ("knowledge/global/project-introduction.md", "当前稳定版本为 `{version}`"),
+    ("knowledge/global/version-and-update-modules.md", '"version": "{version}"'),
 ])
 def test_stale_current_version_surface_is_rejected(version_guard, capsys, relative, marker):
     checker, root, version = version_guard

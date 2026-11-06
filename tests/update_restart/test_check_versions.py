@@ -65,7 +65,7 @@ def build_release_tree(root: Path, version: str = "1.2.7") -> None:
         f"![v]({badge}blue)\n\nCurrent version: `{version}`\n", encoding="utf-8"
     )
     (root / "cli.py").write_text('VERSION = "%s"\n' % version, encoding="utf-8")
-    knowledge = root / "global_knowledge"
+    knowledge = root / "knowledge" / "global"
     knowledge.mkdir(parents=True, exist_ok=True)
     (knowledge / "project-introduction.md").write_text(
         f"当前稳定版本为 `{version}`。\n", encoding="utf-8"
@@ -153,11 +153,11 @@ class CheckVersionsTests(unittest.TestCase):
                 + "\nCompatible kemo-adapter-api 0.8.2\n",
                 encoding="utf-8",
             )
-            (root / "global_knowledge" / "project-introduction.md").write_text(
+            (root / "knowledge" / "global" / "project-introduction.md").write_text(
                 "当前稳定版本为 `1.3.0`。配套 kemo-adapter-api 0.8.2。\n",
                 encoding="utf-8",
             )
-            (root / "global_knowledge" / "version-and-update-modules.md").write_text(
+            (root / "knowledge" / "global" / "version-and-update-modules.md").write_text(
                 '```json\n{"name": "kemo-agent", "version": "1.3.0", '
                 '"compatibility": {"kemo-adapter-api": "0.8.2"}}\n```\n',
                 encoding="utf-8",
@@ -206,14 +206,14 @@ class CheckVersionsTests(unittest.TestCase):
             version_path.write_text(json.dumps(manifest), encoding="utf-8")
             for relative in (
                 "readme.md", "README_EN.md",
-                "global_knowledge/version-and-update-modules.md",
+                "knowledge/global/version-and-update-modules.md",
             ):
                 path = root / relative
                 path.write_text(
                     path.read_text(encoding="utf-8") + "\nkemo-adapter-api 0.8.2\n",
                     encoding="utf-8",
                 )
-            introduction = root / "global_knowledge/project-introduction.md"
+            introduction = root / "knowledge/global/project-introduction.md"
             introduction.write_text(
                 "当前暂定版本为 `1.3.1`（待发布），配套 kemo-adapter-api 0.8.2。\n",
                 encoding="utf-8",

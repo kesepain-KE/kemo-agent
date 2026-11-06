@@ -39,10 +39,12 @@ tmp_unstage_obsidian.txt
 tmp/*
 !tmp/.gitkeep
 
-# Environment
+# Instance environment configuration and private module credentials
+kemo.yaml
+kemo.yaml.*
+!kemo.yaml.example
 .env
 .env.*
-!.env.example
 
 # Local message routing identity map
 config/message_config.json
@@ -73,25 +75,25 @@ template/user/improve/*.sqlite3*
 template/user/task_plan/*.sqlite3*
 
 # Expand / Sense / Skills — only register.py is tracked
-global_expand/*
-!global_expand/register.py
-!global_expand/kemo_gateway_status/
-!global_expand/kemo_gateway_status/**
-!global_expand/kemo_graph/
-!global_expand/kemo_graph/**
-!global_expand/kemo_app/
-!global_expand/kemo_app/**
+expand/global/*
+!expand/global/register.py
+!expand/global/kemo_gateway_status/
+!expand/global/kemo_gateway_status/**
+!expand/global/kemo_graph/
+!expand/global/kemo_graph/**
+!expand/global/kemo_app/
+!expand/global/kemo_app/**
 # Built-in module source is tracked, but private runtime configuration is not.
-global_expand/**/.env
-global_expand/**/.env.*
-!global_expand/**/.env.example
+expand/global/**/.env
+expand/global/**/.env.*
+!expand/global/**/.env.example
 **/kemo-graph-storage/
-global_sense/*
-!global_sense/register.py
-shared_expand/*
-!shared_expand/register.py
-shared_skills/*
-!shared_skills/register.py
+sense/*
+!sense/register.py
+expand/share/*
+!expand/share/register.py
+skills/*
+!skills/register.py
 
 # Message outbound — keep empty folder only
 message/out/*

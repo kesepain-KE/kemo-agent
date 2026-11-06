@@ -9,16 +9,15 @@
     "cron",
     "deploy",
     "events.py",
-    "global_expand",
-    "global_sense",
+    "expand",
+    "sense",
     "message",
     "plugins",
     "provider",
     "restart.py",
     "run",
     "setup.py",
-    "shared_expand",
-    "shared_skills",
+    "skills",
     "start_web.py",
     "template",
     "tests",
@@ -50,14 +49,14 @@
     {
       "root": "tests/expand/test_gateway_status_expand.py",
       "extraPaths": [
-        "global_expand/kemo_gateway_status",
+        "expand/global/kemo_gateway_status",
         "."
       ]
     },
     {
       "root": "tests/expand/test_kemo_graph_expand.py",
       "extraPaths": [
-        "global_expand/kemo_graph",
+        "expand/global/kemo_graph",
         "."
       ]
     },
@@ -69,23 +68,23 @@
       ]
     },
     {
-      "root": "global_expand/kemo_graph",
+      "root": "expand/global/kemo_graph",
       "extraPaths": [
-        "global_expand/kemo_graph",
+        "expand/global/kemo_graph",
         "."
       ]
     },
     {
-      "root": "global_expand/kemo_gateway_status",
+      "root": "expand/global/kemo_gateway_status",
       "extraPaths": [
-        "global_expand/kemo_gateway_status",
+        "expand/global/kemo_gateway_status",
         "."
       ]
     },
     {
-      "root": "global_expand/kemo_app",
+      "root": "expand/global/kemo_app",
       "extraPaths": [
-        "global_expand/kemo_app",
+        "expand/global/kemo_app",
         "."
       ]
     },
