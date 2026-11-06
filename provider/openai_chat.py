@@ -30,7 +30,8 @@ from provider.schema import (
     Usage,
 )
 from provider.tool_arguments import MISSING, parse_tool_arguments
-from provider.protocol.models import normalize_reasoning_effort
+from provider.protocol.models import Measurement, Usage as ProtocolUsage, normalize_reasoning_effort
+from provider.protocol.streaming import iter_sse_payloads
 from provider.chat_deepseek import (
     DEEPSEEK_REASONING_PLACEHOLDER,
     deepseek_chat_url,
@@ -45,6 +46,8 @@ from provider.chat_compat import (
     ChatReasoningAccumulator, chat_content_text, chat_reasoning_text, chat_response_payload, chat_usage,
     chat_public_frame, chat_state_from_raw, chat_transport_profile, chat_url, profile_field as _profile_field,
 )
+from provider.tokenizer import count_chat_request, count_text, count_value
+from provider.token_usage import fill_usage
 
 
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
@@ -165,27 +168,6 @@ def _retry_after_ms(headers: Any) -> int | None:
     return round(max(0.0, min(_MAX_RETRY_DELAY_SECONDS, seconds)) * 1000)
 
 
-def _estimate_tokens(text: str) -> int:
-    if not text:
-        return 0
-        # 保守的无依赖性估计：CJK 倾向于每个代币一个代币
-        # 字符，而拉丁文本倾向于每 4 个字符 1 个标记。
-    cjk = sum(1 for char in text if "\u3400" <= char <= "\u9fff")
-    remaining = len(text) - cjk
-    return cjk + math.ceil(remaining / 4)
-
-
-def _messages_text(messages: list[dict[str, Any]]) -> str:
-    parts: list[str] = []
-    for message in messages:
-        content = message.get("content", "")
-        if isinstance(content, str):
-            parts.append(content)
-        else:
-            parts.append(json.dumps(content, ensure_ascii=False, default=str))
-    return "\n".join(parts)
-
-
 class OpenAIChatTransport:
     def __init__(self, config: dict[str, Any]) -> None:
         self.base_url = str(config["base_url"]).rstrip("/")
@@ -278,6 +260,8 @@ class OpenAIChatTransport:
         payload = request.to_payload()
         payload["model"] = request.model or self.model
         payload["stream"] = stream
+        if "n" in payload:
+            payload["n"] = 1
         if self.is_deepseek:
             return deepseek_payload(
                 payload,
@@ -320,34 +304,48 @@ class OpenAIChatTransport:
             ) from exc
         return _decode_json(raw, context)
 
-    def _usage(self, raw: Any, request: ChatRequest, output: str) -> Usage:
-        if isinstance(raw, dict) and raw:
-            if not self.is_deepseek:
-                raw = chat_usage(raw)
-            prompt = int(raw.get("prompt_tokens") or 0)
-            completion = int(raw.get("completion_tokens") or 0)
-            total = int(raw.get("total_tokens") or prompt + completion)
-            extras = {
-                key: value
-                for key, value in raw.items()
-                if key not in {"prompt_tokens", "completion_tokens", "total_tokens"}
-            }
-            return Usage(
-                prompt_tokens=prompt,
-                completion_tokens=completion,
-                total_tokens=total,
-                estimated=False,
-                source="provider",
-                extra=extras,
-            )
-        prompt = _estimate_tokens(_messages_text(request.messages))
-        completion = _estimate_tokens(output)
+    def _usage(self, raw: Any, request: ChatRequest, output: Any) -> Usage:
+        raw = chat_usage(raw) if isinstance(raw, dict) else {}
+        measurement = (
+            Measurement.model_validate(raw["measurement"])
+            if isinstance(raw.get("measurement"), dict) else Measurement.model_validate({
+                "mode": "estimated" if raw.get("estimated") else "provider",
+            })
+        )
+        extras = {
+            key: value for key, value in raw.items()
+            if key not in {"prompt_tokens", "completion_tokens", "total_tokens",
+                           "input_tokens", "output_tokens", "estimated", "source", "measurement"}
+        }
+
+        def generated_tokens():
+            if not isinstance(output, dict):
+                return count_value(output) if output else 0
+            total = sum(count_text(output.get(key) or "") for key in ("text", "reasoning", "refusal"))
+            for call in output.get("tool_calls") or []:
+                total += count_text(call.get("name") or "") + count_value(call.get("arguments") or {})
+            if not output.get("reasoning"):
+                details = extras.get("completion_tokens_details") or {}
+                total += int(extras.get("reasoning_tokens") or details.get("reasoning_tokens") or 0)
+            return total
+
+        usage = fill_usage(
+            ProtocolUsage(
+                input_tokens=raw.get("prompt_tokens"),
+                output_tokens=raw.get("completion_tokens"),
+                total_tokens=raw.get("total_tokens"),
+                measurement=measurement,
+            ),
+            input_tokens=lambda: count_chat_request(request.messages, request.tools),
+            output_tokens=generated_tokens,
+        )
         return Usage(
-            prompt_tokens=prompt,
-            completion_tokens=completion,
-            total_tokens=prompt + completion,
-            estimated=True,
-            source="local_estimate",
+            prompt_tokens=int(usage.input_tokens or 0),
+            completion_tokens=int(usage.output_tokens or 0),
+            total_tokens=int(usage.total_tokens or 0),
+            estimated=not usage.measurement.exact,
+            source="local_estimate" if usage.measurement.mode == "estimated" else str(usage.measurement.mode),
+            extra={**extras, "measurement": usage.measurement.model_dump(mode="json")},
         )
 
     def chat(self, request: ChatRequest) -> ChatResponse:
@@ -517,7 +515,15 @@ class OpenAIChatTransport:
             annotations=[item for item in annotations if isinstance(item, dict)],
             logprobs=logprobs,
             finish_reason=str(choice.get("finish_reason") or ""),
-            usage=self._usage(data.get("usage"), request, str(text)),
+            usage=self._usage(data.get("usage"), request, {
+                "text": text,
+                "reasoning": reasoning if not reasoning_synthetic else "",
+                "tool_calls": [
+                    {"name": call.name, "arguments": call.arguments}
+                    for call in tool_calls
+                ],
+                "refusal": refusal or "",
+            }),
             model=str(data.get("model") or request.model or self.model),
             response_id=str(data.get("id") or ""),
             system_fingerprint=(
@@ -530,8 +536,8 @@ class OpenAIChatTransport:
                 if data.get("service_tier") is not None
                 else None
             ),
-            choice_index=int(choice.get("index") or 0),
-            choice_count=len(choices),
+            choice_index=0,
+            choice_count=1,
             raw=raw_response,
         )
 
@@ -552,14 +558,13 @@ class OpenAIChatTransport:
         last_logprobs: dict[str, Any] | None = None
         reasoning_parts: list[str] = []
         tool_parts: dict[int, dict[str, Any]] = {}
-        final_usage: Usage | None = None
+        raw_usage: dict[str, Any] = {}
         done_received = False
         finish_reason = ""
         response_model = request.model or self.model
         response_id = ""
         system_fingerprint: str | None = None
         service_tier: str | None = None
-        pending_text_events: list[RunEvent] = []
         chat_reasoning = ChatReasoningAccumulator(self._chat_compat) if self._chat_compat else None
         try:
             content_type = _validate_chat_content_type(response)
@@ -575,25 +580,21 @@ class OpenAIChatTransport:
                     response_format="json_fallback",
                 )
                 return
-            while True:
-                try:
-                    raw_line = response.readline()
-                except (http.client.IncompleteRead, http.client.RemoteDisconnected, OSError) as exc:
-                    raise ProviderError(
-                        f"Provider 流式传输中断：{type(exc).__name__}: {exc}",
-                        category="stream_interrupted",
-                        retryable=(
-                            not reasoning_parts
-                            and not text_parts
-                            and not tool_parts
-                        ),
-                    ) from exc
-                if not raw_line:
-                    break
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or line.startswith(":") or not line.startswith("data:"):
-                    continue
-                value = line[5:].strip()
+            def lines():
+                while True:
+                    try:
+                        raw_line = response.readline()
+                    except (http.client.IncompleteRead, http.client.RemoteDisconnected, OSError) as exc:
+                        raise ProviderError(
+                            f"Provider 流式传输中断：{type(exc).__name__}: {exc}",
+                            category="stream_interrupted",
+                            retryable=not (reasoning_parts or text_parts or tool_parts),
+                        ) from exc
+                    if not raw_line:
+                        return
+                    yield raw_line
+
+            for _, _, value in iter_sse_payloads(lines()):
                 if value == "[DONE]":
                     done_received = True
                     break
@@ -623,11 +624,20 @@ class OpenAIChatTransport:
                     system_fingerprint = str(data["system_fingerprint"])
                 if data.get("service_tier") is not None:
                     service_tier = str(data["service_tier"])
-                if data.get("usage"):
-                    final_usage = self._usage(data["usage"], request, "".join(text_parts))
+                if isinstance(data.get("usage"), dict):
+                    # SSE usage frames are cumulative snapshots, not increments.
+                    snapshot = chat_usage(data["usage"])
+                    if snapshot.get("total_tokens") is None and any(
+                        key in snapshot and snapshot[key] != raw_usage.get(key)
+                        for key in ("prompt_tokens", "completion_tokens")
+                    ):
+                        raw_usage["total_tokens"] = None
+                    raw_usage.update(snapshot)
                 choices = data.get("choices") or []
                 for choice in choices:
                     if not isinstance(choice, dict):
+                        continue
+                    if choice.get("index", 0) != 0:
                         continue
                     finish_reason = str(choice.get("finish_reason") or finish_reason)
                     delta = (checked_682 if isinstance(checked_682 := choice.get("delta"), dict) else {})
@@ -645,23 +655,17 @@ class OpenAIChatTransport:
                     if isinstance(choice.get("logprobs"), dict):
                         last_logprobs = choice["logprobs"]
                     if reasoning:
-                        first_reasoning = not reasoning_parts
                         reasoning_parts.append(str(reasoning))
                         yield RunEvent(
                             type="reasoning_delta", content=str(reasoning),
                             metadata={"raw": chat_public_frame(data) if self._chat_compat else data},
                         )
-                        if first_reasoning:
-                            yield from pending_text_events
-                            pending_text_events.clear()
                     if text:
                         text_parts.append(str(text))
-                        pending_text_events.append(
-                            RunEvent(
-                                type="text_delta",
-                                content=str(text),
-                                metadata={"raw": chat_public_frame(data) if self._chat_compat else data},
-                            )
+                        yield RunEvent(
+                            type="text_delta",
+                            content=str(text),
+                            metadata={"raw": chat_public_frame(data) if self._chat_compat else data},
                         )
                     for position, raw_call in enumerate(delta.get("tool_calls") or []):
                         if not isinstance(raw_call, dict):
@@ -728,8 +732,6 @@ class OpenAIChatTransport:
                         "reason": "missing_upstream_reasoning",
                     },
                 )
-            yield from pending_text_events
-            pending_text_events.clear()
             for index in sorted(tool_parts):
                 part = tool_parts[index]
                 arguments, arguments_raw, parse_error = _parse_arguments(
@@ -758,8 +760,18 @@ class OpenAIChatTransport:
                         "finish_reason": finish_reason,
                     },
                 )
-            if final_usage is None:
-                final_usage = self._usage(None, request, "".join(text_parts))
+            final_usage = self._usage(raw_usage, request, {
+                "text": "".join(text_parts),
+                "reasoning": "".join(reasoning_parts),
+                "refusal": "".join(refusal_parts),
+                "tool_calls": [
+                    {
+                        "name": tool_parts[index]["name"],
+                        "arguments": tool_parts[index]["arguments"],
+                    }
+                    for index in sorted(tool_parts)
+                ],
+            })
             yield RunEvent(type="usage", usage=final_usage.to_dict())
             yield RunEvent(
                 type="done",

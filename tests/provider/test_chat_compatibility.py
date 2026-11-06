@@ -10,7 +10,9 @@ from unittest.mock import patch
 import pytest
 
 from provider.adapters.chat_bridge import ChatBridgeProvider
-from provider.adapters.compat import chat_request_to_kemo, kemo_request_to_chat
+from provider.adapters.compat import (
+    _protocol_usage_from_chat, chat_request_to_kemo, kemo_request_to_chat,
+)
 from provider.chat_compat import (
     CHAT_REASONING_PLACEHOLDER, CHAT_RAW_STATE_KEY, CHAT_STATE_KEY,
     ChatCompatibility, chat_url,
@@ -18,6 +20,7 @@ from provider.chat_compat import (
 from provider.openai_chat import OpenAIChatTransport
 from provider.protocol.models import KemoResponse, ReasoningItem, TextContent, ToolCallItem, ToolResultItem
 from provider.schema import ChatRequest, ProviderError
+from provider.tokenizer import count_value
 from run.conversation import events_for_protocol_response
 from tests.provider.test_provider_protocol import FakeHTTPResponse
 from tests.type_assertions import http_headers
@@ -146,6 +149,90 @@ def test_generic_relay_envelope_and_content_blocks(stream) -> None:
         opened.assert_called_once()
 
 
+def test_missing_chat_usage_uses_shared_deepseek_tokenizer_and_is_marked_estimated() -> None:
+    wire_request = request()
+    wire_request.tools = [{
+        "type": "function",
+        "function": {"name": "lookup", "parameters": {"type": "object"}},
+    }]
+    expected_prompt = count_value({
+        "messages": wire_request.messages,
+        "tools": wire_request.tools,
+    })
+    transport = OpenAIChatTransport(config())
+    with patch("urllib.request.urlopen", return_value=response(reply({"content": "回答"}))):
+        result = transport.chat(wire_request)
+    assert result.usage.prompt_tokens == expected_prompt
+    assert result.usage.completion_tokens == count_value("回答")
+    assert result.usage.estimated is True
+    assert result.usage.source == "local_estimate"
+
+
+def test_partial_chat_usage_retains_only_fields_reported_by_upstream() -> None:
+    wire_request = request()
+    transport = OpenAIChatTransport(config())
+    usage = transport._usage({"prompt_tokens": 17}, wire_request, "answer")
+
+    protocol_usage = _protocol_usage_from_chat(usage)
+
+    assert protocol_usage.input_tokens == 17
+    assert protocol_usage.output_tokens == count_value("answer")
+    assert protocol_usage.total_tokens == 17 + count_value("answer")
+    assert protocol_usage.measurement.exact_fields == ["input_tokens"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_usage_fallback_counts_real_reasoning_and_tool_arguments(stream) -> None:
+    message = {"content": "working", "reasoning_content": "check facts", "tool_calls": [CALL]}
+    transport = OpenAIChatTransport(config())
+    with patch("urllib.request.urlopen", return_value=sse(message) if stream else response(reply(message, "tool_calls"))):
+        if stream:
+            events = list(transport.chat_stream(request()))
+            usage = events[-1].usage
+        else:
+            usage = transport.chat(request()).usage.to_dict()
+    assert usage["estimated"]
+    assert usage["completion_tokens"] > count_value("working") + count_value("check facts")
+    assert usage["measurement"]["estimated_fields"] == [
+        "input_tokens", "output_tokens", "total_tokens",
+    ]
+
+
+def test_stream_usage_frames_are_cumulative_and_last_frame_can_also_contain_output() -> None:
+    frames = [
+        {"usage": {"prompt_tokens": 17}, "choices": [{"delta": {"content": "hello "}}]},
+        {"usage": {"prompt_tokens": 17}, "choices": [{"delta": {"content": "world"}, "finish_reason": "stop"}]},
+    ]
+    wire = ("".join("data: " + json.dumps(frame) + "\n\n" for frame in frames) + "data: [DONE]\n\n").encode()
+    transport = OpenAIChatTransport(config())
+    with patch("urllib.request.urlopen", return_value=FakeHTTPResponse(wire, content_type="text/event-stream")):
+        events = list(transport.chat_stream(request()))
+    usage_events = [event for event in events if event.type == "usage"]
+    assert len(usage_events) == 1
+    usage = usage_events[0].usage
+    assert usage["prompt_tokens"] == 17
+    assert usage["completion_tokens"] == count_value("hello world")
+    assert usage["total_tokens"] == 17 + count_value("hello world")
+    assert usage["measurement"]["exact_fields"] == ["input_tokens"]
+
+
+def test_stream_usage_alias_updates_replace_prior_snapshot_and_rederive_stale_total() -> None:
+    frames = [
+        {"usage": {"prompt_tokens": 17, "completion_tokens": 2, "total_tokens": 19},
+         "choices": [{"delta": {"content": "hello "}}]},
+        {"usage": {"input_tokens": 20, "output_tokens": 5},
+         "choices": [{"delta": {"content": "world"}, "finish_reason": "stop"}]},
+    ]
+    wire = ("".join("data: " + json.dumps(frame) + "\n\n" for frame in frames) + "data: [DONE]\n\n").encode()
+    transport = OpenAIChatTransport(config())
+    with patch("urllib.request.urlopen", return_value=FakeHTTPResponse(wire, content_type="text/event-stream")):
+        usage = list(transport.chat_stream(request()))[-1].usage
+    assert usage["prompt_tokens"] == 20
+    assert usage["completion_tokens"] == 5
+    assert usage["total_tokens"] == 25
+    assert not usage["estimated"]
+
+
 @pytest.mark.parametrize("wire", [
     {"error": {"message": "failed"}, "data": reply({"content": "must not accept"})},
     {"success": False, "data": reply({"content": "must not accept"})},
@@ -220,7 +307,10 @@ def test_signed_state_survives_tools_durable_history_and_api_continuation(stream
         captured.append(payload)
         assistants = [item for item in payload["messages"] if item["role"] == "assistant"]
         assert len(assistants) == 1
-        assert assistants[0]["reasoning_details"] == DETAILS
+        assert assistants[0]["reasoning_details"] == [
+            {key: value for key, value in detail.items() if key not in {"text", "summary"}}
+            for detail in DETAILS
+        ]
         assert assistants[0]["content"] == "Checking."
         assert assistants[0]["tool_calls"][0]["id"] == payload["messages"][-1]["tool_call_id"]
         assert CHAT_STATE_KEY not in assistants[0]
@@ -280,7 +370,7 @@ def test_credential_shaped_state_is_not_hidden_inside_compressed_history() -> No
         policy.state({"reasoning_details": [{"type": "reasoning.text", "text": "api_key=secret-value"}]}, "vendor/model")
 
 
-def test_plain_reasoning_replay_requires_an_explicit_profile() -> None:
+def test_plain_reasoning_profile_does_not_replace_provider_state() -> None:
     transport = {"reasoning": {"history_field": "reasoning_content"}}
     cfg = config(transport)
     cfg["capabilities"] = {"transport": transport}
@@ -292,7 +382,7 @@ def test_plain_reasoning_replay_requires_an_explicit_profile() -> None:
     converted = chat_response_to_kemo(parsed, native)
     mapped = kemo_request_to_chat(native.model_copy(update={"input": converted.output}))
     payload = bridge._transport._payload(mapped, stream=False)
-    assert payload["messages"][0]["reasoning_content"] == "source"
+    assert "reasoning_content" not in payload["messages"][0]
 
 
 def test_signed_stream_blocks_are_private_even_when_text_shares_the_frame() -> None:

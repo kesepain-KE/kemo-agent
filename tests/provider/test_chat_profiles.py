@@ -83,7 +83,7 @@ def test_automatic_profile_full_tool_roundtrip_on_final_wire(model: str, stream:
             assert payload["thinking"] == {"type": "enabled"}
             assert payload["reasoning_effort"] == "high"  # logical medium -> wire high
         else:
-            assert not selected.enabled and "reasoning_effort" not in payload
+            assert selected.enabled and payload["reasoning_effort"] == "medium"
         if len(bodies) == 1:
             return response({"content": "Checking", "reasoning_content": "Observed thought" if selected.enabled else "",
                              "tool_calls": [{"index": 0, "id": "wire-call", "type": "function",
@@ -94,7 +94,7 @@ def test_automatic_profile_full_tool_roundtrip_on_final_wire(model: str, stream:
         assert len(tool_messages) == 1
         assert tool_messages[0]["tool_calls"][0]["id"] == payload["messages"][-1]["tool_call_id"]
         assert payload["messages"][-1]["content"] == "ok"
-        if selected.enabled:
+        if model.startswith("deepseek-") and selected.enabled:
             assert len(assistants) == 1 and tool_messages[0]["reasoning_content"] == "Observed thought"
         return response({"content": "Complete"}, stream=stream)
 
@@ -142,34 +142,35 @@ def test_deepseek_constraints_fail_before_http(model: str) -> None:
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-def test_explicit_tool_denial_has_priority_and_does_not_mutate(wrapped: bool) -> None:
+def test_legacy_tool_claim_is_ignored_without_mutating_configuration(wrapped: bool) -> None:
     cfg = config("deepseek-flash")
     data = {"tools": {"function_calling": False}}
     cfg["capabilities"] = {"capabilities": data} if wrapped else data
     before = copy.deepcopy(cfg)
-    with pytest.raises(CapabilityError, match="工具调用"):
-        ChatBridgeProvider(cfg).validate(request("deepseek-flash"))
+    ChatBridgeProvider(cfg).validate(request("deepseek-flash"))
     assert cfg == before
 
 
 def test_model_switch_does_not_reuse_main_model_policy() -> None:
     bridge = ChatBridgeProvider(config("deepseek-flash"))
     assert bridge.capabilities("deepseek-flash").reasoning.supported
-    assert not bridge.capabilities("other-model").reasoning.supported
+    assert bridge.capabilities("other-model").reasoning.supported
+    assert bridge.capabilities("other-model").extensions["capability_source"] == "compat-default"
     assert bridge.capabilities("other-model").input_modalities == ["text"]
     assert bridge.capabilities("deepseek-v4-pro").input_modalities == ["text"]
     assert bridge.capabilities("deepseek-flash").input_modalities == ["text", "image"]
     with patch("urllib.request.urlopen", return_value=response({"content": "ok"}, stream=False)) as http:
         bridge.create(request("other-model"))
     wire = json.loads(http.call_args.args[0].data)
-    assert wire["model"] == "other-model" and wire["thinking"]["type"] == "disabled"
+    assert wire["model"] == "other-model" and "thinking" not in wire
 
 
-def test_unmapped_explicit_reasoning_is_not_falsely_advertised() -> None:
+def test_legacy_reasoning_claim_does_not_replace_automatic_standard_profile() -> None:
     cfg = config()
     cfg["capabilities"] = {"reasoning": {"supported": True, "efforts": ["high"]}}
     caps = ChatBridgeProvider(cfg).capabilities("unknown")
-    assert not caps.reasoning.supported and caps.extensions["reasoning_unmapped"]
+    assert caps.reasoning.supported and "medium" in caps.reasoning.efforts
+    assert caps.extensions["capability_source"] == "compat-default"
 
 
 @pytest.mark.parametrize("url,base,expected", [
@@ -181,7 +182,10 @@ def test_unmapped_explicit_reasoning_is_not_falsely_advertised() -> None:
 ])
 def test_runtime_configuration_preserves_routes(url: str, base: str, expected: str) -> None:
     from run.config import provider_runtime_config
-    cfg = provider_runtime_config({"provider": {**config("deepseek-flash"), "base_url": url}})
+    cfg = provider_runtime_config({
+        "provider_security": {"allowed_hosts": ["relay.test", "chat.test"]},
+        "provider": {**config("deepseek-flash"), "base_url": url},
+    })
     bridge = ChatBridgeProvider(cfg)
     assert cfg["base_url"] == base
     assert bridge._transport._url() == expected

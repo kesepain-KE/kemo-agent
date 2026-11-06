@@ -102,9 +102,11 @@ def deepseek_payload(
     if configured_effort is None:
         configured_effort = payload.pop("reasoning_effort", None)
 
-    enabled = bool(configured_enabled) if configured_enabled is not None else True
+    enabled = configured_enabled
     if str(configured_effort or "").strip().casefold() == "none":
         enabled = False
+    elif enabled is None and configured_effort is not None:
+        enabled = True
     effort = (
         deepseek_reasoning_effort(
             configured_effort or default_reasoning_effort
@@ -112,20 +114,20 @@ def deepseek_payload(
         if enabled
         else "none"
     )
-    payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
-    payload["reasoning_effort"] = effort
+    if enabled is not None:
+        payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
+        payload["reasoning_effort"] = effort
 
     # Legacy histories and relay responses may contain assistant messages
-    # without a reasoning field.  The wire field must still be present when
-    # tools are enabled. The fixed, explicitly labelled placeholder is adapter
-    # compatibility data, never a claim about the model's actual thoughts.
+    # without a reasoning field. An empty wire field does not invent thoughts.
     messages = payload.get("messages")
     if enabled and payload.get("tools") and isinstance(messages, list):
         payload["messages"] = [
             {
                 **message,
                 "reasoning_content": (
-                    message.get("reasoning_content") or DEEPSEEK_REASONING_PLACEHOLDER
+                    "" if message.get("reasoning_content") == DEEPSEEK_REASONING_PLACEHOLDER
+                    else message.get("reasoning_content") or ""
                 ),
             }
             if isinstance(message, dict) and message.get("role") == "assistant"

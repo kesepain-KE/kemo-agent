@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 from events import RunEvent
 from provider.adapters.compat import (
+    _content_blocks,
     chat_request_to_kemo,
     chat_response_to_kemo,
     chat_stream_to_protocol,
@@ -88,8 +89,7 @@ from provider.schema import (
     Usage as ChatUsage,
 )
 from run.engine import handle_request, iter_request_events
-from run.history import commit_window, empty_window, find_window, load_window
-from run.history import connection
+from run.cards import CardStore
 from run.conversation import (
     events_for_protocol_response,
     run_events_for_protocol_event,
@@ -282,17 +282,17 @@ class UnifiedProtocolTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / "config").mkdir()
         (root / "users" / "alice" / "history").mkdir(parents=True)
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps({"tools": {"enabled": False}}), "utf-8"
         )
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
                     "provider": {
                         "type": "kemo",
                         "base_url": "http://127.0.0.1:1",
-                        "api_key_env": "TEST_KEMO_KEY",
+                        "api_key_env": "KEMO_API_KEY",
                         "model": "gateway/test",
                         "stream": stream,
                     },
@@ -1222,7 +1222,8 @@ class UnifiedProtocolTests(unittest.TestCase):
                 extra={"reasoning_effort": "max", "reasoning_enabled": False},
             )
         )
-        self.assertIsNone(disabled.reasoning)
+        self.assertFalse(require_present(disabled.reasoning).enabled)
+        self.assertEqual(require_present(disabled.reasoning).effort, "none")
         self.assertEqual(disabled.provider_options, {})
 
     def test_kemo_reasoning_uses_gateway_declared_efforts_and_excludes_none(self) -> None:
@@ -1242,7 +1243,7 @@ class UnifiedProtocolTests(unittest.TestCase):
         reasoning = ReasoningConfig(enabled=True, effort="ultra")
         self.assertEqual(reasoning.effort, "ultra")
 
-    def test_chat_tool_without_explicit_strict_defaults_to_non_strict(self) -> None:
+    def test_chat_tool_without_explicit_strict_defaults_to_strict(self) -> None:
         request = chat_request_to_kemo(
             ChatRequest(
                 model="test",
@@ -1264,7 +1265,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(request.tools), 1)
-        self.assertFalse(request.tools[0].strict)
+        self.assertTrue(request.tools[0].strict)
         self.assertNotIn(
             "additionalProperties",
             request.tools[0].parameters["properties"]["params"],
@@ -1667,7 +1668,7 @@ class UnifiedProtocolTests(unittest.TestCase):
             "content": [{"type": "image", "asset_id": "asset_image"}],
             "run_id": "run_native_123",
         }
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
                     request, root=root, provider_factory=lambda _: native
@@ -1683,23 +1684,28 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertIsInstance(user_item, MessageItem)
         assert isinstance(user_item, MessageItem)
         self.assertEqual([block.type for block in require_present(user_item.content)], ["text", "image"])
-        window_path = find_window(root, "alice", "web", "native")
-        window = load_window(require_present(window_path))
-        self.assertEqual(window["items"]["schema_version"], 2)
-        diagnostics = window["data"]["round_metrics"][-1]["provider_request_diagnostics"]
+        store = CardStore(root, "alice")
+        cards = store.raw_page("web", "native", limit=500)
+        self.assertTrue(any(
+            card.raw_kind == "agent_text" and card.raw_payload.get("provider_state")
+            for card in cards
+        ))
+        with store.db() as database:
+            integration = database.execute(
+                "SELECT record_json FROM card_integrations WHERE session_key=?",
+                (store.session("web", "native")["session_key"],),
+            ).fetchone()
+        diagnostics = json.loads(require_present(integration)["record_json"])["provider_request_diagnostics"]
         self.assertEqual(len(diagnostics), len(native.requests))
         self.assertEqual(diagnostics[0]["request_id"], native.requests[0].request_id)
         self.assertEqual(
-            native.requests[0].metadata["prompt_hash"],
+            hashlib.sha256(native.requests[0].system_prompt.encode("utf-8")).hexdigest(),
             diagnostics[0]["system_prompt_sha256"],
         )
         self.assertNotIn("describe", json.dumps(diagnostics))
-        self.assertTrue(
-            any(item.get("type") == "reasoning" for item in window["items"]["items"])
-        )
 
         chat_only = ChatOnlyProvider()
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             with self.assertRaisesRegex(Exception, "Kemo create"):
                 handle_request(
                     {
@@ -1712,25 +1718,6 @@ class UnifiedProtocolTests(unittest.TestCase):
                     provider_factory=lambda _: chat_only,
                 )
         self.assertEqual(len(chat_only.requests), 0)
-
-    def test_sqlite_history_repairs_a_missing_items_partition_on_load(self) -> None:
-        _, root = self.make_root()
-        directory = root / "users" / "alice" / "history" / "items-repair"
-        window = empty_window("alice", "web", "old")
-        window["text"]["messages"] = [
-            {"role": "user", "content": "old question"},
-            {"role": "assistant", "content": "old answer"},
-        ]
-        window["data"]["rounds"] = 1
-        commit_window(directory, window)
-        with connection(root, "alice", write=True) as database:
-            database.execute(
-                "UPDATE history_windows SET items_json='{}' WHERE window_kind='archive' AND window_name='items-repair'"
-            )
-        migrated = load_window(directory)
-        self.assertEqual(len(migrated["items"]["items"]), 2)
-        commit_window(directory, migrated)
-        self.assertEqual(len(load_window(directory)["items"]["items"]), 2)
 
     def test_chat_compat_preserves_missing_empty_and_non_object_arguments(self) -> None:
         for raw_arguments, expected_kind in (
@@ -1954,8 +1941,8 @@ class UnifiedProtocolTests(unittest.TestCase):
                     base_url.rstrip("/") + "/chat/completions",
                 )
                 payload = json.loads(captured[0].data)
-                self.assertEqual(payload["thinking"], {"type": "enabled"})
-                self.assertEqual(payload["reasoning_effort"], "high")
+                self.assertNotIn("thinking", payload)
+                self.assertNotIn("reasoning_effort", payload)
                 self.assertNotIn("reasoning_enabled", payload)
 
     def test_chat_rejects_html_page_with_actionable_endpoint_error(self) -> None:
@@ -2206,6 +2193,71 @@ class UnifiedProtocolTests(unittest.TestCase):
                 # wire placeholder, without storing it as model reasoning.
                 self.assertEqual(continuation.messages[-1]["role"], "tool")
 
+    def test_legacy_reasoning_without_provider_state_is_not_replayed_to_chat(self) -> None:
+        request = KemoRequest.create(
+            model="generic-model",
+            input=[
+                ReasoningItem(id="rs_old", content="legacy private reasoning"),
+                MessageItem(
+                    id="msg_answer_old",
+                    role=MessageRole.ASSISTANT,
+                    content=[TextContent(text="answer")],
+                ),
+                ReasoningItem(id="rs_tool", content="legacy tool reasoning"),
+                ToolCallItem(
+                    id="call_tool_old",
+                    call_id="callid_old",
+                    name="echo",
+                    arguments={"value": "ok"},
+                    arguments_raw='{"value":"ok"}',
+                ),
+            ],
+        )
+
+        converted = kemo_request_to_chat(request)
+
+        self.assertNotIn(
+            "reasoning_content",
+            next(message for message in converted.messages if message["content"] == "answer"),
+        )
+        self.assertFalse(any(message.get("tool_calls") for message in converted.messages))
+        self.assertTrue(any(
+            "already registered by Runtime" in str(message.get("content") or "")
+            for message in converted.messages
+        ))
+        self.assertNotIn("legacy private reasoning", json.dumps(converted.messages))
+        self.assertNotIn("legacy tool reasoning", json.dumps(converted.messages))
+
+    def test_chat_content_blocks_reject_non_string_text_and_keep_empty_arrays_empty(self) -> None:
+        for invalid_text in (123, None, ["not", "text"]):
+            with self.subTest(invalid_text=invalid_text):
+                request = ChatRequest(
+                    model="generic-model",
+                    messages=[{
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": invalid_text}],
+                    }],
+                )
+                with self.assertRaises(CapabilityError):
+                    chat_request_to_kemo(request)
+
+        empty = chat_request_to_kemo(ChatRequest(
+            model="generic-model",
+            messages=[],
+        ))
+        self.assertEqual(_content_blocks([]), [])
+        self.assertEqual(empty.input, [])
+
+    def test_chat_tool_content_rejects_non_string_payload(self) -> None:
+        for invalid_content in (123, None, ["not", "text"]):
+            with self.subTest(invalid_content=invalid_content):
+                request = ChatRequest(
+                    model="generic-model",
+                    messages=[{"role": "tool", "tool_call_id": "call_1", "content": invalid_content}],
+                )
+                with self.assertRaises(CapabilityError):
+                    chat_request_to_kemo(request)
+
     def test_deepseek_commentary_and_tools_keep_reasoning_on_same_message(self) -> None:
         incoming = ChatRequest(
             model="deepseek-flash",
@@ -2246,13 +2298,14 @@ class UnifiedProtocolTests(unittest.TestCase):
         request = ChatRequest(
             model="deepseek-flash", messages=messages,
             tools=[{"type": "function", "function": {"name": "echo"}}],
+            extra={"reasoning_enabled": True},
         )
         transport = OpenAIChatTransport({
             "base_url": "https://api.deepseek.com", "api_key": "offline",
             "model": request.model,
         })
         payload = transport._payload(request, stream=False)
-        self.assertEqual(payload["messages"][1]["reasoning_content"], DEEPSEEK_REASONING_PLACEHOLDER)
+        self.assertEqual(payload["messages"][1]["reasoning_content"], "")
         self.assertEqual(payload["messages"][2]["reasoning_content"], "real")
         self.assertNotIn("reasoning_content", messages[1])
         self.assertNotIn("reasoning_content", payload["messages"][0])

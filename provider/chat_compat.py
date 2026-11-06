@@ -108,6 +108,25 @@ def chat_state_from_raw(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     return state if isinstance(state, dict) else None
 
 
+def _continuation_identifiers(fields: dict[str, Any]) -> dict[str, Any]:
+    """Persist opaque continuation identifiers, never readable thoughts."""
+    details = fields.get("reasoning_details")
+    if not isinstance(details, list):
+        return {}
+    retained = []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        identifier = {
+            key: copy.deepcopy(value) for key, value in detail.items()
+            if key in {"type", "id", "index", "signature", "format"}
+            or key == "data" and detail.get("type") == "reasoning.encrypted"
+        }
+        if any(identifier.get(key) for key in ("id", "signature", "data")):
+            retained.append(identifier)
+    return {"reasoning_details": retained} if retained else {}
+
+
 def chat_public_frame(frame: dict[str, Any]) -> dict[str, Any]:
     """Keep signed continuation blocks out of public streaming metadata."""
     result = copy.deepcopy(frame)
@@ -159,20 +178,24 @@ class ChatCompatibility:
         configured_effort = payload.pop(effort_field, None)
         enabled = payload.pop("reasoning_enabled", configured_enabled)
         effort = payload.pop("reasoning_effort", configured_effort)
-        enabled = enabled is not False and effort != "none"
+        if effort == "none":
+            enabled = False
+        elif enabled is None and effort is not None:
+            enabled = True
+        specified = enabled is not None
         effort = normalize_reasoning_effort(effort or default_effort)
         effort_map = self.reasoning.get("effort_map")
         if isinstance(effort_map, dict) and isinstance(effort_map.get(effort), str):
             effort = effort_map[effort]
-        if self.request_format == "fields":
+        if specified and self.request_format == "fields":
             explicit = any(key in self.reasoning for key in ("enabled_field", "effort_field"))
             if not explicit or "enabled_field" in self.reasoning:
                 payload[self._field("enabled_field", "reasoning_enabled")] = enabled
             if not explicit or "effort_field" in self.reasoning:
                 payload[self._field("effort_field", "reasoning_effort")] = effort if enabled else "none"
-        elif self.request_format == "effort":
+        elif specified and self.request_format == "effort":
             payload[self._field("effort_field", "reasoning_effort")] = effort if enabled else "none"
-        elif self.request_format == "openrouter":
+        elif specified and self.request_format == "openrouter":
             existing = payload.get("reasoning")
             controls = dict(existing) if isinstance(existing, dict) else {}
             controls["enabled"] = enabled
@@ -200,7 +223,14 @@ class ChatCompatibility:
             if "reasoning_details" in fields:
                 message["reasoning_details"] = fields["reasoning_details"]
             elif state is None and isinstance(original.get("reasoning_details"), list):
-                message["reasoning_details"] = copy.deepcopy(original["reasoning_details"])
+                # Legacy history may contain readable reasoning text.  Replay
+                # only the provider continuation identifiers; never forward
+                # the old reasoning body just because no opaque state exists.
+                safe_details = _continuation_identifiers({
+                    "reasoning_details": original["reasoning_details"],
+                }).get("reasoning_details")
+                if safe_details:
+                    message["reasoning_details"] = safe_details
             if history_field:
                 value = fields.get(history_field)
                 if value is None and state is None:
@@ -214,11 +244,15 @@ class ChatCompatibility:
     def state(self, fields: dict[str, Any], model: str) -> dict[str, Any] | None:
         if not fields:
             return None
-        encoded = json.dumps({"route": self.route(model), "fields": fields},
-                             ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if redact_diagnostic_text(encoded.decode("utf-8")) != encoded.decode("utf-8"):
+        raw = json.dumps(fields, ensure_ascii=False)
+        if redact_diagnostic_text(raw) != raw:
             raise ProviderError("Chat 思考续接状态包含不能写入历史的凭据信息",
                                 category="invalid_response")
+        fields = _continuation_identifiers(fields)
+        if not fields:
+            return None
+        encoded = json.dumps({"route": self.route(model), "fields": fields},
+                             ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) > _DECODE_LIMIT:
             raise ProviderError("Chat 思考续接状态超出安全容量，不能截断后继续工具调用",
                                 category="invalid_response")
@@ -249,8 +283,7 @@ class ChatCompatibility:
         if not isinstance(value, dict) or value.get("route") != self.route(model):
             return {}
         fields = value.get("fields")
-        return {key: copy.deepcopy(value) for key, value in fields.items()
-                if key in _REASONING_FIELDS} if isinstance(fields, dict) else {}
+        return _continuation_identifiers(fields) if isinstance(fields, dict) else {}
 
     def response_fields(self, message: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
