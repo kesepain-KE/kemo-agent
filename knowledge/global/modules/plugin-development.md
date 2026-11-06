@@ -9,14 +9,14 @@ list.default_wait 披露缺省策略；后台提交仍受必要依赖完成屏�
 本地 LLM 业务任务时间或工具预算耗尽且真实退出后可显式 resume 同 task_id，
 每轮重新计时并分配新段工具额度，累计调用/用量保留；私有快照恢复
 已配对协议项而不重放已完成操作；仍活着的工具/线程保留屏障且不可恢复。
-外部代理、自定义执行器与串行维护不支持此恢复合同，详见 `agent-task-coordination.md`。
+外部代理、自定义执行器与串行维护不支持此恢复合同，详见 `knowledge/global/runtime/agent-task-coordination.md`。
 
 本文面向需要创建、修改或排查 `plugins/` 工具插件的开发者。它说明插件如何被发现、
 `SKILL.md` 如何同时承担操作说明和工具清单、Provider 工具循环如何执行，以及插件应如何
 处理超时、取消、结果大小和权限边界。
 
 Provider 返回工具调用是否完整、Chat/Kemo 两条协议怎样判断可执行终态，另见
-`provider-reliability.md`。本文从插件注册和运行时执行角度补充该文档。
+`knowledge/global/runtime/provider-reliability.md`。本文从插件注册和运行时执行角度补充该文档。
 
 工具异常返回模型前统一经过 `diagnostic_text()` 脱敏，包含 `api key: value`、`api_key=value`、
 Bearer 和 URL 口令；`path` / `url` 诊断字段先移除 query，再脱敏及截断。异常类型、错误码和
@@ -63,7 +63,7 @@ Python 文件，也不能借此注册 Provider function call。
 说明文本不是可执行代码。Tool JSON 也不会替代操作手册。开发插件时应同时维护两者：
 Schema 负责机器可验证的输入边界，说明文本负责使用顺序、授权条件、失败处理和风险提示。
 
-摘要应包含触发场景与关键限制；正文说明前置条件、参数关系、成功证据、副作用和重试边界。匹配任务后先读取来源 `SKILL.md`，不得根据摘要猜测完整操作。统一编写规范和其他模块的职责划分见 `prompt-authoring-standard.md`。
+摘要应包含触发场景与关键限制；正文说明前置条件、参数关系、成功证据、副作用和重试边界。匹配任务后先读取来源 `SKILL.md`，不得根据摘要猜测完整操作。统一编写规范和其他模块的职责划分见 `knowledge/global/engineering/prompt-authoring-standard.md`。
 
 ## Tool JSON 合同
 
@@ -168,7 +168,7 @@ Worker 在 stdout/stderr 原始分流日志之外维护按采集顺序的有界�
 `read`，让子进程已 flush 的小量输出即时落盘，而非等待整块缓冲或进程退出。
 日志仍按流保留原始字节、有容量上限；超限或日志写失败后继续排空管道，避免反压卡死。
 网页工作面板只读取当前用户作业记录与有界日志尾部，不触发对账、清理或取消；
-UTF-8/宿主编码解码与显示范围见 `frontend-conventions.md` 的“右侧多标签工作面板”。
+UTF-8/宿主编码解码与显示范围见 `knowledge/global/web/frontend-conventions.md` 的“右侧多标签工作面板”。
 
 ## action 参数约定
 
@@ -241,7 +241,7 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
 覆盖本段额度，0 为不限次数；仍受独立 timeout、重复调用、连续失败、取消和 API 池保护。
 超额返回 tool_limit / tool_budget_exhausted，保留安全点、结论和用量，显式续跑不重放副作用；
 框架内部重试不重置本段计数。`guide` 安全点引导，`split` 显式拆分剩余工作，
-预算预警与完整恢复合同见 `agent-task-coordination.md`。
+预算预警与完整恢复合同见 `knowledge/global/runtime/agent-task-coordination.md`。
 
 ## 重复调用与连续失败
 
@@ -263,6 +263,7 @@ Provider 恢复时，再次请求会返回 `ok=false`、`error.code=duplicate_bl
 查询动作包括 web_search、history_search、get_current_time、expand_call、
 file 动态读取、network get/read、shell status、subagent_dispatch list/status，
 以及 memory_manage、task_time、task_plan、模块管理工具中明确声明的读取动作。
+`kemo_graph_write.operation_guide` 只生成操作参数，允许重复获取；实际操作仍由 `expand_call` 执行。
 副作用动作包括 file 写入、Shell run/cancel、external_message、network 写请求，
 任务/记忆/计划变更和多媒体生成等。维护动作分类表时，应将新增内置工具的每个 action
 明确归入查询或副作用；不得通过相同参数命中旧回执来代替查询。
@@ -452,7 +453,7 @@ Kemo 使用现有 Asset 上传／就绪接口，并发送图片、音频、视�
 暂态重试错误不冒充终态，不把尚待重试的媒体标成未发送。
 网页工具卡与“相关文件”据此显示媒体和状态，点击后在右侧工作面板预览，不触发新模型调用。
 文件刷新恢复、旧回执定位、终态未发送及历史交付未确认的展示约定，
-见 `frontend-conventions.md` 的“原生媒体工具与相关文件联动”。
+见 `knowledge/global/web/frontend-conventions.md` 的“原生媒体工具与相关文件联动”。
 该联动不改变队列生命周期、模型能力、路径授权或媒体预算，不复制原文件。
 
 队列在同一逻辑 Run 的网络／运行级重试中复用；上下文压缩保持当前轮媒体消息与工具

@@ -2,7 +2,7 @@
 
 ## 范围与发布状态
 
-本文是 `deploy/` 独立部署系统的知识合同；源码业务更新器另见 `version-and-update-modules.md`。
+本文是 `deploy/` 独立部署系统的知识合同；源码业务更新器另见 `knowledge/global/release/version-and-update-modules.md`。
 当前源码定档版本为 **2.0.0**（2026-11-05），配套 `kemo-adapter-api 1.0.0`，并与 `kemo-graph 1.6.0` 使用已核对的 Kemo 2.0 协议。
 版本唯一真值是根目录 `version.json.version`。Windows、Linux、npm、Docker 不另设部署版本。
 
@@ -45,7 +45,7 @@ PowerPoint/ODF/RTF 时，在运行后端的主机或容器内安装 LibreOffice�
 每个库自身的迁移还会检查 schema 版本并在需要时保存迁移前快照。超前版本拒绝修改，
 迁移失败回滚该库事务；**源码自动回滚不表示已迁移的其他数据库自动回滚**。
 备份位置、逐库恢复示例、WAL 和停止全部写进程的要求，见
-`storage-and-persistence.md` 的“SQLite 初始化、迁移与恢复安全”。
+`knowledge/global/runtime/storage-and-persistence.md` 的“SQLite 初始化、迁移与恢复安全”。
 备份不自动清理；跨库备份并非全局原子快照。以上不改变独立 deploy 安装渠道，
 不得因此混用两个更新入口或宣称 deploy 数据库已支持自动逆迁移。
 
@@ -185,10 +185,8 @@ ZIP 顶层是 `release-manifest.json` 和 `tree/`，包含主框架、部署器�
 包名、manifest、`tree/version.json` 和默认 `v<version>` Release 标签须一致。
 官方 Release digest 或官方 `.sha256` 用于校验；镜像仅回退 ZIP 下载，不提供可信校验值。
 
-发布包额外携带 `knowledge/global/classify.sqlite3` 与 `knowledge/share/classify.sqlite3` 两张默认分类表
-（`deploy/core/policy.py` 的 `RELEASE_DATA_FILES` 精确清单）。它们属于"随包分发但不覆盖本机"的数据：
-安装时目标不存在才写入，已存在一律保留本机内容且不登记进托管清单，更新时也不会被当作过期文件删除。
-托管清单之外的其他 `*.sqlite3`、`*.db` 仍由 `protected()` 统一排除，旧格式 `classify.sql` 不再进包。
+知识分类功能已退役，新的发布包不再携带 `classify.sqlite3` 或 `classify.sql`。
+本机既有分类数据库继续由运行期数据保护策略保留，升级不会为清理旧功能而删除数据。
 
 先构建前端，再从仓库根运行：
 

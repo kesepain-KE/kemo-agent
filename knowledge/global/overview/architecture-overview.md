@@ -32,7 +32,7 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 | `run/agents/` | 子代理运行、队列、服务与调用合同 |
 | `run/tasks/` | 任务计划存储、修订、执行、服务和调度 |
 | `run/scheduler/` | Cron、维护、运行状态和 RuntimeHost 生命周期 |
-| `run/config/` | 配置合并、用户路径、Prompt 来源/组装和知识索引 |
+| `run/config/` | 配置合并、用户路径、Prompt 来源/组装和知识范围策略 |
 | `run/extensions/` | 感知/拓展子进程、多模态、附件、媒体产物和模型能力 |
 | `run/infra/` | 原子 I/O、进程执行、公共错误、日志和 CLI 桥 |
 | `provider/` | Kemo 原生协议、Chat 兼容桥和统一内部模型 |
@@ -52,7 +52,7 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 尚未获得成功响应的请求中保留媒体消息；成功响应后不再自动重复投影，显式重新装载除外，
 终态仅持久安全元数据；
 子代理的队列、模型能力及工具授权独立于主会话。
-完整合同见 `plugin-development.md` 的“三种多媒体输入方式与 attach_media”。
+完整合同见 `knowledge/global/modules/plugin-development.md` 的“三种多媒体输入方式与 attach_media”。
 
 ## 一次请求的完整生命周期
 
@@ -86,14 +86,14 @@ kemo-agent 是本地优先、多用户、事件驱动的 Agent Runtime。它把�
 
 `run/conversation/` 使用项目根目录、用户、来源和会话 ID 组成会话身份，并取得会话级锁。
 同一会话的整合串行执行，避免并发 Run 交错写入；不同用户和不同会话可并行。
-每用户使用 `users/<user>/cards.sqlite3`。`context_cards` 同行保存不可变 RAW 与可变 VIEW；
+每用户使用 `users/<user>/history/cards.sqlite3`。`context_cards` 同行保存不可变 RAW 与可变 VIEW；
 请求快照只选择当前有效 VIEW，并在同一事务中核对会话代际、序号、视图版本和 Token 总量。
 压缩不会删除 RAW，也不读取或迁移旧 window 历史。
 
 Web 历史浏览读取当前用户的全部来源；个人置顶按置顶时间优先，普通历史按 `updated_at` 从新到旧展示，
 可在搜索框下方展开月历，按 `Asia/Shanghai` 自然日查询指定日期的归档，或用下方“收藏”气泡筛选。
 置顶不绕过筛选；筛选与排序在服务端分页前完成。标记独立持久化且不改变会话生命周期，合同见
-`storage-and-persistence.md`。日期、收藏及搜索查询使用独立前端缓存，不替换当前会话列表，
+`knowledge/global/runtime/storage-and-persistence.md`。日期、收藏及搜索查询使用独立前端缓存，不替换当前会话列表，
 避免筛选较早日期时影响当前会话的续接、关闭或删除判断。Web 会话可以继续切换和管理；Android App 的
 `app`、CLI 与 `message:<platform>` 会话作为只读归档打开，并显示来源、生命周期以及完整记忆处理状态。Web 的 closed 会话是可显式重开的已保存归档：历史卡片切换前先调用 reopen，再恢复当前页面租约；迟到心跳、无参数恢复和旧链接仍不能悄悄复活 closed 会话。deleted 会话只可视为已删除，永久不可恢复。
 历史日期缓存中的会话若随后被清理，租约返回 404 时前端会解除 URL 绑定、清除该会话的历史/概览缓存并使全部日期归档查询失效，再回到开始页。开始页没有有效会话身份，因此不得展示用户其他会话或已清理会话遗留的活动计划卡。
@@ -117,7 +117,6 @@ App 桥接请求固定使用 `source=app`，不能由设备端改写为其他渠
 用户人格
 → 全局人格
 → agents.md
-→ 三层知识索引
 → 全局/用户子代理注册摘要
 → 插件说明
 → 共享/用户技能
@@ -127,11 +126,11 @@ App 桥接请求固定使用 `source=app`，不能由设备端改写为其他渠
 → 半年/月/七天临时记忆
 ```
 
-知识库只自动注入索引文件，普通正文按需读取。Kemo Graph 是手动调用的侧载文档站，不替换
-本地知识和记忆 Prompt。CardStream 有效历史跟在固定 Prompt 之后；任务计划、最新感知和实时拓展
-数据构成不写入历史卡片的动态尾部。
+知识库文件不进入 System Prompt。全局专题入口由 `agents.md` 维护；知识正文通过获准工具
+按需读取。Kemo Graph 是手动调用的侧载文档站，不替换本地知识和记忆。CardStream 有效历史
+跟在固定 Prompt 之后；任务计划、最新感知和实时拓展数据构成不写入历史卡片的动态尾部。
 
-固定 Prompt 中的人格、手册、能力说明、知识索引和记忆在整合开始时构建；全局 `memory.prompt_injection=false` 时所有记忆正文不注入，只保留工具检索提示。开启注入时，记忆修订只刷新记忆段；关闭时跳过注入版本轮询，工具和后台维护照常按原规则执行。
+固定 Prompt 中的人格、手册、能力说明和记忆在整合开始时构建；全局 `memory.prompt_injection=false` 时所有记忆正文不注入，只保留工具检索提示。开启注入时，记忆修订只刷新记忆段；关闭时跳过注入版本轮询，工具和后台维护照常按原规则执行。
 每次主 Provider 请求前都会重新读取本会话任务计划及授权的最新感知、拓展快照，并与有效历史一同
 冻结为请求快照。`perception.prompt_injection=false` / `expand.prompt_injection=false` 控制各自的动态尾部注入；旧 `realtime_injection`
 不再控制刷新频率。请求前刷新不运行采集脚本，采集频率和超时仍由 RuntimeHost/Cron 统一管理。
@@ -199,7 +198,7 @@ Provider 内部统一为 Kemo 协议对象：
 - `provider/adapters/compat.py` 在 Chat 与内部 Kemo 结构之间转换。
 
 两条协议都必须在工具执行前确认终态和参数 JSON 完整。Chat 的截断、内容过滤和损坏参数不会
-被包装成半个工具调用继续执行。详细规则见 `provider-reliability.md`。
+被包装成半个工具调用继续执行。详细规则见 `knowledge/global/runtime/provider-reliability.md`。
 
 ### 8. 执行工具循环
 
@@ -214,7 +213,7 @@ Provider 返回可执行工具调用后，运行时：
 
 主整合默认持续处理工具直到真实终态，不设调用总数限制。工具结果完整写入 RAW，
 由 VIEW 压缩及请求容量屏障管理，不静默截断。子代理仍使用独立的 100,000 字符内联结果预算，
-超限保存完整产物并返回有界回执。完整机制见 `plugin-development.md`。
+超限保存完整产物并返回有界回执。完整机制见 `knowledge/global/modules/plugin-development.md`。
 
 Provider 偶发生成不完整工具 JSON 时，运行时不会进入插件。主智能体和 `AgentRunner` 子智能体
 都会按 `tools.invalid_tool_arguments_retries` 使用新请求 ID 请求模型重新生成，默认最多 2 次。
@@ -240,7 +239,7 @@ final_item_ids 指明实际提交的消息，不能拼接此前所有阶段正�
 不设工具调用总数或模型请求轮数上限；网页没有长任务开关，也不按工具次数切换 Run、生成 synthetic 用户消息或转移邮箱。
 单工具超时、连续失败、重复副作用防重、Provider 重试、上下文容量与取消仍按各自规则运行。
 partial 记录已有正文与未完成项，存活执行继续保护会话；任务计划创建/批准边界仍会正常收束。
-具体运行与客户端合同见 `knowledge/global/long-task-runtime.md`。
+具体运行与客户端合同见 `knowledge/global/runtime/long-task-runtime.md`。
 
 ### 9. 处理运行中引导
 
@@ -361,12 +360,12 @@ MessageRouter 默认 8 个工作线程和 20 个排队位置。消息幂等状�
 上限；真实模型请求仍与主模型、其他用户共用同一个进程级 API 池，不另占整段子任务生命周期。
 声明 `background_serial` 的维护代理保留用户级串行写入锁，且其排队不阻塞普通任务。
 未真实退出的超时/取消执行器继续占调度额度。持久提交序号、列表及同批结果稳定排序、
-`wait=false` 并行提交与显式同步合同见 `agent-task-coordination.md`。
+`wait=false` 并行提交与显式同步合同见 `knowledge/global/runtime/agent-task-coordination.md`。
 
 子代理默认整体超时 600 秒，超时后默认保留 120 秒收尾存活期。可恢复的本地 LLM
 业务代理在宽限内尝试一次精简收尾，超时后仍记 `timed_out`，实际未退出为
 `timed_out_running`；非恢复执行器保留 `completed_after_timeout` 兼容对账。默认只向主模型交付结论，
-私有快照支持显式 resume 同任务并重新计时；不支持任意执行器恢复，详见 `agent-task-coordination.md`。
+私有快照支持显式 resume 同任务并重新计时；不支持任意执行器恢复，详见 `knowledge/global/runtime/agent-task-coordination.md`。
 
 ### 模块子进程
 
@@ -381,7 +380,7 @@ MessageRouter 默认 8 个工作线程和 20 个排队位置。消息幂等状�
 
 | 路径 | 权威内容 |
 |------|----------|
-| `users/<user>/cards.sqlite3` | 不可变 RAW、可变 VIEW、有效 Token、整合与工具执行、会话绑定/租约 |
+| `users/<user>/history/cards.sqlite3` | 不可变 RAW、可变 VIEW、有效 Token、整合与工具执行、会话绑定/租约 |
 | `users/<user>/history/` | 用户既有文件空间；旧历史不会被新引擎读取、迁移或自动删除 |
 | `users/<user>/improve/memory.sqlite3` | 四档记忆、权重证据、幂等操作和热视图来源 |
 | `users/<user>/task_plan/task_plans.sqlite3` | 计划、步骤和依赖 |
@@ -391,7 +390,7 @@ MessageRouter 默认 8 个工作线程和 20 个排队位置。消息幂等状�
 
 深入阅读：
 
-- `storage-and-persistence.md`。
+- `knowledge/global/runtime/storage-and-persistence.md`。
 
 ## Web 分层
 
@@ -463,7 +462,7 @@ Web/App 前台调用 `subagent_dispatch(action=call)` 时，通过调用级回�
 业务子代理在入队前登记持久父子归属，必要依赖与未处理结果阻止主任务提前完成；
 后台结果通知在同一个主执行器内自动续接。右侧工作面板从持久账本恢复总览和详情，
 不依赖临时 SSE 气泡。完整完成屏障、取消收尾、跨尝试身份及恢复限制见
-`agent-task-coordination.md`。
+`knowledge/global/runtime/agent-task-coordination.md`。
 外部桥接和自定义执行器没有细粒度事件时只展示真实的排队/运行状态，不推测百分比或内部步骤。
 
 ### 模块注入预览的片段来源
@@ -501,7 +500,7 @@ Zod Schema 校验；内置类型映射为专用 React 组件，未知声明式�
 用户点击后的回填输入框、发送纯文本或复制文本，生成中不会并发启动新 Run。声明仍不能携带可执行
 HTML、JS、CSS、事件处理器或外部 URL；图片组件只接受站内根相对 URL。复制回复时组件替换为文本
 fallback。组件目录、字段上限和历史/重试边界见
-`knowledge/global/inline-widgets.md`。
+`knowledge/global/web/inline-widgets.md`。
 
 ## 文件空间排序
 
@@ -536,7 +535,7 @@ fallback。组件目录、字段上限和历史/重试边界见
 被清理的旧 `session` URL 不会自动创建替代对话；只有用户显式进入 `new_session=1` 链接、执行正常
 新建/首次发送操作或调用会话创建 API，才创建新的随机空间。Web 启动 90 秒后执行首轮旧空间巡检，之后每 60 秒继续裁决：离线且有内容的空间关闭活跃绑定
 并进入记忆队列，完全空的空间清理；模型执行仍由原维护队列负责。在线租约、启动巡检、刷新宽限、
-队列跳过条件、后台清理和数据保护的权威规则见 `storage-and-persistence.md` 的
+队列跳过条件、后台清理和数据保护的权威规则见 `knowledge/global/runtime/storage-and-persistence.md` 的
 “Web 对话空间启动巡检与空空间生命周期”。
 
 ## 更新与重启
@@ -546,7 +545,7 @@ web 四个板块执行。更新器在写入前取得单实例锁、校验远程�
 板块并恢复版本管理的源码路径。用户数据、Cron 运行状态、本地配置和模块派生存储使用专门保护
 规则。`update.cli` 是唯一编排入口；版本、远程源码、调度、备份、锁、事务、构建和迁移分别由
 独立模块负责。全量更新拒绝任一组件降级，所有更新日志和配置差异在显示前脱敏。详细边界见
-`version-and-update-modules.md`。
+`knowledge/global/release/version-and-update-modules.md`。
 
 Web 重启由受保护接口启动 `restart.py` 辅助进程：等待旧进程退出后，以兼容启动参数重新拉起
 `start_web.py`。`kemo.yaml` 在新进程启动时重新加载。
@@ -557,11 +556,11 @@ Web 重启由受保护接口启动 `restart.py` 辅助进程：等待旧进程�
 
 | 目标 | 首选文档 |
 |------|----------|
-| 开发 Provider 工具 | `plugin-development.md` |
-| 创建子代理、技能、感知、拓展或外部代理 | `module-development.md` |
-| 接入外部消息 | `external-message-route-creation.md` |
-| 修改存储、写盘或运行日志 | `storage-and-persistence.md` |
-| 修改配置 | `configuration-reference.md` |
+| 开发 Provider 工具 | `knowledge/global/modules/plugin-development.md` |
+| 创建子代理、技能、感知、拓展或外部代理 | `knowledge/global/modules/module-development.md` |
+| 接入外部消息 | `knowledge/global/modules/external-message-route-creation.md` |
+| 修改存储、写盘或运行日志 | `knowledge/global/runtime/storage-and-persistence.md` |
+| 修改配置 | `knowledge/global/engineering/configuration-reference.md` |
 | 修改 Web 页面或 Markdown 渲染 | 本文“Web 分层” |
 
 修改任何核心链路后，应先运行相关定向测试，再运行完整 `python -m pytest -q`。创建或实质修改

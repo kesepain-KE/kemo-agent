@@ -161,7 +161,7 @@ attachments:
 
 ## 长存活与历史会话
 
-外部历史会话由核心持久化，不依赖平台输入线程的内存状态。活跃绑定键由 `platform + chat_type + external_chat_id` 组成，事务写入 `users/<user>/cards.sqlite3` 的 `card_bindings`；框架或输入模块重启后，同一个外部聊天会继续使用原来的 `conv_<uuid>` 会话。外部消息幂等仍由消息领域独立维护，RAW/VIEW 压缩不会重置领取或发送回执。
+外部历史会话由核心持久化，不依赖平台输入线程的内存状态。活跃绑定键由 `platform + chat_type + external_chat_id` 组成，事务写入 `users/<user>/history/cards.sqlite3` 的 `card_bindings`；框架或输入模块重启后，同一个外部聊天会继续使用原来的 `conv_<uuid>` 会话。外部消息幂等仍由消息领域独立维护，RAW/VIEW 压缩不会重置领取或发送回执。
 
 - 私聊按外部聊天 ID 隔离。
 - 群聊默认不进入 Run；模块可自行采集/合批，但不因此获得框架群聊触发权限。

@@ -26,20 +26,6 @@ kemo-agent 是面向个人智能基础设施的本地优先、多用户 Agent Ru
 - Kemo Graph 工具拆分为只读和写入两个入口。
 - SKILL 参数说明不再重复工具 JSON schema。
 
-### 1.5.3（2026-11-02）
-
-- 子代理控制明确区分停止、引导和级联取消：普通停止不取消仍运行的子任务，
-  只有显式级联停止才请求取消关联任务。Web 控制依赖当前进程持有的执行句柄，
-  不提供跨进程接管。
-- 修复 Chat 流式消息终态的 phase 回填：消息开始时不预判后续工具调用、不缓冲文本，
-  终态按最终是否出现工具调用标记为 commentary 或 final_answer，并与非流式语义一致。
-- 增强子代理 input 前置校验诊断，指出 schema 类型不匹配，并以数量提示不可安全外发的未知字段；
-  不回显输入值或不安全字段名，不放宽严格 schema，也不改变 400/600 字符回执预算。
-- 修正 Chat 侧请求归一化与思考参数映射，避免兼容层反向污染 Kemo 协议的约束；
-  未声明的思考控制与 metadata 仍按原规则净化，两种协议在同一 Run 内不互相回退。
-本次为 2026-11-02 的源码定档。远程 Release、npm 与 GHCR 产物仍须单独构建、验收和发布，
-本地检查通过不表示所有第三方模型、远程渠道或目标设备已经完成实机联调。
-
 当前 `kemo-preview` 分支在该版本基线上直接替换为 CardStream 上下文和存储链路，具体规则见下文。
 重构工作尚未单独发布新版本；版本号不会因本地工作树变更自动递增。
 
@@ -84,11 +70,11 @@ Web 历史按 integration_id 与 seq 从 RAW 分页投影。删除/清空保留 
 - `knowledge/share/`：跨用户共享资料；
 - `users/<user>/knowledge/`：用户私有资料。
 
-系统 Prompt 只自动注入各层索引，正文按需读取。Kemo Graph 是可选的侧载超级文档站，只有
-用户明确要求时才查询、同步或整理，不接管本地知识和记忆。
+知识库文件不自动进入 System Prompt；全局专题入口列在 `agents.md`，正文通过获准工具按需读取。
+Kemo Graph 是可选的侧载超级文档站，只有用户明确要求时才查询、同步或整理，不接管本地知识和记忆。
 
-每层知识目录使用自己的 `classify.sqlite3` 分类表绑定相对文件路径与分类名；分类不移动
-知识正文，数据库随目录一起搬运。网页支持分类筛选和归类操作，全部层级视图会标注分类来源。
+网页知识库按真实硬盘路径展示用户、共享、全局三层目录，可折叠浏览和直接管理文件；
+不使用分类标签。全局架构与文档入口集中在根目录 `agents.md` 的场景索引，正文按需读取。
 
 ### 工具与技能
 
@@ -115,7 +101,7 @@ Web 历史按 integration_id 与 seq 从 RAW 分页投影。删除/清空保留 
 
 用户可以在 `users/<user>/agents/` 创建自己的子代理。每个子代理拥有独立 Prompt、模型档位、
 工具白名单、知识权限、超时和取消信号，不继承主智能体全部权限。
-并行协作、仅结论交付、超时续跑和对话空间公平调度见 `agent-task-coordination.md`；
+并行协作、仅结论交付、超时续跑和对话空间公平调度见 `knowledge/global/runtime/agent-task-coordination.md`；
 网页观察详情不会增加主模型上下文中的工具轨迹。
 
 ### 任务计划与定时任务
@@ -146,7 +132,7 @@ Web 历史按 integration_id 与 seq 从 RAW 分页投影。删除/清空保留 
 首次输入和运行中引导都可携带图片、音频、视频和普通文件。Kemo 协议根据模型能力和 Asset
 API 处理已支持模态；Chat 兼容协议保留图片直传链路，其余资产通过专用多模态或文件工具处理。
 `attach_media` 可在工具取得文件后将其排入下一次原生请求；它与委托专用模型分析的
-`multimodal` 是不同入口。装载队列、授权范围与实际发送状态见 `plugin-development.md`。
+`multimodal` 是不同入口。装载队列、授权范围与实际发送状态见 `knowledge/global/modules/plugin-development.md`。
 
 ### Web 正文内联组件
 
@@ -157,7 +143,7 @@ Web 回复可以在自然语言段落之间直接镶嵌 `kemo-widget` 声明式�
 
 组件交互只改变当前组件本地状态；只有用户明确点击后，按钮、表单、投票或评分才能产生回填输入框、
 发送纯文本或复制文本三种有限动作。媒体和文件只引用站内根相对 URL，位置组件不加载第三方地图瓦片，
-订单组件不支付或调用商户 API。完整协议与兼容规则见 `inline-widgets.md`。
+订单组件不支付或调用商户 API。完整协议与兼容规则见 `knowledge/global/web/inline-widgets.md`。
 
 ### Provider 双模式
 
@@ -166,7 +152,7 @@ Completions 兼容模式面向第三方 OpenAI 兼容服务，默认净化未声
 并支持显式厂商字段映射、思考别名和真实签名状态续接；DeepSeek 使用 adapter 内的专用策略。
 流式工具调用支持宽容聚合，截断调用不可执行。传输层每次只发起一次 HTTP 交换，
 由统一运行级规则决定重试；工具不支持时明确报告。两种模式在一次 Run 内固定，
-不自动互相回退。细节见 `provider-reliability.md`。
+不自动互相回退。细节见 `knowledge/global/runtime/provider-reliability.md`。
 
 ### 多入口
 
@@ -203,7 +189,7 @@ kemo-agent 本地管理对话、记忆、知识、任务和用户文件。不同
 - Docker：Docker Engine 与 Docker Compose，宿主无需安装 Python/Node.js。
 - 源码部署：Python 3.10+、Git、Node.js/npm；只有源码前端构建才要求 Node.js。
 
-Release 带预构建前端。完整渠道选择、日常操作和发布合同见 `deployment-and-release.md`。
+Release 带预构建前端。完整渠道选择、日常操作和发布合同见 `knowledge/global/release/deployment-and-release.md`。
 
 ## 获取与首次部署
 
@@ -272,7 +258,7 @@ python user_create.py
 ```
 
 用户目录包含配置、人格、历史、记忆、知识、技能、拓展、子代理、上传和下载空间。完整结构见
-`knowledge-and-user-data.md`。
+`knowledge/global/engineering/knowledge-and-user-data.md`。
 
 ## 启动 Web
 
@@ -306,7 +292,7 @@ Web 认证支持：
 - `WEB_SESSION_SECRET`；
 - 登录失败限流和可信反向代理配置。
 
-用户名和密码必须同时配置或同时留空。详细字段、优先级和安全规则见 `configuration-reference.md`。
+用户名和密码必须同时配置或同时留空。详细字段、优先级和安全规则见 `knowledge/global/engineering/configuration-reference.md`。
 
 ## 命令行入口
 
@@ -326,7 +312,7 @@ CLI 复用核心对话引擎和用户数据，不是另一套独立历史系统�
 - Docker：在同一项目中 `docker compose stop` → `docker compose pull` → `docker compose up -d`；禁止以 `down -v` 更新。
 - 源码：使用下面原业务更新器，仍支持 core/agents/plugins/web 板块。
 
-安装根、完整可复制命令、恢复与数据边界见 `deployment-and-release.md`。
+安装根、完整可复制命令、恢复与数据边界见 `knowledge/global/release/deployment-and-release.md`。
 
 **以下仅描述源码更新器：**
 
@@ -338,7 +324,7 @@ python update.py
 plugins、web 四个板块同步，使用单实例锁、远程源码一致性校验和失败恢复，并保护用户数据、
 配置、Cron 运行状态、运行时数据库和模块派生存储。全量更新会同时检查根版本和四个组件版本，
 不允许隐式降级；输出到终端或 CI 的仓库 URL、配置差异和错误信息会先脱敏。详细规则见
-`version-and-update-modules.md`。
+`knowledge/global/release/version-and-update-modules.md`。
 
 `restart.py` 是 Web 受控重启辅助入口，一般由 Web API 调用，不建议把它当作常规手工启动命令。
 重启后新进程会重新读取 `kemo.yaml` 和磁盘配置。
@@ -355,7 +341,7 @@ plugins、web 四个板块同步，使用单实例锁、远程源码一致性校
 | `sense/` | 全局感知 |
 | `expand/global/` | 全局拓展 |
 | `skills/` | 共享技能 |
-| `knowledge/global/` | 框架级知识库和主索引 |
+| `knowledge/global/` | 框架级知识库，按 `overview/`、`engineering/`、`runtime/`、`modules/`、`web/`、`release/` 存放专题 |
 | `users/<name>/` | 用户私有工作空间 |
 | `template/` | 模块和用户创建骨架 |
 | `deploy/` | 四渠道 Release 部署、事务更新、恢复、打包和渠道入口 |
@@ -365,7 +351,7 @@ plugins、web 四个板块同步，使用单实例锁、远程源码一致性校
 | `开发临时目录/test_kemo/` | `.gitignore` 排除的本机系统/集成补强；其中 deployment_distribution 负责真实打包和隔离安装，不与正式测试重复断言 |
 
 `run/` 的公开调用只允许从 `run.<领域>` 入口导入；顶层只保留懒加载的 `run/__init__.py` 和
-`run/engine.py` 总门面，不再维护旧平铺模块或平行兼容层。完整导航见 `data_structure.md`。
+`run/engine.py` 总门面，不再维护旧平铺模块或平行兼容层。项目架构导航见根目录 `agents.md`。
 
 ## 关键入口
 
@@ -385,10 +371,10 @@ plugins、web 四个板块同步，使用单实例锁、远程源码一致性校
 
 | 需求 | 文档 |
 |------|------|
-| 开发工具插件 | `plugin-development.md` |
-| 创建技能、子代理、感知、拓展或外部代理 | `module-development.md` |
-| 创建消息平台适配 | `external-message-route-creation.md` |
-| 理解整体运行方式 | `architecture-overview.md` |
+| 开发工具插件 | `knowledge/global/modules/plugin-development.md` |
+| 创建技能、子代理、感知、拓展或外部代理 | `knowledge/global/modules/module-development.md` |
+| 创建消息平台适配 | `knowledge/global/modules/external-message-route-creation.md` |
+| 理解整体运行方式 | `knowledge/global/overview/architecture-overview.md` |
 
 ## 相关项目
 
@@ -403,4 +389,4 @@ plugins、web 四个板块同步，使用单实例锁、远程源码一致性校
 ## 开源协议
 
 kemo-agent 使用 Apache License 2.0。使用、修改、分发和 NOTICE/声明要求见
-`open-source-license.md` 与仓库根 `LICENSE`。
+`knowledge/global/overview/open-source-license.md` 与仓库根 `LICENSE`。

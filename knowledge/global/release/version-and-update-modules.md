@@ -20,7 +20,7 @@
 `kemo check/update` 使用本机 npm 包携带的版本，不直接检查 GitHub latest。
 部署安装存在 `.kemo-install.json` 记录时，不要交替使用源码更新器，以免受管清单与实际版本漂移。
 Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故障恢复与发布产物前提见
-`deployment-and-release.md`；Release/npm/GHCR 是否已发布必须单独确认。
+`knowledge/global/release/deployment-and-release.md`；Release/npm/GHCR 是否已发布必须单独确认。
 
 ## 版本结构
 

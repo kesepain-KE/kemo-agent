@@ -2,7 +2,7 @@
 
 本文集中说明拓展、感知、技能、子智能体和外部智能体桥接的创建与运行合同。每个章节保留自己的清单、作用域和安全边界；不属于这些范围的插件、消息路由和内置拓展仍查对应专题文档。
 
-能力选择、发现摘要、来源路径和数据/指令边界的统一规范见 `prompt-authoring-standard.md`。本页只维护各类型的实际清单与运行合同，不要求固定内部工程结构。
+能力选择、发现摘要、来源路径和数据/指令边界的统一规范见 `knowledge/global/engineering/prompt-authoring-standard.md`。本页只维护各类型的实际清单与运行合同，不要求固定内部工程结构。
 
 ## 拓展模块创建文档
 
@@ -18,7 +18,7 @@
 
 `expand_creater` 不创建全局拓展。共享和全局拓展可被用户配置白名单过滤；当前用户拓展按用户目录实时发现。
 
-框架内置的 `expand/global/kemo_gateway_status/` 是默认未激活的只读网关状态拓展。它的激活方式、独立 `STATUS_TOKEN`、脱敏产物和更新保留规则见 `builtin-expansions.md`。
+框架内置的 `expand/global/kemo_gateway_status/` 是默认未激活的只读网关状态拓展。它的激活方式、独立 `STATUS_TOKEN`、脱敏产物和更新保留规则见 `knowledge/global/modules/builtin-expansions.md`。
 
 `expand_update` 到期后先以 `__system__` 身份刷新全局层和共享层，再为每个有效用户分别执行其私有目录。全局/共享模块不会因用户数量重复运行，用户模块也不会跨用户拼接结果。每个更新入口在独立 Python 子进程中执行，受 `task_cron_system.module_update_timeout` 限制；热插拔模块不会被导入 Web/Runtime 主进程。
 
@@ -352,9 +352,9 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 | `tools.shared_skills.allow` | 可注入共享技能白名单；`["*"]` 使用当前用户共享技能白名单，不绕过用户筛选 |
 | `tools.user_skills.allow` | 精简配置可显式授权当前用户技能，默认空；`["*"]` 选择当前用户可用技能，不扫描其他用户 |
 | `tools.max_iterations` | 子智能体单次运行允许的工具调用上限，正整数；同时受全局同名配置的硬上限约束 |
-| `global_knowledge` | 是否注入全局知识索引 |
-| `shared_knowledge` | 是否注入共享知识索引 |
-| `user_knowledge` | 是否注入当前用户知识索引，默认关闭；知识正文仍须按需读取 |
+| `global_knowledge` | 是否允许访问全局知识路径 |
+| `shared_knowledge` | 是否允许访问共享知识路径 |
+| `user_knowledge` | 是否允许访问当前用户知识路径，默认关闭 |
 | `inherit_main_history` | 是否继承主会话历史和当前请求；默认关闭 |
 
 内置配置与新建模板统一为 80；每个子代理各自计数，不是共享池。仍取全局与子代理配置的最小值；
@@ -366,9 +366,9 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 绑定来源。工作记忆分类仍宽泛，纯事实不强编方法。同名/近似先核对；正文完全相同可复用，
 不同内容撞名安全后缀，近似需要显式复核。来源修正/删除/到期移出使技能 stale，网页可见、Prompt 不再
 自动注入且可人工删除；正常晋升、融合、拆分传递来源身份，不误失效。当前权威状态保存在记忆库，
-旁车 `memory-provenance.json` 为可携带快照。完整规则见 `storage-and-persistence.md`。
+旁车 `memory-provenance.json` 为可携带快照。完整规则见 `knowledge/global/runtime/storage-and-persistence.md`。
 
-插件能力始终与当前用户插件白名单及启用状态求交，知识索引与当前用户知识开关求交。
+插件能力始终与当前用户插件白名单及启用状态求交；知识路径与当前用户知识开关求交。
 固定共享技能授权保留旧代理行为；通配符共享技能授权则服从当前用户的共享技能白名单。
 旧版 `prompt_sources.skills.user` 仍不注入，只有精简配置的 `tools.user_skills.allow`
 显式授权才开放用户技能。技能发现摘要包含来源路径，不代表已读取正文。
@@ -383,8 +383,8 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 
 `agents/general_worker/` 承接文件处理、脚本、检索整理、批量操作和测试验证等明确任务，
 由主智能体调用，不再继续委派。插件、共享技能和当前用户技能使用上述动态授权，
-全局、共享、用户知识只注入允许范围的索引；拓展与感知的说明、状态和数据不自动注入，
-需要时通过已有授权工具按需读取、使用，不自动激活或扩大权限。
+全局、共享、用户知识文件不自动拼入子智能体提示词，需要时通过已有授权工具按需读取；
+拓展与感知的说明、状态和数据也不自动注入，不自动激活或扩大权限。
 
 输入必须含非空 `task`，可附 `context`、`constraints`、`acceptance_criteria`；
 不自动继承主对话历史。输出含 `status`（completed/partial/blocked/failed）、
@@ -684,7 +684,7 @@ Python 和面板校验后再以目录重命名原子发布，失败不留下半�
   再交给既有 `expand_call` 语义执行。
 - 两类模块列表均每页六个，拓展按层级分页；详情居右半区，采集和实际注入并排安全渲染。
   用户操作区复用加高配置卡片及与预览正文同高的操作卡片，完整尺寸和翻页状态规则见
-  `frontend-conventions.md` 的“感知详情与注入预览”。
+  `knowledge/global/web/frontend-conventions.md` 的“感知详情与注入预览”。
 - Expand 的数据总览与模块数据注入预览只展示 `data_injected_markdown` / `injection.data_content`，
   不展示操控能力文档；分类由注入范围记录提供，仅增加只读预览元数据，原有 Prompt 的数据和操控能力注入不变。
 - Sense 只在选中模块详情的“用户操作”标签内显示，与“注入数据”标签切换；采集信息与实际注入片段在数据标签中并排渲染。无声明时显示

@@ -55,7 +55,7 @@ web_ui:
 背景段必须为对象，不接受额外字段，尤其不能填写任意文件路径或 URL。无效值在运行配置
 加载和 API 保存前拒绝；只保存背景字段，不改写 Provider、语言、主题、字号及其他草稿。
 缺少配置或缺少可用媒体时仍显示原主题。媒体固定读取当前用户根目录的 `background.*`；
-格式、上限、安全读取、手工替换和前端视频降级详见 `frontend-conventions.md` 的“用户网页背景”。
+格式、上限、安全读取、手工替换和前端视频降级详见 `knowledge/global/web/frontend-conventions.md` 的“用户网页背景”。
 网页上传仅替换媒体文件，不擅自启用；清除媒体不改写显示参数。
 `web_ui` 不继承全局同名节，背景不能通过全局配置或 `PATCH preferences` 保存；
 `GET preferences` 可返回生效背景参数，但不在 `web_preferences.json` 建立第二份配置真值。
@@ -275,16 +275,15 @@ kemo-agent 全局配置文件，位于 `config/global_config.yaml`。所有用�
 |------|--------|------|
 | `user_soul` | `12000` | 用户人格段注入上限 |
 | `agents_manual` | `26000` | 运行手册段注入上限 |
-| `knowledge_index` | `40000` | 知识索引段注入上限 |
 | `task_plan` | `6000` | 任务计划段注入上限 |
 | `perception` | `20000` | 感知模块数据注入上限 |
 | `expand_data` | `20000` | 拓展模块数据注入上限 |
 | `skill_prompts` | `80000` | 技能提示词（共享技能 + 用户技能）注入上限 |
 | `plugin_prompts` | `80000` | 插件提示词注入上限 |
 
-> `global_soul`、子代理注册和四层记忆仍由各自独立逻辑控制；`user_soul`、`agents_manual`、`knowledge_index` 现在统一使用上述 `char_limits`。启用的 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项；整体记忆注入由全局 `memory.prompt_injection` 控制。
+> `global_soul`、子代理注册和四层记忆仍由各自独立逻辑控制；`user_soul` 与 `agents_manual` 使用上述 `char_limits`。知识文件不拼接到 System Prompt。启用的 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项；整体记忆注入由全局 `memory.prompt_injection` 控制。
 
-固定段顺序由 `run/config/prompt.py::PROMPT_SECTION_ORDER` 定义：用户人格、全局人格、手册、知识索引、内置/用户子代理注册、插件、技能、拓展能力说明、永久记忆、热画像及三层临时记忆。有效历史置于固定段之后；任务计划、最新感知和实时拓展数据按此顺序在每个主 Provider 请求前重新读取并组成动态尾部，不进入固定段或历史卡片。相应字符预算仍有效。旧 `realtime_injection` 不再控制刷新时机；记忆修订时只替换记忆段，不借动态状态刷新重排固定历史前缀。
+固定段顺序由 `run/config/prompt.py::PROMPT_SECTION_ORDER` 定义：用户人格、全局人格、手册、内置/用户子代理注册、插件、技能、拓展能力说明、永久记忆、热画像及三层临时记忆。有效历史置于固定段之后；任务计划、最新感知和实时拓展数据按此顺序在每个主 Provider 请求前重新读取并组成动态尾部，不进入固定段或历史卡片。相应字符预算仍有效。旧 `realtime_injection` 不再控制刷新时机；记忆修订时只替换记忆段，不借动态状态刷新重排固定历史前缀。
 
 ---
 
@@ -375,13 +374,13 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 > 每个用户的 `AgentScheduler` 使用独立有界队列；普通子任务有界并行，上限沿用共享
 > Provider 请求池的实际 `max_requests`，不新增并发配置。`background_serial` 维护任务保留
 > 用户级串行锁；主/子模型的真实 API 请求仍共同受进程级 Provider 总闸限制。
-> 任务顺序、未退出执行器占额及 `wait` 合同见 `agent-task-coordination.md`。
+> 任务顺序、未退出执行器占额及 `wait` 合同见 `knowledge/global/runtime/agent-task-coordination.md`。
 
 有界时单空间最多等待 `ceil(queue_maxsize/2)` 项，另为没有待执行项的新空间保护
 `min(5,floor(queue_maxsize/5))` 个总队列位置；默认对应单空间 25、总等待上限 50、
 新空间保护位 5。保护位不是额外容量，不增加配置项或独立 API 并发；仅影响等待任务入队，
 空闲执行槽仍可借用。`0` 的无界配置不提供硬等待区保护。
-公平轮转与容量边界见 `agent-task-coordination.md` 的“对话空间公平与多窗口余量”。
+公平轮转与容量边界见 `knowledge/global/runtime/agent-task-coordination.md` 的“对话空间公平与多窗口余量”。
 
 ---
 
@@ -424,7 +423,7 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 >
 > 感知 Web API 使用与调度器相同的校验逻辑读取全局 `sense_update_rate`，返回 `update_interval_seconds` 和兼容显示文本。频率不写入单个 `sense.json`；用户配置中的同名字段也不作为全局调度或页面展示来源。
 >
-> 感知默认5秒、拓展默认30秒，由独立采集进程的两条调度分别执行。同根拓展模块最多4个并行，主宿主只读快照；不迁移 WebSocket 服务。两个持久化间隔只减少无变化状态和成功日志的写盘次数，不延迟失败诊断。进程监护与真实退出语义见 `task-automation.md`。
+> 感知默认5秒、拓展默认30秒，由独立采集进程的两条调度分别执行。同根拓展模块最多4个并行，主宿主只读快照；不迁移 WebSocket 服务。两个持久化间隔只减少无变化状态和成功日志的写盘次数，不延迟失败诊断。进程监护与真实退出语义见 `knowledge/global/runtime/task-automation.md`。
 
 ---
 
@@ -459,7 +458,7 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 响应头 `X-Kemo-Heartbeat-Seconds` 表示本次流实际采用的间隔，修改配置对下一次请求生效。
 反代须关闭 SSE 缓冲，空闲读取超时应大于心跳间隔；请求进入 SSE 前仍可能排队并返回 HTTP 503，
 此阶段不发送心跳，反代首次响应等待需大于 `pending_chat_timeout` 并留出准备余量。心跳不延长
-工具/Provider 的执行期限，也不提供断流重放。消费者生命周期见 `architecture-overview.md`。
+工具/Provider 的执行期限，也不提供断流重放。消费者生命周期见 `knowledge/global/overview/architecture-overview.md`。
 
 ---
 
@@ -474,7 +473,7 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 | `important_memory_review_hours` | int | `3` | 宿主级临时重要记忆巡检间隔（小时）。Cron 据此创建唯一系统 recurring 任务，到期后按用户分别执行；不支持用户级时间表 |
 | `daily_memory_review_time` | str | `"02:00"` | 宿主级每日记忆整理时间（北京时间 HH:MM）。Cron 据此创建唯一系统 daily 任务，到期后按用户分别执行；不支持用户级时间表 |
 
-CardStream 将所有历史事件保存在 `users/<user>/cards.sqlite3`。RAW 在追加后不可变；VIEW 可被滚动摘要替换。每次主 Provider 请求前统一计算固定 Prompt、有效历史、动态尾部和工具 Schema；总占用超过有效输入上限的 80% 时压缩，手动压缩也走同一请求屏障。摘要失败或提交冲突时保留原 VIEW。旧轮数/window 配置已退出运行时，不应重新添加。
+CardStream 将所有历史事件保存在 `users/<user>/history/cards.sqlite3`。RAW 在追加后不可变；VIEW 可被滚动摘要替换。每次主 Provider 请求前统一计算固定 Prompt、有效历史、动态尾部和工具 Schema；总占用超过有效输入上限的 80% 时压缩，手动压缩也走同一请求屏障。摘要失败或提交冲突时保留原 VIEW。旧轮数/window 配置已退出运行时，不应重新添加。
 
 输入容量取 `token_limit - 实际输出预留`、声明的 `max_input_tokens`、声明的
 `context_window - 实际输出预留` 三者中已知项的最小值；独立输入上限不再扣输出。
@@ -532,7 +531,7 @@ usage 校准按模型、计量版本及原生媒体类型集合隔离，不把�
 
 kemo-agent 用户级配置文件，位于 `users/<用户名>/user_config.yaml`。用户可在此覆盖全局默认值，也可通过 Web UI 配置面板修改。
 
-目录和数据文件职责见 `knowledge-and-user-data.md`；环境变量兜底和密钥优先级见本文“环境变量”章节。配置保存后，当前 Run 不会中途改变 Provider 或权限，下一次 Run 才使用新的合并结果；需要重建 RuntimeHost 组件的参数应重启服务。
+目录和数据文件职责见 `knowledge/global/engineering/knowledge-and-user-data.md`；环境变量兜底和密钥优先级见本文“环境变量”章节。配置保存后，当前 Run 不会中途改变 Provider 或权限，下一次 Run 才使用新的合并结果；需要重建 RuntimeHost 组件的参数应重启服务。
 
 配置分两类：
 - **用户独有段**：`provider`、`agent_models`、`multimodal_models`、`multimodal_routing`、`knowledge`、`skills`、`expand`、`perception`、`plugins` — 只从用户配置读取，全局配置不兜底
@@ -585,7 +584,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 - 工具不支持：明确报错，不剥离工具字段后静默降级；
 - 请求净化：永不向上游注入 `reasoning_effort`、`reasoning_enabled`、`stream_options`。
 
-行为细节见 `provider-reliability.md` 的 "Chat Completions 兼容链路" 章节。
+行为细节见 `knowledge/global/runtime/provider-reliability.md` 的 "Chat Completions 兼容链路" 章节。
 
 #### Kemo 动态思考档位
 
@@ -699,7 +698,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `char_limits` | object | 各 Prompt 段字符上限。同全局结构：`user_soul`、`agents_manual`、`knowledge_index`、`task_plan`、`perception`、`expand_data`、`skill_prompts`、`plugin_prompts`；超限在段诊断中标记 `truncated=true`。 |
+| `char_limits` | object | 各 Prompt 段字符上限。同全局结构：`user_soul`、`agents_manual`、`task_plan`、`perception`、`expand_data`、`skill_prompts`、`plugin_prompts`；超限在段诊断中标记 `truncated=true`。 |
 
 启用的 Prompt 段注入模式固定为 `full`，不提供 `injection_mode` 配置项；整体记忆注入由全局 `memory.prompt_injection` 控制。旧配置中全部为 `full` 的声明可兼容读取，但不会再影响运行时。
 
@@ -709,10 +708,10 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `use_shared` | bool | `true` | 是否注入共享知识库索引 |
-| `use_global` | bool | `true` | 是否注入全局知识库索引 |
+| `use_shared` | bool | `true` | 是否允许子智能体访问共享知识路径 |
+| `use_global` | bool | `true` | 是否允许子智能体访问全局知识路径 |
 
-> 用户级知识库始终启用，无需开关。三个知识层的注入顺序：用户 > 共享 > 全局（权重从高到低）。
+> 用户级知识路径始终在可用范围内，无需开关。此配置控制访问范围，不将知识文件加入 System Prompt。
 
 ---
 
