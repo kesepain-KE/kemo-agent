@@ -29,6 +29,7 @@ export function conversationChildren(roots: AgentTask[], sessionId: string) {
 }
 
 function ShellRecord({ user, job, onOpen }: { user: string; job: ShellJob; onOpen: () => void }) {
+  useLanguage()
   const name = `Shell · ${job.job_id.slice(-6)}`
   const status = t(shellLabels[job.status] || '状态未知')
   return <button type="button" className={`${styles.entry} ${styles.record}`}

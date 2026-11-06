@@ -87,6 +87,8 @@ import {
 
 import type { ShellOutletContext } from './appShellTypes'
 import { useChatRunRegistry } from './useChatRunRegistry'
+import { CompressionStatusIndicator } from './CompressionStatusIndicator'
+import { useCompressionStatus } from '../store/compressionStatus'
 import {
   CONVERSATION_COMMAND_EVENT,
   chatRunKey,
@@ -137,6 +139,7 @@ export function AppShell() {
   const [rememberedUser, setRememberedUser] = useState(readLastActiveUser)
   const user = resolveCurrentUser(params.get('user') || '', rememberedUser, usersQuery.data?.users)
   const sessionId = params.get('session') || ''
+  const compressionStatus = useCompressionStatus((state) => state.entries[chatRunKey(user, sessionId)])
   const newUserTab = params.get('new_session') === '1' && !sessionId
   const [sessionLifecycleNotice, setSessionLifecycleNotice] = useState('')
   const [leasedConversation, setLeasedConversation] = useState('')
@@ -539,13 +542,6 @@ export function AppShell() {
     action()
   }
 
-  const openCommandPanel = () => {
-    setHistoryDrawerOpen(false)
-    ui.setDrawerOpen(false)
-    setCommandMode('main')
-    setCommandOpen(true)
-  }
-
   const openContextDrawer = () => {
     setCommandOpen(false)
     setHistoryDrawerOpen(false)
@@ -670,9 +666,10 @@ export function AppShell() {
     window.dispatchEvent(new CustomEvent<ConversationCommandAction>(CONVERSATION_COMMAND_EVENT, { detail: action }))
   }
   const conversationCommands = useMemo(() => [
+    { id: 'new', label: tr('直接新建对话'), detail: tr('不等待保存或关闭，旧对话由后台空闲回收处理'), keywords: 'new conversation 直接 新建 多窗口', icon: MessageSquarePlus, action: () => dispatchConversationCommand('new') },
     { id: 'save', label: '保存此对话，创建新对话', detail: '提取记忆、保存当前归档并开启新上下文', keywords: 'save new conversation 保存 新建', icon: Save, action: () => dispatchConversationCommand('save') },
     { id: 'clear', label: '清空此对话', detail: '删除当前归档，然后创建一个新对话', keywords: 'clear delete conversation 清空 删除', icon: Trash2, tone: 'danger', action: () => dispatchConversationCommand('clear') },
-    { id: 'compress', label: '手动进行一次上下文压缩', detail: '优先按轮数压缩，不足时按 Token 压缩；记忆转入后台', keywords: 'compress context token 压缩 上下文', icon: Zap, action: () => dispatchConversationCommand('compress') },
+    { id: 'compress', label: '手动进行一次上下文压缩', detail: '按有效历史 Token 压缩，RAW 原文完整保留', keywords: 'compress context token 压缩 上下文', icon: Zap, action: () => dispatchConversationCommand('compress') },
     { id: 'retry', label: '重新发送一次消息', detail: '撤销上一轮并重放原消息，不增加对话轮数', keywords: 'retry regenerate resend 重新发送 重新生成', icon: RotateCcw, action: () => dispatchConversationCommand('retry') },
   ], [])
   const navigationCommands = useMemo(() => [
@@ -752,10 +749,10 @@ export function AppShell() {
     value: displayedReasoningEffort,
     options: provider?.type === 'kemo' ? kemoReasoningOptions : provider?.type === 'chat' ? reasoningEffortOptions : [],
     disabled: providerConfigSaving,
-    emptyLabel: provider?.type === 'kemo' && providerCapabilitiesQuery.isFetching ? '读取能力中…' : '模型未声明推理档位',
+    emptyLabel: provider?.type === 'kemo' && providerCapabilitiesQuery.isFetching ? tr('读取能力中…') : tr('模型未声明推理档位'),
     notice: reasoningCapabilityNotice,
     error: reasoningEffortMutation.isError && reasoningEffortMutation.variables?.targetUser === user
-      ? '思考强度保存失败，请重试。'
+      ? tr('思考强度保存失败，请重试。')
       : provider?.type === 'kemo' && providerCapabilitiesQuery.isError ? '模型能力读取失败，请在 Provider 配置中重试。' : undefined,
     onChange: (reasoningEffort: ReasoningEffort) => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort }),
   }
@@ -804,7 +801,7 @@ export function AppShell() {
           </div>}
         </div>
         <div className="sidebar-foot">
-          <UserProfileCard username={user || '未选择用户'} userPath={user ? `users/${user}` : 'users/—'}
+          <UserProfileCard username={user || tr('未选择用户')} userPath={user ? `users/${user}` : 'users/—'}
             avatarUrl={user ? getUserAvatarUrl(user, avatarRevision) : undefined}
             users={usersQuery.data?.users.map(item => ({ username: item.name, userPath: `users/${item.name}`, avatarUrl: getUserAvatarUrl(item.name, avatarRevision) }))}
             compact={ui.sidebarCollapsed} logoutPending={logoutPending} switchingDisabled={chatRunning}
@@ -822,6 +819,9 @@ export function AppShell() {
             {location.pathname === '/chat' && <span className="topbar-sub">{webSessions.find(item => item.session_id === sessionId)?.title || '新对话'}</span>}
           </div>
           <div className="topbar-actions">
+            {location.pathname === '/chat' && compressionStatus
+              ? <CompressionStatusIndicator className="topbar-compression-status" status={compressionStatus} />
+              : null}
             <button className="status-pill" title="查看上下文与运行状态" onClick={openContextDrawer}>
               <ReferenceIcon name="gauge" small /><span className="sp-val">{contextAvailable && contextLimit ? `${contextPercent.toFixed(1)}%` : '—'}</span>
               <span className="faint">{contextAvailable && contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : tr('暂不可用')}</span>
@@ -837,11 +837,11 @@ export function AppShell() {
                     ? <ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort}
                         options={provider?.type === 'kemo' ? kemoReasoningOptions : undefined} disabled={providerConfigSaving}
                         onChange={reasoningEffort => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} />
-                    : <small>{providerCapabilitiesQuery.isPending ? '读取能力中…' : '模型未声明推理档位'}</small>}
+                    : <small>{providerCapabilitiesQuery.isPending ? tr('读取能力中…') : tr('模型未声明推理档位')}</small>}
                 </div>
                 {reasoningCapabilityNotice && <div className="reference-menu-copy">{reasoningCapabilityNotice}</div>}
-                {providerCapabilitiesQuery.isError && <div className="banner banner-warning">模型能力读取失败</div>}
-                {reasoningEffortMutation.isError && <div className="banner banner-danger" role="alert">思考强度保存失败，请重试。</div>}
+                {providerCapabilitiesQuery.isError && <div className="banner banner-warning">{tr("模型能力读取失败")}</div>}
+                {reasoningEffortMutation.isError && <div className="banner banner-danger" role="alert">{tr("思考强度保存失败，请重试。")}</div>}
                 <button className="menu-item" onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置</button>
               </div>}
             </div>
@@ -869,7 +869,7 @@ export function AppShell() {
             && (activeSessionQuery.isPending || activeSessionQuery.isFetching || activeSessionQuery.isError
               || Boolean(activeSessionQuery.data?.session?.session_id))) ? <div className={lifecycleStyles.pending} role={activeSessionQuery.isError ? 'alert' : 'status'}>
             {activeSessionQuery.isError ? <>{newUserTab ? '创建独立对话失败，请重试。' : '恢复对话失败，请重试。'}<button onClick={() => { void activeSessionQuery.refetch() }}>{newUserTab ? '重试创建对话' : '重试恢复对话'}</button></> : newUserTab ? '正在为此用户创建独立对话…' : '正在恢复最近的对话…'}
-          </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady: Boolean(sessionId && leasedConversation === chatRunKey(user, sessionId)), clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview: () => { void overviewQuery.refetch() }, openCommandPanel } satisfies ShellOutletContext} />}
+          </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady: Boolean(sessionId && leasedConversation === chatRunKey(user, sessionId)), clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview: () => { void overviewQuery.refetch() } } satisfies ShellOutletContext} />}
         </main></WorkspaceLayout>
       </div>
 
@@ -890,10 +890,10 @@ export function AppShell() {
             </div>
           </section>
           <section className="context-drawer-card context-token-card">
-            <div className="context-card-head"><span><CircleGauge size={17} /><strong>Token 占用概览</strong></span><small>{!contextAvailable ? '暂不可用' : contextTokens?.measurement === 'estimated' ? '运行时估算' : contextTokens?.measurement === 'provider_reference' ? 'Provider 参考' : '当前输入窗口'}</small></div>
+            <div className="context-card-head"><span><CircleGauge size={17} /><strong>Token 占用概览</strong></span><small>{!contextAvailable ? tr('暂不可用') : ['estimated', 'local_estimate'].includes(contextTokens?.measurement || '') ? '运行时估算' : contextTokens?.measurement === 'provider_reference' ? 'Provider 参考' : '当前输入窗口'}</small></div>
             <div className="context-metric-grid two-columns">
-              <div className="context-metric"><span>系统提示词</span><strong>{contextAvailable ? formatTokens(contextTokens?.system_prompt_tokens ?? 0) : '—'}</strong><small>Token</small></div>
-              <div className="context-metric"><span>工具定义</span><strong>{contextAvailable ? formatTokens(contextTokens?.tool_schema_tokens ?? 0) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric"><span>{tr("系统提示词")}</span><strong>{contextAvailable ? formatTokens(contextTokens?.system_prompt_tokens ?? 0) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric"><span>{tr("工具定义")}</span><strong>{contextAvailable ? formatTokens(contextTokens?.tool_schema_tokens ?? 0) : '—'}</strong><small>Token</small></div>
               <div className="context-metric"><span>对话与摘要</span><strong>{contextAvailable ? formatTokens(Number(contextTokens?.conversation_tokens ?? contextWindow?.tokens.context_tokens ?? 0) + Number(contextTokens?.summary_tokens ?? 0)) : '—'}</strong><small>Token</small></div>
               <div className="context-metric emphasized"><span>当前总占用</span><strong>{contextAvailable ? formatTokens(contextTokens?.total_tokens ?? 0) : '—'}</strong><small>Token</small></div>
               <div className="context-metric"><span>容量上限</span><strong>{contextLimit ? formatTokens(contextTokens?.capacity_tokens ?? 0) : '—'}</strong><small>Token</small></div>
@@ -903,11 +903,11 @@ export function AppShell() {
           </section>
 
           <section className="context-drawer-card">
-            <div className="context-card-head"><span><MessageSquarePlus size={17} /><strong>对话统计</strong></span><small>前台与归档</small></div>
+            <div className="context-card-head"><span><MessageSquarePlus size={17} /><strong>对话统计</strong></span><small>上下文与完整历史</small></div>
             <div className="context-metric-grid three-columns">
-              <div className="context-metric"><span>前台对话</span><strong>{contextWindow?.conversation.foreground_rounds ?? '—'}</strong><small>轮</small></div>
-              <div className="context-metric"><span>后台归档</span><strong>{contextWindow?.conversation.archived_rounds ?? '—'}</strong><small>轮</small></div>
-              <div className="context-metric"><span>当前会话总轮数</span><strong>{contextWindow?.conversation.session_total_rounds ?? '—'}</strong><small>轮</small></div>
+              <div className="context-metric"><span>有效上下文</span><strong>{contextWindow?.conversation.cards_active ?? '—'}</strong><small>卡片</small></div>
+              <div className="context-metric"><span>完整历史</span><strong>{contextWindow?.conversation.last_seq ?? '—'}</strong><small>卡片</small></div>
+              <div className="context-metric"><span>整合次数</span><strong>{contextWindow?.conversation.integration_count ?? '—'}</strong><small>次</small></div>
               <div className="context-metric"><span>工具调用</span><strong>{contextWindow?.conversation.session_tool_calls ?? contextWindow?.conversation.total_tool_calls ?? '—'}</strong><small>次</small></div>
             </div>
           </section>
@@ -1007,7 +1007,7 @@ export function AppShell() {
               <h3 id="conversation-command-title">{tr("对话操作")}</h3>
               <div className="command-card-grid">{filteredConversationCommands.map((command) => {
                 const Icon = command.icon
-                return <button className={`command-item ${command.tone || ''}`} type="button" key={command.id} disabled={chatRunning || location.pathname !== '/chat'} onClick={() => runCommand(command.action)}><span className="command-item-icon"><Icon size={18} /></span><span><strong>{command.label}</strong><small>{location.pathname !== '/chat' ? '请先进入对话页面' : command.detail}</small></span></button>
+                return <button className={`command-item ${command.tone || ''}`} type="button" key={command.id} disabled={chatRunning || location.pathname !== '/chat'} onClick={() => runCommand(command.action)}><span className="command-item-icon"><Icon size={18} /></span><span><strong>{tr(command.label)}</strong><small>{location.pathname !== '/chat' ? '请先进入对话页面' : tr(command.detail)}</small></span></button>
               })}</div>
             </section>}
             {showSlashCommand && <section className="command-section" aria-labelledby="slash-command-title">

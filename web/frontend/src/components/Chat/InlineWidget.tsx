@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../../i18n'
 import { OrbitVisualWidget } from './InlineWidgetOrbit'
 import { WidgetHeader, displayValue, toneClass } from './InlineWidgetPrimitives'
 import { useMemo, useState } from 'react'
@@ -55,6 +56,7 @@ function formatChartNumber(value: number): string {
 }
 
 function BarChartWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { component: 'bar-chart' }> }) {
+  useLanguage()
   const { title, description, data, unit = '', value_prefix: prefix = '', value_suffix: suffix = '', max } = widget.props
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const chartMaximum = useMemo(() => Math.max(max || 0, niceChartMaximum(Math.max(...data.map((item) => item.value)))), [data, max])
@@ -110,7 +112,7 @@ function BarChartWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { 
         <summary><ChevronDown size={14} aria-hidden="true" />查看图表数据</summary>
         <div className={styles.tableScroll}>
           <table>
-            <thead><tr><th>项目</th><th>数值</th><th>说明</th></tr></thead>
+            <thead><tr><th>项目</th><th>数值</th><th>{tr("说明")}</th></tr></thead>
             <tbody>
               {data.map((item, index) => (
                 <tr key={`${item.label}-row-${index}`}>
@@ -195,6 +197,7 @@ function LineChartWidget({ widget }: { widget: Extract<InlineWidgetDefinition, {
 const piePalette = ['#4a4a4a', '#606060', '#777777', '#8d8d8d', '#a3a3a3', '#5a5a5a', '#707070', '#868686', '#9c9c9c', '#b2b2b2']
 
 function PieChartWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { component: 'pie-chart' }> }) {
+  useLanguage()
   const { title, description, data, unit = '', donut = true } = widget.props
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const total = data.reduce((sum, item) => sum + item.value, 0)
@@ -212,7 +215,7 @@ function PieChartWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { 
       <div className={styles.pieLayout}>
         <div className={styles.pieStage}>
           <div className={`${styles.pie} ${donut ? styles.donut : ''}`} style={{ background: `conic-gradient(${stops})` }} role="img" aria-label={`${title || '饼图'}，总计 ${formatChartNumber(total)}${unit}`} />
-          <div className={styles.pieCenter}><strong>{active ? formatChartNumber(active.value) : formatChartNumber(total)}</strong><span>{active?.label || unit || '合计'}</span></div>
+          <div className={styles.pieCenter}><strong>{active ? formatChartNumber(active.value) : formatChartNumber(total)}</strong><span>{active?.label || unit || tr('合计')}</span></div>
         </div>
         <div className={styles.pieLegend}>
           {data.map((item, index) => {
@@ -243,12 +246,13 @@ function ChartDataDetails({ data, value }: {
   data: Array<{ label: string; value: number; detail?: string }>
   value: (item: { label: string; value: number; detail?: string }) => string
 }) {
+  useLanguage()
   return (
     <details className={styles.dataDetails}>
       <summary><ChevronDown size={14} aria-hidden="true" />查看图表数据</summary>
       <div className={styles.tableScroll}>
         <table>
-          <thead><tr><th>项目</th><th>数值</th><th>说明</th></tr></thead>
+          <thead><tr><th>项目</th><th>数值</th><th>{tr("说明")}</th></tr></thead>
           <tbody>{data.map((item, index) => <tr key={`${item.label}-${index}`}><td>{item.label}</td><td>{value(item)}</td><td>{item.detail || '—'}</td></tr>)}</tbody>
         </table>
       </div>
@@ -383,6 +387,7 @@ function CalculationWidget({ widget }: { widget: Extract<InlineWidgetDefinition,
 }
 
 function DataTableWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { component: 'data-table' }> }) {
+  useLanguage()
   const { title, description, caption, columns, rows, searchable, page_size: pageSize = 20 } = widget.props
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null)
@@ -454,7 +459,7 @@ function DataTableWidget({ widget }: { widget: Extract<InlineWidgetDefinition, {
       </div>
       <div className={styles.tablePager}>
         <span>共 {filteredRows.length} 行 · 第 {safePage + 1}/{pageCount} 页</span>
-        <div><button type="button" disabled={safePage <= 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button><button type="button" disabled={safePage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>下一页</button></div>
+        <div><button type="button" disabled={safePage <= 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>{tr("上一页")}</button><button type="button" disabled={safePage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>{tr("下一页")}</button></div>
       </div>
     </section>
   )
@@ -608,9 +613,10 @@ function FollowUpWidget({ widget, onAction }: { widget: Extract<InlineWidgetDefi
 }
 
 function ConfirmWidget({ widget, onAction }: { widget: Extract<InlineWidgetDefinition, { component: 'confirm' }>; onAction?: (action: InlineWidgetAction) => void }) {
-  const { title, description, message, confirm, cancel_label: cancelLabel = '取消' } = widget.props
+  useLanguage()
+  const { title, description, message, confirm, cancel_label: cancelLabel = tr('取消') } = widget.props
   const [dismissed, setDismissed] = useState(false)
-  return <section className={styles.widget} aria-label={title || '确认操作'}><WidgetHeader title={title} description={description} /><p className={styles.actionMessage}>{dismissed ? '已取消此操作。' : message}</p>{!dismissed ? <div className={styles.actionRow}><ActionButton button={confirm} onAction={onAction} /><button type="button" className={styles.actionButton} onClick={() => setDismissed(true)}>{cancelLabel}</button></div> : null}</section>
+  return <section className={styles.widget} aria-label={title || tr('确认操作')}><WidgetHeader title={title} description={description} /><p className={styles.actionMessage}>{dismissed ? '已取消此操作。' : message}</p>{!dismissed ? <div className={styles.actionRow}><ActionButton button={confirm} onAction={onAction} /><button type="button" className={styles.actionButton} onClick={() => setDismissed(true)}>{cancelLabel}</button></div> : null}</section>
 }
 
 function ApprovalWidget({ widget, onAction }: { widget: Extract<InlineWidgetDefinition, { component: 'approval' }>; onAction?: (action: InlineWidgetAction) => void }) {

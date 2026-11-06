@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import type { ReactNode } from 'react'
 import {
   AlarmClock,
@@ -80,9 +81,10 @@ function cx(...classNames: Array<string | undefined | false>) {
 }
 
 function SectionHeader({ icon, title, onViewAll }: { icon: ReactNode; title: string; onViewAll?: () => void }) {
+  useLanguage()
   return <div className={styles.sectionHeader}>
     <div className={styles.sectionTitle}><span className={styles.sectionTitleIcon}>{icon}</span><span>{title}</span></div>
-    {onViewAll && <button type="button" className={styles.viewAllButton} onClick={onViewAll}><span>查看全部</span><ChevronRight size={15} strokeWidth={1.8} /></button>}
+    {onViewAll && <button type="button" className={styles.viewAllButton} onClick={onViewAll}><span>{tr("查看全部")}</span><ChevronRight size={15} strokeWidth={1.8} /></button>}
   </div>
 }
 
@@ -93,7 +95,7 @@ function EmptyState({ text }: { text: string }) {
 export function RecentActivityCard({
   scheduledTasks,
   senseData,
-  title = '最近状态',
+  title = tr('最近状态'),
   className,
   maxTaskItems = MAX_TASK_ITEMS,
   maxSenseItems = MAX_SENSE_ITEMS,
@@ -102,21 +104,22 @@ export function RecentActivityCard({
   onTaskClick,
   onSenseDataClick,
 }: RecentActivityCardProps) {
+  useLanguage()
   const visibleTasks = scheduledTasks.slice(0, Math.min(MAX_TASK_ITEMS, Math.max(0, maxTaskItems)))
   const visibleSenseData = senseData.slice(0, Math.min(MAX_SENSE_ITEMS, Math.max(0, maxSenseItems)))
   return <section className={cx(styles.card, className)} aria-labelledby="recent-activity-title">
     <h2 id="recent-activity-title" className={styles.cardTitle}>{title}</h2>
     <div className={styles.scrollArea}>
     <div className={styles.section}>
-      <SectionHeader icon={<AlarmClock size={21} strokeWidth={1.9} />} title="定时任务" onViewAll={onViewAllTasks} />
+      <SectionHeader icon={<AlarmClock size={21} strokeWidth={1.9} />} title={tr("定时任务")} onViewAll={onViewAllTasks} />
       <div className={styles.list}>
-        {visibleTasks.length === 0 ? <EmptyState text="当前没有已配置的用户定时任务" /> : visibleTasks.map((task, index) => {
+        {visibleTasks.length === 0 ? <EmptyState text={tr("当前没有已配置的用户定时任务")} /> : visibleTasks.map((task, index) => {
           const status = taskStatusMeta[task.status]
           return <button key={task.id} type="button" className={styles.taskRow} onClick={() => onTaskClick?.(task)}>
           <span className={cx(styles.itemIcon, styles[`taskIcon${(index % 4) + 1}`])}>{taskIconMap[task.icon ?? 'clipboard']}</span>
           <span className={styles.taskMain}><strong className={styles.itemName}>{task.title}</strong><span className={styles.itemDescription}>{task.schedule}</span></span>
-          <span className={styles.taskNextRun}><span className={styles.metadataLabel}>下次运行：</span><span className={styles.metadataValue}>{task.nextRun}</span></span>
-          <span className={cx(styles.statusPill, status.className)}>{status.label}</span>
+          <span className={styles.taskNextRun}><span className={styles.metadataLabel}>{tr("下次运行：")}</span><span className={styles.metadataValue}>{task.nextRun}</span></span>
+          <span className={cx(styles.statusPill, status.className)}>{tr(status.label)}</span>
         </button>})}
       </div>
     </div>
@@ -126,10 +129,10 @@ export function RecentActivityCard({
         {visibleSenseData.length === 0 ? <EmptyState text="当前没有正在注入的感知数据" /> : visibleSenseData.map((item, index) => <button key={item.id} type="button" className={styles.senseRow} onClick={() => onSenseDataClick?.(item)}>
           <span className={cx(styles.itemIcon, styles[`senseIcon${(index % 3) + 1}`])}>{senseIconMap[item.icon ?? 'radio']}</span>
           <strong className={styles.itemName}>{item.name}</strong>
-          <span className={styles.intervalPill}>{item.updateInterval || '频率未声明'}</span>
-          <span className={styles.senseValue}><span className={styles.metadataLabel}>最新值：</span><span className={styles.metadataValue}>{item.value || '暂无数据'}</span></span>
-          <span className={styles.senseUpdateTime}><span className={styles.metadataLabel}>更新时间：</span><span className={styles.metadataValue}>{item.updatedAt}</span></span>
-          <span className={cx(styles.statusPill, item.injected ? styles.statusEnabled : styles.statusDisabled)}>{item.injected ? '已注入' : '未注入'}</span>
+          <span className={styles.intervalPill}>{item.updateInterval || tr('频率未声明')}</span>
+          <span className={styles.senseValue}><span className={styles.metadataLabel}>{tr("最新值：")}</span><span className={styles.metadataValue}>{item.value || tr('暂无数据')}</span></span>
+          <span className={styles.senseUpdateTime}><span className={styles.metadataLabel}>{tr("更新时间：")}</span><span className={styles.metadataValue}>{item.updatedAt}</span></span>
+          <span className={cx(styles.statusPill, item.injected ? styles.statusEnabled : styles.statusDisabled)}>{item.injected ? '已注入' : tr('未注入')}</span>
         </button>)}
       </div>
     </div>

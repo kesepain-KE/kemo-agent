@@ -4,9 +4,9 @@ import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from './Capab
 
 const items: CapabilityReferenceItem[] = [
   { id: 'expand:user:weather', kind: 'expand', scope: 'user', name: 'weather', title: '天气感知', description: '读取本地天气', path: 'users/demo/expand/weather', status: '已启用' },
-  { id: 'expand:shared:calendar', kind: 'expand', scope: 'shared', name: 'calendar', title: '共享日历', description: '查看团队日程', path: 'shared_expand/calendar', status: '已启用' },
-  { id: 'expand:global:system_power', kind: 'expand', scope: 'global', name: 'system_power', title: '系统电源', description: '读取电池并控制亮度', path: 'global_expand/system_power', status: '已启用' },
-  { id: 'skill:shared:review', kind: 'skill', scope: 'shared', name: 'review', title: '代码审查', description: '审查提交内容', path: 'shared_skills/review', status: '已启用' },
+  { id: 'expand:shared:calendar', kind: 'expand', scope: 'shared', name: 'calendar', title: '共享日历', description: '查看团队日程', path: 'expand/share/calendar', status: '已启用' },
+  { id: 'expand:global:system_power', kind: 'expand', scope: 'global', name: 'system_power', title: '系统电源', description: '读取电池并控制亮度', path: 'expand/global/system_power', status: '已启用' },
+  { id: 'skill:shared:review', kind: 'skill', scope: 'shared', name: 'review', title: '代码审查', description: '审查提交内容', path: 'skills/review', status: '已启用' },
   { id: 'skill:user:release', kind: 'skill', scope: 'user', name: 'release', title: '发布检查', description: '执行用户发布流程', path: 'users/demo/user_skills/release', status: '已启用' },
   { id: 'plugin:global:clock', kind: 'plugin', scope: 'global', name: 'clock', title: 'clock', description: '读取当前时间', path: 'plugins/clock', status: '已启用' },
 ]

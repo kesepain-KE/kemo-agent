@@ -89,6 +89,27 @@ describe('RunEventCards', () => {
     expect(payloads.every((text) => text === longText)).toBe(true)
   })
 
+  it('超时时未确认退出使用独立状态、固定已知耗时并显示回执', () => {
+    vi.useFakeTimers()
+    try {
+      const { container } = render(<ToolCallCard item={{
+        id: 't1', kind: 'tool', callId: 'call-1', name: 'file', status: 'still_running',
+        elapsedMs: 300000, result: { ok: false, error: { still_running: true } },
+      }} />)
+      expect(container.querySelector('.tool-call-status.still_running')).toHaveAttribute('aria-label', '超时后未确认退出')
+      expect(container.querySelector('.tool-call-status.still_running svg')).not.toBeNull()
+      expect(container.querySelector('.tool-call-status.error')).toBeNull()
+      expect(container.querySelector('.tool-running-spinner')).toBeNull()
+      act(() => vi.advanceTimersByTime(2000))
+      expect(container.querySelector('.tool-elapsed')).toHaveTextContent('5.0 min')
+      fireEvent.click(screen.getByRole('button', { name: /file/ }))
+      expect(screen.getByText(/"still_running": true/)).toBeInTheDocument()
+      expect(screen.getByText(/执行结果尚未确认，请先核对状态/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('展开工具卡时会格式化紧凑 JSON，并展开嵌套 JSON 字符串', () => {
     const { container } = render(<ToolCallCard item={{
       id: 't1', kind: 'tool', callId: 'call-1', name: 'shell', status: 'success',

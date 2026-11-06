@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Bot, ChevronRight } from 'lucide-react'
 import type { ChatItem } from '../types/api'
@@ -30,7 +31,7 @@ function dispatchArguments(item: Extract<ChatItem, { kind: 'tool' }>): Record<st
 }
 
 /** A simple dispatch link replaces the previous floating progress stack. */
-export function SubagentToolCard({ item, user = '', sessionId = '' }: {
+export const SubagentToolCard = memo(function SubagentToolCard({ item, user = '', sessionId = '' }: {
   item: Extract<ChatItem, { kind: 'tool' }>; user?: string; sessionId?: string
   progress?: ChatItem[]; running?: boolean
 }) {
@@ -38,7 +39,7 @@ export function SubagentToolCard({ item, user = '', sessionId = '' }: {
   const args = dispatchArguments(item)
   if (args?.action !== 'call') return <ToolCallCard item={item} user={user} sessionId={sessionId} />
   return <DispatchCard item={item} args={args} user={user} sessionId={sessionId} />
-}
+})
 
 function DispatchCard({ item, args, user, sessionId }: {
   item: Extract<ChatItem, { kind: 'tool' }>; args: Record<string, unknown>; user: string; sessionId: string

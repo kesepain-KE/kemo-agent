@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
 import { DocumentMarkdown } from './DocumentMarkdown'
 import { Eye, EyeOff, Play, RotateCcw, Save, Settings2, Trash2 } from 'lucide-react'
@@ -66,11 +67,11 @@ function previewText(
   const lines = [container.title]
   if (container.kind === 'status') {
     for (const field of container.fields) {
-      lines.push(`${field.label}：${field.masked ? (container.secret_set?.[field.key] ? '已设置' : '未设置') : displayValue(container.data?.[field.key])}`)
+      lines.push(`${field.label}：${field.masked ? (container.secret_set?.[field.key] ? '已设置' : tr('未设置')) : displayValue(container.data?.[field.key])}`)
     }
   } else if (container.kind === 'config') {
     for (const field of container.fields) {
-      lines.push(`${field.label}：${field.masked ? (container.secret_set?.[field.key] ? '已设置（不回显）' : '未设置') : displayValue(draft[field.key] ?? fieldDefault(field))}`)
+      lines.push(`${field.label}：${field.masked ? (container.secret_set?.[field.key] ? '已设置（不回显）' : tr('未设置')) : displayValue(draft[field.key] ?? fieldDefault(field))}`)
     }
   } else {
     for (const control of container.controls) {
@@ -86,11 +87,12 @@ function previewText(
 }
 
 function StatusContainer({ container }: { container: Extract<ModulePanelContainer, { kind: 'status' }> }) {
+  useLanguage()
   return <div className={styles.statusFields}>
     {container.data_error ? <p className={styles.containerError}>{container.data_error}</p> : null}
     {container.fields.length ? container.fields.map((field) => {
       const value = field.masked
-        ? container.secret_set?.[field.key] ? '已设置' : '未设置'
+        ? container.secret_set?.[field.key] ? '已设置' : tr('未设置')
         : container.data?.[field.key]
       if (field.type === 'markdown') {
         return <section className={styles.markdownField} key={field.key}><strong>{field.label}</strong><DocumentMarkdown content={displayValue(value)} /></section>
@@ -165,6 +167,7 @@ function ConfigContainer({ container, draft, clearSecrets, revealed, onChange, o
 }
 
 export function ModulePanel({ kind, data, loading = false, busy = false, error = '', emptyText, onSave, onAction }: ModulePanelProps) {
+  useLanguage()
   const [draft, setDraft] = useState<Record<string, ModulePanelValue>>({})
   const [clearSecrets, setClearSecrets] = useState<Set<string>>(new Set())
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
@@ -236,7 +239,7 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
       ariaLabel={`${container.title}，悬停或聚焦可查看完整内容`}
       preview={<pre className={styles.previewText}>{previewText(container, draft, actionValues)}</pre>}
     >
-      <section><header className={styles.cardHeader}><strong>{container.title}</strong><span>{container.kind === 'status' ? '状态' : container.kind === 'config' ? '配置' : '操作'}</span></header>
+      <section><header className={styles.cardHeader}><strong>{container.title}</strong><span>{container.kind === 'status' ? tr('状态') : container.kind === 'config' ? tr('配置') : tr('操作')}</span></header>
         <div className={styles.cardBody}>{container.kind === 'status' ? <StatusContainer container={container} /> : container.kind === 'config' ? <ConfigContainer
           container={container}
           draft={draft}

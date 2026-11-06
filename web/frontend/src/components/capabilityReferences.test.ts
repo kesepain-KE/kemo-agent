@@ -11,7 +11,7 @@ describe('capabilityReferences', () => {
     const expands = {
       expands: [{ scope: 'shared', items: [{
         scope: 'shared', name: 'calendar', display_name: '共享日历', description: '读取日历',
-        relative_path: 'calendar', path: 'shared_expand/calendar', valid: true, whitelisted: true,
+        relative_path: 'calendar', path: 'expand/share/calendar', valid: true, whitelisted: true,
         active_for_main_agent: true,
       }] }],
     } as unknown as ExpandsResponse

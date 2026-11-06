@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../../i18n'
 import { useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
@@ -153,8 +154,9 @@ function MediaPlayerWidget({ widget }: { widget: Extract<InlineWidgetDefinition,
 }
 
 function FileListWidget({ widget, onAction }: { widget: Extract<InlineWidgetDefinition, { component: 'file-list' }>; onAction?: (action: InlineWidgetAction) => void }) {
+  useLanguage()
   const { title, description, files } = widget.props
-  return <section className={styles.widget} aria-label={title || '文件列表'}><Header title={title} description={description} badge={`${files.length} 个文件`} /><div className={styles.fileList}>{files.map((file, index) => <article key={`${file.name}-${index}`}><FileText size={20} aria-hidden="true" /><div><strong>{file.name}</strong>{file.description ? <p>{file.description}</p> : null}<small>{[file.mime_type, file.size].filter(Boolean).join(' · ')}</small></div>{file.url ? <a href={file.url} target="_blank" rel="noreferrer"><ExternalLink size={15} />查看</a> : file.action ? <button type="button" disabled={!onAction} onClick={() => onAction?.(file.action!)}>操作</button> : null}</article>)}</div></section>
+  return <section className={styles.widget} aria-label={title || '文件列表'}><Header title={title} description={description} badge={`${files.length} 个文件`} /><div className={styles.fileList}>{files.map((file, index) => <article key={`${file.name}-${index}`}><FileText size={20} aria-hidden="true" /><div><strong>{file.name}</strong>{file.description ? <p>{file.description}</p> : null}<small>{[file.mime_type, file.size].filter(Boolean).join(' · ')}</small></div>{file.url ? <a href={file.url} target="_blank" rel="noreferrer"><ExternalLink size={15} />查看</a> : file.action ? <button type="button" disabled={!onAction} onClick={() => onAction?.(file.action!)}>{tr("操作")}</button> : null}</article>)}</div></section>
 }
 
 function ProductGridWidget({ widget, onAction }: { widget: Extract<InlineWidgetDefinition, { component: 'product-grid' }>; onAction?: (action: InlineWidgetAction) => void }) {
@@ -167,10 +169,11 @@ function money(value: number, currency: string) {
 }
 
 function OrderSummaryWidget({ widget, onAction }: { widget: Extract<InlineWidgetDefinition, { component: 'order-summary' }>; onAction?: (action: InlineWidgetAction) => void }) {
+  useLanguage()
   const { title, description, currency = '¥', items, adjustments = [], actions = [] } = widget.props
   const subtotal = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0)
   const computedTotal = subtotal + adjustments.reduce((sum, item) => sum + item.amount, 0)
-  return <section className={styles.widget} aria-label={title || '订单摘要'}><Header title={title} description={description} badge={`${items.length} 项`} /><div className={styles.orderLines}>{items.map((item, index) => <div key={`${item.label}-${index}`}><span><strong>{item.label}</strong>{item.detail ? <small>{item.detail}</small> : null}</span><span>× {item.quantity}</span><b>{money(item.quantity * item.unit_price, currency)}</b></div>)}</div><div className={styles.orderTotals}><div><span>小计</span><b>{money(subtotal, currency)}</b></div>{adjustments.map((item, index) => <div key={`${item.label}-${index}`}><span>{item.label}</span><b>{money(item.amount, currency)}</b></div>)}<div className={styles.grandTotal}><span>合计</span><strong>{money(widget.props.total ?? computedTotal, currency)}</strong></div></div>{actions.length ? <div className={styles.actionRow}>{actions.map((button, index) => <button type="button" key={`${button.label}-${index}`} className={`${styles.actionButton} ${toneClass(button.tone)}`} disabled={button.disabled || !onAction} onClick={() => onAction?.(button.action)}>{button.label}</button>)}</div> : null}</section>
+  return <section className={styles.widget} aria-label={title || '订单摘要'}><Header title={title} description={description} badge={`${items.length} 项`} /><div className={styles.orderLines}>{items.map((item, index) => <div key={`${item.label}-${index}`}><span><strong>{item.label}</strong>{item.detail ? <small>{item.detail}</small> : null}</span><span>× {item.quantity}</span><b>{money(item.quantity * item.unit_price, currency)}</b></div>)}</div><div className={styles.orderTotals}><div><span>小计</span><b>{money(subtotal, currency)}</b></div>{adjustments.map((item, index) => <div key={`${item.label}-${index}`}><span>{item.label}</span><b>{money(item.amount, currency)}</b></div>)}<div className={styles.grandTotal}><span>{tr("合计")}</span><strong>{money(widget.props.total ?? computedTotal, currency)}</strong></div></div>{actions.length ? <div className={styles.actionRow}>{actions.map((button, index) => <button type="button" key={`${button.label}-${index}`} className={`${styles.actionButton} ${toneClass(button.tone)}`} disabled={button.disabled || !onAction} onClick={() => onAction?.(button.action)}>{button.label}</button>)}</div> : null}</section>
 }
 
 function PollWidget({ widget, onAction }: { widget: Extract<InlineWidgetDefinition, { component: 'poll' }>; onAction?: (action: InlineWidgetAction) => void }) {

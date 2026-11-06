@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, LogOut, Settings, UserRound, Users, ExternalLink } from 'lucide-react'
@@ -54,6 +55,7 @@ export function UserProfileCard({
   onLogout,
   newUserTabHref,
 }: UserProfileCardProps) {
+  useLanguage()
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -145,7 +147,7 @@ export function UserProfileCard({
         ref={triggerRef}
         type="button"
         className={`${styles.profileCard} ${compact ? styles.compactCard : ''} ${isOpen ? styles.profileCardOpen : ''}`}
-        aria-label="切换当前用户"
+        aria-label={tr("切换当前用户")}
         aria-expanded={isOpen}
         aria-haspopup="menu"
         aria-controls={isOpen ? menuId : undefined}
@@ -208,7 +210,7 @@ export function UserProfileCard({
 
         {onLogout && <>
           <div className={styles.divider} />
-          <button type="button" className={`${styles.menuItem} ${styles.dangerItem}`} role="menuitem" disabled={logoutPending} onClick={() => runAndClose(onLogout)}><LogOut size={16} /><span>{logoutPending ? '正在退出…' : '退出登录'}</span></button>
+          <button type="button" className={`${styles.menuItem} ${styles.dangerItem}`} role="menuitem" disabled={logoutPending} onClick={() => runAndClose(onLogout)}><LogOut size={16} /><span>{logoutPending ? '正在退出…' : tr('退出登录')}</span></button>
         </>}
       </div>, document.body)}
     </div>

@@ -1,3 +1,4 @@
+import { cardHistory } from '../test/cardHistory'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
@@ -26,9 +27,9 @@ const root = (children = [child()], patch: Partial<AgentTask> = {}): AgentTask =
 })
 function mockRecords(jobs = [job()], tasks = [root()]) {
   server.use(
-    http.get('/api/users/:user/sessions/:session/history', ({ params }) => HttpResponse.json({
-      user: params.user, session_id: params.session, source: 'web', messages: [], round_metrics: [], round_traces: [],
-    })),
+    http.get('/api/users/:user/sessions/:session/history', ({ params }) => HttpResponse.json(cardHistory({
+      user: params.user, session_id: params.session, source: 'web', messages: [], integrations: [], integration_traces: [],
+    }))),
     http.get('/api/users/:user/workspace/jobs', () => HttpResponse.json({
       jobs, active_count: 1, total: jobs.length, page: 1, total_pages: 1,
     })),

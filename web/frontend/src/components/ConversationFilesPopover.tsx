@@ -133,7 +133,7 @@ function collectHistoryFiles(user: string, history: HistoryResponse | undefined)
       sources.set(entry.id, entry)
     }
   }
-  for (const metric of history?.round_metrics ?? []) {
+  for (const metric of history?.integrations ?? []) {
     addNative(metric.media_inputs)
     for (const attachment of metric.guidance_details?.flatMap((item) => item.uploaded_files ?? []) ?? []) {
       const entry = attachmentEntry(user, attachment)
@@ -144,7 +144,7 @@ function collectHistoryFiles(user: string, history: HistoryResponse | undefined)
       outputs.set(entry.id, entry)
     }
   }
-  for (const trace of history?.round_traces ?? []) {
+  for (const trace of history?.integration_traces ?? []) {
     for (const tool of trace.tools ?? []) {
       if (tool.name === 'attach_media') addNative(tool.media_inputs)
       for (const artifact of tool.artifacts ?? []) {
@@ -206,6 +206,7 @@ function formatSize(size?: number) {
 }
 
 function FileEntryRow({ entry, onReference, onPreview }: { entry: FileEntry; onReference?: (file: PendingUploadedFile) => void; onPreview: () => void }) {
+  useLanguage()
   const [thumbnailFailed, setThumbnailFailed] = useState(false)
   const image = entry.kind === 'image' && entry.thumbnailUrl && !thumbnailFailed
   return (
@@ -223,7 +224,7 @@ function FileEntryRow({ entry, onReference, onPreview }: { entry: FileEntry; onR
         : null}
       {entry.onPreview && <button type="button" className={styles.entryAction} onClick={() => { entry.onPreview?.(); onPreview() }} aria-label={`${t('在工作面板打开')} ${entry.name}`} title={t('在工作面板打开')}><PanelRight size={14} /></button>}
       {entry.href
-        ? <a className={styles.entryAction} href={entry.href} download={entry.downloadName} aria-label={`下载 ${entry.name}`} title="下载"><Download size={14} /></a>
+        ? <a className={styles.entryAction} href={entry.href} download={entry.downloadName} aria-label={`下载 ${entry.name}`} title={t("下载")}><Download size={14} /></a>
         : null}
     </div>
   )

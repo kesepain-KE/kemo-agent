@@ -1,3 +1,4 @@
+import { cardHistory } from '../test/cardHistory'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -23,9 +24,9 @@ const tool = (overrides: Partial<Extract<ChatItem, { kind: 'tool' }>> = {}): Ext
   id: 'tool-one', kind: 'tool', callId: 'attach-one', name: 'attach_media', status: 'success',
   result: { ok: true, result: { status: 'queued', delivery: 'native_main', assets: [media] } }, ...overrides,
 })
-const history = (overrides: Partial<HistoryResponse> = {}): HistoryResponse => ({
-  user: 'alice', source: 'web', session_id: 's1', messages: [], round_metrics: [], round_traces: [], ...overrides,
-})
+const history = (overrides: Partial<Parameters<typeof cardHistory>[0]> = {}): HistoryResponse => (cardHistory({
+  user: 'alice', source: 'web', session_id: 's1', messages: [], integrations: [], integration_traces: [], ...overrides,
+}))
 const clients: QueryClient[] = []
 beforeEach(() => {
   useWorkspaceStore.setState({ users: {} })
@@ -71,14 +72,14 @@ describe('native media descriptors and state', () => {
   })
 
   it('restores audited history into the tool card without parsing or altering model text', () => {
-    const items = buildHistoryItems(history({
+    const items = buildHistoryItems(history(cardHistory({
       messages: [{ role: 'user', content: 'inspect' }, { role: 'assistant', content: 'done' }],
-      round_traces: [{ round: 1, reasoning: '', tools: [{
+      integration_traces: [{ integration_number: 1, reasoning: '', tools: [{
         call_id: 'attach-one', name: 'attach_media', arguments_text: '{}', arguments_truncated: false,
         result_text: '{}', result_truncated: false, elapsed_ms: 1, status: 'success',
         media_inputs: [{ ...media, status: 'included' }],
       }] }],
-    }))
+    })))
     const restored = items.find(item => item.kind === 'tool')
     expect(restored?.kind === 'tool' && toolNativeInputs(restored)[0].status).toBe('included')
   })
@@ -104,8 +105,8 @@ describe('native media links', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     clients.push(client)
     const live: ChatRunSnapshot = { phase: 'streaming', runId: 'r1', historyUserMessages: 1, nextTurnQueue: [], items: [tool()] }
-    vi.mocked(getHistory).mockResolvedValue(history({ round_metrics: [{
-      round: 1, usage: {}, elapsed_ms: 1, tool_calls: 1, guidance: [], media_inputs: [{ ...media, status: 'included' }],
+    vi.mocked(getHistory).mockResolvedValue(history({ integrations: [{
+      integration_number: 1, usage: {}, elapsed_ms: 1, tool_calls: 1, guidance: [], media_inputs: [{ ...media, status: 'included' }],
       artifacts: [{ asset_id: media.asset_id, type: 'image', scope: 'download', path: media.relative_path,
         name: media.name, size: media.size, mime_type: media.mime_type, checksum_sha256: media.checksum_sha256 }],
     }] }))

@@ -81,10 +81,11 @@
 
 .actions button:hover:not(:disabled) { border-color: var(--brand-line); background: var(--surface-hover); }
 .actions button:disabled { cursor: wait; opacity: .58; }
-.actions .confirm { border-color: var(--brand); color: #fff; background: var(--brand); }
-.danger .actions .confirm { border-color: var(--red); background: var(--red); }
-.actions .confirm:hover:not(:disabled) { border-color: var(--brand); background: color-mix(in srgb, var(--brand) 86%, black); }
-.danger .actions .confirm:hover:not(:disabled) { border-color: var(--red); background: color-mix(in srgb, var(--red) 86%, black); }
+/* 深色主题下 --brand / --red 是浅色，配 #fff 会出现白底白字，统一走对比令牌。 */
+.actions .confirm { border-color: var(--brand); color: var(--accent-contrast, #fff); background: var(--brand); }
+.danger .actions .confirm { border-color: var(--red); background: var(--red); color: var(--accent-contrast, #fff); }
+.actions .confirm:hover:not(:disabled) { border-color: var(--brand); background: color-mix(in srgb, var(--brand) 86%, var(--accent-contrast, #000)); }
+.danger .actions .confirm:hover:not(:disabled) { border-color: var(--red); background: color-mix(in srgb, var(--red) 86%, var(--accent-contrast, #000)); }
 
 @keyframes layerIn { from { opacity: 0; } }
 @keyframes dialogIn { from { opacity: 0; transform: translateY(8px) scale(.985); } }

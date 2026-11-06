@@ -1,4 +1,5 @@
-import { type HTMLAttributes, type ReactNode, useEffect, useRef, useState } from 'react'
+import { t as tr, useLanguage } from '../../i18n'
+import { type HTMLAttributes, type ReactNode, memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy, TriangleAlert } from 'lucide-react'
 import ReactMarkdown, { type Components, type UrlTransform } from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
@@ -168,6 +169,7 @@ function CodeBlock({ code, children, preProps }: {
   children: ReactNode
   preProps: HTMLAttributes<HTMLPreElement>
 }) {
+  useLanguage()
   const [copyState, setCopyState] = useState<CopyState>('idle')
   const resetTimer = useRef<number | null>(null)
 
@@ -189,7 +191,7 @@ function CodeBlock({ code, children, preProps }: {
       })
   }
 
-  const label = copyState === 'copied' ? '已复制' : copyState === 'error' ? '复制失败' : '复制'
+  const label = copyState === 'copied' ? tr('已复制') : copyState === 'error' ? tr('复制失败') : tr('复制')
   const Icon = copyState === 'copied' ? Check : copyState === 'error' ? TriangleAlert : Copy
 
   return (
@@ -273,17 +275,27 @@ export interface MarkdownMessageProps {
   onWidgetAction?: (action: InlineWidgetAction) => void
 }
 
-export function MarkdownMessage({ content, streaming = false, className = '', onWidgetAction }: MarkdownMessageProps) {
-  const remarkPlugins: PluggableList = streaming
-    ? [[remarkGfm, { singleTilde: false }], remarkMath]
-    : [[remarkGfm, { singleTilde: false }], remarkMath, remarkBreaks, remarkEmoji]
-  const rehypePlugins: PluggableList = streaming
-    ? []
-    : [[rehypeSanitize, markdownSchema], rehypeKatex, rehypeHighlight]
+const streamingRemarkPlugins: PluggableList = [[remarkGfm, { singleTilde: false }], remarkMath]
+const staticRemarkPlugins: PluggableList = [...streamingRemarkPlugins, remarkBreaks, remarkEmoji]
+const streamingRehypePlugins: PluggableList = []
+const staticRehypePlugins: PluggableList = [[rehypeSanitize, markdownSchema], rehypeKatex, rehypeHighlight]
+
+const MarkdownText = memo(function MarkdownText({ source, streaming }: { source: string; streaming: boolean }) {
+  return <ReactMarkdown
+    remarkPlugins={streaming ? streamingRemarkPlugins : staticRemarkPlugins}
+    rehypePlugins={streaming ? streamingRehypePlugins : staticRehypePlugins}
+    components={markdownComponents}
+    urlTransform={safeUrlTransform}
+  >{source}</ReactMarkdown>
+})
+
+// The parent keys this mounted memo boundary by message id. Its parsed tree and
+// local widget state survive deltas appended to other messages in the same run.
+export const MarkdownMessage = memo(function MarkdownMessage({ content, streaming = false, className = '', onWidgetAction }: MarkdownMessageProps) {
   const classes = [styles.markdownBody, 'markdown-body', streaming ? styles.streaming : '', className]
     .filter(Boolean)
     .join(' ')
-  const segments = splitInlineWidgets(content)
+  const segments = useMemo(() => splitInlineWidgets(content), [content])
 
   return (
     <div className={classes}>
@@ -293,17 +305,13 @@ export function MarkdownMessage({ content, streaming = false, className = '', on
           : <InlineWidgetPending key={segment.key} interrupted={!streaming} />
         : segment.source
           ? (
-            <ReactMarkdown
+            <MarkdownText
               key={segment.key}
-              remarkPlugins={remarkPlugins}
-              rehypePlugins={rehypePlugins}
-              components={markdownComponents}
-              urlTransform={safeUrlTransform}
-            >
-              {segment.source}
-            </ReactMarkdown>
+              source={segment.source}
+              streaming={streaming}
+            />
           )
           : null)}
     </div>
   )
-}
+})

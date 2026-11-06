@@ -1,11 +1,29 @@
-import { Activity, BookOpen, Bot, BrainCircuit, FileSearch, FolderOpen, Brain, RadioTower, ListChecks, Settings, Shapes, Wrench } from 'lucide-react'
+import { t as tr } from '../i18n'
+import { Activity, BookOpen, Bot, BrainCircuit, FileSearch, FolderOpen, Brain, RadioTower, ListChecks, MessageSquarePlus, RotateCcw, Save, Settings, Shapes, Trash2, Wrench, Zap } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 
 export function chatRunKey(user: string, sessionId: string) {
   return JSON.stringify([user, sessionId])
 }
 
-export type ConversationCommandAction = 'save' | 'clear' | 'compress' | 'retry'
+export type ConversationCommandAction = 'new' | 'save' | 'clear' | 'compress' | 'retry'
 export const CONVERSATION_COMMAND_EVENT = 'kemo:conversation-command'
+
+export interface ComposerSlashCommand {
+  action: ConversationCommandAction
+  command: string
+  label: string
+  description: string
+  icon: LucideIcon
+}
+
+export const composerSlashCommands: readonly ComposerSlashCommand[] = [
+  { action: 'new', command: '/new', label: '直接新建对话', description: '直接切换到新对话，旧对话由后台空闲回收处理', icon: MessageSquarePlus },
+  { action: 'save', command: '/save', label: '保存并新建对话', description: '保存当前对话并开启新的上下文', icon: Save },
+  { action: 'clear', command: '/clear', label: '清空此对话', description: '删除当前归档并创建新对话', icon: Trash2 },
+  { action: 'compress', command: '/compress', label: '压缩当前上下文', description: '整理有效历史，完整保留原始记录', icon: Zap },
+  { action: 'retry', command: '/retry', label: '重新发送上一条消息', description: '撤销上一轮并重放原消息', icon: RotateCcw },
+]
 
 export const slashCommands = [
   { command: '/new [名称]', description: '新建并切换会话' },
@@ -101,16 +119,13 @@ export function sessionLabel(sessionId: string) {
   return sessionId
 }
 
-type InjectionPolicyMode = 'round' | 'realtime' | 'disabled'
+type InjectionPolicyMode = 'dynamic' | 'disabled'
 
 export function injectionPolicyPresentation(mode: InjectionPolicyMode | undefined) {
-  if (mode === 'realtime') {
-    return { mode: 'realtime', label: '实时注入', detail: '每次请求读取最新快照' }
-  }
   if (mode === 'disabled') {
-    return { mode: 'disabled', label: '不注入', detail: '未进入系统提示词' }
+    return { mode: 'disabled', label: tr('不注入'), detail: tr('未进入系统提示词') }
   }
-  return { mode: 'round', label: '按轮注入', detail: '本轮使用固定快照' }
+  return { mode: 'dynamic', label: tr('动态注入'), detail: tr('每次请求读取最新快照') }
 }
 
 const LAST_ACTIVE_USER_KEY = 'kemo-last-active-user'

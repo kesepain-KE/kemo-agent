@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { useEffect, useId, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -41,7 +42,7 @@ export function GlobalConfirmDialog({
   tone = 'warning',
   confirmLabel,
   pendingLabel,
-  cancelLabel = '取消',
+  cancelLabel = tr('取消'),
   pending = false,
   confirmDisabled = false,
   onConfirm,

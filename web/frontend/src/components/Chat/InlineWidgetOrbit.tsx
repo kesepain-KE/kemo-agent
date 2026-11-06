@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../../i18n'
 import { useEffect, useState } from 'react'
 import { Pause, Play, RotateCcw } from 'lucide-react'
 import type { InlineWidgetDefinition } from './inlineWidgetProtocol'
@@ -15,6 +16,7 @@ const orbitColors = {
 } as const
 
 export function OrbitVisualWidget({ widget }: { widget: Extract<InlineWidgetDefinition, { component: 'interactive-visual' }> }) {
+  useLanguage()
   const { title, description, center, bodies, time_label: timeLabel } = widget.props
   const [playing, setPlaying] = useState(true)
   const [time, setTime] = useState(0)
@@ -103,7 +105,7 @@ export function OrbitVisualWidget({ widget }: { widget: Extract<InlineWidgetDefi
       <div className={styles.orbitControls}>
         <button type="button" className={styles.orbitControlButton} onClick={() => setPlaying((value) => !value)} aria-label={playing ? '暂停动画' : '播放动画'}>
           {playing ? <Pause size={14} /> : <Play size={14} />}
-          {playing ? '暂停' : '播放'}
+          {playing ? tr('暂停') : '播放'}
         </button>
         <button type="button" className={styles.orbitControlButton} onClick={() => setTime(0)} aria-label="重置动画">
           <RotateCcw size={14} />重置

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { t as tr, useLanguage } from '../i18n'
+import { memo, useEffect, useRef, useState } from 'react'
 import { AlertCircle, Check, CheckCircle2, ChevronDown, Copy, LoaderCircle, Wrench } from 'lucide-react'
 import type { ChatItem } from '../types/api'
 import { copyText } from '../utils/clipboard'
@@ -39,13 +40,13 @@ export function toolArgumentSummary(persistedText: string | undefined, value: un
         .replace(/\s+/g, ' ')
         .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)\s*[:=]\s*)([^\s,;}]+)/gi, '$1••••')
         .trim()
-      return summary || '无参数'
+      return summary || tr('无参数')
     }
   }
   const redacted = redactToolArgument(source ?? {})
   if (redacted && typeof redacted === 'object' && !Array.isArray(redacted)) {
     const entries = Object.entries(redacted as Record<string, unknown>)
-    if (!entries.length) return '无参数'
+    if (!entries.length) return tr('无参数')
     return entries.map(([key, entry]) => `${key}: ${compactArgumentValue(entry)}`).join(' · ')
   }
   return compactArgumentValue(redacted)
@@ -121,7 +122,8 @@ function escapeToolString(value: string, multiline = false) {
     .replace(/\t/g, multiline ? '\t' : '\\t')
 }
 
-export function ReasoningTrace({ item }: { item: Extract<ChatItem, { kind: 'reasoning' }> }) {
+export const ReasoningTrace = memo(function ReasoningTrace({ item }: { item: Extract<ChatItem, { kind: 'reasoning' }> }) {
+  useLanguage()
   const [open, setOpen] = useState(item.streaming)
   const [copied, setCopied] = useState(false)
   const wasStreaming = useRef(item.streaming)
@@ -167,14 +169,15 @@ export function ReasoningTrace({ item }: { item: Extract<ChatItem, { kind: 'reas
       >
         <pre>{item.content || '等待内容…'}</pre>
         <div className="trace-body-actions">
-          <button className="event-copy-btn" onClick={() => void copy()} disabled={!item.content} aria-label="复制思考过程">{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? '已复制' : '复制'}</button>
+          <button className="event-copy-btn" onClick={() => void copy()} disabled={!item.content} aria-label="复制思考过程">{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? tr('已复制') : tr('复制')}</button>
         </div>
       </div>
     </article>
   )
-}
+})
 
-export function ToolCallCard({ item, user = '', sessionId = '' }: { item: Extract<ChatItem, { kind: 'tool' }>; user?: string; sessionId?: string }) {
+export const ToolCallCard = memo(function ToolCallCard({ item, user = '', sessionId = '' }: { item: Extract<ChatItem, { kind: 'tool' }>; user?: string; sessionId?: string }) {
+  useLanguage()
   const [open, setOpen] = useState(false)
   const [liveElapsedMs, setLiveElapsedMs] = useState(0)
   const elapsedStartedAt = useRef(Date.now())
@@ -197,7 +200,9 @@ export function ToolCallCard({ item, user = '', sessionId = '' }: { item: Extrac
         ? '工具未返回结果'
       : toolPayloadPreview(item.resultText, item.result, item.resultTruncated),
   } : null
-  const statusLabel = item.status === 'running' ? '运行中' : item.status === 'success' ? '已完成' : '失败'
+  const statusLabel = item.status === 'running' ? tr('运行中')
+    : item.status === 'still_running' ? '超时后未确认退出'
+      : item.status === 'success' ? tr('已完成') : tr('失败')
   const argumentSummary = toolArgumentSummary(item.argumentsText, item.arguments)
   const elapsed = item.status === 'running'
     ? `${(liveElapsedMs / 1000).toFixed(1)} s`
@@ -215,16 +220,18 @@ export function ToolCallCard({ item, user = '', sessionId = '' }: { item: Extrac
             {item.status === 'running' && <LoaderCircle className="spin tool-running-spinner" size={16} />}
             {item.status === 'success' && <CheckCircle2 size={17} />}
             {item.status === 'error' && <AlertCircle size={17} />}
+            {item.status === 'still_running' && <AlertCircle size={17} />}
           </span>
         </span>
       </button>
       <ShellJobLink user={user} sessionId={sessionId} name={item.name} result={item.result} resultText={item.resultText} />
       <NativeMediaLinks user={user} item={item} />
       {body && <div className="tool-call-body">
+        {item.status === 'still_running' && <p role="status">超时后未确认退出，执行结果尚未确认，请先核对状态，勿重复执行。</p>}
         <div className="tool-call-grid">
           <div className="tool-call-panel"><label>输入参数</label><pre>{body.arguments}</pre></div>
           <div className={`tool-call-panel ${body.result === null ? 'waiting' : ''}`}>
-            <label>返回结果</label>
+            <label>{tr("返回结果")}</label>
             {body.result === null
               ? <div className="tool-result-waiting"><LoaderCircle className="spin tool-running-spinner" size={14} />工具仍在运行，完成后显示结果</div>
               : <pre>{body.result}</pre>}
@@ -233,7 +240,7 @@ export function ToolCallCard({ item, user = '', sessionId = '' }: { item: Extrac
       </div>}
     </article>
   )
-}
+})
 
 function metric(value: unknown) {
   const number = Number(value)
@@ -247,7 +254,8 @@ function elapsedLabel(value: number | undefined) {
   return `${value} ms`
 }
 
-export function UsageCard({ item }: { item: Extract<ChatItem, { kind: 'usage' }> }) {
+export const UsageCard = memo(function UsageCard({ item }: { item: Extract<ChatItem, { kind: 'usage' }> }) {
+  useLanguage()
   const prompt = metric(item.usage.prompt_tokens)
   const completion = metric(item.usage.completion_tokens)
   const cached = item.usage.cached_prompt_tokens == null ? undefined : metric(item.usage.cached_prompt_tokens)
@@ -259,7 +267,7 @@ export function UsageCard({ item }: { item: Extract<ChatItem, { kind: 'usage' }>
       <span className="usage-summary-chip"><small>缓存</small><strong>{cached === undefined ? '—' : cached.toLocaleString()}</strong></span>
       <span className="usage-summary-chip"><small>命中率</small><strong>{hitRate === undefined ? '—' : `${(hitRate * 100).toFixed(1)}%`}</strong></span>
       {item.providerRequestCount !== undefined ? <span className="usage-summary-chip" title="本轮所有模型请求的累计计量"><small>请求</small><strong>{item.providerRequestCount}</strong></span> : null}
-      <span className="usage-summary-chip"><small>耗时</small><strong>{elapsedLabel(item.elapsedMs)}</strong></span>
+      <span className="usage-summary-chip"><small>{tr("耗时")}</small><strong>{elapsedLabel(item.elapsedMs)}</strong></span>
     </div>
   </article>
-}
+})

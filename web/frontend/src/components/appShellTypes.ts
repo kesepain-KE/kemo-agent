@@ -46,7 +46,6 @@ export interface ShellOutletContext {
   overview?: OverviewResponse
   reasoningControl: ProviderReasoningControl
   refreshOverview: () => void
-  openCommandPanel: () => void
 }
 
 export type ChatItemsUpdater = ChatItem[] | ((items: ChatItem[]) => ChatItem[])

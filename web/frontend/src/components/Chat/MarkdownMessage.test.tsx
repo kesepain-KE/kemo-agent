@@ -1,9 +1,18 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
 import { MarkdownMessage } from './MarkdownMessage'
 
 const renderMermaid = vi.fn()
+const { markdownRenders } = vi.hoisted(() => ({ markdownRenders: vi.fn() }))
+vi.mock('react-markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-markdown')>()
+  return { ...actual, default: (props: Parameters<typeof actual.default>[0]) => {
+    markdownRenders(props.children)
+    return createElement(actual.default, props)
+  } }
+})
 
 vi.mock('mermaid', () => ({
   default: {
@@ -14,6 +23,7 @@ vi.mock('mermaid', () => ({
 
 describe('MarkdownMessage', () => {
   beforeEach(() => {
+    markdownRenders.mockClear()
     renderMermaid.mockReset()
     renderMermaid.mockResolvedValue({ svg: '<svg aria-label="流程图"></svg>' })
     Object.defineProperty(window, 'isSecureContext', {
@@ -28,6 +38,19 @@ describe('MarkdownMessage', () => {
       configurable: true,
       value: undefined,
     })
+  })
+
+  it('keeps historical Markdown mounted by stable keys while only the streaming message changes', () => {
+    const messages = (text: string, history = '**history**') => <>
+      <MarkdownMessage key="history" content={history} />
+      <MarkdownMessage key="current" content={text} streaming />
+    </>
+    const { rerender } = render(messages('delta 0'))
+    for (let index = 1; index <= 10; index++) rerender(messages(`delta ${index}`))
+    expect(markdownRenders.mock.calls.filter(([content]) => content === '**history**')).toHaveLength(1)
+    expect(markdownRenders.mock.calls.filter(([content]) => String(content).startsWith('delta '))).toHaveLength(11)
+    rerender(messages('delta 10', '**edited history**'))
+    expect(markdownRenders.mock.calls.filter(([content]) => content === '**edited history**')).toHaveLength(1)
   })
 
   it('renders static GFM, math, emoji and highlighted code', () => {

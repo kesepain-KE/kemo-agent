@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n'
 import { useEffect, useId, useState, type ReactNode } from 'react'
 import { ChevronDown, MessageSquareText } from 'lucide-react'
 import styles from './ComposerMessagePanel.module.css'
@@ -7,7 +8,7 @@ export function ComposerMessagePanel({
   followUpCount,
   followUpContent,
   guidanceContent,
-  guidanceLabel = '引导中',
+  guidanceLabel = tr('引导中'),
   guidanceDetail,
 }: {
   sessionKey: string

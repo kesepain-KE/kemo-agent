@@ -1,3 +1,4 @@
+import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -14,6 +15,7 @@ interface ComposerModelSelectProps {
 }
 
 export function ComposerModelSelect({ user, provider, disabled = false }: ComposerModelSelectProps) {
+  useLanguage()
   const client = useQueryClient()
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -63,9 +65,9 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
     .includes(search.trim().toLocaleLowerCase()))
   const discoveryError = modelsQuery.error instanceof ApiError
     ? modelsQuery.error.status === 404 && modelsQuery.error.code === 'not_found'
-      ? '当前后端尚未加载模型列表接口，请重启智能体后重试。'
+      ? tr('当前后端尚未加载模型列表接口，请重启智能体后重试。')
       : modelsQuery.error.message
-    : '请刷新重试或检查 Provider 配置。'
+    : tr('请刷新重试或检查 Provider 配置。')
 
   useEffect(() => {
     // 切用户/协议/端点、开始运行时，不保留旧列表或错误。
@@ -142,29 +144,29 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
 
   return <>
     <button ref={triggerRef} type="button" className={`model-pill ${styles.trigger}`}
-      aria-label="输入框切换模型" aria-haspopup="dialog" aria-expanded={open}
+      aria-label={tr("输入框切换模型")} aria-haspopup="dialog" aria-expanded={open}
       aria-controls={open ? listId : undefined} disabled={blocked}
-      title={disabled ? '当前对话运行或操作中，结束后可切换模型' : available ? '切换模型' : '请先配置 Provider'}
+      title={disabled ? tr('当前对话运行或操作中，结束后可切换模型') : available ? tr('切换模型') : tr('请先配置 Provider')}
       onClick={openPicker}
       onKeyDown={(event) => {
         if (event.key === 'ArrowDown' && !open && !blocked) { event.preventDefault(); openPicker() }
       }}>
-      <ReferenceIcon name="cpu" small /><span>{provider?.model || '尚未配置模型'}</span>
+      <ReferenceIcon name="cpu" small /><span>{provider?.model || tr('尚未配置模型')}</span>
       {save.isPending ? <LoaderCircle className={styles.spinner} size={13} /> : <ChevronDown size={13} />}
     </button>
     {open && createPortal(
       <div ref={popoverRef} id={listId} className={styles.popover} style={position}
-        role="dialog" aria-label="切换对话模型">
+        role="dialog" aria-label={tr("切换对话模型")}>
         <header className={styles.header}>
-          <div><strong>切换模型</strong><small>{protocol === 'kemo' ? 'KEMO · 内置模型目录' : 'Chat · 模型 API 列表'}</small></div>
-          <button type="button" aria-label="刷新模型列表" title="刷新模型列表"
+          <div><strong>{tr("切换模型")}</strong><small>{protocol === 'kemo' ? tr('KEMO · 内置模型目录') : tr('Chat · 模型 API 列表')}</small></div>
+          <button type="button" aria-label={tr("刷新模型列表")} title={tr("刷新模型列表")}
             disabled={modelsQuery.isFetching || configSaving} onClick={() => { void refreshModels() }}>
             <RefreshCw size={15} className={modelsQuery.isFetching ? styles.spinner : ''} />
           </button>
         </header>
         <label className={styles.search}><Search size={15} />
           <input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)}
-            aria-label="搜索可用模型" placeholder="搜索模型…"
+            aria-label={tr("搜索可用模型")} placeholder={tr("搜索模型…")}
             onKeyDown={(event) => {
               if (event.key === 'ArrowDown') {
                 event.preventDefault()
@@ -172,11 +174,11 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
               }
             }} />
         </label>
-        {modelsQuery.isFetching && <span className={styles.status} role="status">正在获取模型列表…</span>}
-        {modelsQuery.isError && <div className={styles.error} role="alert">模型列表获取失败：{discoveryError}</div>}
-        {save.isError && <div className={styles.error} role="alert">模型切换失败，已保留原模型，请重试。</div>}
-        {save.isPending && <span className={styles.status} role="status">正在保存模型…</span>}
-        <div className={styles.options} role="listbox" aria-label="可用对话模型"
+        {modelsQuery.isFetching && <span className={styles.status} role="status">{tr("正在获取模型列表…")}</span>}
+        {modelsQuery.isError && <div className={styles.error} role="alert">{tr("模型列表获取失败：")}{discoveryError}</div>}
+        {save.isError && <div className={styles.error} role="alert">{tr("模型切换失败，已保留原模型，请重试。")}</div>}
+        {save.isPending && <span className={styles.status} role="status">{tr("正在保存模型…")}</span>}
+        <div className={styles.options} role="listbox" aria-label={tr("可用对话模型")}
           onKeyDown={(event) => {
             if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
             event.preventDefault()
@@ -198,7 +200,7 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
             {model.id === provider?.model && <Check size={15} />}
           </button>)}
           {!modelsQuery.isPending && !modelsQuery.isError && !visibleModels.length
-            && <span className={styles.status}>{search ? '没有匹配的模型' : '当前接口未返回可用模型'}</span>}
+            && <span className={styles.status}>{search ? tr('没有匹配的模型') : tr('当前接口未返回可用模型')}</span>}
         </div>
       </div>, document.body,
     )}
