@@ -6,7 +6,7 @@ import re
 import unicodedata
 from typing import Any, Pattern
 
-from run.infra.text_search import match_span
+from run.infra import match_span
 
 
 _SEARCH_PART_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+")

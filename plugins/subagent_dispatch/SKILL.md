@@ -90,6 +90,10 @@
   模型内部重试不重置本段工具预算；结论收尾不再开放业务工具，也不保证成功。
   旧版 failed + AgentToolLimitError 会提示 resume_candidate；允许显式申请续跑，
   但仍须有匹配定义/轮次/身份的有效私有安全点，不能恢复任意失败或从头补跑。
+- Provider 响应以 `output_truncated` 结束时不自动重试，也不执行该响应中的工具调用。
+  若任务已实际退出且匹配的安全快照有效，status 会标记 `resumable=true`；主智能体可显式
+  resume，从该请求之前的安全点继续，并保留之前已完成的工具结果。旧版记录可直接尝试显式
+  resume，框架会重新校验实际终态和快照；其他失败不因此获得恢复权。
 - `guide`：task_id + guidance，向当前主任务所属的排队/运行中本地业务子代理
   投递指导，在下一请求安全点处理；不是实时打断在途工具，不启动第二个执行器。
 - `split`：task_id + tasks（1..8 个完整 input），只拆实际已退出的预算停止或失败
@@ -106,13 +110,14 @@
 - `call`：调用公开子代理；普通公开本地 LLM 非串行业务代理省略 `wait` 默认后台提交，显式 `wait=true` 同步等待、`wait=false` 后台提交。`resume` 使用相同缺省策略。
   两者都是当前用户请求的必要依赖；后台提交后可继续其他工作，但不能把 queued 当成完成。
   框架会在安全点自动交付子任务结果；通常不需要反复 status 轮询。主任务等待／取消与
-  网页执行详情合同见 `knowledge/global/agent-task-coordination.md`。
+  网页执行详情合同见 `knowledge/global/runtime/agent-task-coordination.md`。
 - 互不依赖的多个普通任务优先以 `wait=false` 分别提交，调度器会在共享 API 请求上限内并行执行。
   省略 wait 也会后台提交，不要求主模型靠记住额外参数才能获得并行；不要先同步等待一个再提交另一个，也无需自己用 status 轮询实现并行。
   `wait=true` 保留同步语义；串行维护代理及特殊同步规划不强行并行。
   网页按持久提交编号展示；同批结果通知按相同编号返回，同时完成也不会乱序。
 - `status`：使用后台任务 ID 查询状态。
-- `resume`：继续同一对话空间内已“超时停止”或“工具额度停止”且可恢复的任务；使用原 task_id，
+- `resume`：继续同一对话空间内已“超时停止”“工具额度停止”或符合条件的 `output_truncated`
+  且可恢复的任务；使用原 task_id，
   可附 guidance 限定剩余工作，timeout 为新一轮运行预算，wait 控制是否同步等待。
   沿用原任务编号与提交顺序，run_count 增加，每轮重新计时并分配新段额度；不是重新派发相同任务。
   不能恢复仍在停止中的线程、已完成/取消任务、外部代理、自定义 Python 执行器或维护代理。
@@ -175,7 +180,7 @@
 ```json
 {
   "name": "subagent_dispatch",
-  "description": "发现和调度当前用户可用的公开子代理。普通本地 LLM 非串行业务代理 call/resume 省略 wait 默认后台提交并行执行，共用 Provider API 请求池；仍是主任务必要依赖，框架按稳定提交序号交付同批结果，无需反复查询状态。显式 wait=true 同步等待；特殊规划、串行维护和外部代理默认同步。",
+  "description": "发现和调度当前用户可用的公开子代理。普通本地 LLM 非串行业务代理 call/resume 省略 wait 默认后台提交并行执行，共用 Provider API 请求池；仍是主任务必要依赖，框架按稳定提交序号交付同批结果，无需反复查询状态。可显式 resume 有有效安全点的 output_truncated 失败；不会自动重试截断响应。显式 wait=true 同步等待；特殊规划、串行维护和外部代理默认同步。",
   "input_schema": {
     "type": "object",
     "properties": {
@@ -251,7 +256,7 @@
         "description": "call/resume 是否同步等待。普通本地 LLM 非串行业务代理省略默认 false；特殊规划、串行维护和外部代理默认 true。显式 true 保留同步等待，显式 false 仅用于支持后台的代理"
       },
       "timeout": {"type": "number", "description": "call/resume 时可选；本轮子代理运行预算秒数，必须为正数；省略时使用代理默认预算"},
-      "guidance": {"type": "string", "maxLength": 8000, "description": "resume 时可选，guide 时必填；指导剩余工作，不新增权限，guide 在下一请求安全点交付"},
+      "guidance": {"type": "string", "maxLength": 8000, "description": "resume 时可选，guide 时必填；指导剩余工作，不新增权限，guide 在下一请求安全点交付。output_truncated 续跑时可提示从已有进度继续"},
       "max_tool_calls": {
         "type": "integer",
         "minimum": 0,

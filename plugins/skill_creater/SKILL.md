@@ -2,7 +2,7 @@
 
 安全列出、读取、校验、创建、更新或删除当前用户技能及共享技能，支持结构化参数和全文两种写入方式。
 
-技能用于可复用的任务方法，不是自动执行器。主智能体只注入发现摘要，正文按来源路径读取；配套脚本须通过已有获准工具执行，不注册 Provider 工具。创建前先查重并确认作用域和内容；编写规范见 `knowledge/global/prompt-authoring-standard.md`。结构化模式中的 `tool_schema` 仅生成参数文档。
+技能用于可复用的任务方法，不是自动执行器。主智能体只注入发现摘要，正文按来源路径读取；配套脚本须通过已有获准工具执行，不注册 Provider 工具。创建前先查重并确认作用域和内容；编写规范见 `knowledge/global/engineering/prompt-authoring-standard.md`。结构化模式中的 `tool_schema` 仅生成参数文档。
 
 ## 使用原则
 

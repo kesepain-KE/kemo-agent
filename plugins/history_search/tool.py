@@ -6,10 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from run.history.archive_query_common import raw_search_rows, raw_text_context
-from run.history.fulltext import search_rows as fulltext_rows
-from run.infra.fulltext import match_positions
-from run.infra.text_search import compile_query as _compile_query, match_span as _match_span
+from run.history import raw_search_rows, raw_text_context, fulltext_search_rows as fulltext_rows
+from run.infra import compile_query as _compile_query, match_span as _match_span, match_positions
 
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")

@@ -4,8 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from run.infra.text_search import compile_query
-from run.infra.fulltext import match_positions
+from run.infra import compile_query, match_positions
 from plugins.memory_manage.search_matching import search_match, validate_search_options
 
 from run.memory import (
@@ -287,13 +286,13 @@ def _snippet_for_match(
 
 
 def _fulltext_results(root, user, tier, queries, limit, context_chars, include_content):
-    from run.memory.fulltext import search_batch
+    from run.memory import search_fulltext_batch
 
     tiers = _read_tiers(tier)
     if tier == "important":
         raise ValueError("fulltext 仅检索四个记忆碎片层；important 请使用 keywords 或文本匹配")
     results = []
-    for index, (total, rows) in enumerate(search_batch(root, user, tiers, queries, limit)):
+    for index, (total, rows) in enumerate(search_fulltext_batch(root, user, tiers, queries, limit)):
         matches = []
         for item in rows:
             title = item["filename"]
