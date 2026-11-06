@@ -607,14 +607,12 @@ def resolve_capability_model(config: dict[str, Any], capability: str) -> str:
 
 _DOMAIN_MODULES = (
     "web_ui",
-    "knowledge_classification",
     "user_skeleton",
     "source_policy",
     "users",
     "prompt_source_helpers",
     "prompt_sources",
     "markdown",
-    "knowledge",
     "prompt",
 )
 

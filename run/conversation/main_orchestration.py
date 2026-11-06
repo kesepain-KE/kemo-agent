@@ -56,7 +56,7 @@ from run.conversation.runtime_helpers import (
     positive as _positive, build_failure_metadata, response_payloads,
     call_is_explicitly_async as _call_is_explicitly_async,
     duplicate_execution_should_block as _duplicate_execution_should_block, observed_exchange,
-    account_compression_failure, prepare_runtime_request,
+    account_compression_failure, prepare_runtime_request, runtime_dynamic_tail,
 )
 
 def run_conversation(request, *, root: Path, provider_factory, tool_registry_factory,
@@ -84,6 +84,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
     }
     final_payload = None
     overflow_attempts = overflow_wire = 0
+    overflow_error = None
     preventative_retry_at = 0.0
     started = time.monotonic()
     try:
@@ -258,7 +259,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 "guidance_details": copy.deepcopy(consumed_guidance),
                 "tool_argument_retries": argument_corrections,
                 "prompt": copy.deepcopy(bundle.diagnostics),
-                "knowledge": {"documents": copy.deepcopy(bundle.diagnostics["knowledge_documents"])},
+                "knowledge": {"documents": []},
                 "memory": {"injected_files": list(bundle.memory_files), "weighted_files": [],
                            "extraction_mode": memory_extraction_mode(config)},
                 "media_inputs": copy.deepcopy(media.audit),
@@ -328,20 +329,17 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                     # original execution's terminal receipt may release its fence.
                     if live_signatures.get(signature) == event.metadata.get("execution_id"):
                         live_signatures.pop(signature, None)
-                    if status not in synthetic_statuses:
-                        if not capacity_limited:
-                            identical.record(event.tool_name, event.arguments or {})
-                        if not capacity_limited:
-                            failures.record(
-                                event.tool_name,
-                                succeeded=payload.get("ok") is True or result_too_large,
-                            )
-                        if not capacity_limited:
-                            seen.remember(
-                                event.tool_name, event.arguments or {}, payload,
-                                call_iterations.get(event.tool_call_id, iteration),
-                                retain_failure_for_retry=(status == "failed"),
-                            )
+                    if status not in synthetic_statuses and not capacity_limited:
+                        identical.record(event.tool_name, event.arguments or {})
+                        failures.record(
+                            event.tool_name,
+                            succeeded=payload.get("ok") is True or result_too_large,
+                        )
+                        seen.remember(
+                            event.tool_name, event.arguments or {}, payload,
+                            call_iterations.get(event.tool_call_id, iteration),
+                            retain_failure_for_retry=(status == "failed"),
+                        )
                     event.metadata["consecutive_identical_calls"] = (
                         identical.count if signature == identical.signature else 0
                     )
@@ -405,7 +403,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                                 or bool(shell.ready()))
                     if not coordinator.wait(
                         cancel_event, wake=wake,
-                        pending=lambda: bool(integration.pending()[0] or shell.pending()),
+                        pending=integration.live_executions,
                     ):
                         if cancel_event.is_set():
                             raise RetryCancelled("用户停止了当前整合")
@@ -444,12 +442,11 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                     memory_revision = memory.prompt_revision()
 
             def dynamic_tail():
-                tail = read_dynamic_tail(root, user, config, source=source, session_id=session_id)
-                if child_notice:
-                    tail["subagent_events"] = {"content": child_notice["content"], "external_data": True}
-                if shell_notice:
-                    tail["shell_events"] = {"content": shell_notice["content"], "external_data": True}
-                return tail
+                return runtime_dynamic_tail(
+                    read_dynamic_tail(root, user, config, source=source, session_id=session_id),
+                    integration, coordinator, dispatched=dispatched,
+                    child_notice=child_notice, shell_notice=shell_notice,
+                )
 
             request_system_prompt = (
                 system_prompt_with_tool_argument_repair(
@@ -475,12 +472,16 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 force_compact=bool(overflow_wire or request.get("compress") and iteration == 1),
                 skip_preventative=time.monotonic() < preventative_retry_at, run_id=run_id,
                 trigger=compression_trigger, compression_started=compression_started,
-                usage_total=usage_total, context_stats=context_stats,
+                usage_total=usage_total, context_stats=context_stats, overflow_error=overflow_error,
             )
             if barrier.compaction_error is not None or barrier.compaction is not None:
                 preventative_retry_at = time.monotonic() + 60
-            if overflow_wire and barrier.wire_tokens >= overflow_wire:
-                raise EngineError("压缩后请求未实际缩小，停止超限重试；RAW 与工具执行记录已保留")
+            if overflow_error is not None:
+                if barrier.wire_tokens >= overflow_wire:
+                    raise overflow_error
+                yield RunEvent(type="retrying", metadata={"phase": "context_recovery",
+                    "retry_attempt": overflow_attempts, "max_retries": 3,
+                    "failed_request_id": native_request.request_id, "committed": False})
             if compress_only:
                 result = metadata("completed", compressed=barrier.compaction is not None)
                 integration.continuation(False)
@@ -529,14 +530,13 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 continuation = True
                 overflow_attempts += 1
                 overflow_wire = barrier.wire_tokens
+                overflow_error = error
                 input_limit = max(1, min(input_limit - 1, int(overflow_wire * .7)))
                 context_stats["recovery_input_limit"] = input_limit
-                yield RunEvent(type="retrying", metadata={"phase": "context_recovery",
-                    "retry_attempt": overflow_attempts, "max_retries": 3,
-                    "failed_request_id": native_request.request_id, "committed": False})
                 continue
             overflow_attempts = 0
             overflow_wire = 0
+            overflow_error = None
             response = accepted.response
             repair_pending = False
             repair_tool_name = ""
@@ -701,7 +701,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 "absorbed_cards": int(compression_started.get("absorbed_cards") or 0),
             })
             compression_started.clear()
-        if getattr(error, "failed_usage", None):
+        if error is not overflow_error and getattr(error, "failed_usage", None):
             record_provider_request(usage_total, usage_from_dict(error.failed_usage))
         account_compression_failure(error, usage_total, context_stats)
         cleanup_attempted = True

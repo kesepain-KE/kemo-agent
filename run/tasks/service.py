@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from provider.factory import create_provider
 from run.agents import AgentRunError, AgentRunner
-from run.config import MainAgentSourcePolicy, load_config, select_knowledge_index
+from run.config import load_config
 from run.memory import MemoryStore
 from run.tasks.store import (
     PlanConflictError,
@@ -102,64 +102,15 @@ def _collect_skills(root: Path, user: str) -> dict[str, str]:
     }
 
 
-def _read_index(path: Path) -> str:
-    if not path.is_file() or path.is_symlink():
-        return ""
-    try:
-        return path.read_text("utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise PlanGenerationError(f"知识库索引不可读：{path}（{exc}）") from exc
-
-
-def _collect_knowledge_indexes(
-    root: Path,
-    user: str,
-    config: dict[str, Any],
-) -> dict[str, str]:
-    """Collect only policy-enabled index documents in the canonical order.
-
-    Task-plan input used to read one hard-coded ``data_structure.md`` file per
-    scope and ignored the user's knowledge switches.  Keep the three legacy
-    payload fields for the task-plan contract, but source their contents from
-    the same selector used by the main prompt pipeline.  This makes nested
-    ``index.md``/localized index files and scope filtering consistent without
-    changing the subagent input schema.
-    """
-
-    policy = MainAgentSourcePolicy.from_config(config)
-    selection = select_knowledge_index(
-        root,
-        user,
-        scopes=policy.direct_knowledge_scopes(),
-    )
-    grouped: dict[str, list[str]] = {
-        "global": [],
-        "shared": [],
-        "user": [],
-    }
-    for document in selection.documents:
-        grouped.setdefault(document.scope, []).append(document.content)
-    return {
-        "global_knowledge_index": "\n\n".join(grouped["global"]),
-        "shared_knowledge_index": "\n\n".join(grouped["shared"]),
-        "user_knowledge_index": "\n\n".join(grouped["user"]),
-    }
-
-
 def _planning_injections(
     root: Path,
     user: str,
-    config: dict[str, Any],
 ) -> dict[str, str]:
     skills = _collect_skills(root, user)
-    knowledge = _collect_knowledge_indexes(root, user, config)
     return {
         "plugin_skills": skills["plugin_skills"],
         "shared_skills_text": skills["shared_skills"],
         "user_skills_text": skills["user_skills"],
-        "global_knowledge_index": knowledge["global_knowledge_index"],
-        "shared_knowledge_index": knowledge["shared_knowledge_index"],
-        "user_knowledge_index": knowledge["user_knowledge_index"],
     }
 
 
@@ -280,7 +231,7 @@ def prepare_task_plan_input(
     goal = str(input_data.get("goal") or "")
     edit_request = input_data.get("edit_request")
     memory_query = str(edit_request or goal)
-    injections = _planning_injections(root, user, cfg)
+    injections = _planning_injections(root, user)
 
     payload: dict[str, Any] = {
         "goal": goal,
@@ -288,14 +239,16 @@ def prepare_task_plan_input(
         "plugin_skills": injections["plugin_skills"],
         "shared_skills_text": injections["shared_skills_text"],
         "user_skills_text": injections["user_skills_text"],
-        "global_knowledge_index": injections["global_knowledge_index"],
-        "shared_knowledge_index": injections["shared_knowledge_index"],
-        "user_knowledge_index": injections["user_knowledge_index"],
         "max_steps": max_steps,
         "auto_accept": auto_accept,
         "relevant_memory": _relevant_memory(root, user, cfg, memory_query),
     }
-    protected_fields = set(payload) | {"completed_steps"}
+    protected_fields = set(payload) | {
+        "completed_steps",
+        "global_knowledge_index",
+        "shared_knowledge_index",
+        "user_knowledge_index",
+    }
     for key, value in input_data.items():
         if key not in protected_fields:
             payload[key] = value

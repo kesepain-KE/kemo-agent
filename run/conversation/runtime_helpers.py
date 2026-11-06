@@ -16,6 +16,23 @@ from run.conversation.provider_projection import final_answer_messages
 from run.infra import EngineError
 
 
+def runtime_dynamic_tail(tail, integration, coordinator, *, dispatched, child_notice, shell_notice):
+    """Attach live dependencies and notices to the request-only state."""
+    if dispatched:
+        pending = [*integration.live_executions(), *coordinator.pending_dependencies()]
+        tail["async_tasks"] = {
+            "pending_count": len(pending),
+            "completion_blocked": bool(pending),
+            "pending_tasks": pending[:80],
+            "pending_tasks_truncated": len(pending) > 80,
+        }
+    if child_notice:
+        tail["subagent_events"] = {"content": child_notice["content"], "external_data": True}
+    if shell_notice:
+        tail["shell_events"] = {"content": shell_notice["content"], "external_data": True}
+    return tail
+
+
 def positive(config: dict, name: str, default: int) -> int:
     value = config.get(name, default)
     if type(value) is not int or value < 1:
@@ -243,8 +260,8 @@ def prepare_runtime_request(*, store, source, session_id, provider, config, runt
                             request_system_prompt, dynamic_tail, native_tools, tool_wire,
                             virtual_media, input_limit, ratio, retry, cancel_event, settings,
                             capabilities, force_compact, skip_preventative, run_id, trigger,
-                            compression_started, usage_total, context_stats):
-    from run.cards import ProviderSummarizer, prepare_request
+                            compression_started, usage_total, context_stats, overflow_error):
+    from run.cards import CardCapacityError, ProviderSummarizer, prepare_request
     from run.infra import merge_usage_dict
     summarizer = ProviderSummarizer(
         provider, config, model=runtime["model"], system_prompt=request_system_prompt,
@@ -264,10 +281,16 @@ def prepare_runtime_request(*, store, source, session_id, provider, config, runt
         )
     def mark_compression_started(details):
         compression_started.update(details, trigger=trigger)
-    barrier = yield from prepare_request_with_events(
-        prepare_barrier, run_id=run_id,
-        trigger=trigger, on_started=mark_compression_started,
-    )
+    try:
+        barrier = yield from prepare_request_with_events(
+            prepare_barrier, run_id=run_id,
+            trigger=trigger, on_started=mark_compression_started,
+        )
+    except CardCapacityError as error:
+        if overflow_error is not None:
+            account_compression_failure(error, usage_total, context_stats)
+            raise overflow_error from error
+        raise
     if barrier.compaction_error is not None:
         account_compression_failure(barrier.compaction_error, usage_total, context_stats)
         compression_started.clear()

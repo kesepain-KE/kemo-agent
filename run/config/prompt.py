@@ -9,7 +9,6 @@ from typing import Any, Iterable
 
 from plugins.manifest import PluginManifest, discover_plugin_manifests
 from run.config import memory_prompt_injection
-from run.config.knowledge import KnowledgeIndexSelection, select_knowledge_index
 from run.memory import MemoryStore
 from run.config.prompt_sources import (
     SkillDescriptor,
@@ -25,7 +24,6 @@ PROMPT_SECTION_ORDER = (
     "user_soul",
     "global_soul",
     "agents_manual",
-    "knowledge_index",
     "global_subagent_registry",
     "user_subagent_registry",
     "plugins",
@@ -46,7 +44,6 @@ DEFAULT_IMPORTANT_MEMORY_MAX_CHARS = 20000
 DEFAULT_CHAR_LIMITS = {
     "user_soul": 12000,
     "agents_manual": 26000,
-    "knowledge_index": 40000,
     "task_plan": 6000,
     "perception": 20000,
     "expand_data": 20000,
@@ -134,7 +131,18 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
             "prompt 包含已移除或未知项：" + ", ".join(unknown_prompt)
         )
 
-    char_limits = _nonnegative_group(raw.get("char_limits"), DEFAULT_CHAR_LIMITS, "char_limits")
+    raw_char_limits = raw.get("char_limits")
+    if isinstance(raw_char_limits, dict) and "knowledge_index" in raw_char_limits:
+        raw_char_limits = {
+            key: value
+            for key, value in raw_char_limits.items()
+            if key != "knowledge_index"
+        }
+    char_limits = _nonnegative_group(
+        raw_char_limits,
+        DEFAULT_CHAR_LIMITS,
+        "char_limits",
+    )
     mode_raw = raw.get("injection_mode")
     if mode_raw is not None:
         # Compatibility bridge for deployments that keep an older global or user
@@ -149,6 +157,8 @@ def parse_prompt_settings(config: dict[str, Any]) -> PromptSettings:
                 + ", ".join(unknown_modes)
             )
         for key, value in mode_raw.items():
+            if key == "knowledge_index":
+                continue
             if not isinstance(value, str) or value.strip().casefold() != INJECTION_MODE:
                 raise PromptConfigError(
                     f"prompt.injection_mode.{key} 已移除；仅兼容旧值 'full'"
@@ -337,28 +347,6 @@ def _user_subagent_registry_section(root: Path, user: str) -> PromptSection | No
     )
 
 
-def _knowledge_index_prompt(
-    selection: KnowledgeIndexSelection,
-    *,
-    scopes: tuple[str, ...],
-) -> tuple[str, tuple[Path, ...], int]:
-    """Render every enabled local knowledge index without external replacement."""
-
-    pieces: list[str] = []
-    injected_paths: list[Path] = []
-    injected_items = 0
-    for scope in scopes:
-        for document in selection.documents:
-            if document.scope != scope:
-                continue
-            pieces.append(
-                f"[{document.scope}:{document.relative_path}]\n{document.content}"
-            )
-            injected_paths.append(document.path)
-            injected_items += 1
-    return "\n\n".join(pieces), tuple(injected_paths), injected_items
-
-
 def _section_diagnostic(section: PromptSection) -> dict[str, Any]:
     return {
         "mode": section.mode,
@@ -483,34 +471,6 @@ def build_prompt_bundle(
             injected_chars=len(content), truncated=truncated,
         ))
 
-    knowledge = select_knowledge_index(
-        root,
-        user,
-        scopes=source_policy.knowledge_scopes,
-    )
-    knowledge_text, knowledge_paths, knowledge_injected_items = _knowledge_index_prompt(
-        knowledge,
-        scopes=source_policy.knowledge_scopes,
-    )
-    knowledge_text, knowledge_truncated = truncate_chars(
-        knowledge_text,
-        settings.char_limits["knowledge_index"],
-    )
-    if knowledge_text:
-        sections.append(
-            PromptSection(
-                "knowledge_index",
-                knowledge_text,
-                tuple(relative_path(path, root) for path in knowledge_paths),
-                original_chars=knowledge.original_chars,
-                injected_chars=len(knowledge_text),
-                original_items=knowledge.original_items,
-                injected_items=knowledge_injected_items,
-                truncated=knowledge.truncated or knowledge_truncated,
-                mode=INJECTION_MODE,
-            )
-        )
-
     tier_specs_all = (
         ("permanent", "permanent_memory", None),
         (
@@ -612,10 +572,6 @@ def build_prompt_bundle(
         "total_chars": len(text),
         "section_order": order,
         "sections": {section.name: _section_diagnostic(section) for section in padded},
-        "knowledge_documents": [
-            {"scope": item.scope, "path": item.relative_path, "title": item.title}
-            for item in knowledge.documents
-        ],
         "source_policy": source_policy.public_summary(),
         "source_selection": registered_sources.selection_diagnostics(),
         "memory_integrity_warnings": list(dict.fromkeys(memory_integrity_warnings)),

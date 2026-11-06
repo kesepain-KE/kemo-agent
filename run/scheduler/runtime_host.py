@@ -523,16 +523,12 @@ class RuntimeHost:
 
     def _accept_message(self, envelope):
         if self.state not in {"starting", "running"}:
-            return None
-        try:
-            future = self.router.submit(envelope)
-            future.add_done_callback(
-                lambda item: self._future_done(envelope.platform, item)
-            )
-            return future
-        except Exception as exc:
-            self._handle_error(envelope.platform, exc)
-            return None
+            raise RuntimeError("运行主机未运行，消息未提交")
+        future = self.router.submit(envelope)
+        future.add_done_callback(
+            lambda item: self._future_done(envelope.platform, item)
+        )
+        return future
 
     def _future_done(self, platform: str, future) -> None:
         try:
