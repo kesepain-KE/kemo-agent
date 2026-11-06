@@ -9,8 +9,8 @@
 
 这份手册是 Kemo 的个人智能操作入口，帮助你陪这个人相处、记住重要脉络，并把他交给你的事情做好。
 人格回答"我如何和他相处"，记忆回答"我已经了解什么"，知识库回答"具体怎样做"。
-工程操作与运行机制在 `knowledge/global/engineering-operations.md`，日常对话不必先读工程文档。
-索引是入口，不代表正文已经读过；工具和真实授权决定当前能做什么。
+工程操作与运行机制在 `knowledge/global/engineering/engineering-operations.md`，日常对话不必先读工程文档。
+全局知识专题按真实目录分类并在本手册列出入口；需要细节时再读取对应正文。工具和实际授权决定当前能做什么。
 
 ## 1. 相处与主动性
 
@@ -53,12 +53,12 @@
 **什么时候不记**：纯工具进度、一次性测试结果、未确认的猜测状态、敏感凭据。
 助手的推测不当作用户事实；旧记忆遇到新表达先核对差异，不机械强化旧印象；检索和注入本身不加权。
 
-全局 `memory.prompt_injection` 关闭时不自动加载记忆，需要背景可用 `memory_manage` 按需检索，`list(tier=all)` 可统一列出四个碎片层；开关与搜索模式见 `knowledge/global/configuration-reference.md` 和 `plugins/memory_manage/SKILL.md`。
+全局 `memory.prompt_injection` 关闭时不自动加载记忆，需要背景可用 `memory_manage` 按需检索，`list(tier=all)` 可统一列出四个碎片层；开关与搜索模式见 `knowledge/global/engineering/configuration-reference.md` 和 `plugins/memory_manage/SKILL.md`。
 
 **热画像**：由 `memory_temporary_important` 整理为一页连贯简介，只读使用，不由主智能体直接改写。
 让每次对话开始时已经认识这个人。
 `self_improve` 负责有证据的记忆整理和晋升，不是聊天日志记录员，不按每个短句建一条记忆。
-具体档位、证据绑定、原子写入和分页见 `knowledge/global/storage-and-persistence.md`。
+具体档位、证据绑定、原子写入和分页见 `knowledge/global/runtime/storage-and-persistence.md`。
 
 个人记忆与方法分开：记忆保存这个人的选择和处境，知识保存可重查的事实，技能保存可复用做法。
 **技能与记忆联动**：用户编辑技能时可检索相关记忆并提醒可融合，默认继续保留记忆，不自动删除；
@@ -85,10 +85,12 @@
 只使用获准的上下文，不假装拥有完整主对话，不自行向其他代理继续委派。
 工具返回失败或后台仍运行时，先查真实状态，不盲目重复有副作用的操作。
 
+自然语言创建或编辑定时任务时，先用 `time_plan` 解析，不得直接猜测时间参数，再用 `task_time` 执行。
+
 ### Web 正文内联组件
 
 图表或交互能帮助理解时，可以自然穿插在正文中，不把普通聊天全部卡片化。
-必须先读取 `knowledge/global/inline-widgets.md`，不要凭记忆复制或发明字段；不能可靠生成时用 Markdown。
+必须先读取 `knowledge/global/web/inline-widgets.md`，不要凭记忆复制或发明字段；不能可靠生成时用 Markdown。
 
 ## 4. 做事与交付
 
@@ -97,6 +99,7 @@
 工具处理中的普通正文只是进展，不是终稿。必要工具和后台工作收齐后，
 直接用普通助手正文交付实际结果、核验依据与未完成项；不要调用或臆造最终答案提交工具。
 阶段正文与最终正文由 Provider 响应 phase 和宿主的执行完成屏障区分，工具仍在运行时不能宣称任务已完成。
+主请求会披露剩余异步依赖数；正常等待与超时／取消收尾的区别见长任务运行专题。
 无需工具的普通问答可以直接回答，不人为制造最终提交流程。
 
 交付先说用户得到什么。文件与测试等可核对的结果实际检查，不把猜测当验收。
@@ -112,28 +115,69 @@
 
 按当前问题选正文，不要求先通读全库。用户个人资料优先在用户知识层查，
 可共享的方法查共享层，框架事实和工程工作规则查全局层。
+全局专题按 `overview/`、`engineering/`、`runtime/`、`modules/`、`web/`、`release/`
+存放，入口统一维护在本手册。知识库文件不自动拼入系统提示词，需要内容时通过获准工具按需读取。
+知识库的折叠层级对应硬盘中的真实子路径，不使用分类标签。
+
+### 架构骨架
+
+```text
+kemo-agent/
+├── web/                   # Web 入口
+├── cli.py                 # 命令行入口
+├── message/               # 外部消息入口
+├── cron/                  # 定时任务入口
+├── run/                   # 核心运行时
+│   ├── conversation/      # 会话编排与执行循环
+│   ├── cards/             # 上下文、压缩与请求组装
+│   ├── tools/             # 工具发现与执行
+│   └── agents/            # 子智能体运行
+├── provider/              # 模型协议与适配
+├── plugins/               # 工具插件
+├── agents/                # 内置子智能体定义
+├── skills/                # 可复用技能
+├── expand/                # 拓展能力
+├── sense/                 # 感知能力
+├── config/                # 全局配置
+├── knowledge/
+│   ├── global/            # overview、engineering、runtime、modules、web、release 专题
+│   └── share/             # 跨用户共享资料
+└── users/                 # 用户配置、人格、历史与记忆
+```
+
+### 全局文档入口
 
 | 需要了解什么 | 资料入口 |
 |---|---|
-| 配置的分工、用户覆盖与 YAML 字段 | `knowledge/global/configuration-reference.md` |
-| 人格、记忆、知识和技能各该放什么 | `knowledge/global/prompt-authoring-standard.md` |
-| 记忆主题、时效、合并、证据和存储 | `knowledge/global/storage-and-persistence.md`、`run/memory/lifecycle.md` |
-| 修改文件、运行工具、失败恢复与开发约定 | `knowledge/global/engineering-operations.md` |
-| 请求流转、上下文压缩、消息撤回与最终完成 | `knowledge/global/architecture-overview.md`、`knowledge/global/storage-and-persistence.md`、`knowledge/global/long-task-runtime.md` |
-| Provider、token、媒体与重试 | `knowledge/global/provider-reliability.md` |
-| 插件操作与模块开发 | `knowledge/global/plugin-development.md`、`knowledge/global/module-development.md` |
-| 子智能体协作、后台工作与续跑 | `knowledge/global/agent-task-coordination.md` |
-| 提醒、计划创建边界和自动维护 | `knowledge/global/task-automation.md` |
-| 部署、升级和发布 | `knowledge/global/deployment-and-release.md` |
-| 网页展示、多语言/i18next（固定九语）、计划悬浮与双侧面板避让、完整用户发言导航（首条即显）、输入坞缓存率与正文组件 | `knowledge/global/frontend-conventions.md`、`knowledge/global/inline-widgets.md` |
-| 用户资料与目录结构 | `knowledge/global/knowledge-and-user-data.md` |
-| 其他框架专题 | `knowledge/global/data_structure.md` |
+| 项目定位、能力与使用入口 | `knowledge/global/overview/project-introduction.md` |
+| 请求流程、上下文与并发 | `knowledge/global/overview/architecture-overview.md` |
+| Apache-2.0 许可与分发 | `knowledge/global/overview/open-source-license.md` |
+| 配置字段、默认值与用户覆盖 | `knowledge/global/engineering/configuration-reference.md` |
+| 人格、手册、知识与技能各该放什么 | `knowledge/global/engineering/prompt-authoring-standard.md` |
+| 三层知识库、真实路径和用户目录 | `knowledge/global/engineering/knowledge-and-user-data.md` |
+| 记忆主题、时效、证据、CardStream、历史删除与数据库索引维护 | `knowledge/global/runtime/storage-and-persistence.md`、`run/memory/lifecycle.md` |
+| 修改文件、运行工具、失败恢复与开发约定 | `knowledge/global/engineering/engineering-operations.md` |
+| Provider、token、媒体、重试与上下文超限恢复 | `knowledge/global/runtime/provider-reliability.md` |
+| 任务计划、定时任务、执行记录清理与后台维护 | `knowledge/global/runtime/task-automation.md` |
+| 持续执行、异步结果计数、完成屏障与停止 | `knowledge/global/runtime/long-task-runtime.md` |
+| 子智能体协作、状态与续跑 | `knowledge/global/runtime/agent-task-coordination.md` |
+| 技能、拓展、感知与子智能体开发 | `knowledge/global/modules/module-development.md` |
+| 工具插件、执行合同与媒体处理 | `knowledge/global/modules/plugin-development.md` |
+| 内置 App、网关与图谱集成 | `knowledge/global/modules/builtin-expansions.md` |
+| 外部消息平台接入与路由 | `knowledge/global/modules/external-message-route-creation.md` |
+| 六类模块的合同验收 | `knowledge/global/modules/module-template-validation.md` |
+| 网页布局、多语言、任务面板、知识目录树、用户发言导航与输入坞 | `knowledge/global/web/frontend-conventions.md` |
+| 正文内联组件与交互协议 | `knowledge/global/web/inline-widgets.md` |
+| 安装、打包、发布与恢复 | `knowledge/global/release/deployment-and-release.md` |
+| 版本兼容、更新入口与边界 | `knowledge/global/release/version-and-update-modules.md` |
 
 ### 资源定位
 
 当前用户的配置与人格分别在 `users/<name>/user_config.yaml`、`users/<name>/user_soul.md`；
 热画像为 `users/<name>/memory_temporary_important.md`，上传与下载在
 `users/<name>/file_upload/`、`users/<name>/download/`。
+当前会话历史库为 `users/<name>/history/cards.sqlite3`；路径迁移与备份见存储专题。
+用户明确删除历史时清理后端正文及数据库检索记录，置顶/收藏不豁免；删除与数据库索引维护见存储专题，界面行为见前端专题。
 新用户骨架为 `template/user/`；技能在 `skills/`，插件在 `plugins/`，内置子智能体在 `agents/`。
 这些是定位方式，不表示可以读取无关用户的数据。
 
@@ -141,6 +185,6 @@
 
 人格保持相处方式，手册保持个人智能操作导航；工程规则更新对应全局专题，
 不要再把预算常量、部署细节和历史事故堆回常驻提示。
-修改行为时同步专题正文、这里的相关入口和主索引；
+修改行为时同步专题正文、这里的架构与文档入口；
 `python .github/scripts/check_agents_manual.py` 同时检查轻量手册与按需工程声明。
 维护和发布的具体流程按知识库执行，不把工程细则当作人格。

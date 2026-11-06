@@ -2,7 +2,7 @@
   "schema_version": 1,
   "manual": "agents.md",
   "max_characters": 26000,
-  "engineering_manual": "knowledge/global/engineering-operations.md",
+  "engineering_manual": "knowledge/global/engineering/engineering-operations.md",
   "engineering_max_characters": 26000,
   "sections": [
     "0. 本手册怎么用",
@@ -485,7 +485,7 @@
         {
           "path": "run/retry/tool_dedup.py",
           "symbol": "REEXECUTE_ACTIONS",
-          "ast_sha256": "94bea180b813e171bb97eeb36f4ea1498aa1540ff7f58b80e2ebc14d95d12f15"
+          "ast_sha256": "412a02f4bac53d081005bfb470c2c0eb7406f9f81963d0a9dcb90ce5cb85885f"
         },
         {
           "path": "run/retry/tool_dedup.py",
@@ -566,6 +566,11 @@
       "path": "users/<name>/memory_temporary_important.md",
       "source": "run/config/prompt.py",
       "proof_literal": "memory_temporary_important.md"
+    },
+    {
+      "path": "users/<name>/history/cards.sqlite3",
+      "source": "run/cards/schema.py",
+      "proof_literal": "\"history\" / \"cards.sqlite3\""
     },
     {
       "path": "tmp/",

@@ -16,7 +16,6 @@ prompt:
   char_limits:
     user_soul: 12000
     agents_manual: 26000
-    knowledge_index: 40000
     task_plan: 6000
     perception: 20000
     expand_data: 20000
