@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 import json
 import sqlite3
@@ -51,7 +52,7 @@ def test_append_commits_raw_view_and_token_increment_together(store):
     assert snapshot.history_tokens == card.raw_tokens == card.view_tokens
     assert snapshot.last_seq == 1 and card.view_revision == 1 and card.token_active
     assert len(snapshot.cards) == 1
-    assert not (store.root / "users" / "alice" / "history").exists()
+    assert store.path == store.root / "users/alice/history/cards.sqlite3"
 
 
 def test_payload_reads_do_not_mutate_frozen_snapshots(store):
@@ -193,7 +194,7 @@ def test_closed_or_deleted_sessions_reject_late_append(store):
 
 def test_new_engine_never_imports_or_deletes_legacy_history(store):
     legacy = store.root / "users" / "alice" / "history"
-    legacy.mkdir()
+    legacy.mkdir(exist_ok=True)
     old = legacy / "history.sqlite3"
     old.write_bytes(b"old-user-data-must-remain-unchanged")
     add(store)
@@ -240,3 +241,40 @@ def test_schema_upgrade_preserves_raw_tools_and_corrects_response_terminal_statu
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_schema_five_upgrade_indexes_absorption_and_preserves_compressed_history(store):
+    from run.cards.schema import SCHEMA_VERSION
+
+    for index in range(4):
+        add(store, f"retained message {index} " + "x" * 2000)
+    store.replace_prefix(batch(store), summary())
+    before = store.snapshot("web", "s1")
+    raw = store.raw_page("web", "s1")
+    with closing(sqlite3.connect(store.path)) as db, db:
+        db.execute("DROP INDEX IF EXISTS idx_cards_absorbed")
+        db.execute("PRAGMA user_version=5")
+
+    with store.db() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM context_cards WHERE absorbed_by=?",
+            (raw[0].card_id,),
+        ).fetchall()
+        assert any("idx_cards_absorbed" in row[3] for row in plan)
+        assert db.execute(
+            "SELECT count(*) FROM card_text_fts WHERE card_text_fts MATCH 'retained'"
+        ).fetchone()[0] == 4
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert store.snapshot("web", "s1") == before
+    assert store.raw_page("web", "s1") == raw
+    backups = list(store.path.parent.glob("cards.sqlite3.bak.v5.*"))
+    assert len(backups) == 1
+    with closing(sqlite3.connect(backups[0])) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute(
+            "SELECT count(*) FROM sqlite_master WHERE name='idx_cards_absorbed'"
+        ).fetchone()[0] == 0
+    with store.db():
+        pass
+    assert list(store.path.parent.glob("cards.sqlite3.bak.v5.*")) == backups

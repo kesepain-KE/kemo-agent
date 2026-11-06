@@ -60,7 +60,8 @@ def test_history_search_and_web_read_raw_after_compaction_and_never_touch_old_fi
     assert tuple(card.raw_payload_json for card in store.raw_page("web", "s1")) == before
     for path, body in sentinels.items():
         assert path.read_bytes() == body
-    assert sorted(path.name for path in old.iterdir()) == sorted(path.name for path in sentinels)
+    assert sorted(path.name for path in old.iterdir() if not path.name.startswith("cards.sqlite3")) == sorted(
+        path.name for path in sentinels)
 
 
 def test_web_history_keeps_initial_input_outside_long_raw_pages_and_preserves_cursors(root):
@@ -195,9 +196,9 @@ def test_other_document_lease_blocks_entire_bulk_delete(root):
         delete_all_sessions(root, "alice", "web", client_id="mine")
     assert store.session("web", "first")["lifecycle"] == "open"
     assert store.session("web", "second")["lifecycle"] == "open"
-    count, physical_deletions = delete_all_sessions(root, "alice", "web", client_id="other")
-    assert (count, physical_deletions) == (2, 0)
-    assert len(store.raw_page("web", "first")) == 2
+    count, deleted_files = delete_all_sessions(root, "alice", "web", client_id="other")
+    assert (count, deleted_files) == (2, 0)
+    assert store.raw_page("web", "first") == ()
 
 
 def test_marks_survive_concurrent_metadata_mutation_and_stale_snapshots_cannot_overwrite_them(root):
@@ -215,10 +216,12 @@ def test_marks_survive_concurrent_metadata_mutation_and_stale_snapshots_cannot_o
 
 def test_deleted_preferred_identity_is_not_reused_for_new_raw(root):
     store, _ = completed(root)
+    compact(store, "web", "s1", summarize=lambda _: summary())
     delete_session(root, "alice", "web", "s1")
     new, created = get_or_reserve_active(root, "alice", "web", "browser", preferred_session_id="s1")
     assert created and new["session_id"] != "s1"
     assert store.session("web", "s1")["lifecycle"] == "deleted"
+    assert store.raw_page("web", "s1") == ()
 
 
 def test_utf8_raw_pagination_is_lossless_bounded_and_frozen_against_append(root):

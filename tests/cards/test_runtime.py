@@ -103,9 +103,9 @@ def test_public_runtime_writes_only_cards_and_restores_native_history(root):
                         if isinstance(item, MessageItem) and item.role == "user")
             return response(request, "reply:" + text_from_content(user.content))
 
-    old = root / "users" / "alice" / "history"
-    old.mkdir()
-    legacy = old / "history.sqlite3"
+    history_dir = root / "users" / "alice" / "history"
+    history_dir.mkdir()
+    legacy = history_dir / "history.sqlite3"
     legacy.write_bytes(b"DO NOT OPEN OR MIGRATE THIS")
     for text in ("one", "two"):
         events = list(run(root, Provider(), text=text))
@@ -115,7 +115,7 @@ def test_public_runtime_writes_only_cards_and_restores_native_history(root):
     assert [card.raw_kind for card in history(root)] == ["user_text", "agent_text"] * 2
     assert [card.raw_level for card in history(root)] == ["initial", "final"] * 2
     assert legacy.read_bytes() == b"DO NOT OPEN OR MIGRATE THIS"
-    assert sorted(path.name for path in old.iterdir()) == ["history.sqlite3"]
+    assert sorted(path.name for path in history_dir.iterdir()) == ["cards.sqlite3", "history.sqlite3"]
     assert "PERSONA" in seen[0].system_prompt
     assert not any("window" in str(path) for path in root.rglob("*.json")
                    if "user_config" not in path.name and "global_config" not in path.name)

@@ -69,6 +69,12 @@ def test_provider_overflow_compacts_same_integration_without_replaying_tools(roo
         main_requests[-2].system_prompt, main_requests[-2].input, main_requests[-2].tools)
     assert any(e.type == "context_compression" and e.metadata.get("trigger") == "provider_overflow"
                and e.metadata.get("status") == "ready" for e in events)
+    recovery = [e for e in events if e.type == "retrying" and e.metadata.get("phase") == "context_recovery"]
+    assert len(recovery) == 1
+    assert recovery[0].metadata["failed_request_id"] == main_requests[1].request_id
+    ready_index = next(i for i, e in enumerate(events)
+                      if e.type == "context_compression" and e.metadata.get("status") == "ready")
+    assert ready_index < events.index(recovery[0])
     raw = store.raw_page("web", "s1", limit=500)
     assert sum(c.raw_kind == "tool_call" for c in raw) == 1
     assert sum(c.raw_kind == "tool_result" for c in raw) == 1

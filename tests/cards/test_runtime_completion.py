@@ -11,7 +11,7 @@ from run.tools.background_jobs import prepare_background_job
 from run.tools.background_jobs import publish_background_result, read_background_job
 from run.tools.background_notifications import ShellInbox
 from run.tools.background_worker import _finish
-from provider.protocol.models import KemoResponse, MessageItem, ReasoningItem, ToolResultItem
+from provider.protocol.models import KemoResponse, MessageItem, ReasoningItem, ToolResultItem, text_from_content
 from run.tools import ToolRuntime
 from tests.cards.test_runtime import call, definition, history, response, root, run
 
@@ -155,6 +155,10 @@ def test_mixed_plan_batch_preserves_prior_work_and_defers_following_effects(root
 
 
 def test_required_shell_waits_for_receipt_then_resumes_without_reexecution(root, monkeypatch):
+    config_path = root / "config/global_config.yaml"
+    config = json.loads(config_path.read_text("utf-8"))
+    config["agent_runtime"] = {"default_timeout": .1}
+    config_path.write_text(json.dumps(config), "utf-8")
     job_ids, requests = [], []
 
     def fake_execute(tool, arguments, *, context, **kwargs):
@@ -170,23 +174,48 @@ def test_required_shell_waits_for_receipt_then_resumes_without_reexecution(root,
     class Provider:
         def create(self, request):
             requests.append(request)
-            return response(request, "draft", [call(name="shell")]) if len(requests) == 1 else response(request)
+            if len(requests) == 1:
+                return response(request, "draft", [
+                    call(name="shell", call_id="callid_first", label="first"),
+                    call(name="shell", call_id="callid_second", label="second"),
+                ])
+            return response(request)
 
     with ThreadPoolExecutor(1) as pool:
         future = pool.submit(lambda: list(run(
             root, Provider(), tools=[definition(root, lambda: None, name="shell")],
         )))
-        eventually(lambda: len(requests) == 2 and bool(job_ids))
-        assert not future.done()
-        _finish(root, "alice", job_ids[0], exit_code=0, output_tail=["[stdout] complete"])
+        eventually(lambda: len(requests) == 2 and len(job_ids) == 2)
+        try:
+            state = json.loads(text_from_content(requests[-1].input[-1].content).split("\n", 1)[1])["async_tasks"]
+            assert state["pending_count"] == 2 and state["completion_blocked"]
+            assert {task["id"] for task in state["pending_tasks"]} == set(job_ids)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=1.25)
+            assert len(requests) == 2
+            _finish(root, "alice", job_ids[0], exit_code=0, output_tail=["[stdout] first complete"])
+            eventually(lambda: len(requests) == 3)
+            state = json.loads(text_from_content(requests[-1].input[-1].content).split("\n", 1)[1])["async_tasks"]
+            assert state["pending_count"] == 1 and state["completion_blocked"]
+            assert state["pending_tasks"][0]["id"] == job_ids[1]
+            assert not future.done()
+        finally:
+            for job_id in job_ids:
+                _finish(root, "alice", job_id, exit_code=0, output_tail=["[stdout] complete"])
         events = future.result(4)
     assert events[-1].metadata["status"] == "completed"
-    assert len(requests) == 3 and len(job_ids) == 1
-    assert job_ids[0] in requests[-1].model_dump_json()
-    receipts = [card for card in history(root) if card.raw_payload.get("execution_id") == job_ids[0]]
-    assert len(receipts) == 1
-    assert receipts[0].raw_payload["original_call"] == {"name": "shell", "arguments": {}}
-    assert receipts[0].raw_payload["result"]["output_tail"] == ["[stdout] complete"]
+    assert len(requests) == 4 and len(job_ids) == 2
+    state = json.loads(text_from_content(requests[-1].input[-1].content).split("\n", 1)[1])["async_tasks"]
+    assert state["pending_count"] == 0 and not state["completion_blocked"]
+    assert state["pending_tasks"] == []
+    receipts = [card for card in history(root) if card.raw_payload.get("execution_id") in job_ids]
+    assert len(receipts) == 2
+    assert {card.raw_payload["original_call"]["arguments"]["label"] for card in receipts} == {"first", "second"}
+    assert all('"async_tasks"' not in card.raw_payload_json for card in history(root))
+    assert {card.raw_payload["original_call"]["arguments"]["label"]:
+            card.raw_payload["result"]["output_tail"] for card in receipts} == {
+        "first": ["[stdout] first complete"], "second": ["[stdout] complete"],
+    }
 
 
 def shell_job(root, integration, *, mode="required"):
