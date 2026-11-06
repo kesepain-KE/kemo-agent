@@ -96,7 +96,7 @@ def _normalize_ingest_paths(value: list[str] | None) -> list[str] | None:
 
 
 def _configuration(root: Path, user: str) -> dict[str, Any]:
-    path = root / "global_expand" / "kemo_graph" / "graph_config.json"
+    path = root / "expand" / "global" / "kemo_graph" / "graph_config.json"
     if not path.is_file():
         return {"active": False, "module": "global:kemo_graph", "libraries": []}
     try:

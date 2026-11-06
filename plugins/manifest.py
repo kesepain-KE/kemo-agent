@@ -92,6 +92,13 @@ def _validate_plugin_tool(raw: dict[str, Any], path: Path, title: str) -> None:
         raise PluginManifestError(f"插件 enabled 必须是布尔值：{path}")
     if "strict" in raw and not isinstance(raw["strict"], bool):
         raise PluginManifestError(f"插件 strict 必须是布尔值：{path}")
+    permission = raw.get("permission", "write")
+    if not isinstance(permission, str) or permission not in {
+        "read", "write", "delete", "external"
+    }:
+        raise PluginManifestError(
+            f"插件 permission 必须是 read、write、delete 或 external：{path}"
+        )
     timeout_policy = raw.get("timeout_policy", "argument_or_default")
     if not isinstance(timeout_policy, str) or timeout_policy not in {
         "argument_or_default",
