@@ -12,7 +12,6 @@ from run.memory.analysis import (
     extract_round_memory, memory_batch_operation_id, memory_round_data, persist_round_memory_analysis,
 )
 from run.memory.evidence import bind_reference, quoted_rounds, search_receipts, trusted_dates
-from run.memory.pipeline import memory_round_payload
 from web.services.memory import MemoryServiceMixin
 
 
@@ -23,10 +22,10 @@ BODY = "用户喜欢简洁回答。"
 @pytest.fixture
 def store(tmp_path):
     (tmp_path / "users" / "alice").mkdir(parents=True)
-    (tmp_path / "users" / "alice" / "user_config.json").write_text("{}", "utf-8")
+    (tmp_path / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "global_config.json").write_text("{}", "utf-8")
-    return MemoryStore(tmp_path, "alice", {})
+    (tmp_path / "config" / "global_config.yaml").write_text("{}", "utf-8")
+    return MemoryStore(tmp_path, "alice", {"memory": {"profile": "work"}})
 
 
 def candidate(**changes):
@@ -87,18 +86,6 @@ def test_union_duplicate_candidates_preserves_distinct_evidence_days(store):
     assert store.get_entry("seven_days", "style.md")["weight"] == 3
 
 
-def test_compat_compression_uses_same_evidence_union_and_replay(store):
-    from run.memory.pipeline import extract_compressed_round_memory
-
-    runner = SimpleNamespace(run=lambda *args, **kwargs: model_result([
-        candidate(evidence_rounds=[n]) for n in (1, 2, 3, 4)]))
-    result = extract_compressed_round_memory(root=store.root, user="alice", config={}, rounds=rounds(),
-                                            trigger="manual", agent_runner=runner, session_id="compat")
-    assert len(result.metadata["memory_update"]["weight_events"]) == 3
-    again = extract_compressed_round_memory(root=store.root, user="alice", config={}, rounds=rounds(),
-                                           trigger="manual", agent_runner=runner, session_id="compat")
-    assert again.metadata["memory_update"]["replayed"] is True
-    assert store.get_entry("seven_days", "style.md")["weight"] == 3
 
 
 def test_extraction_through_executor_tool_receipt_and_transaction(store, monkeypatch):
@@ -248,14 +235,6 @@ def test_operation_identity_ignores_assistant_and_tool_serialization():
     assert identity(a) != identity(b)
 
 
-def test_archived_round_timestamp_survives_payload_rebuild():
-    window = {"text": {"messages": rounds()[0]["messages"]},
-              "data": {"round_metrics": [{"round": 1, "committed_at": rounds()[0]["committed_at"]}]}}
-    payload = memory_round_payload(window, 1)
-    rebuilt = memory_round_data(round_number=1, **payload)
-    assert trusted_dates([rebuilt]) == {"1": "2026-09-20"}
-    window["data"]["round_metrics"] = []
-    assert "committed_at" not in memory_round_payload(window, 1)
 
 
 def test_runtime_maintenance_includes_weight_only_update(store, monkeypatch):
@@ -271,7 +250,7 @@ def test_runtime_maintenance_includes_weight_only_update(store, monkeypatch):
     bound = bind_reference(candidate(action="reinforce"), receipts(), store)
     # Applied today, but backed by yesterday's conversation.
     store.upsert_candidates([bound], source={"evidence_dates": {"1": "2026-09-24"}}, now=NOW)
-    monkeypatch.setattr("web.services.runtime_status.datetime", FixedDateTime)
+    monkeypatch.setattr("web.services.runtime_status_aggregate.datetime", FixedDateTime)
     service = SimpleNamespace(
         root=store.root, require_user=lambda value: value, require_source=lambda value: value,
         settings=lambda _: {"provider": {}, "limits": {}},

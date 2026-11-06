@@ -398,8 +398,9 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertEqual(definition.trigger_file, "trigger.md")
         self.assertIn("candidates", definition.trigger_content)
         self.assertIn("最长 20 字符", definition.trigger_content)
-        self.assertIn("独立更新、独立失效、独立加权、独立检索", definition.trigger_content)
-        self.assertIn("不按对话轮数或单文件字数折算", definition.trigger_content)
+        self.assertIn("整合相关偏好、原因、例子与近况", definition.trigger_content)
+        self.assertIn("不按轮数、句子或属性标签折算", definition.trigger_content)
+        self.assertNotIn("任一项可独立处理就必须拆开", definition.trigger_content)
 
     def test_permanent_prompt_selection_is_unlimited(self) -> None:
         self.add("永久一", "永久记忆一。", explicit=True)

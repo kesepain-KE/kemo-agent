@@ -14,10 +14,11 @@ from typing import Iterator
 
 from run.config import user_dir
 from run.infra import execute_schema, schema_migration
+from run.infra.fulltext import load_simple
 
 
 MEMORY_DB_FILENAME = "memory.sqlite3"
-MEMORY_DB_SCHEMA_VERSION = 2
+MEMORY_DB_SCHEMA_VERSION = 4
 _READY_DATABASES: set[str] = set()
 _READY_DATABASES_LOCK = threading.Lock()
 
@@ -28,6 +29,7 @@ def database_path(root: Path, user: str) -> Path:
 
 def _configure(database: sqlite3.Connection, *, initialize: bool = False) -> None:
     database.row_factory = sqlite3.Row
+    load_simple(database)
     if initialize:
         database.execute("PRAGMA journal_mode=WAL")
         database.execute("PRAGMA synchronous=NORMAL")
@@ -41,12 +43,16 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
         "memory_generated_skills", "memory_important_sources",
     )}
     required["memory_weight_events"] = ("source",)
+    required["memory_fragments"] = ("domain",)
+    required["memory_text_fts"] = ("filename", "content")
     required["memory_work_items"] = ("lease_token", "lease_until")
     with schema_migration(
         database, target=MEMORY_DB_SCHEMA_VERSION,
         meta_table="memory_meta", required=required,
-    ):
+    ) as previous:
         _initialize_schema(database)
+        if previous < 4:
+            database.execute("INSERT INTO memory_text_fts(memory_text_fts) VALUES('rebuild')")
 
 
 def _initialize_schema(database: sqlite3.Connection) -> None:
@@ -66,6 +72,8 @@ def _initialize_schema(database: sqlite3.Connection) -> None:
             ),
             content TEXT NOT NULL,
             content_hash TEXT NOT NULL,
+            domain TEXT NOT NULL DEFAULT 'fact'
+                CHECK (domain IN ('fact', 'relation', 'state')),
             weight INTEGER NOT NULL DEFAULT 0 CHECK (weight >= 0),
             created_at TEXT NOT NULL,
             content_updated_at TEXT NOT NULL,
@@ -81,6 +89,26 @@ def _initialize_schema(database: sqlite3.Connection) -> None:
             ON memory_fragments(tier, expires_at);
         CREATE INDEX IF NOT EXISTS idx_memory_fragments_updated
             ON memory_fragments(content_updated_at DESC);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_text_fts USING fts5(
+            filename, content, content='memory_fragments', content_rowid='id',
+            tokenize='simple 0'
+        );
+        CREATE TRIGGER IF NOT EXISTS memory_text_fts_insert AFTER INSERT ON memory_fragments BEGIN
+            INSERT INTO memory_text_fts(rowid,filename,content)
+            VALUES(new.id,new.filename,new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memory_text_fts_delete AFTER DELETE ON memory_fragments BEGIN
+            INSERT INTO memory_text_fts(memory_text_fts,rowid,filename,content)
+            VALUES('delete',old.id,old.filename,old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memory_text_fts_update
+        AFTER UPDATE OF filename,content ON memory_fragments BEGIN
+            INSERT INTO memory_text_fts(memory_text_fts,rowid,filename,content)
+            VALUES('delete',old.id,old.filename,old.content);
+            INSERT INTO memory_text_fts(rowid,filename,content)
+            VALUES(new.id,new.filename,new.content);
+        END;
 
         CREATE TABLE IF NOT EXISTS memory_weight_events (
             fragment_id INTEGER NOT NULL,
@@ -140,6 +168,13 @@ def _initialize_schema(database: sqlite3.Connection) -> None:
         """
     )
     # The migration guard already serializes introspection and ALTER across processes.
+    fragment_columns = {str(r["name"]) for r in database.execute(
+        "PRAGMA table_info(memory_fragments)").fetchall()}
+    if "domain" not in fragment_columns:
+        database.execute(
+            "ALTER TABLE memory_fragments ADD COLUMN domain TEXT NOT NULL DEFAULT 'fact' "
+            "CHECK (domain IN ('fact', 'relation', 'state'))"
+        )
     work_columns = {str(r["name"]) for r in database.execute(
         "PRAGMA table_info(memory_work_items)").fetchall()}
     for column in ("lease_token", "lease_until"):

@@ -34,7 +34,7 @@ def _publish(path: Path, body: str) -> None:
 
 
 def archive_expired(store, tier: str, filename: str, current) -> dict:
-    from run.memory import contains_sensitive_credential, iso
+    from run.memory import contains_sensitive_credential, iso, memory_upgrade_threshold
 
     with store._lock:
         with connection(store.root, store.user) as db:
@@ -44,7 +44,8 @@ def archive_expired(store, tier: str, filename: str, current) -> dict:
             snapshot = dict(row)
         if tier == "permanent" or not snapshot["expires_at"] or snapshot["expires_at"] > iso(current):
             return {"archived": False, "reason": "not_expired"}
-        if snapshot["weight"] >= int(store.rules[tier].upgrade_threshold or 0):
+        threshold = memory_upgrade_threshold(store.config, tier, snapshot["domain"])
+        if threshold is not None and snapshot["weight"] >= threshold:
             return {"archived": False, "reason": "promotion_due"}
         if contains_sensitive_credential(snapshot["content"]) or contains_sensitive_credential(filename):
             raise ValueError("过期记忆包含疑似敏感凭据，归档和删除均已阻止")
@@ -66,6 +67,8 @@ def archive_expired(store, tier: str, filename: str, current) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         metadata = {k: snapshot[k] for k in
                     ("id", "filename", "tier", "weight", "created_at", "expires_at", "content_hash")}
+        if snapshot["domain"] != "fact":
+            metadata["domain"] = snapshot["domain"]
         metadata.update(archived_at=stamp, archive_id=key)
         body = "---\n" + "\n".join(f"{k}: {json.dumps(v, ensure_ascii=False)}"
                                   for k, v in metadata.items()) + "\n---\n\n" + snapshot["content"] + "\n"

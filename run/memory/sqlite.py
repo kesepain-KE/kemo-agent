@@ -28,8 +28,21 @@ class SqliteMemoryStore(
         self.root = root.resolve()
         self.user = user
         self.config = config
+        api.memory_domain_rules(config)
         self.rules = api.tier_rules(config)
         self._lock = api._store_lock(self.root, user)
 
     def database_path(self) -> Path:
         return database_path(self.root, self.user)
+
+    def prompt_revision(self):
+        """Content revisions, not access/weight writes or Provider polling."""
+        from run.memory.store import connection
+        revision = (0, 0, "")
+        if self.database_path().is_file():
+            with connection(self.root, self.user) as db:
+                revision = tuple(db.execute("SELECT count(*),coalesce(sum(revision),0),"
+                    "coalesce(max(content_updated_at),'') FROM memory_fragments").fetchone())
+        important = self.root / "users" / self.user / "memory_temporary_important.md"
+        stamp = (important.stat().st_mtime_ns, important.stat().st_size) if important.is_file() else None
+        return revision, stamp

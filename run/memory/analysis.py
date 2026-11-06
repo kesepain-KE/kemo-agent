@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -11,14 +12,12 @@ from typing import Any
 
 from run.agents import AgentRunner
 from run.infra import EngineError
-from run.history import commit_window
-from run.history import find_record, update_memory_state
 from run.memory import (
     MemoryStore,
-    memory_extraction_batch_rounds,
     memory_extraction_mode,
+    memory_profile,
+    memory_domains_for_profile,
 )
-from run.memory.pipeline import memory_round_payload
 from run.memory.evidence import trusted_dates, text as evidence_text
 from run.conversation import new_usage_total, record_provider_request, usage_from_dict
 
@@ -81,6 +80,7 @@ def analyze_memory_batch(
         }
     )
     effective_source["evidence_dates"] = trusted_dates(rounds)
+    config = getattr(agent_runner, "config", {})
     try:
         runner_kwargs: dict[str, Any] = {"cancel_event": cancel_event}
         if str(agent_source or "").strip():
@@ -93,6 +93,8 @@ def analyze_memory_batch(
                 "trigger": "context_compression",
                 "rounds": rounds,
                 "source": effective_source,
+                "memory_profile": memory_profile(config),
+                "memory_domains": list(memory_domains_for_profile(config)),
             },
             **runner_kwargs,
         )
@@ -217,7 +219,14 @@ def analyze_memory_batch_resilient(
     if len(rounds) <= 1:
         return analysis
 
-    midpoint = max(1, len(rounds) // 2)
+    # Malformed-output isolation must not cut the user away from that same
+    # integration's guidance/final. Huge integrations are already token-paged.
+    boundaries = [index for index in range(1, len(rounds))
+                  if not rounds[index].get("integration_id")
+                  or rounds[index].get("integration_id") != rounds[index - 1].get("integration_id")]
+    if not boundaries:
+        return analysis
+    midpoint = min(boundaries, key=lambda index: abs(index - len(rounds) / 2))
     parts: list[dict[str, Any]] = []
     for subset in (rounds[:midpoint], rounds[midpoint:]):
         numbers = [int(item.get("round") or 0) for item in subset]
@@ -297,15 +306,22 @@ def persist_round_memory_analysis(
         source = {"source": "round_commit"}
     source = {**source, "evidence_dates": source.get("evidence_dates", {})}
     try:
-        deduplicated: dict[str, dict[str, Any]] = {}
+        deduplicated: dict[tuple[str, str], dict[str, Any]] = {}
         unkeyed: list[dict[str, Any]] = []
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 unkeyed.append(candidate)
                 continue
             raw_key = candidate.get("filename") or candidate.get("target")
-            key = str(raw_key or "").strip().casefold()
-            if key:
+            filename_key = str(raw_key or "").strip().casefold()
+            from run.memory import normalize_memory_domain, MemoryError
+            try:
+                domain = normalize_memory_domain(candidate.get("memory_domain"))
+            except MemoryError:
+                unkeyed.append(candidate)
+                continue
+            key = (domain, filename_key)
+            if filename_key:
                 previous = deduplicated.get(key)
                 merged = dict(candidate)
                 if previous is not None:
@@ -429,221 +445,96 @@ def extract_round_memory(
     )
 
 
-def extract_memory_backlog(
-    *,
-    root: Path,
-    user: str,
-    source: str,
-    session_id: str,
-    directory: Path,
-    window: dict[str, Any],
-    config: dict[str, Any],
-    agent_runner: AgentRunner | None,
-    cancel_event: threading.Event | None,
-) -> dict[str, Any]:
-    """Extract every unprocessed committed round and advance one durable cursor."""
+def extract_card_memory(*, root, user, source, session_id, config, agent_runner,
+                        cancel_event=None, claim=None):
+    """Extract a bounded immutable RAW seq range; compaction never sets coverage.
 
-    data = window.setdefault("data", {})
-    rounds = max(0, int(data.get("rounds") or 0))
-    base_result: dict[str, Any] = {
-        "user": user,
-        "source": source,
-        "session_id": session_id,
-        "round": rounds,
-        "candidates": 0,
-        "extraction": None,
-        "extractions": [],
-        "usage": new_usage_total(),
-        "index_error": None,
-    }
-    if rounds < 1:
-        return {**base_result, "status": "skipped", "reason": "no_complete_round"}
-
-    indexed_session = find_record(root, user, source, session_id)
-    if isinstance(indexed_session, dict) and (
-        indexed_session.get("memory_claim_id")
-        or indexed_session.get("memory_queue_reason") == "manual_compression"
-    ):
-        return {
-            **base_result,
-            "status": "skipped",
-            "reason": "background_extraction_in_progress",
-        }
-
-    extraction_mode = memory_extraction_mode(config)
-    if extraction_mode == "disabled":
-        return {
-            **base_result,
-            "status": "skipped",
-            "reason": "memory_extraction_disabled",
-            "mode": extraction_mode,
-        }
-
-    raw_cursor = data.get("memory_processed_round")
-    processed_round = (
-        max(0, int(raw_cursor or 0))
-        if raw_cursor is not None
-        else max(0, rounds - 1)
-    )
-    if processed_round >= rounds:
-        return {**base_result, "status": "skipped", "reason": "already_processed"}
-    if agent_runner is None:
-        raise EngineError("记忆提取缺少 AgentRunner")
-
-    data["memory_processed_round"] = processed_round
-    data["memory_status"] = "processing"
-    data.pop("memory_error", None)
-    commit_window(directory, window)
-    index_error: dict[str, Any] | None = None
+    The self_improve schema retains the label ``round`` for an evidence record
+    ID, but here that ID is the original RAW seq, not a conversational round.
+    No window, summary, thinking, or external tool text becomes user evidence.
+    """
+    from run.cards import CardConflictError, CardStore, session_key
+    from run.history import (claim_pending_memory, defer_memory_claim, finish_memory_claim,
+                             queue_memory_extraction)
+    store = CardStore(root, user)
+    base = {"user": user, "source": source, "session_id": session_id,
+            "candidates": 0, "cursor_unit": "raw_seq"}
+    if memory_extraction_mode(config) == "disabled":
+        return {**base, "status": "skipped", "reason": "memory_extraction_disabled"}
+    if claim is None:
+        queue_memory_extraction(root, user, source, session_id, reason="manual_memory")
+        from run.memory import memory_extraction_input_tokens
+        claim = claim_pending_memory(root, user, source=source, session_id=session_id,
+                                     input_tokens=memory_extraction_input_tokens(config))
+    if claim is None:
+        return {**base, "status": "skipped", "reason": "no_claimable_raw"}
+    start, end = claim["memory_claim_start_seq"], claim["memory_claim_end_seq"]
+    claim_id = claim["memory_claim_id"]
+    identity = {**base, "seq_start": start, "seq_end": end, "claim_id": claim_id}
     try:
-        update_memory_state(root, user, source, session_id, status="processing")
-    except Exception as exc:
-        index_error = {"message": str(exc), "exception_type": type(exc).__name__}
-
-    extractions: list[dict[str, Any]] = []
-    candidates = 0
-    usage = new_usage_total()
-    batch_size = memory_extraction_batch_rounds(config)
-    non_extractable_rounds = {
-        int(item.get("round") or 0): str(item.get("status") or "")
-        for item in data.get("round_metrics", [])
-        if isinstance(item, dict)
-        and item.get("status") in {"cancelled", "failed"}
-    }
-    batch_start = processed_round + 1
-    while batch_start <= rounds:
-        batch_end = min(rounds, batch_start + batch_size - 1)
-        batch_rounds: list[dict[str, Any]] = []
-        skipped_rounds: list[int] = []
-        for round_number in range(batch_start, batch_end + 1):
-            if round_number in non_extractable_rounds:
-                skipped_rounds.append(round_number)
-                continue
-            payload = memory_round_payload(window, round_number)
-            batch_rounds.append(memory_round_data(round_number=round_number, **payload))
-
-        if not batch_rounds:
-            skipped_statuses = {
-                non_extractable_rounds[number] for number in skipped_rounds
-            }
-            extraction = {
-                "status": "skipped",
-                "candidate_count": 0,
-                "reason": (
-                    "cancelled_rounds"
-                    if skipped_statuses == {"cancelled"}
-                    else (
-                        "failed_rounds"
-                        if skipped_statuses == {"failed"}
-                        else "non_extractable_rounds"
-                    )
-                ),
-                "round_start": batch_start,
-                "round_end": batch_end,
-                "rounds": [],
-                "skipped_rounds": skipped_rounds,
-            }
+        from run.cards.models import Card
+        from run.memory.evidence import narrative_record, narrative_rows
+        with store.db() as db:
+            count = db.execute("SELECT COUNT(*) FROM context_cards WHERE session_key=? AND seq BETWEEN ? AND ?",
+                               (session_key(source, session_id), start, end)).fetchone()[0]
+            if count != end - start + 1:
+                raise CardConflictError("RAW 提取范围不完整，拒绝推进记忆游标")
+            evidence = [item for row in narrative_rows(db, session_key(source, session_id), start, end)
+                        if (item := narrative_record(Card.from_row(row))) is not None]
+            # An already checkpointed partial integration may resume after many
+            # tools. Supply its user context, but do not re-extract old evidence.
+            integrations = {item["integration_id"] for item in evidence}
+            previous = [item for row in narrative_rows(db, session_key(source, session_id), 1, start - 1)
+                        if row["integration_id"] in integrations and row["raw_kind"] == "user_text"
+                        and (item := narrative_record(Card.from_row(row))) is not None]
+            evidence = [{**item, "context_only": True} for item in previous] + evidence
+        evidence_source = {"source": "cardstream_raw", "channel": source,
+            "session_id": session_id, "generation": claim["session_generation"],
+            "seq_start": start, "seq_end": end, "evidence_unit": "raw_seq"}
+        operation = memory_batch_operation_id(user, source, session_id, start, end, evidence)
+        from run.memory.work import WorkLedger
+        candidate_work = WorkLedger(root, user).get("candidate:" + operation)
+        if candidate_work is not None:
+            # A bounded local persistence pause must not generate a new model
+            # analysis or change the already accepted candidate set.
+            accepted_candidates = candidate_work["payload"]["candidates"]
+            analysis = {"status": "completed", "candidate_count": len(accepted_candidates),
+                        "candidates": accepted_candidates, "source": candidate_work["source"]}
         else:
-            operation_id = memory_batch_operation_id(
-                user, source, session_id, batch_start, batch_end, batch_rounds
-            )
-            batch_source = {
-                "source": "round_commit",
-                "channel": source,
-                "session_id": session_id,
-                "round_start": batch_start,
-                "round_end": batch_end,
-            }
-            try:
-                analysis = analyze_memory_batch_resilient(
-                    rounds=batch_rounds,
-                    source=batch_source,
-                    agent_runner=agent_runner,
-                    cancel_event=cancel_event,
-                    agent_source=source,
-                    session_id=session_id,
-                )
-                extraction = persist_round_memory_analysis(
-                    root=root,
-                    user=user,
-                    config=config,
-                    analysis=analysis,
-                    operation_id=operation_id,
-                )
-                extraction["skipped_rounds"] = skipped_rounds
-            except Exception as exc:
-                extraction = {
-                    "status": "failed",
-                    "candidate_count": 0,
-                    "round_start": batch_start,
-                    "round_end": batch_end,
-                    "rounds": [int(item["round"]) for item in batch_rounds],
-                    "skipped_rounds": skipped_rounds,
-                    "error": {
-                        "message": str(exc),
-                        "exception_type": type(exc).__name__,
-                    },
-                }
-
-        extractions.append(extraction)
-        extraction_usage = extraction.get("usage")
-        if isinstance(extraction_usage, dict):
-            record_provider_request(usage, usage_from_dict(extraction_usage))
-        if extraction.get("status") not in {"completed", "skipped"}:
-            error = (
-                (checked_594 if isinstance(checked_594 := extraction.get("error"), dict) else {"message": "记忆提取失败"})
-            )
-            data["memory_status"] = "failed"
-            data["memory_error"] = error
-            commit_window(directory, window)
-            try:
-                update_memory_state(
-                    root, user, source, session_id, status="failed", error=error
-                )
-            except Exception as exc:
-                index_error = index_error or {
-                    "message": str(exc),
-                    "exception_type": type(exc).__name__,
-                }
-            return {
-                **base_result,
-                "status": "failed",
-                "round": batch_start,
-                "round_start": batch_start,
-                "round_end": batch_end,
-                "candidates": candidates,
-                "extraction": extraction,
-                "extractions": extractions,
-                "usage": usage,
-                "index_error": index_error,
-            }
-
-        candidates += int(extraction.get("candidate_count") or 0)
-        data["memory_processed_round"] = batch_end
-        data["memory_status"] = "completed" if batch_end >= rounds else "processing"
-        data.pop("memory_error", None)
-        commit_window(directory, window)
-        try:
-            update_memory_state(
-                root,
-                user,
-                source,
-                session_id,
-                processed_round=batch_end,
-                status=str(data["memory_status"]),
-            )
-        except Exception as exc:
-            index_error = index_error or {
-                "message": str(exc),
-                "exception_type": type(exc).__name__,
-            }
-        batch_start = batch_end + 1
-    return {
-        **base_result,
-        "status": "completed",
-        "candidates": candidates,
-        "extraction": extractions[-1],
-        "extractions": extractions,
-        "usage": usage,
-        "index_error": index_error,
-    }
+            analysis = (analyze_memory_batch_resilient(rounds=evidence, agent_runner=agent_runner,
+                    cancel_event=cancel_event, source=evidence_source,
+                    agent_source=source, session_id=session_id) if evidence else
+                    {"status": "completed", "candidate_count": 0, "candidates": [], "source": evidence_source})
+        if analysis.get("status") != "completed":
+            error = analysis.get("error") or {"message": "记忆提取未完成"}
+            finish = defer_memory_claim if error.get("work_pending") or error.get("capacity_blocked") else finish_memory_claim
+            finish(root, user, source, session_id, claim_id=claim_id, error=error)
+            return {**identity, "status": "failed", "error": error}
+        # Hold only the short control-plane transaction during idempotent local
+        # memory persistence. A deleted/stolen/expired claim cannot apply a late
+        # model result or move a different owner's cursor.
+        with store.db(write=True) as db:
+            state = db.execute("SELECT * FROM card_sessions WHERE session_key=?",
+                               (session_key(source, session_id),)).fetchone()
+            record = json.loads(state["record_json"]) if state else {}
+            expires = datetime.fromisoformat(record.get("memory_claim_expires_at") or "0001-01-01T00:00:00+00:00")
+            if (state is None or state["lifecycle"] == "deleted"
+                    or state["generation"] != claim["session_generation"]
+                    or record.get("memory_claim_id") != claim_id
+                    or state["memory_processed_seq"] != start - 1
+                    or expires.tzinfo is None or expires <= datetime.now(timezone.utc)):
+                raise CardConflictError("记忆认领已经失效，未写入过期结果")
+            result = persist_round_memory_analysis(root=root, user=user, config=config,
+                                                   analysis=analysis, operation_id=operation)
+            error = result.get("error") if result.get("status") != "completed" else None
+            finish = (defer_memory_claim
+                      if error and (error.get("work_pending") or error.get("capacity_blocked"))
+                      else finish_memory_claim)
+            finished = finish(root, user, source, session_id, claim_id=claim_id,
+                              error=error, transaction=db)
+        return {**identity, **result, "candidates": result.get("candidate_count", 0),
+                "processed_seq": finished["memory_processed_seq"] if finished else start - 1}
+    except Exception as error:
+        detail = {"message": str(error), "exception_type": type(error).__name__}
+        finish_memory_claim(root, user, source, session_id, claim_id=claim_id, error=detail)
+        return {**identity, "status": "failed", "error": detail}

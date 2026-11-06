@@ -21,7 +21,6 @@ from run.agents import AgentOutputError, AgentRunResult
 from run.memory import MemoryStore, normalize_memory_filename
 from run.memory.store import connection as memory_connection
 from tests.support.memory_db import update_fragment_metadata
-from run.memory import extract_compressed_round_memory
 
 
 TIERS = {
@@ -75,56 +74,6 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         )
         return filename
 
-    def test_context_compression_passes_complete_rounds_and_persists_candidates(
-        self,
-    ) -> None:
-        rounds = [
-            {
-                "round": 4,
-                "messages": [
-                    {"role": "user", "content": [{"type": "text", "text": "hello"}]},
-                    {"role": "assistant", "content": "world"},
-                ],
-                "tools": {"calls": [{"name": "lookup", "result": {"ok": True}}]},
-            }
-        ]
-
-        class Runner:
-            def __init__(self):
-                self.input_data = None
-
-            def run(self, name, input_data, **kwargs):
-                self.input_data = input_data
-                return _result(
-                    candidates=[
-                        {
-                            "action": "upsert",
-                            "filename": "batch fact",
-                            "content": "A fact from complete rounds.",
-                            "explicit": False,
-                        }
-                    ]
-                )
-
-        runner = Runner()
-        extract_compressed_round_memory(
-            root=self.root,
-            user="alice",
-            config=CONFIG,
-            rounds=rounds,
-            trigger="token_limit",
-            agent_runner=runner,
-        )
-
-        self.assertEqual(require_present(runner.input_data)["trigger"], "context_compression")
-        self.assertEqual(require_present(runner.input_data)["rounds"], rounds)
-        self.assertEqual(require_present(runner.input_data)["source"]["trigger"], "token_limit")
-        self.assertEqual(
-            MemoryStore(self.root, "alice", CONFIG).load_tier("seven_days")[0][
-                "content"
-            ],
-            "A fact from complete rounds.",
-        )
 
     def test_due_scan_deletes_low_weight_and_dispatches_eligible_batch(self) -> None:
         now = datetime(2026, 7, 19, tzinfo=timezone.utc)
@@ -665,6 +614,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
     def test_self_improve_executor_validates_trigger_specific_output(self) -> None:
         class Context:
+            runner = SimpleNamespace(root=self.root, user="alice", config=CONFIG)
+
             def __init__(self, result):
                 self.result = result
 
@@ -683,6 +634,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
     def test_context_extraction_rejects_non_durable_or_unverifiable_candidates(self) -> None:
         class Context:
+            runner = SimpleNamespace(root=self.root, user="alice", config=CONFIG)
+
             @staticmethod
             def run_model(input_data):
                 return _result(
@@ -747,7 +700,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             [item["filename"] for item in result.data["candidates"]],
-            ["偏好一", "偏好二"],
+            ["偏好一.md", "偏好二.md"],
         )
         self.assertEqual(result.metadata["candidate_filter"]["accepted"], 2)
         self.assertEqual(result.metadata["candidate_filter"]["rejected"], 4)
@@ -756,6 +709,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         captured = {}
 
         class Context:
+            runner = SimpleNamespace(root=self.root, user="alice", config=CONFIG)
+
             @staticmethod
             def run_model(input_data):
                 captured.update(input_data)
@@ -784,11 +739,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             [
                 {
                     "round": 7,
-                    "messages": [{"role": "user", "content": "用户明确原话"}],
-                },
-                {
-                    "round": 7,
-                    "messages": [{"role": "assistant", "content": "来自临时重要记忆的复述"}],
+                    "messages": [{"role": "user", "content": "用户明确原话"},
+                                 {"role": "assistant", "content": "来自临时重要记忆的复述"}],
                 },
             ],
         )
@@ -799,6 +751,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
     def test_context_extraction_uses_configured_batch_candidate_cap(self) -> None:
         class Context:
             runner = SimpleNamespace(
+                root=self.root, user="alice",
                 config={"memory": {"extraction_max_candidates_per_batch": 6}}
             )
 
@@ -848,6 +801,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
 
         class Context:
             runner = SimpleNamespace(
+                root=self.root, user="alice",
                 config={"memory": {"extraction_max_candidates_per_batch": 30}}
             )
 

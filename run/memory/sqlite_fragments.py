@@ -28,6 +28,7 @@ from run.memory.sqlite_support import (
 class FragmentStoreMixin:
     if TYPE_CHECKING:
         _lock: threading.RLock
+        config: dict[str, Any]
         root: Path
         rules: dict[str, Any]
         user: str
@@ -99,14 +100,22 @@ class FragmentStoreMixin:
         current: datetime,
         *,
         source_meta: dict[str, Any] | None = None,
+        domain: str = "fact",
     ) -> sqlite3.Row:
         api = _memory_api()
+        domain = api.normalize_memory_domain(domain)
+        if domain not in api.memory_domains_for_profile(self.config):
+            raise api.MemoryError("domain_not_enabled")
+        if domain == "state" and tier != "seven_days":
+            raise api.MemoryError("state 记忆只能写入 seven_days")
         normalized = api.normalize_memory_filename(filename)
         body = api._normalise_text(content)
         if not body:
             raise api.MemoryError("记忆内容不能为空")
         if api.contains_sensitive_credential(body):
             raise api.MemoryError("记忆内容包含疑似敏感凭据")
+        if domain == "state":
+            api.validate_memory_fragment_size(body, "B", operation="近期状态")
         if tier not in api.TIERS:
             raise api.MemoryError(f"未知记忆档位：{tier}")
         if self._row_by_filename(database, normalized) is not None:
@@ -129,8 +138,8 @@ class FragmentStoreMixin:
             INSERT INTO memory_fragments(
                 filename, filename_key, tier, content, content_hash, weight,
                 created_at, content_updated_at, last_used_at, last_weight_date,
-                tier_entered_at, expires_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tier_entered_at, expires_at, domain
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized,
@@ -145,6 +154,7 @@ class FragmentStoreMixin:
                 meta["last_weight_date"],
                 meta["tier_entered_at"],
                 meta["expires_at"],
+                domain,
             ),
         )
         return self._row_by_filename(database, normalized, tier=tier)  # type: ignore[return-value]
@@ -156,12 +166,26 @@ class FragmentStoreMixin:
         content: str,
         *,
         now: datetime | None = None,
+        domain: str = "fact",
     ) -> dict[str, Any]:
         api = _memory_api()
         current = now or api.utc_now()
         with self._lock, connection(self.root, self.user, write=True) as database:
-            row = self._insert_fragment(database, tier, filename, content, current)
+            row = self._insert_fragment(database, tier, filename, content, current, domain=domain)
             return _entry_from_row(row)
+
+    def _refresh_state_expiry(self, database, row, current: datetime) -> None:
+        api = _memory_api()
+        if str(row["domain"]) != "state" or str(row["tier"]) != "seven_days":
+            return
+        rule = api.memory_domain_rules(self.config).get("state", {})
+        if not rule.get("refresh_expiry_on_update", False):
+            return
+        meta = self._new_meta("seven_days", current, source_meta=_row_meta(row))
+        database.execute(
+            "UPDATE memory_fragments SET tier_entered_at=?, expires_at=? WHERE id=?",
+            (meta["tier_entered_at"], meta["expires_at"], int(row["id"])),
+        )
 
     def locate(self, filename: str) -> Any | None:
         api = _memory_api()
@@ -347,6 +371,8 @@ class FragmentStoreMixin:
             row = self._row_by_filename(database, source_name, tier=tier)
             if row is None:
                 raise FileNotFoundError(f"记忆不存在：{tier}/{source_name}")
+            if row["domain"] == "state":
+                api.validate_memory_fragment_size(body, "B", operation="近期状态")
             conflict = self._row_by_filename(database, target_name)
             if conflict is not None and int(conflict["id"]) != int(row["id"]):
                 raise FileExistsError(f"目标记忆已存在：{target_name}")
@@ -365,6 +391,8 @@ class FragmentStoreMixin:
                     int(row["id"]),
                 ),
             )
+            if body != str(row["content"]):
+                self._refresh_state_expiry(database, row, current)
             if tier != "permanent":
                 refreshed = database.execute(
                     "SELECT * FROM memory_fragments WHERE id=?", (int(row["id"]),)

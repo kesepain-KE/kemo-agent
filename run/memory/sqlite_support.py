@@ -41,5 +41,6 @@ def entry_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "filename": str(row["filename"]),
         "content": str(row["content"]),
         "tier": str(row["tier"]),
+        **({"domain": str(row["domain"])} if row["domain"] != "fact" else {}),
         **row_meta(row),
     }

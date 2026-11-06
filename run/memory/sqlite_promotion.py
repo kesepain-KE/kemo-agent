@@ -48,6 +48,8 @@ class PromotionStoreMixin:
     ) -> None:
         api = _memory_api()
         source_tier = str(row["tier"])
+        if str(row["domain"]) == "state":
+            raise api.MemoryError("state 记忆不参与晋升")
         if source_tier == "permanent" or target_tier not in api.TIERS:
             raise api.MemoryError(f"无效记忆晋升：{source_tier}→{target_tier}")
         target_name = api.normalize_memory_filename(target_filename or row["filename"])
@@ -64,6 +66,8 @@ class PromotionStoreMixin:
             require_explicit_type=require_explicit_type,
         )
         if target is not None and int(target["id"]) != int(row["id"]):
+            if str(target["domain"]) != str(row["domain"]):
+                raise api.MemoryError("不同记忆域不能融合")
             if merged_content is None or str(target["tier"]) != target_tier:
                 raise api.MemoryError(f"晋升目标已存在同名记忆：{target_name}")
             target_meta = self._new_meta(
@@ -197,6 +201,8 @@ class PromotionStoreMixin:
                 raise api.MemoryError(f"晋升来源不存在：{location.filename}")
             if str(row["tier"]) == "permanent":
                 raise api.MemoryError("永久记忆不能继续晋升")
+            if str(row["domain"]) == "state":
+                raise api.MemoryError("state 记忆不参与晋升")
 
             source_id = int(row["id"])
             reserved_keys = {
@@ -249,8 +255,8 @@ class PromotionStoreMixin:
                     INSERT INTO memory_fragments(
                         filename, filename_key, tier, content, content_hash,
                         weight, created_at, content_updated_at, last_used_at,
-                        last_weight_date, tier_entered_at, expires_at
-                    ) VALUES(?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, ?, ?)
+                        last_weight_date, tier_entered_at, expires_at, domain
+                    ) VALUES(?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, ?, ?, ?)
                     """,
                     (
                         filename,
@@ -263,6 +269,7 @@ class PromotionStoreMixin:
                         row["last_used_at"],
                         row["tier_entered_at"],
                         row["expires_at"],
+                        row["domain"],
                     ),
                 )
                 if inserted.lastrowid is None:

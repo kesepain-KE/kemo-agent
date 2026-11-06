@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.card_history_support import session_history
+
 from tests.type_assertions import require_present
 
 import json
@@ -13,13 +15,12 @@ from unittest.mock import patch
 from provider.adapters.compat import chat_response_to_kemo, kemo_request_to_chat
 from provider.schema import ChatResponse, Usage
 from run.engine import handle_request, iter_request_events
-from run.history import find_window, load_runtime_window, load_window
+
 from run.memory import (
     analyze_memory_batch_resilient,
     memory_batch_operation_id,
 )
 from run.history import find_record as find_history_record
-from run.history import list_windows, window_exists, window_path
 from run.memory import MemoryStore
 
 
@@ -139,15 +140,15 @@ class MemoryEngineTests(unittest.TestCase):
         provider = {
             "type": "kemo",
             "base_url": "http://127.0.0.1:1/v1",
-            "api_key_env": "TEST_MEMORY_KEY",
+            "api_key_env": "KEMO_API_KEY",
             "model": "mock",
             "stream": False,
         }
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps({"schema_version": 1, "provider": provider}),
             "utf-8",
         )
-        (root / "config" / "global_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text(
             json.dumps(
                 {
                     "tools": {"enabled": False},
@@ -178,24 +179,22 @@ class MemoryEngineTests(unittest.TestCase):
         store = MemoryStore(root, "alice", config)
         self.assertEqual(store.load_tier("permanent"), [])
 
-    def test_committed_round_defers_compression_only_extraction(self) -> None:
+    def test_committed_history_defers_compression_only_extraction(self) -> None:
         root = self.root()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "x"}, clear=False):
             result = handle_request(
                 self.request(), root=root, provider_factory=lambda _: Provider()
             )
         self.assertTrue(result["committed"])
-        self.assertIsNone(result["memory"]["extraction_task_id"])
-        self.assertIsNone(result["memory"]["extraction_error"])
         self.assertEqual(result["memory"]["extraction_mode"], "compression_only")
-        self.assertEqual(result["memory"]["round_extraction"]["status"], "skipped")
-        self.assertEqual(
-            result["memory"]["round_extraction"]["reason"],
-            "deferred_until_compression",
-        )
-        archive = load_window(require_present(find_window(root, "alice", "cli", "s")))
-        self.assertEqual(archive["data"]["memory_processed_round"], 0)
-        self.assertEqual(archive["data"]["memory_status"], "deferred")
+        history = require_present(session_history(root, "alice", "cli", "s")).refresh()
+        self.assertEqual([card.raw_kind for card in history.cards],
+                         ["user_text", "agent_text"])
+        self.assertEqual(history.integrations[0]["status"], "completed")
+        record = require_present(find_history_record(root, "alice", "cli", "s"))
+        self.assertEqual(record["memory_processed_seq"], 0)
+        self.assertNotIn("memory_target_seq", record)
+        self.assertNotEqual(record.get("memory_status"), "queued")
         self.assertEqual(
             MemoryStore(root, "alice", {"memory": {"tiers": TIERS}}).list_items(),
             [],
@@ -203,16 +202,16 @@ class MemoryEngineTests(unittest.TestCase):
 
     def test_provider_failure_and_cancel_commit_without_extracting_memory(self) -> None:
         root = self.root()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "x"}, clear=False):
             with self.assertRaises(RuntimeError):
                 handle_request(
                     self.request(),
                     root=root,
                     provider_factory=lambda _: Provider(fail=True),
                 )
-        archive = load_window(require_present(find_window(root, "alice", "cli", "s")))
-        self.assertEqual(archive["data"]["rounds"], 1)
-        self.assertEqual(archive["data"]["round_metrics"][0]["status"], "failed")
+        archive = require_present(session_history(root, 'alice', 'cli', 's')).refresh()
+        self.assertEqual(len(archive.integrations), 1)
+        self.assertEqual(archive.integrations[0]['status'], 'failed')
         self.assertEqual(
             MemoryStore(root, "alice", {"memory": {"tiers": TIERS}}).list_items(),
             [],
@@ -226,62 +225,15 @@ class MemoryEngineTests(unittest.TestCase):
             cancel_event=stopped,
         )
         stopped.set()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "x"}, clear=False):
             events = list(iterator)
         self.assertEqual([event.type for event in events], ["done"])
         self.assertEqual(events[0].metadata["status"], "cancelled")
-        archive = load_window(require_present(find_window(root, "alice", "cli", "s")))
-        self.assertEqual(archive["data"]["rounds"], 2)
-        self.assertEqual(
-            [item["status"] for item in archive["data"]["round_metrics"]],
-            ["failed", "cancelled"],
-        )
+        archive = require_present(session_history(root, 'alice', 'cli', 's')).refresh()
+        self.assertEqual(len(archive.integrations), 2)
+        self.assertEqual([item['status'] for item in archive.integrations], ['failed', 'cancelled'])
 
-    def test_committed_round_persists_history_without_extraction_queue(self) -> None:
-        root = self.root()
-        with patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False):
-            result = handle_request(
-                self.request(), root=root, provider_factory=lambda _: Provider()
-            )
-        self.assertTrue(result["committed"])
-        windows = list_windows(root, "alice", source="cli")
-        self.assertEqual(len(windows), 1)
-        runtime = window_path(
-            root,
-            "alice",
-            str(windows[0]["window_name"]),
-            kind="runtime",
-        )
-        self.assertFalse(window_exists(runtime))
-        archive = window_path(
-            root,
-            "alice",
-            str(windows[0]["window_name"]),
-            kind="archive",
-        )
-        _runtime_path, workspace = load_runtime_window(archive)
-        self.assertEqual(workspace["data"]["rounds"], 1)
 
-    def test_terminal_bundle_does_not_need_redundant_memory_index_update(self) -> None:
-        root = self.root()
-        request = self.request()
-        request["session_id"] = "index-error"
-        with (
-            patch.dict(os.environ, {"TEST_MEMORY_KEY": "x"}, clear=False),
-            patch(
-                "run.conversation.runtime.patch_archive_metadata",
-                side_effect=RuntimeError("index failed"),
-            ) as metadata_patch,
-        ):
-            result = handle_request(
-                request, root=root, provider_factory=lambda _: Provider()
-            )
-
-        self.assertTrue(result["committed"])
-        self.assertIsNone(result["history_index_error"])
-        metadata_patch.assert_not_called()
-        indexed = find_history_record(root, "alice", "cli", "index-error")
-        self.assertEqual(indexed["run_state"], "idle")
 
 
 if __name__ == "__main__":

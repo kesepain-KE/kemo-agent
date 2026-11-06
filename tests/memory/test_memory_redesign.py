@@ -3,6 +3,7 @@ from tests.type_assertions import require_present
 
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
+import yaml
 import json
 from pathlib import Path
 import sqlite3
@@ -19,7 +20,7 @@ from run.memory import MemoryStore
 from run.memory.analysis import persist_round_memory_analysis
 from run.memory.archive import archive_expired
 from run.memory.evidence import extraction_rounds, quoted_rounds
-from run.memory.extraction import run_extraction_pages, source_pages, INPUT_CHAR_BUDGET
+from run.memory.extraction import run_extraction_pages, source_pages, INPUT_TOKEN_BUDGET
 from run.memory.generated_skills import reconcile
 from run.memory.skill_work import queue_conversion, retry_conversions
 from run.memory.store import connection, _READY_DATABASES
@@ -47,7 +48,7 @@ Verify an existing local deployment without inventing commands.
 @pytest.fixture
 def store(tmp_path):
     (tmp_path / "users/alice").mkdir(parents=True)
-    return MemoryStore(tmp_path, "alice", {})
+    return MemoryStore(tmp_path, "alice", {"memory": {"profile": "work"}})
 
 
 def result(candidates=None, metadata=None, **data):
@@ -106,7 +107,7 @@ def test_v1_migration_preserves_legacy_events_and_fragments(store):
     _READY_DATABASES.discard(str(path.resolve()).casefold())
     with connection(store.root, store.user) as db:
         assert db.execute("SELECT source FROM memory_weight_events").fetchone()[0] == "historical_migration"
-        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == "2"
+        assert db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0] == "3"
     assert store.get_entry("seven_days", "deploy")["content"] == BODY
 
 
@@ -124,6 +125,30 @@ def test_assistant_quote_reinforces_only_with_explicit_same_round_user_backing(s
         assert db.execute("SELECT source FROM memory_weight_events").fetchone()[0] == "assistant"
     again = store.upsert_candidates(accepted, source={"evidence_dates": {"1": "2026-10-15"}}, now=NOW)
     assert again["weighted"] == []
+
+
+@pytest.mark.parametrize("same_integration", [True, False])
+def test_raw_evidence_links_explicit_backing_by_host_integration(store, same_integration):
+    seed(store)
+    data = [
+        {"round": 7, "integration_id": "integration-user",
+         "messages": [{"role": "user", "content": guided_candidate()["user_evidence"]}]},
+        {"round": 9, "integration_id": "integration-user" if same_integration else "integration-other",
+         "messages": [{"role": "assistant", "content": guided_candidate()["evidence"]}]},
+    ]
+    seen = []
+
+    def model(model_input):
+        seen.extend(model_input["rounds"])
+        return result([guided_candidate(evidence_rounds=[9])], receipt_metadata())
+
+    output = execute(context(store, model), {"trigger": "context_compression", "rounds": data})
+    assert all(item.get("integration_id") for item in seen)
+    if same_integration:
+        assert output.data["candidates"][0]["evidence_rounds"] == [9]
+        assert output.data["candidates"][0]["evidence_source"] == "assistant"
+    else:
+        assert output.data["candidates"] == []
 
 
 def test_assistant_cannot_smuggle_explicit_promotion(store):
@@ -228,7 +253,8 @@ def test_source_budget_splits_without_dropping_tail():
     pages = source_pages(extraction_rounds(input_rounds(user=body)))
     assert len(pages) > 1
     for page in pages:
-        assert sum(len(m["content"]) for item in page for m in item["messages"]) <= INPUT_CHAR_BUDGET
+        from provider.tokenizer import count_value
+        assert count_value(page) <= INPUT_TOKEN_BUDGET
     assert any("末尾独立事实" in m["content"] for page in pages for item in page for m in item["messages"])
 
 
@@ -282,45 +308,40 @@ def test_candidate_overflow_applies_batch_limit_and_replays_without_duplicates(s
 
 
 def test_real_history_cursor_waits_for_all_candidate_batches(store):
-    from run.history import (commit_window, empty_window, load_window,
-                             queue_memory_extraction, read_registry, write_registry)
+    from run.history import queue_memory_extraction, find_record
+    from tests.card_history_support import seed_history
     from run.scheduler.memory_recovery import recover_pending_memory
     config = {"memory": {"extraction_mode": "compression_only",
-                          "extraction_max_candidates_per_batch": 2,
-                          "recovery_max_rounds_per_scan": 1}}
+                         "extraction_max_candidates_per_batch": 2,
+                         "extraction_input_tokens": 12000}}
     (store.root / "config").mkdir()
-    (store.root / "config/global_config.json").write_text(json.dumps(config), "utf-8")
-    (store.root / "users/alice/user_config.json").write_text("{}", "utf-8")
-    archive = store.root / "users/alice/history/conv_pending"
-    window = empty_window("alice", "web", "pending")
-    window["text"]["messages"] = [{"role": "user", "content": "五个独立事实"},
-                                  {"role": "assistant", "content": "已记录"}]
-    window["data"].update(rounds=1, memory_processed_round=0, memory_status="deferred",
-                          round_metrics=[{"round": 1, "committed_at": NOW.isoformat()}])
-    commit_window(archive, window)
-    queue_memory_extraction(store.root, store.user, "web", "pending", target_round=1,
-                            reason="manual_compression")
+    (store.root / "config/global_config.yaml").write_text(json.dumps(config), "utf-8")
+    (store.root / "users/alice/user_config.yaml").write_text("{}", "utf-8")
+    seed_history(store.root, store.user, "web", "pending", [
+        {"role": "user", "content": "五个独立事实"},
+        {"role": "assistant", "content": "已记录"},
+    ])
+    queue_memory_extraction(store.root, store.user, "web", "pending", target_seq=2, reason="manual_compression")
     analysis = {"status": "completed", "source": {"evidence_dates": {"1": "2026-10-15"}},
                 "candidates": [{"action": "create", "filename": f"queued-{i}",
                                 "content": f"独立事实 {i}", "evidence_rounds": [1]}
                                for i in range(5)]}
     scheduler = SimpleNamespace(root=store.root, provider_factory=lambda _: None,
                                 _stop_event=threading.Event(), _report_error=lambda *args: None)
-    with patch("run.scheduler.maintenance.analyze_round_memory", return_value=analysis):
+    with (patch("run.memory.analysis.analyze_memory_batch_resilient", return_value=analysis) as analyze,
+          patch("run.history.memory_claims.datetime", wraps=datetime) as clock):
+        cycle = datetime.now(timezone.utc)
         for expected_count in (2, 4, 5):
+            clock.now.return_value = cycle
             recovered = recover_pending_memory(scheduler, store.user)
-            data = load_window(archive)["data"]
+            record = find_record(store.root, store.user, "web", "pending")
             assert not recovered["failed"]
-            assert not recovered["capacity_blocked"]
             assert len(store.load_all()) == expected_count
-            assert data["memory_processed_round"] == (1 if expected_count == 5 else 0)
+            assert record["memory_processed_seq"] == (2 if expected_count == 5 else 0)
             if expected_count < 5:
-                assert data["memory_status"] == "queued"
-                assert "memory_error" not in data
-                sessions, active = read_registry(store.root, store.user)
-                for record in sessions.values():
-                    record["memory_retry_at"] = "2000-01-01T00:00:00+00:00"
-                write_registry(store.root, store.user, sessions, active)
+                assert recovered["deferred"] and record["memory_status"] == "queued"
+            cycle += timedelta(seconds=61)
+    assert analyze.call_count == 1
     assert not WorkLedger(store.root, store.user).pending("candidate")
 
 
@@ -619,8 +640,8 @@ def test_web_catalog_retains_stale_status_and_manual_cleanup(store, monkeypatch)
     from web.service import WebRunService
     monkeypatch.setattr("run.memory.utc_now", lambda: NOW)
     (store.root / "config").mkdir()
-    (store.root / "config/global_config.json").write_text("{}", "utf-8")
-    (store.root / "users/alice/user_config.json").write_text("{}", "utf-8")
+    (store.root / "config/global_config.yaml").write_text("{}", "utf-8")
+    (store.root / "users/alice/user_config.yaml").write_text("{}", "utf-8")
     seed(store)
     generated_skill(store)
     service = WebRunService(store.root)
@@ -654,8 +675,8 @@ def test_builtin_and_template_subagents_use_80_without_relaxing_guards():
     for path in [*(root / "agents").glob("*/agent-config.json"),
                  root / "template/agent/agent-config.json"]:
         assert json.loads(path.read_text("utf-8"))["tools"]["max_iterations"] == 80
-    config = json.loads((root / "config/global_config.json").read_text("utf-8"))
-    assert config["tools"]["consecutive_identical_call_limit"] == 8
+    config = yaml.safe_load((root / "config/global_config.yaml").read_text("utf-8"))
+    assert config["tools"]["consecutive_identical_call_limit"] == 3
     assert config["history"]["consecutive_tool_fail_limit"] == 5
     assert config["agent_runtime"]["default_timeout"] == 600
     assert [config["memory"]["tiers"][tier]["upgrade_threshold"]

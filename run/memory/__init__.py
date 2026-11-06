@@ -18,12 +18,17 @@ from run.memory.store import MEMORY_DB_SCHEMA_VERSION
 MEMORY_SCHEMA_VERSION = MEMORY_DB_SCHEMA_VERSION
 TIERS = ("seven_days", "one_month", "half_year", "permanent")
 TEMPORARY_TIERS = TIERS[:-1]
+MEMORY_PROFILES = frozenset({"work", "companion"})
+MEMORY_DOMAINS = ("fact", "relation", "state")
+DEFAULT_DOMAIN_RULES = {
+    "relation": {"upgrade_threshold": 1},
+    "state": {"upgrade_threshold": None, "refresh_expiry_on_update": True},
+}
 MEMORY_EXTRACTION_MODES = frozenset(
     {"disabled", "compression_only", "background", "on_commit"}
 )
-DEFAULT_EXTRACTION_BATCH_ROUNDS = 5
+DEFAULT_EXTRACTION_INPUT_TOKENS = 12000
 DEFAULT_EXTRACTION_MAX_CANDIDATES_PER_BATCH = 30
-MAX_EXTRACTION_BATCH_ROUNDS = 20
 MAX_EXTRACTION_CANDIDATES_PER_BATCH = 40
 MEMORY_OPERATION_HISTORY_LIMIT = 512
 FILENAME_MAX_CHARS = 50
@@ -145,22 +150,72 @@ def memory_extraction_mode(config: dict[str, Any]) -> str:
     return mode
 
 
-def memory_extraction_batch_rounds(config: dict[str, Any]) -> int:
+def memory_profile(config: dict[str, Any]) -> str:
+    raw = config.get("memory", {})
+    if not isinstance(raw, dict):
+        raise MemoryConfigError("memory 必须是对象")
+    value = raw.get("profile", "companion")
+    if not isinstance(value, str) or value not in MEMORY_PROFILES:
+        raise MemoryConfigError("memory.profile 只允许 work 或 companion")
+    return value
+
+
+def memory_domains_for_profile(config: dict[str, Any]) -> tuple[str, ...]:
+    return MEMORY_DOMAINS if memory_profile(config) == "companion" else ("fact",)
+
+
+def memory_domain_rules(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    profile = memory_profile(config)
+    raw = config.get("memory", {}).get("domain_rules", {})
+    if not isinstance(raw, dict) or set(raw) - set(DEFAULT_DOMAIN_RULES):
+        raise MemoryConfigError("memory.domain_rules 只允许 relation 或 state 对象")
+    rules = {name: dict(values) for name, values in DEFAULT_DOMAIN_RULES.items()}
+    for name, values in raw.items():
+        if not isinstance(values, dict) or set(values) - set(rules[name]):
+            raise MemoryConfigError(f"memory.domain_rules.{name} 包含未知配置项")
+        rules[name].update(values)
+    for name, values in rules.items():
+        threshold = values["upgrade_threshold"]
+        if threshold is not None and (type(threshold) is not int or threshold < 0):
+            raise MemoryConfigError(
+                f"memory.domain_rules.{name}.upgrade_threshold 必须是非负整数或 null"
+            )
+    if type(rules["state"]["refresh_expiry_on_update"]) is not bool:
+        raise MemoryConfigError("memory.domain_rules.state.refresh_expiry_on_update 必须是 bool")
+    return rules if profile == "companion" else {}
+
+
+def normalize_memory_domain(value: Any) -> str:
+    if value is None or value == "":
+        return "fact"
+    if not isinstance(value, str) or value not in MEMORY_DOMAINS:
+        raise MemoryError("memory_domain 只允许 fact、relation 或 state")
+    return value
+
+
+def memory_upgrade_threshold(
+    config: dict[str, Any], tier: str, domain: str,
+) -> int | None:
+    domain = normalize_memory_domain(domain)
+    rules = memory_domain_rules(config)
+    if domain == "state":
+        return None
+    if domain in rules:
+        return rules[domain]["upgrade_threshold"]
+    # Legacy fact rules treat a null threshold as zero; keep that behavior.
+    return int(tier_rules(config)[tier].upgrade_threshold or 0)
+
+
+def memory_extraction_input_tokens(config: dict[str, Any]) -> int:
     raw_memory = config.get("memory") or {}
     if not isinstance(raw_memory, dict):
         raise MemoryConfigError("memory 必须是对象")
     raw_value = raw_memory.get(
-        "extraction_batch_rounds", DEFAULT_EXTRACTION_BATCH_ROUNDS
+        "extraction_input_tokens", DEFAULT_EXTRACTION_INPUT_TOKENS
     )
-    if isinstance(raw_value, bool):
-        raise MemoryConfigError("memory.extraction_batch_rounds 必须是正整数")
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise MemoryConfigError("memory.extraction_batch_rounds 必须是正整数") from exc
-    if value < 1:
-        raise MemoryConfigError("memory.extraction_batch_rounds 必须是正整数")
-    return min(value, MAX_EXTRACTION_BATCH_ROUNDS)
+    if type(raw_value) is not int or not 512 <= raw_value <= 64000:
+        raise MemoryConfigError("memory.extraction_input_tokens 必须是 512..64000 的整数")
+    return raw_value
 
 
 def memory_extraction_candidate_limit(
@@ -351,7 +406,6 @@ _DOMAIN_MODULES = (
     "evidence",
     "extraction",
     "generated_skills",
-    "pipeline",
     "skill_work",
     "sqlite",
     "store",

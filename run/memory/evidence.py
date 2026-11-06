@@ -79,6 +79,40 @@ def safe_body(value: Any, *, role: str) -> str:
     return body.strip()
 
 
+def narrative_record(card) -> dict | None:
+    """Only actual user/guidance and delivered assistant prose is evidence.
+
+    VIEW activity is irrelevant: absorbed RAW remains evidence. Withdrawn
+    integrations are excluded by the RAW query, not by token_active.
+    """
+    payload = card.raw_payload
+    if card.raw_kind == "user_text":
+        role = "user"
+    elif card.raw_kind == "agent_text" and card.raw_level == "final":
+        role = "assistant"
+    else:
+        return None
+    if any(payload.get(key) for key in ("incomplete", "retry_snapshot", "withdrawn")):
+        return None
+    body = safe_body(payload.get("text") or payload.get("content"), role=role)
+    if not body:
+        return None
+    return {"round": card.seq, "seq": card.seq, "card_id": card.card_id,
+            "integration_id": card.integration_id, "level": card.raw_level,
+            "committed_at": card.created_at, "messages": [{"role": role, "content": body}]}
+
+
+def narrative_rows(db, key, start, end):
+    """Stream narrative only; never count tool-card traffic as memory input."""
+    return db.execute(
+        "SELECT c.* FROM context_cards c LEFT JOIN card_integrations i "
+        "ON i.integration_id=c.integration_id AND i.session_key=c.session_key "
+        "WHERE c.session_key=? AND c.seq>=? AND c.seq<=? "
+        "AND c.raw_kind IN ('user_text','agent_text') "
+        "AND COALESCE(json_extract(i.record_json,'$.withdrawn'),0)!=1 ORDER BY c.seq",
+        (key, start, end))
+
+
 def extraction_rounds(rounds: list[Any]) -> list[dict[str, Any]]:
     result = []
     for item in rounds:
@@ -91,7 +125,11 @@ def extraction_rounds(rounds: list[Any]) -> list[dict[str, Any]]:
                 body = safe_body(message.get("content"), role=role)
                 if body:
                     messages.append({"role": role, "content": body})
-        result.append({"round": item.get("round"), "messages": messages})
+        record = {key: item[key] for key in (
+            "round", "seq", "card_id", "integration_id", "level", "committed_at", "context_only")
+            if key in item}
+        record["messages"] = messages
+        result.append(record)
     return result
 
 
@@ -102,7 +140,7 @@ def quoted_rounds(candidate: dict[str, Any], rounds: list[dict[str, Any]],
     if not quote:
         return []
     matches = sorted({r["round"] for r in rounds
-                      if type(r.get("round")) is int and r["round"] > 0
+                       if type(r.get("round")) is int and r["round"] > 0 and not r.get("context_only")
                       and any(isinstance(m, dict) and m.get("role") == role
                               and quote in normalize(safe_body(m.get("content"), role=role))
                               for m in r.get("messages", []))})
@@ -119,8 +157,8 @@ def quoted_rounds(candidate: dict[str, Any], rounds: list[dict[str, Any]],
 def assistant_backing(candidate: dict, rounds: list[dict]) -> list[int]:
     """Assistant-only recitation cannot manufacture an independent observation.
 
-    Require same-round explicit user confirmation plus substantial overlap
-    with the searched fact. Generic 'continue/yes' and questions do not count.
+    RAW records require host-owned integration linkage; combined evidence
+    records use their own record ID. Generic assent and questions do not count.
     """
     from run.memory import _tokens, contains_sensitive_credential
     backing = candidate.get("user_evidence")
@@ -133,7 +171,18 @@ def assistant_backing(candidate: dict, rounds: list[dict]) -> list[int]:
     overlap = _tokens(backing) & _tokens(candidate.get("content", ""))
     if len(overlap) < 3:
         return []
-    return quoted_rounds({**candidate, "evidence": backing}, rounds)
+    user_candidate = {k: v for k, v in candidate.items() if k != "evidence_rounds"}
+    confirmed = set(quoted_rounds({**user_candidate, "evidence": backing}, rounds))
+    assistant_records = quoted_rounds(candidate, rounds, role="assistant")
+    integrations = {
+        item["integration_id"] for item in rounds
+        if item.get("round") in confirmed and item.get("integration_id")
+    }
+    return sorted({
+        item["round"] for item in rounds if item.get("round") in assistant_records
+        and (item["integration_id"] in integrations if item.get("integration_id")
+             else item["round"] in confirmed)
+    })
 
 
 def search_receipts(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:

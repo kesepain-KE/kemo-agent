@@ -28,11 +28,13 @@ from run.memory.sqlite_support import (
 class CandidateStoreMixin:
     if TYPE_CHECKING:
         _insert_fragment = SqliteMemoryStore._insert_fragment
+        _refresh_state_expiry = SqliteMemoryStore._refresh_state_expiry
         _lock: threading.RLock
         _promote_location = SqliteMemoryStore._promote_location
         _promote_row = SqliteMemoryStore._promote_row
         _row_by_filename = SqliteMemoryStore._row_by_filename
         _touch_row = SqliteMemoryStore._touch_row
+        config: dict[str, Any]
         database_path = SqliteMemoryStore.database_path
         load_all = SqliteMemoryStore.load_all
         root: Path
@@ -201,6 +203,16 @@ class CandidateStoreMixin:
                 if not isinstance(candidate, dict):
                     rejected += 1
                     continue
+                try:
+                    domain = api.normalize_memory_domain(candidate.get("memory_domain"))
+                except api.MemoryError:
+                    rejected += 1
+                    rejection_reasons.append({"reason": "invalid_memory_domain"})
+                    continue
+                if domain not in api.memory_domains_for_profile(self.config):
+                    rejected += 1
+                    rejection_reasons.append({"reason": "domain_not_enabled"})
+                    continue
                 action = str(candidate.get("action") or "upsert").strip().casefold()
                 raw_filename = candidate.get("filename") or candidate.get("target")
                 content = api._normalise_text(candidate.get("content"))
@@ -234,6 +246,10 @@ class CandidateStoreMixin:
                         rejected += 1
                         continue
                     row = self._row_by_filename(database, filename)
+                    if row is not None and str(row["domain"]) != domain:
+                        rejected += 1
+                        rejection_reasons.append({"filename": filename, "reason": "memory_domain_mismatch"})
+                        continue
                     if row is not None:
                         forgotten.append(str(row["filename"]))
                         database.execute(
@@ -251,21 +267,26 @@ class CandidateStoreMixin:
                     filename = api.normalize_memory_filename(raw_filename or content)
                     if action != "reinforce":
                         content, _ = api.validate_memory_fragment_size(
-                            content, candidate.get("memory_type"), operation="候选记忆")
+                            content, "B" if domain == "state" else candidate.get("memory_type"),
+                            operation="候选记忆")
                 except api.MemoryError:
                     rejected += 1
                     continue
                 explicit = (candidate.get("explicit") is True
                             and candidate.get("evidence_source") != "assistant")
                 row = self._row_by_filename(database, filename)
+                if row is not None and str(row["domain"]) != domain:
+                    rejected += 1
+                    rejection_reasons.append({"filename": filename, "reason": "memory_domain_mismatch"})
+                    continue
                 if action == "create" and row is not None:
                     rejected += 1
                     rejection_reasons.append({"filename": filename, "reason": "create_conflict"})
                     continue
                 if row is None:
-                    tier = "permanent" if explicit else "seven_days"
+                    tier = "permanent" if explicit and domain != "state" else "seven_days"
                     inserted = self._insert_fragment(
-                        database, tier, filename, content, current
+                        database, tier, filename, content, current, domain=domain
                     )
                     created.append(str(inserted["filename"]))
                     added, locked, skipped = self._weight_evidence(
@@ -291,7 +312,8 @@ class CandidateStoreMixin:
                         """,
                         (content, _hash(content), api.iso(current), int(row["id"])),
                     )
-                if explicit and tier != "permanent":
+                    self._refresh_state_expiry(database, row, current)
+                if explicit and tier != "permanent" and domain != "state":
                     refreshed = database.execute(
                         "SELECT * FROM memory_fragments WHERE id=?", (int(row["id"]),)
                     ).fetchone()
@@ -378,7 +400,8 @@ class CandidateStoreMixin:
             tier = str(row["tier"])
             filename = str(row["filename"])
             rule = self.rules[tier]
-            if int(row["weight"]) >= int(rule.upgrade_threshold or 0):
+            threshold = api.memory_upgrade_threshold(self.config, tier, str(row["domain"]))
+            if threshold is not None and int(row["weight"]) >= threshold:
                 if rule.next is None:
                     raise api.MemoryConfigError(f"临时记忆层缺少晋升目标：{tier}")
                 self._promote_location(api.MemoryLocation(tier, filename), rule.next, current)
@@ -448,6 +471,11 @@ class CandidateStoreMixin:
                 """,
                 (tier,),
             ).fetchall()
+        if tier != "permanent" and api.memory_profile(self.config) == "companion":
+            priority = {"state": 0, "relation": 1, "fact": 2}
+            rows.sort(key=lambda row: (
+                priority[str(row["domain"])], -int(row["weight"]), str(row["filename_key"]),
+            ))
         selected_rows = (
             rows
             if tier == "permanent" or max_files is None
