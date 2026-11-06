@@ -82,7 +82,7 @@ def test_production_prompt_loads_the_complete_single_manual() -> None:
 def test_personal_manual_is_light_and_engineering_reference_is_separate() -> None:
     assert len(MANUAL) < 8000
     assert "个人智能操作入口" in MANUAL
-    assert "knowledge/global/engineering-operations.md" in MANUAL
+    assert "knowledge/global/engineering/engineering-operations.md" in MANUAL
     assert "MAX_TOOL_RESULT_CHARS" in ENGINEERING
     assert "provider_runtime.max_retries" in ENGINEERING
     assert "MAX_TOOL_RESULT_CHARS" not in MANUAL
@@ -95,7 +95,7 @@ def test_personal_manual_is_light_and_engineering_reference_is_separate() -> Non
         ("tools.timeout=240", "tools.timeout=241", "claim tool-budget", True),
         ("不要盲目重试", "可以直接重试", "required safety", True),
         ("### 用户指定执行路径", "### 信任与资料", "duplicate h3", False),
-        ("knowledge/global/inline-widgets.md", "knowledge/global/missing.md", "source path missing", False),
+        ("knowledge/global/web/inline-widgets.md", "knowledge/global/missing.md", "source path missing", False),
         ("users/<name>/file_upload/", "users/<name>/upload/", "runtime path not classified", True),
         ("`web_search`", "搜索工具", "coverage plugin", True),
         ("查询工具对相同参数也重新执行", "静态查询", "claim tool-dedup", True),

@@ -145,7 +145,7 @@ def test_repeat_side_effect_is_blocked_without_execution_count(workspace, monkey
 
 
 def test_inflight_duplicate_policy_blocks_side_effects_and_live_reads():
-    from run.conversation.main_orchestration import _duplicate_execution_should_block
+    from run.conversation.runtime_helpers import duplicate_execution_should_block
 
     class Integration:
         def __init__(self, live):
@@ -154,13 +154,13 @@ def test_inflight_duplicate_policy_blocks_side_effects_and_live_reads():
         def live_executions(self):
             return self.live
 
-    read = {"action": "read", "path": "same.txt"}
-    write = {"action": "write", "path": "same.txt", "content": "x"}
-    assert _duplicate_execution_should_block(
-        Integration([{"execution_id": "exec-1"}]), "file", read, "exec-1",
+    assert duplicate_execution_should_block(
+        Integration([{"execution_id": "exec-1"}]), "exec-1",
     )
-    assert not _duplicate_execution_should_block(Integration([]), "file", read, "exec-1")
-    assert _duplicate_execution_should_block(Integration([]), "file", write, "exec-1")
+    assert not duplicate_execution_should_block(Integration([]), "exec-1")
+    assert not duplicate_execution_should_block(
+        Integration([{"execution_id": "exec-other"}]), "exec-1",
+    )
 
 
 def test_completed_live_read_is_reexecuted_after_finishing_during_provider_request(
@@ -261,6 +261,17 @@ def test_identical_search_file_and_network_queries_are_reexecuted(workspace, mon
     assert len(executions) == 6
     assert [r["status"] for r in records] == ["completed"] * 6
     assert [r["result"]["result"]["sequence"] for r in records] == list(range(1, 7))
+
+
+@pytest.mark.parametrize("agent", ["main", "child"])
+def test_graph_write_guide_reexecutes_across_provider_retry(workspace, monkeypatch, agent):
+    call = ("kemo_graph_write", {"action": "operation_guide", "operation": "sync"})
+    records, executions, _ = run_loop(
+        workspace, monkeypatch, agent, [call] * 2, retry=True,
+    )
+    assert len(executions) == 2
+    assert records[-1]["result"]["result"]["sequence"] == 2
+    assert records[-1]["status"] == "completed"
 
 
 @pytest.mark.parametrize("agent", ["main", "child"])

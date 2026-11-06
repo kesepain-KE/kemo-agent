@@ -123,7 +123,11 @@ def test_saved_conversation_agents_use_real_chat_structured_tool(
     rounds = [{"round": 1, "user": "Please remember the project uses Python.",
                "assistant": "Noted."}]
     payload = (
-        {"trigger": "session_closed", "session_id": "saved-chat", "target_round": 1, "rounds": rounds}
+        {"trigger": "session_closed", "session_id": "saved-chat", "target_seq": 2,
+         "records": [
+             {"seq": 1, "role": "user", "text": rounds[0]["user"]},
+             {"seq": 2, "role": "assistant", "text": rounds[0]["assistant"]},
+         ]}
         if agent == "history_summary" else
         {"trigger": "context_compression", "rounds": rounds}
     )

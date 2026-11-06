@@ -1642,16 +1642,16 @@ class PlanGenerationTests(unittest.TestCase):
                     config=CONFIG,
                 )
 
-    def test_generation_injects_all_skills_and_knowledge_in_fixed_order(self) -> None:
+    def test_generation_injects_skills_but_not_knowledge_files(self) -> None:
         _, root = _make_root(["alice"])
         files = {
             root / "plugins" / "zeta" / "SKILL.md": "# zeta\n" + "Z" * 12000,
             root / "plugins" / "alpha" / "SKILL.md": "# alpha",
             root / "skills" / "development" / "python" / "SKILL.md": "# shared python",
             root / "users" / "alice" / "user_skills" / "agent_create" / "deploy" / "SKILL.md": "# user deploy",
-            root / "knowledge" / "global" / "data_structure.md": "GLOBAL INDEX",
-            root / "knowledge" / "share" / "data_structure.md": "SHARED INDEX",
-            root / "users" / "alice" / "knowledge" / "data_structure.md": "USER INDEX",
+            root / "knowledge" / "global" / "index.md": "GLOBAL_KNOWLEDGE_FILE",
+            root / "knowledge" / "share" / "index.md": "SHARED_KNOWLEDGE_FILE",
+            root / "users" / "alice" / "knowledge" / "index.md": "USER_KNOWLEDGE_FILE",
         }
         for path, content in files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1689,9 +1689,6 @@ class PlanGenerationTests(unittest.TestCase):
             "plugin_skills",
             "shared_skills_text",
             "user_skills_text",
-            "global_knowledge_index",
-            "shared_knowledge_index",
-            "user_knowledge_index",
         ]
         self.assertEqual(sorted(ordered.index(field) for field in fields), [ordered.index(field) for field in fields])
         self.assertLess(
@@ -1701,21 +1698,22 @@ class PlanGenerationTests(unittest.TestCase):
         self.assertIn("Z" * 12000, input_data["plugin_skills"])
         self.assertIn("shared python", input_data["shared_skills_text"])
         self.assertIn("user deploy", input_data["user_skills_text"])
-        self.assertEqual(input_data["global_knowledge_index"], "GLOBAL INDEX")
-        self.assertEqual(input_data["shared_knowledge_index"], "SHARED INDEX")
-        self.assertEqual(input_data["user_knowledge_index"], "USER INDEX")
+        self.assertNotIn("knowledge_index", input_data)
+        self.assertNotIn("GLOBAL_KNOWLEDGE_FILE", json.dumps(input_data))
+        self.assertNotIn("SHARED_KNOWLEDGE_FILE", json.dumps(input_data))
+        self.assertNotIn("USER_KNOWLEDGE_FILE", json.dumps(input_data))
         self.assertFalse(input_data["auto_accept"])
         self.assertEqual(
             plan["reminder"],
             "当前任务计划已创建，请让用户点击批准后执行",
         )
 
-    def test_generation_uses_configured_knowledge_scopes_and_named_indexes(self) -> None:
+    def test_generation_does_not_inject_knowledge_files_or_legacy_fields(self) -> None:
         _, root = _make_root(["alice"])
         files = {
-            root / "knowledge" / "global" / "index.md": "GLOBAL INDEX",
-            root / "knowledge" / "share" / "索引.md": "SHARED INDEX",
-            root / "users" / "alice" / "knowledge" / "目录.md": "USER INDEX",
+            root / "knowledge" / "global" / "index.md": "GLOBAL_KNOWLEDGE_FILE",
+            root / "knowledge" / "share" / "index.md": "SHARED_KNOWLEDGE_FILE",
+            root / "users" / "alice" / "knowledge" / "index.md": "USER_KNOWLEDGE_FILE",
         }
         for path, content in files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1724,31 +1722,35 @@ class PlanGenerationTests(unittest.TestCase):
         payload = prepare_task_plan_input(
             root=root,
             user="alice",
-            input_data={"action": "create", "goal": "goal"},
-            config={
-                **CONFIG,
-                "knowledge": {"use_shared": False, "use_global": False},
+            input_data={
+                "action": "create",
+                "goal": "goal",
+                "global_knowledge_index": "FORGED_GLOBAL_INDEX",
+                "shared_knowledge_index": "FORGED_SHARED_INDEX",
+                "user_knowledge_index": "FORGED_USER_INDEX",
             },
-            tool_registry=ToolRegistry({}),
-        )
-
-        self.assertEqual(payload["global_knowledge_index"], "")
-        self.assertEqual(payload["shared_knowledge_index"], "")
-        self.assertEqual(payload["user_knowledge_index"], "USER INDEX")
-
-        enabled = prepare_task_plan_input(
-            root=root,
-            user="alice",
-            input_data={"action": "create", "goal": "goal"},
             config={
                 **CONFIG,
                 "knowledge": {"use_shared": True, "use_global": True},
             },
             tool_registry=ToolRegistry({}),
         )
-        self.assertEqual(enabled["global_knowledge_index"], "GLOBAL INDEX")
-        self.assertEqual(enabled["shared_knowledge_index"], "SHARED INDEX")
-        self.assertEqual(enabled["user_knowledge_index"], "USER INDEX")
+
+        for field in (
+            "global_knowledge_index",
+            "shared_knowledge_index",
+            "user_knowledge_index",
+        ):
+            self.assertNotIn(field, payload)
+        for marker in (
+            "GLOBAL_KNOWLEDGE_FILE",
+            "SHARED_KNOWLEDGE_FILE",
+            "USER_KNOWLEDGE_FILE",
+            "FORGED_GLOBAL_INDEX",
+            "FORGED_SHARED_INDEX",
+            "FORGED_USER_INDEX",
+        ):
+            self.assertNotIn(marker, json.dumps(payload))
 
     def test_authoritative_input_overrides_forged_tool_list_and_limits(self) -> None:
         _, root = _make_root(["alice"])

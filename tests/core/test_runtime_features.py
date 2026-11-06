@@ -953,12 +953,21 @@ def run(*, context):
                 "done",
             ],
         )
-        self.assertEqual(provider.requests[1].messages[-1]["role"], "tool")
+        messages = provider.requests[1].messages
+        tool_message = next(message for message in messages if message["role"] == "tool")
+        self.assertEqual(json.loads(tool_message["content"])["result"]["result"]["value"], "x")
+        tail = messages[-1]
+        self.assertTrue(tail["content"].startswith("[CardStream dynamic_tail:"))
+        self.assertEqual(json.loads(tail["content"].split("\n", 1)[1])["async_tasks"], {
+            "pending_count": 0, "completion_blocked": False,
+            "pending_tasks": [], "pending_tasks_truncated": False,
+        })
         assistant_tool_message = next(
             message
             for message in provider.requests[1].messages
             if message.get("tool_calls")
         )
+        self.assertEqual(tool_message["tool_call_id"], assistant_tool_message["tool_calls"][0]["id"])
         self.assertNotIn("reasoning_content", assistant_tool_message)
         path = session_history(root, 'alice', 'cli', 'tool')
         window = require_present(path).refresh()
@@ -2927,15 +2936,13 @@ def run(*, context):
 
     def test_unrecoverable_context_error_commits_failed_round(self) -> None:
         _, root = self.make_root()
-        provider = ScriptedProvider(
-            responses=[
-                ProviderError(
-                    "oversized request",
-                    status_code=400,
-                    category="context_length_exceeded",
-                )
-            ]
+        failure = ProviderError(
+            "oversized request",
+            status_code=400,
+            category="context_length_exceeded",
         )
+        failure.failed_usage = {"input_tokens": 3, "output_tokens": 0, "total_tokens": 3}
+        provider = ScriptedProvider(responses=[failure])
         with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             events = list(
                 iter_request_events(
@@ -2944,7 +2951,6 @@ def run(*, context):
                         "source": "cli",
                         "session_id": "context-unrecoverable",
                         "prompt": "go",
-                        "_auto_retry_max_attempts": 1,
                     },
                     root=root,
                     provider_factory=lambda _: provider,
@@ -2952,6 +2958,7 @@ def run(*, context):
             )
 
         self.assertEqual([event.type for event in events], ["error"])
+        self.assertEqual(len(provider.requests), 1)
         self.assertTrue(events[0].metadata["committed"])
         self.assertEqual(
             events[0].error["category"],
@@ -2960,6 +2967,8 @@ def run(*, context):
         window = require_present(session_history(root, 'alice', 'cli', 'context-unrecoverable')).refresh()
         self.assertEqual(len(window.integrations), 1)
         self.assertEqual(window.integrations[0]['status'], 'failed')
+        self.assertEqual(window.usage["total_tokens"], 3)
+        self.assertEqual(window.usage["provider_request_count"], 1)
 
     def test_error_and_cancel_both_commit_terminal_rounds(self) -> None:
         _, root = self.make_root(stream=True)

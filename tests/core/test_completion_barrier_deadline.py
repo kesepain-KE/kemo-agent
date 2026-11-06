@@ -4,11 +4,12 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import Future
 
 import pytest
 
 from provider.schema import ChatResponse, ProviderError
-from run.agents import TaskCoordinator, TaskLedger
+from run.agents import AgentTimeoutError, TaskCoordinator, TaskLedger
 from run.engine import iter_request_events
 from run.cards import CardStore
 from run.conversation import session_lock
@@ -40,11 +41,17 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
             lambda **kwargs: SimpleNamespace(stop_reason="task_plan_created", plan_id="test",
                                              awaiting_user_approval=True))
     release, started, cancel = threading.Event(), threading.Event(), threading.Event()
+    late_result = Future()
     calls, events, errors = [], [], []
 
     def uncooperative(_):
         calls.append(1)
         started.set()
+        if route == "waiting":
+            raise AgentTimeoutError(
+                "child exceeded its execution budget", process_terminated=False,
+                completion_future=late_result,
+            )
         release.wait(10)
         return {"answer": "late child"}
 
@@ -95,7 +102,7 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
         assert total == 1 and children[0]["execution_live"]
         assert children[0]["status"] in {"cancelling", "running", "timed_out_running"}
         child_id = children[0]["id"]
-        assert not scheduler._tasks[child_id].done_event.is_set()
+        assert scheduler._tasks[child_id].done_event.is_set() is (route == "waiting")
         assert calls == [1]
         lock = session_lock(root, "alice", "web", "scope")
         assert lock.acquire(blocking=False) is False
@@ -119,6 +126,8 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
         assert other[-1].type == "done"
     finally:
         release.set()
+        if route == "waiting":
+            late_result.set_result({"answer": "late child"})
         thread.join(6)
     assert not thread.is_alive() and not errors
     eventually(lambda: not TaskLedger(root, "alice").get(record["id"], "web", "scope").get("execution_live"))

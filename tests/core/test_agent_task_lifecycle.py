@@ -86,11 +86,16 @@ def root_record(root):
 
 def test_background_final_is_blocked_then_result_resumes_with_paired_tools(setup):
     root, _ = setup
+    config_path = root / "config/global_config.yaml"
+    config = json.loads(config_path.read_text("utf-8"))
+    config["agent_runtime"] = {"default_timeout": .1}
+    config_path.write_text(json.dumps(config), "utf-8")
     release = threading.Event()
     JOBS['worker'] = lambda cancel: release.wait(30) and {'answer': 'child-result'}
     thread, _, events, errors, provider = launch(root)
     try:
         eventually(lambda: (root_record(root) or {}).get('status') == 'waiting_children')
+        thread.join(1.25)
         assert thread.is_alive() and len(provider.requests) == 2
         assert not any(e.type == 'done' for e in events)
     finally:
