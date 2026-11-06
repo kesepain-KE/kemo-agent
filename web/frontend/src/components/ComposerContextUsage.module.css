@@ -1,0 +1,78 @@
+.controls {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 32px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-full);
+}
+.trigger, .cacheTrigger {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  border: 0;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--text-primary);
+}
+.trigger { width: 28px; padding: 0; }
+.cacheTrigger {
+  padding: 0 6px 0 10px;
+  color: var(--text-secondary);
+  font-size: var(--t-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.trigger:hover, .trigger[aria-expanded="true"] { background: var(--bg-hover); }
+.trigger:focus-visible, .cacheTrigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.popover {
+  position: fixed;
+  z-index: 85;
+  box-sizing: border-box;
+  padding: 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xl);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--t-sm);
+  line-height: var(--lh-base);
+  font-variant-numeric: tabular-nums;
+}
+.popover:focus { outline: none; }
+.heading, .cache > div, .breakdown > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.heading { flex-wrap: wrap; color: var(--text-tertiary); }
+.heading strong { color: var(--text-primary); font-weight: 550; white-space: nowrap; }
+.heading > span > strong { margin-left: 3px; }
+.track {
+  display: flex;
+  gap: 1px;
+  height: 5px;
+  margin: 14px 0 16px;
+  overflow: hidden;
+  border-radius: var(--r-full);
+  background: var(--bg-active);
+}
+.track > i { display: block; min-width: 0; flex: none; }
+.system { background: var(--text-faint); }
+.tools { background: var(--text-tertiary); }
+.history { background: var(--accent); }
+.dynamic { background: var(--text-secondary); }
+.breakdown { display: grid; gap: 9px; margin: 0; }
+.breakdown dt { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-secondary); }
+.breakdown dt > i { width: 8px; height: 8px; flex: none; border-radius: 2px; }
+.breakdown dd { flex: none; margin: 0; }
+.cache { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--border-subtle); }
+.cache > div > span { color: var(--text-secondary); }
+.cache strong { font-weight: 550; }
+.cache small { display: block; margin-top: 4px; color: var(--text-tertiary); font-size: var(--t-xs); }

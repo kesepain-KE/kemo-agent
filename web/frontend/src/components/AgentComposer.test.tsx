@@ -11,13 +11,9 @@ function renderComposer(overrides: Partial<ComponentProps<typeof AgentComposer>>
   const props: ComponentProps<typeof AgentComposer> = {
     value: '',
     placeholder: '给 kemo-agent 发送消息…',
-    currentRound: 3,
-    roundLimit: 30,
     onChange: vi.fn(),
     onOpenKnowledge: vi.fn(),
     onOpenCapabilities: vi.fn(),
-    onOpenCommands: vi.fn(),
-    onToggleConversationMenu: vi.fn(),
     onSubmit: vi.fn(),
     ...overrides,
   }
@@ -25,11 +21,20 @@ function renderComposer(overrides: Partial<ComponentProps<typeof AgentComposer>>
 }
 
 describe('AgentComposer', () => {
+  it('uses the single stop action to stop the run and cancel subagents', () => {
+    const onStopAndCancelSubagents = vi.fn()
+    renderComposer({ running: true, onStop: vi.fn(), onStopAndCancelSubagents })
+    expect(screen.getAllByRole('button', { name: '停止生成' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '停止生成' }))
+    expect(onStopAndCancelSubagents).toHaveBeenCalledOnce()
+  })
+
   it('运行中 Enter 默认消息跟进，Ctrl+Enter 直接本轮引导，Shift+Enter 保留换行', () => {
     const onSubmit = vi.fn()
     const onGuide = vi.fn()
-    const onNextTurn = vi.fn()
-    const { rerender, props } = renderComposer({ value: '跟进任务', running: true, onSubmit, onGuide, onNextTurn })
+    const { rerender, props } = renderComposer({
+      value: '跟进任务', running: true, onSubmit, onGuide, onStop: vi.fn(),
+    })
     const input = screen.getByRole('textbox', { name: '消息内容' })
     expect(input).toHaveAttribute('aria-keyshortcuts', 'Control+Enter')
     fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
@@ -44,13 +49,11 @@ describe('AgentComposer', () => {
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
     expect(onGuide).toHaveBeenCalledOnce()
     expect(onSubmit).toHaveBeenCalledOnce()
-    expect(onNextTurn).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: '下一轮发送' }))
-    expect(onNextTurn).toHaveBeenCalledOnce()
-    expect(screen.queryByRole('button', { name: '本轮引导' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '停止生成' })).toBeInTheDocument()
     rerender(<AgentComposer {...props} uploading />)
-    expect(screen.getByRole('button', { name: '下一轮发送' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '消息跟进' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
   })
 
   it('空闲时 Enter 发送，Shift+Enter 和 Ctrl+Enter 均保留编辑行为', () => {
@@ -58,30 +61,12 @@ describe('AgentComposer', () => {
     const onGuide = vi.fn()
     renderComposer({
       value: '检查状态',
-      currentRound: 8,
-      totalRounds: 44,
-      roundLimit: 30,
-      contextPercent: 42,
-      contextUsedTokens: 291228,
-      contextTokenWindow: 1000000,
+      contextUsage: <button aria-label="查看上下文用量" />,
       onSubmit,
       onGuide,
     })
-    const roundStat = screen.getByLabelText('上下文占用 42% | 291,228 token | 1,000,000 token窗口 · 当前轮数 8 · 压缩触发轮数 30 · 总轮数 44')
-    expect(roundStat).toBeInTheDocument()
-    expect(roundStat).not.toHaveTextContent('42%')
-    expect(roundStat).toHaveAttribute('title', '上下文占用 42% | 291,228 token | 1,000,000 token窗口 · 当前轮数 8 · 压缩触发轮数 30 · 总轮数 44')
-    expect(roundStat.querySelectorAll('.reference-round-number')).toHaveLength(3)
-    expect(roundStat).toHaveTextContent('8')
-    expect(roundStat).toHaveTextContent('30')
-    expect(roundStat).toHaveTextContent('44')
-    const roundBubble = roundStat.querySelector('.reference-round-bubble')
-    expect(roundBubble?.querySelectorAll('.reference-round-number')).toHaveLength(3)
-    expect(roundBubble?.querySelectorAll('.reference-stat-divider')).toHaveLength(2)
-    expect(roundBubble?.querySelector('.context-usage-ring')).toBeNull()
-    const circles = roundStat.querySelectorAll('.context-usage-ring circle')
-    expect(circles).toHaveLength(2)
-    circles.forEach((circle) => expect(circle).toHaveAttribute('r', '15'))
+    expect(screen.getByRole('button', { name: '查看上下文用量' })).toBeInTheDocument()
+    expect(document.querySelector('.reference-round-stat, .reference-round-bubble')).toBeNull()
 
     const input = screen.getByRole('textbox', { name: '消息内容' })
     expect(input).not.toHaveAttribute('aria-keyshortcuts')
@@ -94,24 +79,95 @@ describe('AgentComposer', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
 
-  it('运行中保留消息跟进和停止能力，未接入的上传按钮保持禁用', () => {
-    const onSubmit = vi.fn()
+  it('运行中隐藏发送控件并保留停止能力，未接入的上传按钮保持禁用', () => {
     const onStop = vi.fn()
-    renderComposer({ value: '补充要求', running: true, onSubmit, onStop })
+    renderComposer({ value: '补充要求', running: true, onStop })
     expect(screen.getByRole('button', { name: '上传文件' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '停止生成' }))
-    expect(onSubmit).toHaveBeenCalledTimes(1)
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 
-  it('运行中仍可打开对话操作菜单，以便关闭会话级长任务模式', () => {
-    const onToggleConversationMenu = vi.fn()
-    renderComposer({ running: true, onToggleConversationMenu })
-    const menu = screen.getByRole('button', { name: '展开对话操作' })
-    expect(menu).toBeEnabled()
-    fireEvent.click(menu)
-    expect(onToggleConversationMenu).toHaveBeenCalledOnce()
+  it('输入斜杠后显示命令列表，按文本过滤并可用回车执行', () => {
+    const onChange = vi.fn()
+    const onSlashCommand = vi.fn()
+    const { props, rerender } = renderComposer({ value: '/', onChange, onSlashCommand })
+    const input = screen.getByRole('textbox', { name: '消息内容' })
+    expect(screen.getByRole('listbox', { name: '对话操作' })).toBeInTheDocument()
+    expect(screen.getAllByRole('option')).toHaveLength(5)
+    expect(screen.queryByRole('button', { name: /斜杠指令/ })).not.toBeInTheDocument()
+
+    fireEvent.change(input, { target: { value: '/comp' } })
+    rerender(<AgentComposer {...props} value="/comp" />)
+    expect(screen.getAllByRole('option')).toHaveLength(1)
+    expect(screen.getByRole('option')).toHaveTextContent('/compress')
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledWith('')
+    expect(onSlashCommand).toHaveBeenCalledWith('compress')
+  })
+
+  it('斜杠菜单锚定整个输入卡片而不是正文输入区域', () => {
+    renderComposer({
+      value: '/',
+      modelBar: <div data-testid="composer-modelbar">模型选择</div>,
+      uploadFeedback: <div>待发送附件</div>,
+    })
+    const composer = screen.getByRole('region', { name: '消息输入区域' })
+    const menu = screen.getByRole('listbox', { name: '对话操作' })
+    expect(menu.parentElement).toBe(composer)
+    expect(menu.closest('.composer-input-wrap')).toBeNull()
+    expect(screen.getByTestId('composer-modelbar').parentElement).toBe(composer)
+    expect(screen.getByRole('textbox', { name: '消息内容' }).closest('.composer-input-wrap')).not.toBeNull()
+  })
+
+  it('斜杠菜单支持上下键选择和点击执行', () => {
+    const onSlashCommand = vi.fn()
+    renderComposer({ value: '/', onSlashCommand })
+    const input = screen.getByRole('textbox', { name: '消息内容' })
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(screen.getByRole('option', { name: /清空此对话/ }))
+    expect(onSlashCommand).toHaveBeenCalledWith('clear')
+  })
+
+  it('输入 /new 可直接执行新建而不是保存并新建', () => {
+    const onSlashCommand = vi.fn()
+    const onChange = vi.fn()
+    renderComposer({ value: '/new', onSlashCommand, onChange })
+    expect(screen.getAllByRole('option')).toHaveLength(1)
+    expect(screen.getByRole('option')).toHaveTextContent('直接新建对话')
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter' })
+    expect(onSlashCommand).toHaveBeenCalledExactlyOnceWith('new')
+    expect(onChange).toHaveBeenCalledWith('')
+  })
+
+  it('点击发送按钮也执行 /new，不把指令作为普通消息发送给智能体', () => {
+    const onSlashCommand = vi.fn()
+    const onSubmit = vi.fn()
+    renderComposer({ value: '/new', onSlashCommand, onSubmit })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(onSlashCommand).toHaveBeenCalledExactlyOnceWith('new')
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('Escape closes the slash menu without executing an item', () => {
+    const onSlashCommand = vi.fn()
+    renderComposer({ value: '/', onSlashCommand })
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Escape' })
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(onSlashCommand).not.toHaveBeenCalled()
+  })
+
+  it('运行时只显示一个停止按钮，并统一取消当前子任务', () => {
+    const onStop = vi.fn()
+    const onStopAndCancelSubagents = vi.fn()
+    renderComposer({ running: true, value: '补充要求', onStop, onStopAndCancelSubagents })
+    expect(screen.getAllByRole('button', { name: '停止生成' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '停止生成' }))
+    expect(onStopAndCancelSubagents).toHaveBeenCalledOnce()
+    expect(onStop).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
   })
 
   it('停止过渡期间把新文本作为下一轮提交，不会误投给旧运行', () => {
@@ -121,9 +177,8 @@ describe('AgentComposer', () => {
     fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter', ctrlKey: true })
     expect(onGuide).not.toHaveBeenCalled()
     expect(onSubmit).not.toHaveBeenCalled()
-    const submit = screen.getByRole('button', { name: '消息跟进' })
-    expect(submit).toBeEnabled()
-    fireEvent.click(submit)
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter' })
     expect(onSubmit).toHaveBeenCalledOnce()
     expect(screen.getByRole('button', { name: '停止生成' })).toBeDisabled()
   })
@@ -186,9 +241,8 @@ describe('AgentComposer', () => {
     const onSubmit = vi.fn()
     renderComposer({ running: true, pendingFileCount: 1, onSubmit })
 
-    const button = screen.getByRole('button', { name: '消息跟进' })
-    expect(button).toBeEnabled()
-    fireEvent.click(button)
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter' })
     expect(onSubmit).toHaveBeenCalledOnce()
   })
 

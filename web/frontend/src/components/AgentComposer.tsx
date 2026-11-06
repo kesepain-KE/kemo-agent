@@ -1,25 +1,20 @@
 import { t as tr, useLanguage } from '../i18n'
 import type { ChangeEvent, ClipboardEvent, KeyboardEvent, ReactNode } from 'react'
-import { useRef } from 'react'
-import { BookOpen, Boxes, Mic, Paperclip, Send, Square, Zap } from 'lucide-react'
+import { useId, useRef, useState } from 'react'
+import { BookOpen, Boxes, Mic, Paperclip, Square } from 'lucide-react'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
 import { useComposerAutosize } from '../hooks/useComposerAutosize'
 import { ReferenceIcon } from '../reference/ReferenceIcon'
+import { composerSlashCommands, type ConversationCommandAction } from './appShellConfig'
 
 export interface AgentComposerProps {
   value: string
   placeholder: string
-  currentRound: number
-  totalRounds?: number
-  roundLimit: number
-  contextPercent?: number
-  contextUsedTokens?: number
-  contextTokenWindow?: number
+  contextUsage?: ReactNode
   running?: boolean
   stopping?: boolean
   disabled?: boolean
-  conversationMenuOpen?: boolean
-  conversationMenu?: ReactNode
+  commandBusy?: boolean
   notice?: ReactNode
   uploadFeedback?: ReactNode
   modelBar?: ReactNode
@@ -29,28 +24,21 @@ export interface AgentComposerProps {
   onUploadFiles?: (files: File[]) => void
   onOpenKnowledge: () => void
   onOpenCapabilities: () => void
-  onOpenCommands: () => void
-  onToggleConversationMenu: () => void
+  onSlashCommand?: (action: ConversationCommandAction) => void
   onSubmit: () => void
   onGuide?: () => void
-  onNextTurn?: () => void
   onStop?: () => void
+  onStopAndCancelSubagents?: () => void
 }
 
 export function AgentComposer({
   value,
   placeholder,
-  currentRound,
-  totalRounds = currentRound,
-  roundLimit,
-  contextPercent = 0,
-  contextUsedTokens,
-  contextTokenWindow,
+  contextUsage,
   running = false,
   stopping = false,
   disabled = false,
-  conversationMenuOpen = false,
-  conversationMenu,
+  commandBusy = false,
   notice,
   uploadFeedback,
   modelBar,
@@ -60,16 +48,18 @@ export function AgentComposer({
   onUploadFiles,
   onOpenKnowledge,
   onOpenCapabilities,
-  onOpenCommands,
-  onToggleConversationMenu,
+  onSlashCommand,
   onSubmit,
   onGuide,
-  onNextTurn,
   onStop,
+  onStopAndCancelSubagents,
 }: AgentComposerProps) {
   useLanguage()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const slashMenuId = useId()
+  const [slashMenuDismissed, setSlashMenuDismissed] = useState(false)
+  const [activeSlashIndex, setActiveSlashIndex] = useState(0)
   const canSubmit = !disabled
     && !uploading
     && (!stopping || running)
@@ -81,19 +71,59 @@ export function AgentComposer({
   })
 
   useComposerAutosize(textareaRef, value)
-  const normalizedContextPercent = Math.max(0, Math.min(100, Number.isFinite(contextPercent) ? contextPercent : 0))
-  const contextPercentLabel = Number.isInteger(normalizedContextPercent)
-    ? String(normalizedContextPercent)
-    : normalizedContextPercent.toFixed(1)
-  const contextUsedTokensLabel = formatTokenCount(contextUsedTokens)
-  const contextTokenWindowLabel = formatTokenCount(contextTokenWindow)
-  const contextUsageLabel = `${contextPercentLabel}% | ${contextUsedTokensLabel} token | ${contextTokenWindowLabel} token窗口`
+  const slashMatch = value.match(/^\s*\/([^\s/]*)$/)
+  const slashMenuOpen = Boolean(slashMatch) && !slashMenuDismissed
+  const slashQuery = (slashMatch?.[1] || '').toLocaleLowerCase()
+  const filteredSlashCommands = slashMenuOpen
+    ? composerSlashCommands.filter((command) =>
+      `${command.command} ${command.label} ${command.description}`.toLocaleLowerCase().includes(slashQuery))
+    : []
+  const selectedSlashIndex = Math.min(activeSlashIndex, Math.max(0, filteredSlashCommands.length - 1))
+  const slashCommandsDisabled = disabled || running || stopping || commandBusy
 
-  const handleChange = (event: ChangeEvent<HTMLTextAreaElement>) => onChange(event.target.value)
+  const runSlashCommand = (action: ConversationCommandAction) => {
+    if (slashCommandsDisabled) return
+    setSlashMenuDismissed(true)
+    onChange('')
+    onSlashCommand?.(action)
+    window.requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+  const handleChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    setSlashMenuDismissed(false)
+    setActiveSlashIndex(0)
+    onChange(event.target.value)
+  }
   const handleSubmit = () => {
+    if (slashMenuOpen && filteredSlashCommands.length > 0) {
+      runSlashCommand(filteredSlashCommands[selectedSlashIndex].action)
+      return
+    }
     if (canSubmit) onSubmit()
   }
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashMenuOpen && !event.nativeEvent.isComposing && event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      setSlashMenuDismissed(true)
+      return
+    }
+    if (slashMenuOpen && !event.nativeEvent.isComposing
+      && filteredSlashCommands.length > 0 && !slashCommandsDisabled) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault()
+        const direction = event.key === 'ArrowDown' ? 1 : -1
+        setActiveSlashIndex((index) => (
+          (index + direction + filteredSlashCommands.length) % filteredSlashCommands.length
+        ))
+        return
+      }
+      if (event.key === 'Enter' && !event.nativeEvent.isComposing
+        && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        runSlashCommand(filteredSlashCommands[selectedSlashIndex].action)
+        return
+      }
+    }
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
     if (running && !stopping && event.ctrlKey && onGuide) {
       event.preventDefault()
@@ -128,19 +158,56 @@ export function AgentComposer({
       {uploadFeedback}
       {modelBar}
       <input ref={fileInputRef} type="file" multiple hidden aria-hidden="true" onChange={handleFileChange} />
-      <textarea
-        ref={textareaRef}
-        className="composer-textarea"
-        value={value}
-        placeholder={placeholder}
-        disabled={disabled}
-        rows={1}
-        aria-label={tr("消息内容")}
-        aria-keyshortcuts={running && onGuide ? 'Control+Enter' : undefined}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-      />
+      <div className="composer-input-wrap">
+        <textarea
+          ref={textareaRef}
+          className="composer-textarea"
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          rows={1}
+          aria-label={tr("消息内容")}
+          aria-keyshortcuts={running && onGuide ? 'Control+Enter' : undefined}
+          aria-autocomplete={slashMenuOpen ? 'list' : undefined}
+          aria-expanded={slashMenuOpen}
+          aria-controls={slashMenuOpen ? slashMenuId : undefined}
+          aria-activedescendant={slashMenuOpen && filteredSlashCommands.length
+            ? `${slashMenuId}-option-${selectedSlashIndex}` : undefined}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+        />
+      </div>
+      {slashMenuOpen && (
+        <div id={slashMenuId} className="composer-slash-menu" role="listbox" aria-label={tr('对话操作')}>
+          <div className="composer-slash-menu-head">{tr('对话操作')}</div>
+          {filteredSlashCommands.map((command, index) => {
+            const Icon = command.icon
+            return (
+              <button
+                id={`${slashMenuId}-option-${index}`}
+                key={command.action}
+                type="button"
+                className={`composer-slash-option ${index === selectedSlashIndex ? 'is-active' : ''}`}
+                role="option"
+                aria-selected={index === selectedSlashIndex}
+                disabled={slashCommandsDisabled}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setActiveSlashIndex(index)}
+                onClick={() => runSlashCommand(command.action)}
+              >
+                <span className="composer-slash-option-icon"><Icon size={17} aria-hidden="true" /></span>
+                <span className="composer-slash-option-copy">
+                  <strong>{tr(command.label)}</strong>
+                  <small>{tr(command.description)}</small>
+                </span>
+                <code>{command.command}</code>
+              </button>
+            )
+          })}
+          {!filteredSlashCommands.length && <div className="composer-slash-empty">{tr('没有匹配的对话操作')}</div>}
+        </div>
+      )}
 
       <div className="composer-bar">
         <div className="reference-composer-tools">
@@ -162,93 +229,44 @@ export function AgentComposer({
           <ComposerIconButton label={tr("打开能力引用")} title="引用拓展、技能或插件" onClick={onOpenCapabilities} disabled={disabled}>
             <Boxes />
           </ComposerIconButton>
-          <ComposerIconButton label={tr("打开快捷指令")} onClick={onOpenCommands} disabled={disabled} command>
-            <Zap />
-          </ComposerIconButton>
         </div>
 
         <div className="reference-composer-actions">
-          <div
-            className="model-pill reference-round-stat"
-            title={`上下文占用 ${contextUsageLabel} · 当前轮数 ${currentRound} · 压缩触发轮数 ${roundLimit} · 总轮数 ${totalRounds}`}
-            aria-label={`上下文占用 ${contextUsageLabel} · 当前轮数 ${currentRound} · 压缩触发轮数 ${roundLimit} · 总轮数 ${totalRounds}`}
-          >
-            <span className="context-usage-ring" aria-hidden="true">
-              <svg viewBox="0 0 36 36">
-                <circle className="context-usage-ring-track" cx="18" cy="18" r="15" pathLength="100" />
-                <circle
-                  className="context-usage-ring-fill"
-                  cx="18"
-                  cy="18"
-                  r="15"
-                  pathLength="100"
-                  strokeDasharray={`${normalizedContextPercent} 100`}
-                />
-              </svg>
-            </span>
-            <span className="reference-stat-divider" aria-hidden="true" />
-            <span className="reference-round-bubble">
-              <span className="reference-round-number">{currentRound}</span>
-              <span className="reference-stat-divider" aria-hidden="true" />
-              <span className="reference-round-number">{roundLimit}</span>
-              <span className="reference-stat-divider" aria-hidden="true" />
-              <span className="reference-round-number">{totalRounds}</span>
-            </span>
-          </div>
+          {contextUsage}
 
-          <div className="composer-more reference-menu-anchor">
-            <button
-              type="button"
-              className={`btn btn-ghost btn-sm ${conversationMenuOpen ? 'is-active' : ''}`}
-              disabled={disabled}
-              aria-expanded={conversationMenuOpen}
-              aria-label={tr("展开对话操作")}
-              onClick={onToggleConversationMenu}
-            >
-              <span>{tr("对话操作")}</span>
-            </button>
-            {conversationMenu}
-          </div>
-
-          {running && onNextTurn ? <button type="button" className="btn btn-ghost btn-sm" disabled={!canSubmit} onClick={() => { if (canSubmit) onNextTurn() }}>
-            <span>{tr("下一轮发送")}</span>
-          </button> : null}
-          <button type="button" className={`send-btn ${running ? 'reference-followup-send' : ''}`} disabled={!canSubmit} onClick={handleSubmit}>
-            <ReferenceIcon name="arrowUp" />
-            <span className="sr-only">{running ? tr('消息跟进') : tr('发送')}</span>
-          </button>
-          {running && onStop ? (
-            <button type="button" className="send-btn is-stop" onClick={onStop} aria-label={tr("停止生成")} disabled={stopping}>
+          {running ? (
+            onStop ? <button type="button" className="send-btn is-stop" onClick={onStopAndCancelSubagents || onStop}
+              aria-label={tr("停止生成")} title={tr("停止生成")} disabled={stopping}>
               <Square aria-hidden="true" />
               <span className="sr-only">{stopping ? tr('正在停止…') : tr('停止')}</span>
+            </button> : null
+          ) : (
+            <button type="button" className="send-btn" disabled={!canSubmit} onClick={handleSubmit}>
+              <ReferenceIcon name="arrowUp" />
+              <span className="sr-only">{tr('发送')}</span>
             </button>
-          ) : null}
+          )}
         </div>
       </div>
     </section>
   )
 }
 
-function formatTokenCount(value: number | undefined) {
-  return Number.isFinite(value) ? Math.max(0, Number(value)).toLocaleString() : '—'
-}
-
 interface ComposerIconButtonProps {
   label: string
   title?: string
   disabled?: boolean
-  command?: boolean
   active?: boolean
   children: ReactNode
   onClick?: () => void
 }
 
-function ComposerIconButton({ label, title, disabled, command = false, active = false, children, onClick }: ComposerIconButtonProps) {
+function ComposerIconButton({ label, title, disabled, active = false, children, onClick }: ComposerIconButtonProps) {
   useLanguage()
   return (
     <button
       type="button"
-      className={`icon-btn ${command ? 'reference-command-tool' : ''} ${active ? 'is-active' : ''}`}
+      className={`icon-btn ${active ? 'is-active' : ''}`}
       aria-label={label}
       aria-pressed={active || undefined}
       title={disabled && !onClick ? `${label} · 待接入` : title || label}
