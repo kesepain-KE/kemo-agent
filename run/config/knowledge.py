@@ -86,8 +86,8 @@ def select_knowledge_index(
     """Inject every named index file in user → shared → global order."""
     available_scopes = (
         ("user", root / "users" / user / "knowledge"),
-        ("shared", root / "shared_knowledge"),
-        ("global", root / "global_knowledge"),
+        ("shared", root / "knowledge" / "share"),
+        ("global", root / "knowledge" / "global"),
     )
     allowed_scopes = set(scopes)
     documents: list[KnowledgeDocument] = []

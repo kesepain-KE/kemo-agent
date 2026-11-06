@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,55 @@ from run.config.prompt_source_helpers import (
     relative_path,
     truncate_chars,
 )
+
+_logger = logging.getLogger(__name__)
+
+
+def read_dynamic_tail(
+    root: Path, user: str, config: dict[str, Any], *, source: str, session_id: str,
+) -> dict[str, Any]:
+    """Sample authorized latest state. No collectors or historical writes."""
+    from run.config.prompt import parse_prompt_settings
+    from run.config.source_policy import MainAgentSourcePolicy
+    from run.tasks import select_prompt_plans
+
+    settings, policy = parse_prompt_settings(config), MainAgentSourcePolicy.from_config(config)
+    registry = load_prompt_source_registry(root, user)
+    plans = select_prompt_plans(root, user, max_chars=settings.char_limits["task_plan"],
+                                source=source, session_id=session_id)
+    result: dict[str, Any] = {}
+    if plans.text:
+        result["task_plan"] = {"text": plans.text, "revisions": plans.revisions}
+
+    def observation(text: str, sources: tuple[str, ...]) -> dict[str, Any]:
+        times = {}
+        for relative in sources:
+            path = root / relative
+            path.resolve().relative_to(root.resolve())
+            try:
+                times[relative] = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+            except FileNotFoundError:
+                times[relative] = None
+        return {"text": text, "sources": list(sources), "observed_at": times,
+                "sampled_at": datetime.now(timezone.utc).isoformat(), "external_data": True}
+
+    if policy.perception_prompt_injection:
+        perception = registry.select_perception(
+            max_chars=settings.char_limits["perception"],
+            allow_modules=policy.global_perception.selector(),
+        )
+        if perception.text:
+            result["perception"] = observation(perception.text, perception.source_files)
+    if policy.expand_prompt_injection:
+        expand = registry.select_expand(
+            max_chars=settings.char_limits["expand_data"],
+            allow={"global": policy.global_expand.selector(),
+                   "shared": policy.shared_expand.selector(), "user": None},
+        )
+        if expand.data_text:
+            result["extension"] = observation(expand.data_text, expand.source_files)
+    return result
+
 
 class PromptSourceRegistry:
     """Collect prompt-source layers registered by directory-local Python modules."""
@@ -61,8 +111,8 @@ class PromptSourceRegistry:
 
     def _expand_base(self, scope: str) -> Path:
         base = {
-            "global": self.root / "global_expand",
-            "shared": self.root / "shared_expand",
+            "global": self.root / "expand" / "global",
+            "shared": self.root / "expand" / "share",
             "user": self.root / "users" / self.user / "expand",
         }.get(scope)
         if base is None:
@@ -114,7 +164,7 @@ class PromptSourceRegistry:
 
     def add_skills(self, scope: str, base: Path) -> None:
         expected = {
-            "shared": self.root / "shared_skills",
+            "shared": self.root / "skills",
             "user": self.root / "users" / self.user / "user_skills",
         }.get(scope)
         if expected is None:
@@ -163,9 +213,28 @@ class PromptSourceRegistry:
             )
         )
 
+    def expand_capabilities(self, *, allow: dict[str, tuple[str, ...] | None]) -> str:
+        """Stable descriptions, without sampled input, health or update times."""
+        descriptions = []
+        for scope, module, directory in self._expand_module_entries():
+            if not self._allowed(module, allow.get(scope, ())):
+                continue
+            meta = read_expand_meta(directory)
+            if not meta.valid:
+                continue
+            text = f"[{scope}:{module}] {meta.name}: {meta.explain}"
+            if meta.open_control:
+                text += (
+                    f"\n能力入口：expand_call(scope={scope}, module={module})；"
+                    f"先读取 {relative_path(directory / meta.start_control, self.root)}。"
+                    "此能力说明不增加工具或路径授权。"
+                )
+            descriptions.append(text)
+        return "\n\n".join(descriptions)
+
     def add_perception(self, base: Path) -> None:
         resolved = base.resolve()
-        expected = (self.root / "global_sense").resolve()
+        expected = (self.root / "sense").resolve()
         if resolved != expected:
             raise PromptRegistrationError(
                 f"perception 注册目录与模块位置不一致：{resolved}（应为 {expected}）"
@@ -192,9 +261,20 @@ class PromptSourceRegistry:
             values = None if allow is None else allow.get(scope, ())
             discovered: list[str] = []
             selected: list[str] = []
+            invalid: list[str] = []
             for path in iter_files(base, names={"SKILL.md"}):
-                definition = parse_skill_descriptor(path, scope=scope, root=self.root)
                 logical_name = path.parent.relative_to(base).as_posix()
+                try:
+                    definition = parse_skill_descriptor(path, scope=scope, root=self.root)
+                except (PromptRegistrationError, OSError, UnicodeError) as exc:
+                    invalid.append(logical_name)
+                    _logger.warning(
+                        "跳过无效技能描述（scope=%s,name=%s,error=%s）",
+                        scope,
+                        logical_name,
+                        type(exc).__name__,
+                    )
+                    continue
                 discovered.append(logical_name)
                 if (not include_stale and scope == "user" and logical_name.startswith("agent_create/")
                         and generated.get(path.parent.name, {}).get("status") == "stale"):
@@ -209,6 +289,7 @@ class PromptSourceRegistry:
                 "mode": "all" if values is None else "allowlist",
                 "discovered": discovered,
                 "selected": selected,
+                "invalid": invalid,
                 "filtered": [item for item in discovered if item not in selected_set],
                 "unmatched": [item for item in configured if item not in discovered_set],
             }
@@ -594,10 +675,10 @@ def load_prompt_source_registry(root: Path, user: str) -> PromptSourceRegistry:
     base = root.resolve()
     registry = PromptSourceRegistry(base, user)
     paths = (
-        base / "global_expand" / "register.py",
-        base / "shared_expand" / "register.py",
-        base / "shared_skills" / "register.py",
-        base / "global_sense" / "register.py",
+        base / "expand" / "global" / "register.py",
+        base / "expand" / "share" / "register.py",
+        base / "skills" / "register.py",
+        base / "sense" / "register.py",
     )
     for path in paths:
         if path.is_file():

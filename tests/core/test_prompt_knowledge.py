@@ -40,8 +40,8 @@ class PromptKnowledgeTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         (root / "config").mkdir()
-        (root / "global_knowledge").mkdir()
-        (root / "shared_knowledge").mkdir()
+        (root / "knowledge" / "global").mkdir(parents=True)
+        (root / "knowledge" / "share").mkdir()
         (root / "users" / "alice" / "knowledge").mkdir(parents=True)
         (root / "users" / "alice" / "history").mkdir()
         (root / "users" / "alice" / "improve").mkdir()
@@ -55,14 +55,14 @@ class PromptKnowledgeTests(unittest.TestCase):
             "provider": {
                 "type": "kemo",
                 "base_url": "http://127.0.0.1:1/v1",
-                "api_key_env": "TEST_KEMO_KEY",
+                "api_key_env": "KEMO_API_KEY",
                 "model": "mock",
                 "stream": False,
             },
             "knowledge": {},
         }
-        (root / "config" / "global_config.json").write_text("{}", "utf-8")
-        (root / "users" / "alice" / "user_config.json").write_text(
+        (root / "config" / "global_config.yaml").write_text("{}", "utf-8")
+        (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -93,7 +93,7 @@ class PromptKnowledgeTests(unittest.TestCase):
             "utf-8",
         )
         seen: list[list[dict]] = []
-        with patch.dict(os.environ, {"TEST_KEMO_KEY": "secret"}, clear=False):
+        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
             result = handle_request(
                 {
                     "user": "alice",
@@ -118,12 +118,12 @@ class PromptKnowledgeTests(unittest.TestCase):
             "utf-8",
         )
         (root / "users" / "alice" / "knowledge" / "body.md").write_text("BODY", "utf-8")
-        (root / "shared_knowledge" / "目录.md").write_text("SHARED INDEX", "utf-8")
-        (root / "global_knowledge" / "索引.md").write_text("GLOBAL INDEX", "utf-8")
+        (root / "knowledge" / "share" / "目录.md").write_text("SHARED INDEX", "utf-8")
+        (root / "knowledge" / "global" / "索引.md").write_text("GLOBAL INDEX", "utf-8")
         for base in (
             root / "users" / "alice" / "knowledge",
-            root / "shared_knowledge",
-            root / "global_knowledge",
+            root / "knowledge" / "share",
+            root / "knowledge" / "global",
         ):
             runtime = base / "kemo-graph-storage" / "content" / "markdown"
             runtime.mkdir(parents=True)

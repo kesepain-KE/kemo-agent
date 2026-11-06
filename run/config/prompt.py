@@ -1,4 +1,4 @@
-"""Deterministic assembly of the complete per-request system prompt."""
+"""Deterministic stable prefix; runtime state belongs only to the dynamic tail."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from plugins.manifest import PluginManifest, discover_plugin_manifests
+from run.config import memory_prompt_injection
 from run.config.knowledge import KnowledgeIndexSelection, select_knowledge_index
 from run.memory import MemoryStore
 from run.config.prompt_sources import (
@@ -18,26 +19,23 @@ from run.config.prompt_sources import (
     truncate_chars,
 )
 from run.config.source_policy import MainAgentSourcePolicy
-from run.tasks import select_prompt_plans
 
 
 PROMPT_SECTION_ORDER = (
     "user_soul",
     "global_soul",
     "agents_manual",
+    "knowledge_index",
     "global_subagent_registry",
     "user_subagent_registry",
     "plugins",
     "skills",
-    "knowledge_index",
+    "expansions",
     "permanent_memory",
     "important_memory",
     "temporary_memory:half_year",
     "temporary_memory:one_month",
     "temporary_memory:seven_days",
-    "task_plan",
-    "expand_data",
-    "perception",
 )
 DEFAULT_TEMPORARY_MEMORY_LIMITS = {
     "half_year": 300,
@@ -46,6 +44,9 @@ DEFAULT_TEMPORARY_MEMORY_LIMITS = {
 }
 DEFAULT_IMPORTANT_MEMORY_MAX_CHARS = 20000
 DEFAULT_CHAR_LIMITS = {
+    "user_soul": 12000,
+    "agents_manual": 26000,
+    "knowledge_index": 40000,
     "task_plan": 6000,
     "perception": 20000,
     "expand_data": 20000,
@@ -272,6 +273,30 @@ def _subagent_registry_section(
     )
 
 
+def _bounded_section(
+    section: PromptSection | None,
+    *,
+    max_chars: int,
+) -> PromptSection | None:
+    if section is None or max_chars == 0:
+        return None
+    content, truncated = truncate_chars(section.content, max_chars)
+    if not content:
+        return None
+    return PromptSection(
+        name=section.name,
+        content=content,
+        source_files=section.source_files,
+        item_ids=section.item_ids,
+        original_chars=section.original_chars,
+        injected_chars=len(content),
+        original_items=section.original_items,
+        injected_items=section.injected_items,
+        truncated=section.truncated or truncated,
+        mode=section.mode,
+    )
+
+
 def _global_subagent_registry_section(root: Path) -> PromptSection | None:
     # 延迟导入避免 schema -> prompt_sources -> prompt 的初始化环。
     from agents._runtime.schema import discover_agents
@@ -347,58 +372,6 @@ def _section_diagnostic(section: PromptSection) -> dict[str, Any]:
     }
 
 
-def _dynamic_prompt_sections(
-    registered_sources: Any,
-    settings: PromptSettings,
-    source_policy: MainAgentSourcePolicy,
-    *,
-    include_expand: bool = True,
-    include_perception: bool = True,
-) -> dict[str, PromptSection]:
-    sections: dict[str, PromptSection] = {}
-    if include_expand:
-        expand = registered_sources.select_expand(
-            max_chars=settings.char_limits["expand_data"],
-            mode=INJECTION_MODE,
-            allow={
-                "global": source_policy.global_expand.selector(),
-                "shared": source_policy.shared_expand.selector(),
-                "user": None,
-            },
-        )
-        if expand.text:
-            sections["expand_data"] = PromptSection(
-                "expand_data",
-                expand.text,
-                expand.source_files,
-                original_chars=expand.original_chars,
-                injected_chars=expand.injected_chars,
-                original_items=expand.original_items,
-                injected_items=expand.injected_items,
-                truncated=expand.truncated,
-                mode=INJECTION_MODE,
-            )
-    if include_perception:
-        perception = registered_sources.select_perception(
-            max_chars=settings.char_limits["perception"],
-            mode=INJECTION_MODE,
-            allow_modules=source_policy.global_perception.selector(),
-        )
-        if perception.text:
-            sections["perception"] = PromptSection(
-                "perception",
-                perception.text,
-                perception.source_files,
-                original_chars=perception.original_chars,
-                injected_chars=perception.injected_chars,
-                original_items=perception.original_items,
-                injected_items=perception.injected_items,
-                truncated=perception.truncated,
-                mode=INJECTION_MODE,
-            )
-    return sections
-
-
 def _ordered_prompt_sections(
     sections: Iterable[PromptSection],
     *,
@@ -440,6 +413,7 @@ def build_prompt_bundle(
 
     root = root.resolve()
     settings = parse_prompt_settings(config)
+    inject_memory = memory_prompt_injection(config)
     source_policy = MainAgentSourcePolicy.from_config(config)
     manifests = (
         discover_plugin_manifests(root)
@@ -455,13 +429,19 @@ def build_prompt_bundle(
     registered_sources = load_prompt_source_registry(root, user)
     sections: list[PromptSection] = []
 
-    section = _base_section(root, "user_soul", root / "users" / user / "user_soul.md")
+    section = _bounded_section(
+        _base_section(root, "user_soul", root / "users" / user / "user_soul.md"),
+        max_chars=settings.char_limits["user_soul"],
+    )
     if section:
         sections.append(section)
     section = _base_section(root, "global_soul", root / "config" / "global_soul.md")
     if section:
         sections.append(section)
-    section = _base_section(root, "agents_manual", root / "agents.md")
+    section = _bounded_section(
+        _base_section(root, "agents_manual", root / "agents.md"),
+        max_chars=settings.char_limits["agents_manual"],
+    )
     if section:
         sections.append(section)
     section = _global_subagent_registry_section(root)
@@ -491,6 +471,18 @@ def build_prompt_bundle(
     if section:
         sections.append(section)
 
+    capabilities = registered_sources.expand_capabilities(allow={
+        "global": source_policy.global_expand.selector(),
+        "shared": source_policy.shared_expand.selector(),
+        "user": None,
+    })
+    if capabilities:
+        content, truncated = truncate_chars(capabilities, settings.char_limits["expand_data"])
+        sections.append(PromptSection(
+            "expansions", content, original_chars=len(capabilities),
+            injected_chars=len(content), truncated=truncated,
+        ))
+
     knowledge = select_knowledge_index(
         root,
         user,
@@ -499,6 +491,10 @@ def build_prompt_bundle(
     knowledge_text, knowledge_paths, knowledge_injected_items = _knowledge_index_prompt(
         knowledge,
         scopes=source_policy.knowledge_scopes,
+    )
+    knowledge_text, knowledge_truncated = truncate_chars(
+        knowledge_text,
+        settings.char_limits["knowledge_index"],
     )
     if knowledge_text:
         sections.append(
@@ -510,7 +506,7 @@ def build_prompt_bundle(
                 injected_chars=len(knowledge_text),
                 original_items=knowledge.original_items,
                 injected_items=knowledge_injected_items,
-                truncated=knowledge.truncated,
+                truncated=knowledge.truncated or knowledge_truncated,
                 mode=INJECTION_MODE,
             )
         )
@@ -537,109 +533,78 @@ def build_prompt_bundle(
     memory_ids: list[str] = []
     memory_files: list[str] = []
     memory_integrity_warnings: list[str] = []
-    for (
-        tier,
-        section_name,
-        max_files,
-    ) in tier_specs_all:
-        selection = store.select_tier_for_prompt(
+    if inject_memory:
+        for (
             tier,
-            max_files=max_files,
-            mode=INJECTION_MODE,
-        )
-        memory_integrity_warnings.extend(selection.integrity_warnings)
-        memory_files.extend(f"{tier}/{filename}" for filename in selection.selected_ids)
-        if tier != "permanent":
-            memory_ids.extend(selection.selected_ids)
-        if selection.text:
-            tier_sections[section_name] = PromptSection(
-                section_name,
-                selection.text,
-                tuple(relative_path(path, root) for path in selection.source_files),
-                selection.selected_ids,
-                selection.original_chars,
-                len(selection.text),
-                selection.original_items,
-                selection.injected_items,
-                selection.truncated,
-                INJECTION_MODE,
-            )
-    if "permanent_memory" in tier_sections:
-        sections.append(tier_sections["permanent_memory"])
-
-    if settings.important_memory_max_chars > 0:
-        important_path = root / "users" / user / "memory_temporary_important.md"
-        important = (
-            read_optional_text(important_path)
-            if store.important_view_is_current()
-            else ""
-        )
-        injected, truncated = truncate_chars(important, settings.important_memory_max_chars)
-        if injected:
-            memory_files.append("memory_temporary_important.md")
-            sections.append(
-                PromptSection(
-                    "important_memory",
-                    injected,
-                    (relative_path(important_path, root),),
-                    original_chars=len(important),
-                    injected_chars=len(injected),
-                    original_items=1,
-                    injected_items=1,
-                    truncated=truncated,
-                    mode=INJECTION_MODE,
-                )
-            )
-    for name in (
-        "temporary_memory:half_year",
-        "temporary_memory:one_month",
-        "temporary_memory:seven_days",
-    ):
-        if name in tier_sections:
-            sections.append(tier_sections[name])
-
-    plans = select_prompt_plans(
-        root,
-        user,
-        max_chars=settings.char_limits["task_plan"],
-        source=source,
-        session_id=session_id,
-    )
-    if plans.text:
-        sections.append(
-            PromptSection(
-                "task_plan",
-                plans.text,
-                plans.source_files,
-                original_chars=plans.original_chars,
-                injected_chars=plans.injected_chars,
-                original_items=plans.original_items,
-                injected_items=plans.injected_items,
-                truncated=plans.truncated,
+            section_name,
+            max_files,
+        ) in tier_specs_all:
+            selection = store.select_tier_for_prompt(
+                tier,
+                max_files=max_files,
                 mode=INJECTION_MODE,
             )
-        )
-    sections.extend(
-        _dynamic_prompt_sections(
-            registered_sources,
-            settings,
-            source_policy,
-            include_expand=source_policy.expand_prompt_injection,
-            include_perception=source_policy.perception_prompt_injection,
-        ).values()
-    )
+            memory_integrity_warnings.extend(selection.integrity_warnings)
+            memory_files.extend(f"{tier}/{filename}" for filename in selection.selected_ids)
+            if tier != "permanent":
+                memory_ids.extend(selection.selected_ids)
+            if selection.text:
+                tier_sections[section_name] = PromptSection(
+                    section_name,
+                    selection.text,
+                    tuple(relative_path(path, root) for path in selection.source_files),
+                    selection.selected_ids,
+                    selection.original_chars,
+                    len(selection.text),
+                    selection.original_items,
+                    selection.injected_items,
+                    selection.truncated,
+                    INJECTION_MODE,
+                )
+        if "permanent_memory" in tier_sections:
+            sections.append(tier_sections["permanent_memory"])
 
-    disabled_dynamic_sections = frozenset(
-        name
-        for name, enabled in (
-            ("expand_data", source_policy.expand_prompt_injection),
-            ("perception", source_policy.perception_prompt_injection),
-        )
-        if not enabled
-    )
+        if settings.important_memory_max_chars > 0:
+            important_path = root / "users" / user / "memory_temporary_important.md"
+            important = (
+                read_optional_text(important_path)
+                if store.important_view_is_current()
+                else ""
+            )
+            injected, truncated = truncate_chars(important, settings.important_memory_max_chars)
+            if injected:
+                memory_files.append("memory_temporary_important.md")
+                sections.append(
+                    PromptSection(
+                        "important_memory",
+                        injected,
+                        (relative_path(important_path, root),),
+                        original_chars=len(important),
+                        injected_chars=len(injected),
+                        original_items=1,
+                        injected_items=1,
+                        truncated=truncated,
+                        mode=INJECTION_MODE,
+                    )
+                )
+        for name in (
+            "temporary_memory:half_year",
+            "temporary_memory:one_month",
+            "temporary_memory:seven_days",
+        ):
+            if name in tier_sections:
+                sections.append(tier_sections[name])
+    else:
+        notice = "当前记忆没有开启注入，可以通过工具进行记忆检索"
+        sections.append(PromptSection(
+            "important_memory", notice,
+            original_chars=len(notice), injected_chars=len(notice),
+        ))
+
     padded = _ordered_prompt_sections(
         sections,
-        disabled_names=disabled_dynamic_sections,
+        disabled_names=(frozenset(name for _, name, _ in tier_specs_all)
+                        if not inject_memory else frozenset()),
     )
     order = [section.name for section in padded]
     text = _render_prompt_sections(padded)
@@ -654,6 +619,8 @@ def build_prompt_bundle(
         "source_policy": source_policy.public_summary(),
         "source_selection": registered_sources.selection_diagnostics(),
         "memory_integrity_warnings": list(dict.fromkeys(memory_integrity_warnings)),
+        "memory_prompt_injection": inject_memory,
+        "task_plan_scope": {"source": source, "session_id": session_id},
     }
     return PromptBundle(
         text=text,
@@ -664,87 +631,21 @@ def build_prompt_bundle(
     )
 
 
-def refresh_dynamic_prompt_bundle(
-    root: Path,
-    user: str,
-    config: dict[str, Any],
-    bundle: PromptBundle,
-) -> PromptBundle:
-    """Reload enabled live sections from collected files without collecting."""
-
-    root = root.resolve()
-    settings = parse_prompt_settings(config)
-    source_policy = MainAgentSourcePolicy.from_config(config)
-    refresh_expand = (
-        source_policy.expand_prompt_injection
-        and source_policy.expand_realtime_injection
-    )
-    refresh_perception = (
-        source_policy.perception_prompt_injection
-        and source_policy.perception_realtime_injection
-    )
-    if not refresh_expand and not refresh_perception:
-        return bundle
-    registered_sources = load_prompt_source_registry(root, user)
-    dynamic_sections = _dynamic_prompt_sections(
-        registered_sources,
-        settings,
-        source_policy,
-        include_expand=refresh_expand,
-        include_perception=refresh_perception,
-    )
-    refreshed_names: set[str] = set()
-    if refresh_expand:
-        refreshed_names.add("expand_data")
-    if refresh_perception:
-        refreshed_names.add("perception")
-    refreshed_sections = tuple(
-        (
-            dynamic_sections.get(
-                section.name,
-                PromptSection(name=section.name, content="（无）"),
-            )
-            if section.name in refreshed_names
-            else section
-        )
-        for section in bundle.sections
-    )
-    refreshed_sections = _ordered_prompt_sections(refreshed_sections)
-    text = _render_prompt_sections(refreshed_sections)
-    diagnostics = copy.deepcopy(bundle.diagnostics)
-    diagnostics["total_chars"] = len(text)
-    diagnostics["sections"] = {
-        section.name: _section_diagnostic(section)
-        for section in refreshed_sections
-    }
-    source_selection = diagnostics.setdefault("source_selection", {})
-    latest_selection = registered_sources.selection_diagnostics()
-    refreshed_source_names: list[str] = []
-    if refresh_expand:
-        refreshed_source_names.append("expand")
-    if refresh_perception:
-        refreshed_source_names.append("perception")
-    for name in refreshed_source_names:
-        if name in latest_selection:
-            source_selection[name] = latest_selection[name]
-        else:
-            source_selection.pop(name, None)
-    diagnostics["dynamic_sections_refreshed"] = True
-    diagnostics["dynamic_section_names"] = sorted(refreshed_names)
-    diagnostics["perception_realtime_injection"] = (
-        refresh_perception
-    )
-    diagnostics["expand_realtime_injection"] = (
-        refresh_expand
-    )
-    return PromptBundle(
-        text=text,
-        sections=refreshed_sections,
-        memory_ids=bundle.memory_ids,
-        diagnostics=diagnostics,
-        memory_files=bundle.memory_files,
-    )
-
-
 def build_system_prompt(root: Path, user: str, config: dict[str, Any]) -> str:
     return build_prompt_bundle(root, user, config).text
+
+
+def refresh_memory_prompt_bundle(bundle: PromptBundle, root: Path, user: str,
+                                 config: dict[str, Any], *, memory_store: MemoryStore) -> PromptBundle:
+    """Refresh only low-frequency memory; stable persona/capability bytes stay fixed."""
+    current = build_prompt_bundle(root, user, config, memory_store=memory_store)
+    names = {name for name in PROMPT_SECTION_ORDER if "memory" in name}
+    replacement = {section.name: section for section in current.sections if section.name in names}
+    sections = tuple(replacement.get(section.name, section) for section in bundle.sections)
+    text = _render_prompt_sections(sections)
+    diagnostics = copy.deepcopy(bundle.diagnostics)
+    diagnostics["total_chars"] = len(text)
+    diagnostics["sections"] = {section.name: _section_diagnostic(section) for section in sections}
+    diagnostics["memory_integrity_warnings"] = current.diagnostics.get("memory_integrity_warnings", [])
+    diagnostics["memory_prompt_injection"] = current.diagnostics["memory_prompt_injection"]
+    return PromptBundle(text, sections, current.memory_ids, diagnostics, current.memory_files)

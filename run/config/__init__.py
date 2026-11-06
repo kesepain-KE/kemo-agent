@@ -9,10 +9,12 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
-from run.infra import cached_read_text
+import yaml
+from run.infra import cached_read_text, record_runtime_event
 
 from provider.protocol.models import (
     normalize_kemo_reasoning_effort,
@@ -48,10 +50,97 @@ MULTIMODAL_CAPABILITIES = frozenset(
 )
 AGENT_MODEL_PROFILES = frozenset({"default", "cheap", "reasoning"})
 SYSTEM_UPDATE_RATE_KEYS = frozenset({"sense_update_rate", "expand_update_rate"})
+PROVIDER_API_KEY_ENVS = frozenset({
+    "KEMO_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY",
+})
+PROVIDER_BUILTIN_HOSTS = frozenset({
+    "localhost", "127.0.0.1", "api.openai.com", "api.deepseek.com", "api.anthropic.com",
+})
+_PROVIDER_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 class ConfigError(RuntimeError):
     """Configuration is missing or malformed."""
+
+
+class _ConfigYamlLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        self.flatten_mapping(node)
+        result = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, str) or key in result:
+                raise ConfigError("YAML 配置键必须是字符串且不能重复")
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
+def _parse_yaml_mapping(text: str, path: Path, *, allow_empty: bool = False) -> dict[str, Any]:
+    try:
+        value = yaml.load(text, Loader=_ConfigYamlLoader)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f"第 {mark.line + 1} 行、第 {mark.column + 1} 列" if mark else "语法错误"
+        raise ConfigError(f"配置文件 YAML 无效：{path}（{location}）") from None
+    if value is None and allow_empty:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"配置文件根节点必须是映射：{path}")
+    return value
+
+
+def validate_provider_security(config: dict[str, Any]) -> None:
+    """Validate only routing/credential selectors, even before keys/models exist.
+
+    ``config`` must be instance-merged: merge_user_config drops user host policy.
+    This boundary does not resolve DNS or replace transport/network isolation.
+    """
+    policy = config.get("provider_security", {})
+    if not isinstance(policy, dict) or not isinstance(policy.get("allowed_hosts", []), list):
+        raise ConfigError("provider_security.allowed_hosts 必须是实例级精确主机名数组")
+    hosts = set(PROVIDER_BUILTIN_HOSTS)
+    for host in policy.get("allowed_hosts", []):
+        if (
+            not isinstance(host, str) or len(host) > 253
+            or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                       for label in host.casefold().split("."))
+        ):
+            raise ConfigError(
+                "provider_security.allowed_hosts 只接受精确主机名；不含协议、端口、路径或通配符"
+            )
+        hosts.add(host.casefold())
+    provider = config.get("provider") or {}
+    if not isinstance(provider, dict):
+        raise ConfigError("provider 必须是对象")
+    env_name = str(provider.get("api_key_env") or "").strip()
+    if env_name and env_name not in PROVIDER_API_KEY_ENVS:
+        raise ConfigError(
+            "provider.api_key_env 不在允许列表：" + ", ".join(sorted(PROVIDER_API_KEY_ENVS))
+            + "；请将 Provider 密钥迁移到允许的环境变量并更新别名，不要复制其他服务凭据"
+        )
+    url = str(provider.get("base_url") or "")
+    if not url:
+        return
+    host = ""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
+        valid = (
+            not any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in url)
+            and "\\" not in url and parts.username is None and parts.password is None
+            and bool(host) and (port is None or 1 <= port <= 65535)
+            and (parts.scheme == "https" or (parts.scheme == "http" and host in _PROVIDER_HTTP_HOSTS))
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ConfigError("provider.base_url 必须是有效 https 地址（仅 localhost/127.0.0.1 允许 http），不得含用户凭据")
+    if host not in hosts:
+        raise ConfigError(
+            "provider.base_url 的 host 未获实例授权；请由管理员在 config/global_config.yaml 的 "
+            "provider_security.allowed_hosts 追加精确主机名，不可在用户配置中放行"
+        )
 
 
 def cron_history_retention_days(config: dict[str, Any]) -> int:
@@ -150,16 +239,44 @@ def dotenv_values(
     return values
 
 
-def load_dotenv(path: Path, *, override: bool = False) -> None:
-    """Load simple KEY=VALUE entries without adding a third-party dependency."""
+def load_kemo_yaml(path: Path, *, override: bool = False) -> None:
+    """Load root environment settings from a YAML mapping."""
+    try:
+        text = path.read_text("utf-8-sig")
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"kemo.yaml 无法读取：{path}") from exc
+    values = _parse_yaml_mapping(text, path, allow_empty=True)
 
-    for name, value in dotenv_values(
-        path,
-        duplicate_policy="last" if override else "first",
-        case_insensitive_names=os.name == "nt",
-    ).items():
+    normalized_names: set[str] = set()
+    environment: dict[str, str] = {}
+    for name, value in values.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or not name.replace("_", "a").isalnum()
+            or name[0].isdigit()
+        ):
+            raise ConfigError(f"kemo.yaml 包含无效环境变量名：{name!r}")
+        identity = name.casefold() if os.name == "nt" else name
+        if identity in normalized_names:
+            raise ConfigError(f"kemo.yaml 包含重复环境变量：{name}")
+        normalized_names.add(identity)
+        if value is None:
+            text = ""
+        elif isinstance(value, bool):
+            text = "true" if value else "false"
+        elif isinstance(value, (str, int, float)):
+            text = str(value)
+        else:
+            raise ConfigError(f"kemo.yaml 环境变量值必须是标量：{name}")
+        if "\x00" in text:
+            raise ConfigError(f"kemo.yaml 环境变量包含空字符：{name}")
+        environment[name] = text
+    for name, text in environment.items():
         if override or name not in os.environ:
-            os.environ[name] = value
+            os.environ[name] = text
 
 
 def project_root() -> Path:
@@ -189,6 +306,20 @@ def read_json_object(path: Path, *, allow_empty: bool = False) -> dict[str, Any]
     return value
 
 
+def read_yaml_object(path: Path, *, allow_empty: bool = False) -> dict[str, Any]:
+    try:
+        text = cached_read_text(path, "utf-8")
+    except FileNotFoundError:
+        if allow_empty:
+            return {}
+        raise ConfigError(f"配置文件不存在：{path}") from None
+    if not text.strip():
+        if allow_empty:
+            return {}
+        raise ConfigError(f"配置文件为空：{path}")
+    return _parse_yaml_mapping(text, path, allow_empty=allow_empty)
+
+
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in override.items():
@@ -197,6 +328,16 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
         else:
             result[key] = copy.deepcopy(value)
     return result
+
+
+def memory_prompt_injection(config: dict[str, Any]) -> bool:
+    memory = config.get("memory") or {}
+    if not isinstance(memory, dict):
+        raise ConfigError("memory 必须是对象")
+    value = memory.get("prompt_injection", True)
+    if not isinstance(value, bool):
+        raise ConfigError("memory.prompt_injection 必须是布尔值")
+    return value
 
 
 def merge_user_config(
@@ -215,6 +356,16 @@ def merge_user_config(
         if key not in USER_ONLY_SECTIONS
     }
     merged = deep_merge(global_defaults, user_config)
+    # The user owns provider routing, never the instance destination allowlist.
+    merged.pop("provider_security", None)
+    if "provider_security" in global_config:
+        merged["provider_security"] = copy.deepcopy(global_config["provider_security"])
+    memory = merged.get("memory")
+    if memory is None:
+        memory = merged["memory"] = {}
+    if not isinstance(memory, dict):
+        raise ConfigError("memory 必须是对象")
+    memory["prompt_injection"] = memory_prompt_injection(global_config)
     retention_days = cron_history_retention_days(global_config)
     idle_close_seconds = cron_session_idle_close_seconds(global_config)
     if isinstance(merged.get("cron", {}), dict):
@@ -228,17 +379,65 @@ def merge_user_config(
     return merged
 
 
+def validate_cardstream_settings(config: dict[str, Any]) -> None:
+    import math
+    agents = config.get("agents") or {}
+    if not isinstance(agents, dict):
+        raise ValueError("agents 必须是对象")
+    for key, default in (("token_limit", 1000000), ("output_reserve", 8192)):
+        if type(agents.get(key, default)) is not int or agents.get(key, default) < 1:
+            raise ValueError(f"agents.{key} 必须是正整数")
+    ratio = agents.get("token_compression_ratio", .3)
+    if isinstance(ratio, bool) or not isinstance(ratio, (float, int)) or not 0 < ratio < 1:
+        raise ValueError("agents.token_compression_ratio 必须在 0 和 1 之间")
+    timeout = agents.get("compression_timeout_seconds", 180)
+    if isinstance(timeout, bool) or not isinstance(timeout, (float, int)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("agents.compression_timeout_seconds 必须是有限正数")
+    runtime = config.get("provider_runtime") or {}
+    retries = runtime.get("max_retries", 5) if isinstance(runtime, dict) else None
+    if type(retries) is not int or not 0 <= retries <= 5:
+        raise ValueError("provider_runtime.max_retries 必须是 0..5 的整数")
+
+
 def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     base = root or project_root()
-    load_dotenv(base / ".env")
+    load_kemo_yaml(base / "kemo.yaml")
     from run.config import user_dir
 
-    global_config = read_json_object(base / "config" / "global_config.json")
-    user_config = read_json_object(
-        user_dir(user, base) / "user_config.json", allow_empty=True
+    global_config = read_yaml_object(base / "config" / "global_config.yaml")
+    user_config = read_yaml_object(
+        user_dir(user, base) / "user_config.yaml", allow_empty=True
     )
     merged = merge_user_config(global_config, user_config)
+    # Retired options have no runtime branch. Existing user files stay intact.
+    for section, keys in {
+        "agents": ("context_engine", "max_rounds", "conserved_rounds", "rounds_after_compression",
+                   "enable_mid_context_compression", "compression_max_attempts"),
+        "history": ("schema_version", "recent_full_rounds"),
+        "memory": ("recovery_max_rounds_per_scan", "extraction_batch_rounds"),
+        "expand": ("realtime_injection",),
+        "perception": ("realtime_injection",),
+    }.items():
+        if isinstance(merged.get(section), dict):
+            for key in keys:
+                merged[section].pop(key, None)
     merged["user"] = user
+    from run.memory import memory_domain_rules
+
+    memory_domain_rules(merged)
+    configured_expand_update_interval(merged)
+    try:
+        validate_cardstream_settings(merged)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    try:
+        validate_provider_security(merged)
+    except ConfigError:
+        if "provider" in user_config:
+            record_runtime_event(base, user, category="backend", name="provider_config_override", status="failed")
+        raise
+    if "provider" in user_config:
+        record_runtime_event(base, user, category="backend", name="provider_config_override", status="success")
     from run.extensions import validate_multimodal_config
 
     validate_multimodal_config(merged)
@@ -251,6 +450,10 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
             merged["web_ui"]["language"] = language
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    if (merged.get("provider") or {}).get("type") == "chat":
+        from provider.chat_profiles import warn_deprecated_chat_capabilities
+
+        warn_deprecated_chat_capabilities(merged["provider"])
     return merged
 
 
@@ -259,6 +462,8 @@ def system_update_rate(config: dict[str, Any], key: str) -> int:
 
     if key not in SYSTEM_UPDATE_RATE_KEYS:
         raise ConfigError(f"未知系统模块刷新配置：{key}")
+    if key == "expand_update_rate":
+        return configured_expand_update_interval(config)
     task_config = config.get("task_cron_system") or {}
     if not isinstance(task_config, dict):
         return 5
@@ -268,7 +473,25 @@ def system_update_rate(config: dict[str, Any], key: str) -> int:
     return value
 
 
+def configured_expand_update_interval(config: dict[str, Any]) -> int:
+    """Read the canonical collector interval, accepting the old key as an alias."""
+    section = config.get("cron", {})
+    for key in ("task_cron_system", "expand_update"):
+        if not isinstance(section, dict):
+            raise ConfigError("cron.task_cron_system.expand_update.interval_seconds 必须是正整数")
+        section = section.get(key, {})
+    legacy = config.get("task_cron_system") or {}
+    fallback = legacy.get("expand_update_rate", 30) if isinstance(legacy, dict) else 30
+    if type(fallback) is not int or fallback < 1:
+        fallback = 30
+    value = section.get("interval_seconds", fallback) if isinstance(section, dict) else None
+    if type(value) is not int or value < 1:
+        raise ConfigError("cron.task_cron_system.expand_update.interval_seconds 必须是正整数")
+    return value
+
+
 def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    validate_provider_security(config)
     provider = copy.deepcopy(config.get("provider") or {})
     provider_type = str(provider.get("type") or "").strip().lower()
     if provider_type not in {"chat", "kemo"}:
@@ -299,6 +522,7 @@ def provider_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             if provider_type == "kemo"
             else "https://api.openai.com/v1"
         )
+    validate_provider_security({**config, "provider": {**provider, "base_url": base_url}})
     # An explicit Chat URL may use /proxy/api, a complete /chat/completions
     # route or query parameters. Preserve those routes; a bare host retains
     # the established /v1 default used by Chat model discovery as well.

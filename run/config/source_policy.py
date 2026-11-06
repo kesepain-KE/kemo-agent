@@ -7,6 +7,7 @@ from typing import Any
 
 from run.config import ConfigError
 
+PLUGIN_PERMISSIONS = ("read", "write", "delete", "external")
 
 @dataclass(frozen=True, slots=True)
 class NameFilter:
@@ -72,15 +73,14 @@ def _reject_unknown(
 class MainAgentSourcePolicy:
     knowledge_scopes: tuple[str, ...]
     plugins: NameFilter
+    plugin_permissions: tuple[str, ...]
     shared_skills: NameFilter
     user_skills: NameFilter
     global_expand: NameFilter
     shared_expand: NameFilter
     expand_prompt_injection: bool
-    expand_realtime_injection: bool
     global_perception: NameFilter
     perception_prompt_injection: bool
-    perception_realtime_injection: bool
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "MainAgentSourcePolicy":
@@ -99,16 +99,28 @@ class MainAgentSourcePolicy:
                 "global_whitelist",
                 "shared_whitelist",
                 "prompt_injection",
-                "realtime_injection",
             },
             field="expand",
         )
         _reject_unknown(
             perception,
-            {"global_whitelist", "prompt_injection", "realtime_injection"},
+            {"global_whitelist", "prompt_injection"},
             field="perception",
         )
-        _reject_unknown(plugins, {"whitelist"}, field="plugins")
+        _reject_unknown(plugins, {"whitelist", "permissions"}, field="plugins")
+        plugin_permissions = plugins.get("permissions", list(PLUGIN_PERMISSIONS))
+        if (
+            not isinstance(plugin_permissions, list)
+            or any(
+                not isinstance(item, str) or item not in PLUGIN_PERMISSIONS
+                for item in plugin_permissions
+            )
+        ):
+            raise ConfigError(
+                "plugins.permissions 必须是 read、write、delete、external 的字符串数组"
+            )
+        if len(set(plugin_permissions)) != len(plugin_permissions):
+            raise ConfigError("plugins.permissions 不得包含重复权限")
 
         use_shared = _boolean(
             knowledge,
@@ -133,6 +145,7 @@ class MainAgentSourcePolicy:
                 plugins.get("whitelist", []),
                 field="plugins.whitelist",
             ),
+            plugin_permissions=tuple(dict.fromkeys(plugin_permissions)),
             shared_skills=NameFilter.from_config(
                 skills.get("shared_whitelist", []),
                 field="skills.shared_whitelist",
@@ -152,12 +165,6 @@ class MainAgentSourcePolicy:
                 field="expand.prompt_injection",
                 default=True,
             ),
-            expand_realtime_injection=_boolean(
-                expand,
-                "realtime_injection",
-                field="expand.realtime_injection",
-                default=False,
-            ),
             global_perception=NameFilter.from_config(
                 perception.get("global_whitelist", []),
                 field="perception.global_whitelist",
@@ -168,12 +175,6 @@ class MainAgentSourcePolicy:
                 field="perception.prompt_injection",
                 default=True,
             ),
-            perception_realtime_injection=_boolean(
-                perception,
-                "realtime_injection",
-                field="perception.realtime_injection",
-                default=False,
-            ),
         )
 
     def direct_knowledge_scopes(self) -> tuple[str, ...]:
@@ -182,23 +183,21 @@ class MainAgentSourcePolicy:
         return self.knowledge_scopes
 
     @staticmethod
-    def _injection_mode(*, enabled: bool, realtime: bool) -> str:
+    def _injection_mode(*, enabled: bool) -> str:
         if not enabled:
             return "disabled"
-        return "realtime" if realtime else "round"
+        return "dynamic"
 
     @property
     def expand_injection_mode(self) -> str:
         return self._injection_mode(
             enabled=self.expand_prompt_injection,
-            realtime=self.expand_realtime_injection,
         )
 
     @property
     def perception_injection_mode(self) -> str:
         return self._injection_mode(
             enabled=self.perception_prompt_injection,
-            realtime=self.perception_realtime_injection,
         )
 
     def public_summary(self) -> dict[str, Any]:
@@ -208,7 +207,10 @@ class MainAgentSourcePolicy:
                 "configured_scopes": list(self.knowledge_scopes),
                 "effective_scopes": list(self.direct_knowledge_scopes()),
             },
-            "plugins": self.plugins.public_summary(),
+            "plugins": {
+                **self.plugins.public_summary(),
+                "permissions": list(self.plugin_permissions),
+            },
             "skills": {
                 "shared": self.shared_skills.public_summary(),
                 "user": self.user_skills.public_summary(),
@@ -217,13 +219,11 @@ class MainAgentSourcePolicy:
                 "global": self.global_expand.public_summary(),
                 "shared": self.shared_expand.public_summary(),
                 "prompt_injection": self.expand_prompt_injection,
-                "realtime_injection": self.expand_realtime_injection,
                 "injection_mode": self.expand_injection_mode,
             },
             "perception": {
                 "global": self.global_perception.public_summary(),
                 "prompt_injection": self.perception_prompt_injection,
-                "realtime_injection": self.perception_realtime_injection,
                 "injection_mode": self.perception_injection_mode,
             },
         }

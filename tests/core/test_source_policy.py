@@ -12,69 +12,64 @@ class SourcePolicyTests(unittest.TestCase):
         self.assertEqual(policy.knowledge_scopes, ("user", "shared", "global"))
         self.assertEqual(policy.direct_knowledge_scopes(), policy.knowledge_scopes)
         self.assertTrue(policy.plugins.unrestricted)
+        self.assertEqual(
+            policy.plugin_permissions, ("read", "write", "delete", "external")
+        )
         self.assertTrue(policy.shared_skills.unrestricted)
         self.assertTrue(policy.user_skills.unrestricted)
         self.assertTrue(policy.global_expand.unrestricted)
         self.assertTrue(policy.shared_expand.unrestricted)
         self.assertTrue(policy.expand_prompt_injection)
-        self.assertFalse(policy.expand_realtime_injection)
-        self.assertEqual(policy.expand_injection_mode, "round")
+        self.assertEqual(policy.expand_injection_mode, "dynamic")
         self.assertTrue(policy.global_perception.unrestricted)
         self.assertTrue(policy.perception_prompt_injection)
-        self.assertFalse(policy.perception_realtime_injection)
-        self.assertEqual(policy.perception_injection_mode, "round")
+        self.assertEqual(policy.perception_injection_mode, "dynamic")
 
-    def test_perception_realtime_injection_is_user_controlled_and_defaults_off(
-        self,
-    ) -> None:
+    def test_perception_injection_uses_the_dynamic_tail(self) -> None:
         policy = MainAgentSourcePolicy.from_config(
             {
                 "perception": {
                     "global_whitelist": ["screen"],
-                    "realtime_injection": True,
                 }
             }
         )
-        self.assertTrue(policy.perception_realtime_injection)
+        self.assertTrue(policy.perception_prompt_injection)
+        self.assertEqual(policy.perception_injection_mode, "dynamic")
         self.assertEqual(policy.global_perception.names, ("screen",))
-        self.assertTrue(policy.public_summary()["perception"]["realtime_injection"])
+        self.assertEqual(policy.public_summary()["perception"]["injection_mode"], "dynamic")
 
-    def test_expand_realtime_injection_is_user_controlled_and_defaults_off(
-        self,
-    ) -> None:
+    def test_expand_injection_uses_the_dynamic_tail(self) -> None:
         policy = MainAgentSourcePolicy.from_config(
             {
                 "expand": {
                     "global_whitelist": ["weather"],
                     "shared_whitelist": [],
-                    "realtime_injection": True,
                 }
             }
         )
-        self.assertTrue(policy.expand_realtime_injection)
+        self.assertTrue(policy.expand_prompt_injection)
+        self.assertEqual(policy.expand_injection_mode, "dynamic")
         self.assertEqual(policy.global_expand.names, ("weather",))
-        self.assertTrue(policy.public_summary()["expand"]["realtime_injection"])
+        self.assertEqual(policy.public_summary()["expand"]["injection_mode"], "dynamic")
 
     def test_prompt_injection_master_switches_override_realtime_mode(self) -> None:
         policy = MainAgentSourcePolicy.from_config(
             {
                 "expand": {
                     "prompt_injection": False,
-                    "realtime_injection": True,
                 },
                 "perception": {
                     "prompt_injection": True,
-                    "realtime_injection": True,
                 },
             }
         )
         self.assertFalse(policy.expand_prompt_injection)
         self.assertEqual(policy.expand_injection_mode, "disabled")
         self.assertTrue(policy.perception_prompt_injection)
-        self.assertEqual(policy.perception_injection_mode, "realtime")
+        self.assertEqual(policy.perception_injection_mode, "dynamic")
         summary = policy.public_summary()
         self.assertEqual(summary["expand"]["injection_mode"], "disabled")
-        self.assertEqual(summary["perception"]["injection_mode"], "realtime")
+        self.assertEqual(summary["perception"]["injection_mode"], "dynamic")
 
     def test_knowledge_switches_compute_exact_main_scopes(self) -> None:
         policy = MainAgentSourcePolicy.from_config(
@@ -122,12 +117,14 @@ class SourcePolicyTests(unittest.TestCase):
             ({"skills": {"shared_whitelist": "all"}}, "skills.shared_whitelist"),
             ({"expand": {"global_whitelist": [""]}}, "expand.global_whitelist"),
             ({"expand": {"prompt_injection": 1}}, "必须是布尔值"),
-            ({"expand": {"realtime_injection": 1}}, "必须是布尔值"),
+            ({"expand": {"realtime_injection": 1}}, "已移除或未知项"),
             ({"perception": {"global_whitelist": [1]}}, "perception.global_whitelist"),
             ({"perception": {"prompt_injection": "no"}}, "必须是布尔值"),
-            ({"perception": {"realtime_injection": "yes"}}, "必须是布尔值"),
+            ({"perception": {"realtime_injection": "yes"}}, "已移除或未知项"),
             ({"skills": {"user_whitelist": []}}, "已移除"),
             ({"plugins": {"whitelist": ["*"]}}, "不支持"),
+            ({"plugins": {"permissions": ["read", "read"]}}, "重复"),
+            ({"plugins": {"permissions": ["execute"]}}, "字符串数组"),
             ({"plugins": {"unknown": []}}, "未知"),
         )
         for config, message in cases:
