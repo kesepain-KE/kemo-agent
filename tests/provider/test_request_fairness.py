@@ -222,7 +222,7 @@ def test_interleaved_main_generators_do_not_leak_space_across_yields(tmp_path):
         finally:
             seen.append((request["session_id"], current_request_scope()))
 
-    with patch("run.conversation.runtime._iter_request_events_unlocked", events):
+    with patch("run.conversation.main_orchestration.run_conversation", events):
         first = iter_request_events({"user": "alice", "source": "web", "session_id": "a"}, root=tmp_path)
         second = iter_request_events({"user": "alice", "source": "web", "session_id": "b"}, root=tmp_path)
         try:

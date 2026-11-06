@@ -11,7 +11,7 @@ from provider.adapters.base import ProviderAdapter
 from provider.adapters.chat_bridge import ChatBridgeProvider
 from provider.kemo_gateway import KemoGatewayProvider
 from provider.request_pool import FairRequestPool, RequestCancelled
-from provider.request_scope import current_request_scope
+from provider.request_scope import current_request_priority, current_request_scope
 
 
 class ProviderCongestionError(RuntimeError):
@@ -98,7 +98,7 @@ def provider_request_slot(
     scope = current_request_scope()
     with _provider_semaphore_lock:
         semaphore = get_provider_semaphore(max_concurrent)
-        ticket = semaphore.register(scope)
+        ticket = semaphore.register(scope, current_request_priority())
     try:
         acquired = semaphore.wait(ticket, timeout, cancel_event)
     except RequestCancelled as exc:

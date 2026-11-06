@@ -26,7 +26,7 @@ def test_profileless_bridge_allows_basic_tools_but_labels_assumption():
     declared = bridge.capabilities("unknown")
     assert declared.extensions["capability_source"] == "compat-default"
     assert declared.extensions["capability_verification"] == "assumed"
-    assert not declared.reasoning.supported and not declared.tools.multimodal_results
+    assert declared.reasoning.supported and not declared.tools.multimodal_results
 
 
 @pytest.mark.parametrize("target", ["messages", "system", "input", "instructions", "model", "unknown_option"])

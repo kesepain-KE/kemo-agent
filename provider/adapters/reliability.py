@@ -117,7 +117,10 @@ class KemoNetworkRetryPolicy:
         cancel_event: threading.Event | None,
     ) -> None:
         error.attempt_count = failed_attempt
-        if not error.retryable or failed_attempt >= self.max_attempts:
+        if not error.retryable:
+            raise error
+        if failed_attempt >= self.max_attempts:
+            error.retry_budget_exhausted = True
             raise error
         self.wait_before_retry(
             error,

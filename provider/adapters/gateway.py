@@ -49,14 +49,12 @@ from provider.protocol.streaming import (
     parse_sse_events,
 )
 from provider.protocol.validation import validate_provider_options, validate_request
+from provider.token_usage import complete_usage, merge_usage_snapshots
 from provider.schema import (
     ProviderAuthError,
     ProviderError,
     ProviderTimeoutError,
 )
-
-
-_RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 class _MultipartUpload:
@@ -173,9 +171,8 @@ class KemoGatewayAdapter:
                 category="gateway_error",
                 status_code=exc.code,
                 retryable=(
-                    declared_retryable
-                    if declared_retryable is not None
-                    else exc.code in _RETRYABLE_STATUS
+                    (exc.code in {408, 429} or 500 <= exc.code < 600)
+                    and declared_retryable is not False
                 ),
                 retry_after_ms=parse_retry_after_ms(exc, body),
                 body=safe_body,
@@ -344,12 +341,9 @@ class KemoGatewayAdapter:
                     category="gateway_protocol_error",
                     retryable=False,
                 )
-            return response
+            return complete_usage(request, response)
 
-        return self._retry_policy.run(
-            send,
-            cancel_event=cancel_event,
-        )
+        return self._retry_policy.run(send, cancel_event=cancel_event)
 
     def embeddings(
         self,
@@ -487,6 +481,7 @@ class KemoGatewayAdapter:
             ),
         )
         terminal = False
+        stream_usage = None
         expected_response_id: str | None = None
         remote_cancel_id: str | None = None
 
@@ -568,6 +563,11 @@ class KemoGatewayAdapter:
                                     "actual": event.response_id,
                                 },
                             )
+                        if event.usage is not None:
+                            stream_usage = merge_usage_snapshots(event.usage, stream_usage)
+                        if event.response is not None:
+                            completed = complete_usage(request, event.response, previous=stream_usage)
+                            event = event.model_copy(update={"response": completed})
                         if guard.accept(event):
                             current_last_event_id = event.event_id
                             current_resume_sequence = event.sequence

@@ -17,6 +17,8 @@ class RequestCancelled(RuntimeError):
 @dataclass(eq=False)
 class RequestTicket:
     scope: RequestScope
+    priority: int = 2
+    enqueued_at: float = 0.0
 
 
 class FairRequestPool:
@@ -37,10 +39,12 @@ class FairRequestPool:
                 "waiting_estimate": len(self._pending),
             }
 
-    def register(self, scope: RequestScope) -> RequestTicket:
+    def register(self, scope: RequestScope, priority: int = 2) -> RequestTicket:
         """Register under the factory lock so idle reconfiguration cannot race."""
         with self._condition:
-            ticket = RequestTicket(scope)
+            if type(priority) is not int or priority not in {0, 1, 2}:
+                raise ValueError("Invalid Provider priority")
+            ticket = RequestTicket(scope, priority, time.monotonic())
             self._pending.append(ticket)
             # Record new contenders before a current borrower releases its slot.
             self._turns.choose((item.scope for item in self._pending), self._active)
@@ -61,8 +65,20 @@ class FairRequestPool:
                     if not first_check and deadline is not None and time.monotonic() >= deadline:
                         return False
                     # A zero timeout still allows an immediate nonblocking grant.
-                    chosen = self._turns.choose((item.scope for item in self._pending), self._active)
-                    first = next((item for item in self._pending if item.scope == chosen), None)
+                    now = time.monotonic()
+                    # Every 2s of waiting raises one effective class. Once all
+                    # reach P0, age wins across classes, preserving bounded
+                    # service even under a continuous stream of main requests.
+                    def rank(item):
+                        return max(0, item.priority - int((now - item.enqueued_at) / 2))
+                    best = min((rank(item) for item in self._pending), default=2)
+                    candidates = [item for item in self._pending if rank(item) == best]
+                    aged = [item for item in candidates if now - item.enqueued_at >= 4]
+                    if aged:
+                        first = min(aged, key=lambda item: item.enqueued_at)
+                    else:
+                        chosen = self._turns.choose((item.scope for item in candidates), self._active)
+                        first = next((item for item in candidates if item.scope == chosen), None)
                     if self._active.total() < self.limit and first is ticket:
                         self._pending.remove(ticket)
                         self._active[ticket.scope] += 1
