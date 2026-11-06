@@ -126,25 +126,9 @@ def create_user(
 
 
 def _post_process_knowledge(root: Path, name: str) -> None:
-    """初始化 knowledge 索引和分类 SQLite 表。"""
-    from run.config import ensure_classification_file
+    """Ensure the user's path-based knowledge root exists."""
 
-    index_path = root / "users" / name / "knowledge" / "data_structure.md"
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    if not (index_path.exists() and index_path.stat().st_size > 0):
-        index_path.write_text(
-            f"# users/{name}/knowledge/ 目录结构\n\n"
-            f"用户 {name} 的私有知识库。\n\n"
-            f"| 文件 | 说明 |\n"
-            f"|------|------|\n"
-            f"| `data_structure.md` | 本索引文件 |\n\n"
-            f"## 检索规则\n\n"
-            f"1. 先查此目录，再查全局知识库。\n"
-            f"2. 用户私有信息默认写入此目录。\n"
-            f"3. 文件发生增删改移后必须同步本索引。\n",
-            "utf-8",
-        )
-    ensure_classification_file(index_path.parent)
+    (root / "users" / name / "knowledge").mkdir(parents=True, exist_ok=True)
 
 
 def _post_process_memory(root: Path, name: str) -> None:

@@ -51,7 +51,7 @@ def backup_runtime_databases(*, root: Path = ROOT, dry_run: bool) -> DatabaseBac
         user / relative
         for user in _user_directories(root)
         for relative in (
-            "cards.sqlite3", "improve/memory.sqlite3",
+            "history/cards.sqlite3", "cards.sqlite3", "improve/memory.sqlite3",
             "task_plan/task_plans.sqlite3",
         )
         if (user / relative).is_file()
@@ -114,7 +114,7 @@ def _recovery_hint(backups: DatabaseBackups | None) -> str:
         f"；更新前数据库备份：{backups.directory}。恢复前停止所有框架进程，"
         "保留现有数据库及 WAL/SHM，按 manifest.json 对应路径使用 SQLite backup API 恢复；"
         "源码自动回滚不等于数据库已经恢复。单库恢复命令示例见 "
-        "knowledge/global/storage-and-persistence.md 的“手工恢复单库”"
+        "knowledge/global/runtime/storage-and-persistence.md 的“手工恢复单库”"
     )
 
 
@@ -189,7 +189,7 @@ def initialize_user_memory_databases(
 def initialize_runtime_state_databases(
     *, root: Path = ROOT, dry_run: bool, backups: DatabaseBackups | None = None
 ) -> None:
-    """Initialize current SQLite stores without scanning obsolete formats."""
+    """Relocate CardStream if needed, then initialize current SQLite stores."""
 
     users = _user_directories(root)
     if dry_run:
@@ -204,6 +204,7 @@ def initialize_runtime_state_databases(
         from run.tasks import PlanStore
 
         for user_path in users:
+            _relocate_card_database(root, user_path)
             with connection(root, user_path.name):
                 pass
             ProcessedMessageStore(root, user_path.name).recover_interrupted()
@@ -214,3 +215,27 @@ def initialize_runtime_state_databases(
         raise
     except Exception as exc:
         raise UpdateError(f"运行状态 SQLite 初始化失败：{exc}{_recovery_hint(backups)}") from exc
+
+
+def _relocate_card_database(root: Path, user_path: Path) -> None:
+    """Move the previous CardStream location during a stopped, backed-up update."""
+    from contextlib import closing
+    import sqlite3
+
+    from plugins._creator_security import reject_link_components
+
+    source = user_path / "cards.sqlite3"
+    if not source.exists():
+        return
+    destination = user_path / "history" / "cards.sqlite3"
+    reject_link_components(root.resolve(), source, label="CardStream 迁移源")
+    reject_link_components(root.resolve(), destination, label="CardStream 迁移目标")
+    if not source.is_file() or source.stat().st_nlink > 1:
+        raise UpdateError(f"CardStream 迁移源必须是非链接普通文件：{source}")
+    if destination.exists():
+        raise UpdateError(f"CardStream 新旧位置同时存在数据库，拒绝覆盖：{source}；{destination}")
+    with closing(sqlite3.connect(source, timeout=5.0)) as database:
+        if database.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
+            raise UpdateError(f"CardStream WAL 仍被占用，未移动数据库：{source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source.rename(destination)

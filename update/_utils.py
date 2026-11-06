@@ -61,7 +61,8 @@ _DISPLAY_URL_RE = re.compile(r"(?i)\bhttps?://[^\s'\"<>]+")
 
 
 def _is_sensitive_key(value: object) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).casefold()).strip("_")
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(value))
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
     if normalized in _DISPLAY_SENSITIVE_KEYS:
         return True
     return normalized.endswith(

@@ -9,6 +9,8 @@ from pathlib import Path
 from ._utils import green, sync_directory, yellow
 from .constants import (
     BACKUP_EXCLUDES,
+    BACKUP_ABSENT_FILE_MARKERS,
+    BACKUP_INCLUDED_FILES,
     BACKUP_KEEP,
     ROLLBACK_MANAGED_FILES,
     ROLLBACK_MANAGED_PATHS,
@@ -25,6 +27,16 @@ def make_backup(*, root: Path = ROOT, dry_run: bool = False) -> Path | None:
     backup_dir.mkdir(parents=True, exist_ok=False)
     try:
         sync_directory(root, backup_dir, delete=False, excludes=BACKUP_EXCLUDES)
+        for relative in BACKUP_INCLUDED_FILES:
+            source = root / relative
+            if source.is_file():
+                target = backup_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target, follow_symlinks=False)
+            else:
+                marker = backup_dir / BACKUP_ABSENT_FILE_MARKERS[relative]
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
     except Exception:
         # An incomplete backup must never be presented as recoverable.
         shutil.rmtree(backup_dir, ignore_errors=True)
@@ -65,6 +77,16 @@ def restore_backup(*, backup_dir: Path, root: Path = ROOT) -> None:
         delete=False,
         excludes=BACKUP_EXCLUDES,
     )
+    for relative in BACKUP_INCLUDED_FILES:
+        source = backup_dir / relative
+        target = root / relative
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target, follow_symlinks=False)
+        elif (
+            backup_dir / BACKUP_ABSENT_FILE_MARKERS[relative]
+        ).is_file():
+            target.unlink(missing_ok=True)
     for relative in ROLLBACK_MANAGED_FILES:
         source = backup_dir / relative
         target = root / relative

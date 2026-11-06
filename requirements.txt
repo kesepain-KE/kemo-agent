@@ -2,6 +2,9 @@
 # Web 后端: FastAPI + Pydantic + Uvicorn
 
 fastapi>=0.110.0,<0.140.0
+starlette>=0.36.3,<2.0.0
+anyio>=4.0.0,<5.0.0
+httpx>=0.27.0,<0.29.0
 itsdangerous>=2.2.0,<3.0.0
 Pillow>=10.0.0,<13.0.0
 PyYAML>=6.0.0,<7.0.0
@@ -13,3 +16,6 @@ tzdata>=2024.1,<2027.0
 uvicorn>=0.27.0,<0.52.0
 tavily-python>=0.7.0,<0.8.0
 psutil>=5.9.0,<8.0.0
+
+# SQLite FTS5/simple 使用 Python SQLite 扩展加载能力和随包携带的原生库，
+# 不需要额外的 pip 分词包；系统运行库要求见 run/infra/sqlite_simple/README.md。

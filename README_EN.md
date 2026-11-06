@@ -243,7 +243,7 @@ python start_web.py
 
 The default web address is `http://127.0.0.1:1357`. Start with the web interface and configure model services, the user, and access credentials.
 
-See the [deployment guide](deploy/README.md) for options, custom paths, offline archives, recovery, and publication, and the [deployment knowledge reference](knowledge/global/deployment-and-release.md) for the agent-facing contract. Both detailed guides are currently in Chinese.
+See the [deployment guide](deploy/README.md) for options, custom paths, offline archives, recovery, and publication, and the [deployment knowledge reference](knowledge/global/release/deployment-and-release.md) for the agent-facing contract. Both detailed guides are currently in Chinese.
 
 ---
 
@@ -276,16 +276,6 @@ Confirmed compatible Kemo gateway: `kemo-adapter-api 1.0.0` (Kemo 2.0 wire proto
 - `file.search` now uses only `name` and `content`; `web_search.search` uses semantic `answer` and `raw_content` enums.
 - The graph guide is split into `kemo_graph_read` and `kemo_graph_write`; read permission no longer exposes write operations.
 - Duplicate parameter tables were removed from plugin guides. Old tool names and parameter semantics are intentionally incompatible.
-
-### 1.5.3 release notes (November 2, 2026)
-
-A bug-fix-only release with no new features, focused on the correctness of both the KEMO and Chat protocol paths.
-
-- Clarifies subagent stop, live guidance, and cascading cancellation semantics: an ordinary stop leaves running child tasks intact, while cancellation is requested only for an explicit cascade. Web controls require an execution handle held by the current process and do not support cross-process takeover.
-- Fixes terminal phase backfill for streamed Chat messages. Message start does not predict later tool calls or buffer text; the terminal phase is set to `commentary` or `final_answer` from the final tool-call state, consistent with non-streaming behavior.
-- Improves subagent input preflight diagnostics by identifying field type mismatches and reporting counts for unknown field names that cannot be safely exposed. It does not echo input values or unsafe names, relax strict schemas, or change the 400/600-character response budgets.
-- Corrects Chat request normalization and thinking-parameter mapping so the compatibility layer cannot weaken Kemo protocol invariants.
-- This is a source finalization, not confirmation that Release, npm, or GHCR artifacts have been built, verified, or published. Historical validation records and older artifacts are not relabeled as 1.5.3.
 
 The current `kemo-preview` branch builds on this baseline with the CardStream refactor: complete immutable RAW
 history and a rolling VIEW summary. Each main request freezes history and the dynamic tail, compacting above

@@ -17,6 +17,7 @@ LOCAL_NAMES = {
 }
 # 发布包携带的默认数据文件：缺失时补入，已存在时一律保留本机内容。
 # 逐条精确列出，避免把运行期数据库整体放进发布包。
+# 接受旧发布包中的分类默认数据；新打包器已停止分发，已有本机文件仍不覆盖。
 RELEASE_DATA_FILES = frozenset({
     'knowledge/global/classify.sqlite3',
     'knowledge/share/classify.sqlite3',

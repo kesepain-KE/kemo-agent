@@ -22,12 +22,11 @@ ROOT_FILES = {'version.json', 'cli.py', 'events.py', 'setup.py', 'update.py', 'r
 
 
 def publishable(name: str) -> bool:
-    if preserved_seed(name):
-        # 默认知识分类表是框架自带数据，必须进包；安装时只补缺不覆盖。
-        return True
-    if name.endswith('/classify.sql'):
-        # 旧格式文本分类脚本已由分类数据表取代，不再随发布包分发。
+    if name.endswith(('/classify.sql', '/classify.sqlite3')):
+        # 分类元数据已退役；旧发布包仍可安装，新包不再携带。
         return False
+    if preserved_seed(name):
+        return True
     parts = Path(name).parts
     if parts[0] not in DIRECTORIES and name not in ROOT_FILES:
         return False

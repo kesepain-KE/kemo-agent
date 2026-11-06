@@ -103,7 +103,7 @@ session_id= <chat_type>:<external_chat_id>
 消息模块通过 ProcessedMessageStore 管理幂等记录，当前表位于每用户 CardStream 数据库，独立于历史 RAW/VIEW：
 
 ```text
-users/<user>/cards.sqlite3
+users/<user>/history/cards.sqlite3
 └── message_processed_messages
 ```
 

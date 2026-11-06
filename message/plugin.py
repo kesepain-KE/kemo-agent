@@ -291,7 +291,11 @@ class FileMessageTransport:
                     self._pending[token] = _PendingEnvelope(
                         originals, claim
                     )
-                    callback(envelope)
+                    try:
+                        callback(envelope)
+                    except BaseException:
+                        self._pending.pop(token, None)
+                        raise
                     submitted += 1
                 self._update_state(
                     lambda state: (
@@ -304,12 +308,22 @@ class FileMessageTransport:
                 )
             except BaseException as exc:
                 raise_if_host_exception(exc)
+                pending_count = sum(
+                    pending.claim_path == claim
+                    for pending in self._pending.values()
+                )
+                if pending_count:
+                    self._claim_counts[claim] = pending_count
+                else:
+                    self._claim_counts.pop(claim, None)
                 failed = claim.with_suffix(claim.suffix + ".failed")
                 try:
                     os.replace(claim, failed)
-                except OSError:
-                    pass
-                self._active_claims.discard(claim)
+                except OSError as move_error:
+                    self._report_error(move_error)
+                else:
+                    if pending_count == 0:
+                        self._active_claims.discard(claim)
                 self._report_error(exc)
         return submitted
 

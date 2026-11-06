@@ -89,6 +89,12 @@ RUNTIME_EXCLUDES = (
 # Keep this alias for callers and older tests that used BACKUP_EXCLUDES.
 BACKUP_EXCLUDES = RUNTIME_EXCLUDES + (".git/", ".venv/", "venv/", ".backups/")
 
+# Release-managed files inside otherwise runtime-owned directories.
+BACKUP_INCLUDED_FILES = ("skills/register.py",)
+BACKUP_ABSENT_FILE_MARKERS = {
+    "skills/register.py": "skills/.register.py.absent",
+}
+
 # Source directories that a normal release may update and therefore must be
 # restored after a failed write. User/runtime-owned paths are handled
 # separately through RUNTIME_EXCLUDES and board-specific merge rules.
@@ -105,7 +111,6 @@ ROLLBACK_MANAGED_PATHS = (
     "expand/global",
     "expand/share",
     "sense",
-    "skills",
     "agents",
     "plugins",
     "web",
