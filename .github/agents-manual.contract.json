@@ -2,14 +2,16 @@
   "schema_version": 1,
   "manual": "agents.md",
   "max_characters": 26000,
+  "engineering_manual": "knowledge/global/engineering-operations.md",
+  "engineering_max_characters": 26000,
   "sections": [
     "0. 本手册怎么用",
-    "1. 必读红线",
-    "2. 能力地图",
-    "3. 高频操作规则",
-    "4. 系统自动行为",
+    "1. 相处与主动性",
+    "2. 记住这个人",
+    "3. 选合适的能力",
+    "4. 做事与交付",
     "5. 场景索引",
-    "6. 维护契约"
+    "6. 维护约定"
   ],
   "scene_section": "5. 场景索引",
   "max_scene_row_characters": 210,
@@ -26,6 +28,12 @@
     "不要盲目重试",
     "任何情况下不可删除、不可清空、不可写入空内容"
   ],
+  "prompt_required_phrases": [
+    "个人智能",
+    "记忆为了连续理解",
+    "用户可以指定执行顺序",
+    "不要调用或臆造最终答案提交工具"
+  ],
   "forbidden_phrases": [
     "统一优先 pwsh",
     "该值覆盖插件内部期限",
@@ -34,35 +42,27 @@
   "rules": [
     {
       "id": "tool-budget",
-      "claim": "[机制] 仓库配置基线：`tools.max_iterations={iterations}`、`tools.timeout={timeout}` 秒、`tools.consecutive_identical_call_limit={identical}`、`history.consecutive_tool_fail_limit={failures}`。",
+      "claim": "[机制] 仓库配置基线：`tools.timeout={timeout}` 秒、`tools.consecutive_identical_call_limit={identical}`、`history.consecutive_tool_fail_limit={failures}`。",
       "facts": {
-        "iterations": {
-          "kind": "json",
-          "path": "config/global_config.json",
-          "key": [
-            "tools",
-            "max_iterations"
-          ]
-        },
         "timeout": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "tools",
             "timeout"
           ]
         },
         "identical": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "tools",
             "consecutive_identical_call_limit"
           ]
         },
         "failures": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "history",
             "consecutive_tool_fail_limit"
@@ -71,12 +71,14 @@
       },
       "boundaries": [
         "用户覆盖后以有效配置为准",
-        "每个工具调用分别计数"
+        "每个工具调用分别计数",
+        "主智能体从用户输入到最终回复默认持续执行",
+        "不需要长任务开关"
       ]
     },
     {
       "id": "tool-result",
-      "claim": "[机制] 内联结果预算为 {limit:,} 字符（`run/tools/__init__.py` 的 `MAX_TOOL_RESULT_CHARS`）。",
+      "claim": "[机制] 主整合工具结果完整写入 CardStream RAW，由 VIEW 压缩和请求容量检查管理；子代理内联结果预算为 {limit:,} 字符（`run/tools/__init__.py` 的 `MAX_TOOL_RESULT_CHARS`）。",
       "facts": {
         "limit": {
           "kind": "python",
@@ -86,16 +88,23 @@
         }
       },
       "boundaries": [
-        "完整结果文件",
+        "original_call",
+        "execution_id",
         "已执行不等于业务成功",
         "不要盲目重试",
+        "完整结果文件",
         "ToolResultTooLargeError"
       ],
       "source_guards": [
         {
           "path": "run/tools/__init__.py",
           "symbol": "_enforce_tool_result_limit",
-          "ast_sha256": "17af2444f62e018c53af5eda617d93a2b16e473e1fe71b93d73be590e5be1ec5"
+          "ast_sha256": "5693f664bd1b8c196a3789b39b557866108a2c17e835ecf776d50cd616c21102"
+        },
+        {
+          "path": "run/tools/runtime.py",
+          "symbol": "ToolRuntime._execute",
+          "ast_sha256": "b21d5f19260a30581dcb73e2e85a27518807540c57fa5a0bfae2f42f0320d9ba"
         }
       ]
     },
@@ -172,8 +181,8 @@
       "claim": "[机制] `memory.tiers` 配置基线：`seven_days` {d7} 天/权重≥{w7} → `one_month` {d30} 天/权重≥{w30} → `half_year` {d180} 天/权重≥{w180} → `permanent`。",
       "facts": {
         "d7": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "memory",
             "tiers",
@@ -182,8 +191,8 @@
           ]
         },
         "w7": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "memory",
             "tiers",
@@ -192,8 +201,8 @@
           ]
         },
         "d30": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "memory",
             "tiers",
@@ -202,8 +211,8 @@
           ]
         },
         "w30": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "memory",
             "tiers",
@@ -212,8 +221,8 @@
           ]
         },
         "d180": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "memory",
             "tiers",
@@ -222,8 +231,8 @@
           ]
         },
         "w180": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "memory",
             "tiers",
@@ -266,78 +275,60 @@
     },
     {
       "id": "context-budget",
-      "claim": "[机制] 仓库配置基线：`agents.max_rounds={rounds}`、`agents.token_limit={tokens}`、`agents.token_compression_ratio={ratio}`、`agents.conserved_rounds={conserved}`、`agents.rounds_after_compression={after}`、`history.recent_full_rounds={full}`、`agents.enable_mid_context_compression={mid}`。",
+      "claim": "[机制] CardStream 配置基线：`agents.token_limit={tokens}`、`agents.output_reserve={reserve}`、`agents.token_compression_ratio={ratio}`；主请求前占用超过有效输入上限的80%时自动压缩。",
       "facts": {
-        "rounds": {
-          "kind": "json",
-          "path": "config/global_config.json",
-          "key": [
-            "agents",
-            "max_rounds"
-          ]
-        },
         "tokens": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "agents",
             "token_limit"
           ]
         },
+        "reserve": {
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
+          "key": [
+            "agents",
+            "output_reserve"
+          ]
+        },
         "ratio": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "agents",
             "token_compression_ratio"
           ]
-        },
-        "conserved": {
-          "kind": "json",
-          "path": "config/global_config.json",
-          "key": [
-            "agents",
-            "conserved_rounds"
-          ]
-        },
-        "after": {
-          "kind": "json",
-          "path": "config/global_config.json",
-          "key": [
-            "agents",
-            "rounds_after_compression"
-          ]
-        },
-        "full": {
-          "kind": "json",
-          "path": "config/global_config.json",
-          "key": [
-            "history",
-            "recent_full_rounds"
-          ]
-        },
-        "mid": {
-          "kind": "json",
-          "path": "config/global_config.json",
-          "key": [
-            "agents",
-            "enable_mid_context_compression"
-          ]
         }
       },
       "boundaries": [
-        "不是代码兜底值",
         "用户覆盖后以有效配置为准",
-        "不影响轮数、Token 或 Provider 超限恢复"
+        "RAW 追加后不可变",
+        "候选验证后原子提交",
+        "失败不改变已提交VIEW",
+        "不读取、迁移或删除旧历史文件"
+      ],
+      "source_guards": [
+        {
+          "path": "run/cards/barrier.py",
+          "symbol": "prepare_request",
+          "ast_sha256": "bd1e50b8b2a734a31d60d34479f4aaa5a3e1d8d9578fb4c589f791dd082c1dad"
+        },
+        {
+          "path": "run/cards/store.py",
+          "symbol": "CardStore.replace_prefix",
+          "ast_sha256": "f2cc636748c1013012c87769434d5179222dc3c52f9579b43f9dd620a1a06737"
+        }
       ]
     },
     {
       "id": "agent-timeout",
-      "claim": "[机制] `agent_runtime.default_timeout` 仓库配置为 {seconds} 秒（`config/global_config.json`）；这是子代理运行预算基准，不是所有工具外层看门狗的统一期限。",
+      "claim": "[机制] `agent_runtime.default_timeout` 仓库配置为 {seconds} 秒（`config/global_config.yaml`）；这是子代理运行预算基准，不是所有工具外层看门狗的统一期限。",
       "facts": {
         "seconds": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "agent_runtime",
             "default_timeout"
@@ -369,11 +360,11 @@
     },
     {
       "id": "invalid-arguments",
-      "claim": "[机制] 参数不合法的模型纠错重试基线为 {retries} 次（`tools.invalid_tool_arguments_retries`，`config/global_config.json`）。",
+      "claim": "[机制] 参数不合法的模型纠错重试基线为 {retries} 次（`tools.invalid_tool_arguments_retries`，`config/global_config.yaml`）。",
       "facts": {
         "retries": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "tools",
             "invalid_tool_arguments_retries"
@@ -387,27 +378,55 @@
     },
     {
       "id": "provider-retries",
-      "claim": "[机制] Provider 单次错误序列最多重试 {retries} 次（`run/retry/policy.py` 的 `MAX_RETRIES`）；接受完整响应后重置，不是单 Run 的累计次数上限。",
+      "claim": "[机制] 主模型单次逻辑请求额外重试基线为 {main_retries} 次（`provider_runtime.max_retries`）；上限 5 次，子代理单次运行累计额外重试上限为 {retries} 次（`run/retry/policy.py` 的 `MAX_RETRIES`）。",
       "facts": {
         "retries": {
           "kind": "python",
           "path": "run/retry/policy.py",
           "symbol": "MAX_RETRIES",
           "key": []
+        },
+        "main_retries": {
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
+          "key": [
+            "provider_runtime",
+            "max_retries"
+          ]
         }
       },
       "boundaries": [
-        "auth 不可重试",
-        "不把普通 HTTP 400 当输入超限"
+        "不恢复单次运行的累计重试额度",
+        "传输预算耗尽不被外层重新放大",
+        "中断正文与思考先保存不完整快照",
+        "完整失败终态或已有片段时使用新request_id",
+        "已执行工具不重跑",
+        "已输出媒体不自动重放",
+        "仅思考或commentary不作为最终正文",
+        "已处理回执不清除最终正文候选",
+        "保留Retry-After",
+        "普通 HTTP 400 和413不触发旧轮次恢复"
+      ],
+      "source_guards": [
+        {
+          "path": "run/retry/loop.py",
+          "symbol": "RetryLedger",
+          "ast_sha256": "9566740c90a587a6846f8265369a373ec5527b61ffdf2e85bd417764ae9fb903"
+        },
+        {
+          "path": "provider/adapters/reliability.py",
+          "symbol": "KemoNetworkRetryPolicy.retry_or_raise",
+          "ast_sha256": "2654ed53e386cbb99b7919219c0ca2b0d35668f758a2af26e72da9b343d3350a"
+        }
       ]
     },
     {
       "id": "session-lifecycle",
-      "claim": "[机制] 仓库空闲归档配置为 {idle} 秒（`cron.session_idle_close_seconds`，`config/global_config.json`）；Web 空会话清理宽限为 {empty} 秒（`run/history/web_lifecycle.py` 的 `WEB_EMPTY_GRACE_SECONDS`）。",
+      "claim": "[机制] 仓库空闲归档配置为 {idle} 秒（`cron.session_idle_close_seconds`，`config/global_config.yaml`）；Web 空会话清理宽限为 {empty} 秒（`run/history/web_lifecycle.py` 的 `WEB_EMPTY_GRACE_SECONDS`）。",
       "facts": {
         "idle": {
-          "kind": "json",
-          "path": "config/global_config.json",
+          "kind": "yaml",
+          "path": "config/global_config.yaml",
           "key": [
             "cron",
             "session_idle_close_seconds"
@@ -444,20 +463,15 @@
       ]
     },
     {
-      "id": "tool-reuse",
-      "claim": "[机制] 当前 Run 内，工具名+完整参数相同、此前成功且符合复用策略时，可能返回 duplicate_reused，不重新执行。",
+      "id": "tool-dedup",
+      "claim": "[机制] 查询工具对相同参数也重新执行，不复用旧结果；查询失败后的 Provider 恢复也重新查询。已知副作用成功后，或副作用失败后遇到 Provider 恢复，均按工具名和完整参数防重，重复调用返回 `duplicate_blocked` 且不带旧结果；同一推理轮次收到工具失败时允许模型按失败回执重试。未知工具默认按副作用保护。",
       "facts": {},
       "boundaries": [
-        "动态读取",
-        "闸门仍可能先阻止",
+        "查询工具对相同参数也重新执行",
+        "未知工具默认按副作用保护",
         "不能为绕过去重随意更改副作用参数"
       ],
       "source_guards": [
-        {
-          "path": "run/retry/recovery.py",
-          "symbol": "reuse_allowed",
-          "ast_sha256": "3904fb9a241d57de43c007d06d28226510edf2f313a3bcfaf540f55054b7b6db"
-        },
         {
           "path": "run/retry/recovery.py",
           "symbol": "_LIVE_READ_ACTIONS",
@@ -469,9 +483,24 @@
           "ast_sha256": "ada27d29698c5e990e5af0f4b287ac04981999e7f18f20422144624f1000669b"
         },
         {
-          "path": "run/retry/recovery.py",
-          "symbol": "_EXPAND_LIVE_READ_COMMANDS",
-          "ast_sha256": "f48c8ba8257189436038af23bdb98d4d41f8d8bddfb150ca0314dc94c280ea68"
+          "path": "run/retry/tool_dedup.py",
+          "symbol": "REEXECUTE_ACTIONS",
+          "ast_sha256": "94bea180b813e171bb97eeb36f4ea1498aa1540ff7f58b80e2ebc14d95d12f15"
+        },
+        {
+          "path": "run/retry/tool_dedup.py",
+          "symbol": "BLOCK_ACTIONS",
+          "ast_sha256": "00d78878b3866d0e335ee0da0a4d6fdcd357c936d8966b2a4db9423167ad8d31"
+        },
+        {
+          "path": "run/retry/tool_dedup.py",
+          "symbol": "attempt_dedup_policy",
+          "ast_sha256": "2f0acbc884f5fe3ab22b29acf4d91441e5d9b1e2d370058276ea9a68a1ef1305"
+        },
+        {
+          "path": "run/retry/tool_dedup.py",
+          "symbol": "AttemptToolDedup",
+          "ast_sha256": "f1ae85462f80e71a88666b68e48841ff13dd61fb1f5d420dbf1546e412b990c9"
         }
       ]
     },
@@ -514,9 +543,9 @@
   ],
   "runtime_paths": [
     {
-      "path": "users/<name>/user_config.json",
+      "path": "users/<name>/user_config.yaml",
       "source": "run/config/__init__.py",
-      "proof_literal": "user_config.json"
+      "proof_literal": "user_config.yaml"
     },
     {
       "path": "users/<name>/user_soul.md",

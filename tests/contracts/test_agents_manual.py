@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import yaml
 import json
 import re
 import shutil
@@ -18,12 +19,17 @@ checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
 CONTRACT = json.loads((ROOT / checker.CONTRACT).read_text("utf-8"))
 MANUAL = (ROOT / "agents.md").read_text("utf-8")
+ENGINEERING = (ROOT / CONTRACT["engineering_manual"]).read_text("utf-8")
 
 
 @pytest.fixture
 def isolated_repository(tmp_path: Path) -> Path:
     """Copy public documentation definitions only; never copy/create real users."""
-    sources = {checker.CONTRACT, "agents.md"}
+    sources = {
+        checker.CONTRACT,
+        "agents.md",
+        CONTRACT["engineering_manual"],
+    }
     for rule in CONTRACT["rules"]:
         sources.update(row["path"] for row in rule.get("facts", {}).values())
         sources.update(row["path"] for row in rule.get("source_guards", []))
@@ -36,10 +42,11 @@ def isolated_repository(tmp_path: Path) -> Path:
             if group["kind"] == "agent":
                 raw = json.loads(path.read_text("utf-8"))
                 sources.update(str((path.parent / name).relative_to(ROOT)) for name in ("AGENT.md", "agent-config.json", raw["trigger"]))
-    for token in re.findall(r"`([^`\n]+)`", MANUAL):
-        if re.fullmatch(r"[.\w<>*-]+(?:/[.\w<>*()-]+)+/?", token) or re.fullmatch(r"[\w.-]+\.(?:md|py|json|yml)", token):
-            if not token.startswith(("users/", "tmp/", "runtime/")) and (ROOT / token).exists():
-                sources.add(token)
+    for document in (MANUAL, ENGINEERING):
+        for token in re.findall(r"`([^`\n]+)`", document):
+            if re.fullmatch(r"[.\w<>*-]+(?:/[.\w<>*()-]+)+/?", token) or re.fullmatch(r"[\w.-]+\.(?:md|py|json|yml)", token):
+                if not token.startswith(("users/", "tmp/", "runtime/")) and (ROOT / token).exists():
+                    sources.add(token)
     for relative in sources:
         source, target = ROOT / relative, tmp_path / relative
         if source.is_dir():
@@ -54,7 +61,11 @@ def test_repository_manual_contract() -> None:
     result = checker.check(ROOT)
     assert result["passed"], result["errors"]
     assert len(result["inventory"]["plugin"]) >= 19
-    assert len(result["inventory"]["agent"]) >= 7
+    assert set(result["inventory"]["agent"]) == {
+        "general_worker", "history_summary", "memory_temporary_important",
+        "self_improve", "task_plan", "time_plan",
+    }
+    assert "context_manage" not in result["inventory"]["agent"]
 
 
 def test_production_prompt_loads_the_complete_single_manual() -> None:
@@ -68,32 +79,51 @@ def test_production_prompt_loads_the_complete_single_manual() -> None:
     assert "agents-manual.contract.json" not in section.source_files
 
 
+def test_personal_manual_is_light_and_engineering_reference_is_separate() -> None:
+    assert len(MANUAL) < 8000
+    assert "个人智能操作入口" in MANUAL
+    assert "knowledge/global/engineering-operations.md" in MANUAL
+    assert "MAX_TOOL_RESULT_CHARS" in ENGINEERING
+    assert "provider_runtime.max_retries" in ENGINEERING
+    assert "MAX_TOOL_RESULT_CHARS" not in MANUAL
+    assert "provider_runtime.max_retries" not in MANUAL
+
+
 @pytest.mark.parametrize(
-    ("before", "after", "error"),
+    ("before", "after", "error", "in_engineering"),
     [
-        ("tools.max_iterations=80", "tools.max_iterations=81", "claim tool-budget"),
-        ("不要盲目重试", "可以直接重试", "required safety"),
-        ("### 指令与资料边界", "### 内部优先级与身份边界", "duplicate h3"),
-        ("global_knowledge/inline-widgets.md", "global_knowledge/missing.md", "source path missing"),
-        ("users/<name>/file_upload/", "users/<name>/upload/", "runtime path not classified"),
-        ("`web_search`", "搜索工具", "coverage plugin"),
-        ("动态读取", "静态值", "claim tool-reuse"),
+        ("tools.timeout=240", "tools.timeout=241", "claim tool-budget", True),
+        ("不要盲目重试", "可以直接重试", "required safety", True),
+        ("### 用户指定执行路径", "### 信任与资料", "duplicate h3", False),
+        ("knowledge/global/inline-widgets.md", "knowledge/global/missing.md", "source path missing", False),
+        ("users/<name>/file_upload/", "users/<name>/upload/", "runtime path not classified", True),
+        ("`web_search`", "搜索工具", "coverage plugin", True),
+        ("查询工具对相同参数也重新执行", "静态查询", "claim tool-dedup", True),
+        ("agents.output_reserve=8192", "agents.output_reserve=4096", "claim context-budget", True),
     ],
 )
-def test_manual_drift_is_rejected(before: str, after: str, error: str) -> None:
-    assert before in MANUAL
-    result = checker.check(ROOT, manual_text=MANUAL.replace(before, after))
+def test_manual_drift_is_rejected(
+    before: str, after: str, error: str, in_engineering: bool
+) -> None:
+    source = ENGINEERING if in_engineering else MANUAL
+    assert before in source
+    arguments = {"engineering_text": ENGINEERING.replace(before, after)}
+    if before in MANUAL:
+        arguments["manual_text"] = MANUAL.replace(before, after)
+    elif not in_engineering:
+        arguments["manual_text"] = source.replace(before, after)
+    result = checker.check(ROOT, **arguments)
     assert not result["passed"]
     assert any(error in item for item in result["errors"]), result["errors"]
 
 
 def test_config_change_without_manual_update_fails(isolated_repository: Path) -> None:
-    path = isolated_repository / "config/global_config.json"
-    value = json.loads(path.read_text("utf-8"))
-    value["tools"]["max_iterations"] = 81
+    path = isolated_repository / "config/global_config.yaml"
+    value = yaml.safe_load(path.read_text("utf-8"))
+    value["tools"]["timeout"] = 241
     path.write_text(json.dumps(value), "utf-8")
     result = checker.check(isolated_repository)
-    assert any("claim tool-budget" in item and "81" in item for item in result["errors"])
+    assert any("claim tool-budget" in item and "241" in item for item in result["errors"])
 
 
 def test_same_shell_returns_with_changed_condition_are_rejected(isolated_repository: Path) -> None:
@@ -103,6 +133,24 @@ def test_same_shell_returns_with_changed_condition_are_rejected(isolated_reposit
     path.write_text(text.replace("if _looks_like_powershell(command):", "if not _looks_like_powershell(command):", 1), "utf-8")
     result = checker.check(isolated_repository)
     assert any("claim shell-selection: source behavior changed" in item for item in result["errors"])
+
+
+def test_main_result_truncation_is_rejected(isolated_repository: Path) -> None:
+    path = isolated_repository / "run/tools/__init__.py"
+    text = path.read_text("utf-8")
+    assert "if preserve_result:" in text
+    path.write_text(text.replace("if preserve_result:", "if False:", 1), "utf-8")
+    result = checker.check(isolated_repository)
+    assert any("claim tool-result: source behavior changed" in item for item in result["errors"])
+
+
+def test_unbounded_progress_retries_are_rejected(isolated_repository: Path) -> None:
+    path = isolated_repository / "run/retry/loop.py"
+    text = path.read_text("utf-8")
+    assert "self.attempts >= self.max_attempts" in text
+    path.write_text(text.replace("self.attempts >= self.max_attempts", "False"), "utf-8")
+    result = checker.check(isolated_repository)
+    assert any("claim provider-retries: source behavior changed" in item for item in result["errors"])
 
 
 def test_new_plugin_requires_reachable_entry(isolated_repository: Path) -> None:
@@ -140,7 +188,11 @@ def test_budget_and_unclosed_fence_fail_closed() -> None:
 
 def test_fenced_headings_and_comments_are_not_real_coverage() -> None:
     assert checker.headings("## Real\n\n```md\n### Fake\n```\n") == [(1, 2, "Real")]
-    result = checker.check(ROOT, manual_text=MANUAL.replace("`web_search`", "搜索工具") + "\n<!-- `web_search` -->\n")
+    result = checker.check(
+        ROOT,
+        engineering_text=ENGINEERING.replace("`web_search`", "搜索工具")
+        + "\n<!-- `web_search` -->\n",
+    )
     assert any("coverage plugin" in item for item in result["errors"])
 
 

@@ -1,4 +1,4 @@
-"""Read-only, standard-library checks for the injected agents.md contract.
+"""Read-only checks for the injected personal manual and its engineering reference.
 
 Never import runtime code, execute plugins, initialize users or edit documentation.
 The contract describes selected critical claims, not a proof of every sentence.
@@ -10,6 +10,7 @@ import ast
 import hashlib
 import json
 import re
+import yaml
 from pathlib import Path
 from typing import Any
 
@@ -111,8 +112,8 @@ def source_fingerprint(text: str, symbol: str) -> str:
 def fact_value(root: Path, source: dict[str, Any]) -> Any:
     text = read_source(root, source["path"])
     kind = source["kind"]
-    if kind == "json":
-        value = json.loads(text)
+    if kind in {"json", "yaml"}:
+        value = yaml.safe_load(text) if kind == "yaml" else json.loads(text)
         for key in source.get("key", []):
             value = value[key]
     elif kind == "python":
@@ -169,7 +170,13 @@ def plugin_name(root: Path, path: Path) -> str:
     return name
 
 
-def check(root: Path, *, manual_text: str | None = None, contract: dict[str, Any] | None = None) -> dict[str, Any]:
+def check(
+    root: Path,
+    *,
+    manual_text: str | None = None,
+    engineering_text: str | None = None,
+    contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     root = root.resolve()
     contract = contract if contract is not None else json.loads(read_source(root, CONTRACT))
     errors: list[str] = []
@@ -177,8 +184,22 @@ def check(root: Path, *, manual_text: str | None = None, contract: dict[str, Any
         raise ValueError("unsupported manual contract schema")
     text = manual_text if manual_text is not None else read_source(root, contract["manual"])
     visible = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    engineering_path = contract.get("engineering_manual")
+    engineering = engineering_text
+    if engineering is None:
+        engineering = (
+            read_source(root, engineering_path)
+            if engineering_path
+            else text
+        )
+    engineering_visible = re.sub(r"<!--.*?-->", "", engineering, flags=re.S)
     if len(text) > contract["max_characters"]:
         errors.append(f"budget: {len(text)} > {contract['max_characters']} characters")
+    engineering_limit = contract.get("engineering_max_characters")
+    if engineering_limit is not None and len(engineering) > engineering_limit:
+        errors.append(
+            f"engineering budget: {len(engineering)} > {engineering_limit} characters"
+        )
     marks = headings(visible)
     actual_sections = [title for _, level, title in marks if level == 2]
     if actual_sections != contract["sections"]:
@@ -186,6 +207,12 @@ def check(root: Path, *, manual_text: str | None = None, contract: dict[str, Any
     h3 = [title for _, level, title in marks if level == 3]
     if len(h3) != len(set(h3)):
         errors.append("structure: duplicate h3 titles")
+    engineering_marks = headings(engineering_visible)
+    engineering_h3 = [
+        title for _, level, title in engineering_marks if level == 3
+    ]
+    if len(engineering_h3) != len(set(engineering_h3)):
+        errors.append("engineering structure: duplicate h3 titles")
     lines = visible.splitlines()
     for index, (line, level, title) in enumerate(marks):
         end = marks[index + 1][0] - 1 if index + 1 < len(marks) else len(lines)
@@ -194,13 +221,20 @@ def check(root: Path, *, manual_text: str | None = None, contract: dict[str, Any
         if not content and next_level <= level:
             errors.append(f"structure: empty section: {title}")
     for phrase in contract.get("required_phrases", []):
-        if phrase not in visible:
+        if phrase not in engineering_visible:
             errors.append(f"required safety/discipline phrase missing: {phrase}")
+    for phrase in contract.get("prompt_required_phrases", []):
+        if phrase not in visible:
+            errors.append(f"required personal prompt phrase missing: {phrase}")
     for phrase in contract.get("forbidden_phrases", []):
-        if phrase in visible:
+        if phrase in engineering_visible:
             errors.append(f"obsolete claim: {phrase}")
     blocks: dict[str, str] = {}
-    for ident, body in re.findall(r"<!-- rule:([\w-]+) -->\s*(.*?)\s*<!-- /rule -->", text, re.S):
+    for ident, body in re.findall(
+        r"<!-- rule:([\w-]+) -->\s*(.*?)\s*<!-- /rule -->",
+        engineering,
+        re.S,
+    ):
         if ident in blocks:
             errors.append(f"rule duplicated: {ident}")
         blocks[ident] = body
@@ -247,7 +281,7 @@ def check(root: Path, *, manual_text: str | None = None, contract: dict[str, Any
                 else:
                     raise ValueError(f"unknown inventory kind: {group['kind']}")
                 names.append(name)
-                if f"`{name}`" not in visible:
+                if f"`{name}`" not in engineering_visible:
                     errors.append(f"coverage {group['kind']}: no explicit capability/entry for {name}")
             except (ValueError, KeyError, OSError, TypeError, AttributeError) as exc:
                 errors.append(f"inventory: {exc}")
@@ -256,7 +290,9 @@ def check(root: Path, *, manual_text: str | None = None, contract: dict[str, Any
         inventory[group["kind"]] = names
     runtime = {row["path"]: row for row in contract.get("runtime_paths", [])}
     external = {row["path"]: row for row in contract.get("external_paths", [])}
-    for token in set(re.findall(r"`([^`\n]+)`", visible)):
+    for token in set(
+        re.findall(r"`([^`\n]+)`", f"{visible}\n{engineering_visible}")
+    ):
         if not re.fullmatch(r"[.\w<>*-]+(?:/[.\w<>*()-]+)+/?", token) and not re.fullmatch(r"[\w.-]+\.(?:md|py|json|yml)", token):
             continue
         if token in external:
@@ -278,6 +314,8 @@ def check(root: Path, *, manual_text: str | None = None, contract: dict[str, Any
                 errors.append(f"scene index: oversized mapping ({len(line)} chars)")
     return {"passed": not errors, "errors": errors, "characters": len(text),
             "max_characters": contract["max_characters"], "rules_checked": len(rule_ids),
+            "engineering_characters": len(engineering),
+            "engineering_max_characters": engineering_limit,
             "inventory": inventory, "scope": "selected critical claims, structure, source paths and built-in reachability; not a semantic proof"}
 
 
