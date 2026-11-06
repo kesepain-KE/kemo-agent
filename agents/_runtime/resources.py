@@ -121,7 +121,10 @@ def build_agent_tool_registry(
         raise AgentCapabilityError(
             f"子代理 {definition.name} 工具白名单包含未知插件：{', '.join(unknown)}"
         )
-    runtime_registry = apply_runtime_tool_policy(discovered, config or {})
+    runtime_registry = apply_runtime_tool_policy(
+        discovered, config or {},
+        allowed_permissions=set(definition.capabilities.plugin_permissions),
+    )
     selected = {
         name: tool
         for name, tool in runtime_registry.tools.items()

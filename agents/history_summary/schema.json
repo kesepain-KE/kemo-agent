@@ -1,7 +1,7 @@
 {
   "input_schema": {
     "type": "object",
-    "required": ["trigger", "session_id", "target_round", "rounds"],
+    "required": ["trigger", "session_id", "target_seq", "records"],
     "properties": {
       "trigger": {
         "type": "string",
@@ -12,32 +12,20 @@
         "minLength": 1,
         "maxLength": 128
       },
-      "target_round": {
-        "type": "integer"
+      "target_seq": {
+        "type": "integer",
+        "minimum": 1
       },
-      "previous_summary": {
-        "oneOf": [
-          {"type": "null"},
-          {
-            "type": "object",
-            "required": ["title", "summary"],
-            "properties": {
-              "title": {"type": "string"},
-              "summary": {"type": "string"}
-            },
-            "additionalProperties": false
-          }
-        ]
-      },
-      "rounds": {
+      "records": {
         "type": "array",
+        "minItems": 1,
         "items": {
           "type": "object",
-          "required": ["round", "user", "assistant"],
+          "required": ["seq", "role", "text"],
           "properties": {
-            "round": {"type": "integer"},
-            "user": {"type": "string"},
-            "assistant": {"type": "string"}
+            "seq": {"type": "integer", "minimum": 1},
+            "role": {"type": "string", "enum": ["user", "assistant"]},
+            "text": {"type": "string", "minLength": 1}
           },
           "additionalProperties": false
         }
@@ -52,12 +40,12 @@
       "title": {
         "type": "string",
         "minLength": 8,
-        "maxLength": 36
+        "maxLength": 24
       },
       "summary": {
         "type": "string",
         "minLength": 30,
-        "maxLength": 160
+        "maxLength": 120
       }
     },
     "additionalProperties": false

@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+import yaml
 
 from run.config import natural_path_key
 from run.infra import cached_read_text
@@ -18,14 +19,10 @@ _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _EXECUTIONS = {"sync", "background_serial"}
 _WRITE_POLICIES = {"none", "derived_cache", "user_memory", "user_task"}
 _EXPOSURES = {"internal", "tool"}
+_PLUGIN_PERMISSIONS = {"read", "write", "delete", "external"}
 _COMPACT_MANIFEST_FIELDS = {"name", "version", "description", "trigger"}
 _LOOSE_OBJECT_SCHEMA = {"type": "object", "additionalProperties": True}
 _BUILTIN_DEFAULTS: dict[str, dict[str, str]] = {
-    "context_manage": {
-        "execution": "sync",
-        "write_policy": "derived_cache",
-        "model_profile": "cheap",
-    },
     "memory_temporary_important": {
         "execution": "background_serial",
         "write_policy": "user_memory",
@@ -77,6 +74,7 @@ class AgentCapabilities:
     exposure: Literal["internal", "tool"] = "internal"
     allowed_callers: tuple[str, ...] = ()
     plugin_tools: tuple[str, ...] = ()
+    plugin_permissions: tuple[str, ...] = ("read", "write", "delete", "external")
     max_tool_iterations: int = 1
     shared_skills: tuple[str, ...] = ()
     user_skills: tuple[str, ...] = ()
@@ -184,6 +182,24 @@ def _allow_list(container: Any, key: str, *, field: str, path: Path) -> tuple[st
     return _string_list(value, field=f"{field}.{key}", path=path)
 
 
+def _plugin_permissions(container: Any, *, path: Path) -> tuple[str, ...]:
+    if container is None:
+        return tuple(sorted(_PLUGIN_PERMISSIONS))
+    if not isinstance(container, list) or any(
+        not isinstance(item, str) or item not in _PLUGIN_PERMISSIONS
+        for item in container
+    ):
+        raise AgentManifestError(
+            "tools.plugins.permissions 必须是 read、write、delete、external 的数组："
+            f"{path}"
+        )
+    if len(set(container)) != len(container):
+        raise AgentManifestError(
+            f"tools.plugins.permissions 不得包含重复权限：{path}"
+        )
+    return tuple(dict.fromkeys(container))
+
+
 def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabilities:
     if path is None:
         return AgentCapabilities()
@@ -206,6 +222,7 @@ def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabi
         raise AgentManifestError(f"tools 必须是对象：{path}")
     plugins_raw = tools_raw.get("plugins") or {}
     plugin_tools = _allow_list(plugins_raw, "allow", field="tools.plugins", path=path)
+    plugin_permissions = _plugin_permissions(plugins_raw.get("permissions"), path=path)
     max_iterations = tools_raw.get("max_iterations", 1)
     if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations < 1:
         raise AgentManifestError(f"tools.max_iterations 必须是正整数：{path}")
@@ -233,6 +250,7 @@ def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabi
         exposure="internal" if exposure == "internal" else "tool",
         allowed_callers=callers,
         plugin_tools=plugin_tools,
+        plugin_permissions=plugin_permissions,
         max_tool_iterations=max_iterations,
         shared_skills=_allow_list(skills, "shared", field="prompt_sources.skills", path=path),
         # Legacy user-skill declarations were never injected; retain that boundary.
@@ -289,6 +307,11 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         field="tools.shared_skills",
         path=path,
     )
+    plugin_permissions = _plugin_permissions(
+        (tools_raw.get("plugins") or {}).get("permissions")
+        if isinstance(tools_raw.get("plugins") or {}, dict) else None,
+        path=path,
+    )
     user_skills = _allow_list(
         tools_raw.get("user_skills"),
         "allow",
@@ -315,6 +338,7 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         exposure="internal" if internal_mode else "tool",
         allowed_callers=callers,
         plugin_tools=plugin_tools,
+        plugin_permissions=plugin_permissions,
         max_tool_iterations=max_iterations,
         shared_skills=shared_skills,
         user_skills=user_skills,
@@ -331,14 +355,14 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
 
 def _read_agent_timeout(root: Path) -> float:
     try:
-        config_path = root / "config" / "global_config.json"
+        config_path = root / "config" / "global_config.yaml"
         if config_path.is_file():
-            config = json.loads(cached_read_text(config_path, "utf-8-sig"))
+            config = yaml.safe_load(cached_read_text(config_path, "utf-8-sig"))
             value = (config.get("agent_runtime") or {}).get("default_timeout", 600)
             timeout = float(value)
             if timeout > 0:
                 return timeout
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, UnicodeError, yaml.YAMLError, TypeError, ValueError, AttributeError):
         pass
     return 600.0
 

@@ -8,6 +8,7 @@
 
 # 操作信息
 
-输入必须包含 `trigger=session_closed`、`session_id`、`target_round` 和 `rounds`。
-长对话可分块调用，后续分块通过 `previous_summary` 接收前一批滚动结果。
+输入必须包含 `trigger=session_closed`、`session_id`、`target_seq` 和 `records`。
+`records` 按时间顺序合并本次预算内的用户初始正文与智能体最终正文，字段为 `seq`、`role` 和 `text`。
+摘要任务每个会话提交一次完整合并输入；超预算时较早内容可能被省略，必须以实际收到的最新正文为准。
 不得读取主对话、知识库、工具日志、思考过程或记忆，不执行任何写入。

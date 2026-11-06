@@ -1,8 +1,8 @@
 # 注册信息
 
 - **名称**: self_improve
-- **触发**: 三种模式 — ① context_manage 裁剪旧轮次后传入批量对话（`trigger: "context_compression"`） ② cron 模块 `review_due` 任务发现达标碎片后唤起（`trigger: "memory_promotion"`） ③ 主智能体通过 `subagent_dispatch` 主动唤起（`trigger: "manual_review"`）
-- **职责**: 提取新微记忆碎片 → 增量权重（每天最多+1） → 碎片融合 → 层间晋升 → 工作记忆创建技能
+- **触发**: 三种模式 — ① 宿主按 RAW seq 认领安全正文并按 token 预算分页（`trigger: "context_compression"`） ② cron 模块 `review_due` 任务发现达标碎片后唤起（`trigger: "memory_promotion"`） ③ 主智能体通过 `subagent_dispatch` 主动唤起（`trigger: "manual_review"`）
+- **职责**: 整理连贯个人主题 → 增量权重（每天最多+1） → 碎片融合 → 层间晋升 → 工作记忆创建技能
 - **模型**: reasoning
 - **工具**: memory_manage（只读搜索记忆）、skill_creater（180d→permanent 工作记忆时创建技能）
 
@@ -12,13 +12,25 @@
 
 | trigger | 调用方 | 说明 |
 |---------|--------|------|
-| `context_compression` | context_manage / 记忆提取管线 | 保存、压缩或配置允许的逐轮入口传入完整轮次 |
+| `context_compression` | CardStream 记忆提取管线 | 保存、压缩或后台维护传入用户正文、引导正文与最终正文 |
 | `memory_promotion` | cron `review_due` 任务 | 发现到期且权重达标的碎片后唤起 |
 | `manual_review` | 主智能体（通过 `subagent_dispatch`） | 用户主动要求审阅/整理/搜索记忆时，手动唤起记忆提取与审阅 |
 
 ## 三种模式
 
 ### 模式一：碎片提取与更新（trigger = `"context_compression"`）
+
+宿主传入 `memory_profile` 和 `memory_domains`，候选用 `memory_domain` 标注域，缺省 fact。
+`work` 仅 fact，继续按下面的长期事实门槛判断；`companion` 是个人智能模式，
+另开放 relation（称呼、玩笑、口癖、相处方式、用户提起的共同经历）和 state（近况、近期计划与感受）。
+relation 只要求出现过且可辨认；state 允许过期，固定 seven_days、B 类 ≤150 字，
+一个滚动主题一个文件名，同主题 revise，不建跨主题容器。
+这两个域不套用“必须长期稳定”或“默认不创建”的 fact 门槛，也不要求 durable=true；
+但 create/revise/forget 仍必须有用户原话。助手扮演台词不能成为新记忆。
+复制检索结果的 domain 为候选 memory_domain，旧结果未标域时为 fact。
+state 正文更新按配置续期，不晋升；relation 默认在第二个自然日再次证实后到期可晋升。
+
+以下是 fact 域的原有收录规则：
 
 采用失败关闭策略：默认不创建记忆。只提取跨会话仍有价值、无法从系统配置重新读取、
 并且有用户原话证明的长期用户事实。
@@ -35,25 +47,26 @@
 ```
 输入: { rounds: [...], trigger: "context_compression", source: {...} }
 
-来源可以是历史提交后的单轮 `round_commit`，也可以是 context_manage 压缩前的多轮批次。
+来源是宿主认领的连续 RAW seq 范围；正文条数不由工具调用数量决定。round/evidence_rounds 在此对应 RAW seq，不是对话轮数。
 
 流程:
-  1. 先枚举全部长期信息，再按独立更新、独立失效、独立加权、独立检索四项检查分解为微记忆碎片；任一项可独立处理就必须拆开
+  1. 先理解个人的完整主题，整合相关偏好、原因、例子与近况；只有主体、时效或语义边界确实不同才拆分，不按属性或句子逐项建档
   2. 汇总候选后使用 memory_manage `search_many tier=all` 批量搜索匹配；不超过 20 个候选时一次查询，超过 20 个时按最多 20 个一批分组。每项使用 2～4 个空格分隔的核心关键词，不提交完整句子，禁止逐候选、逐层串行搜索
   3. 命中: 依据 `match_score`、`matched_terms` 和返回正文核对语义；确认同一事实后复制 memory_ref 和 filename，返回 reinforce（正文不变）或 revise（完整新正文）；宿主绑定成功 search_many 的完整正文快照并在事务内校验，按原对话证据日期每天最多+1。单个公共词命中不得直接复用
   4. 未命中: 返回 create，在 seven_days 创建新碎片；首个证据日 weight=0，后续不同日期可加权
-  5. 每个 create / reinforce / revise 必须携带 `durable=true`、`evidence` 与 `evidence_rounds`；**条数按独立事实计算，不按对话轮数或单文件字数折算**。一个事实一条碎片，识别出几个事实就返回几条。大维度只用于分类，不是合并边界；字符上限只防止失控。禁止为减少文件数或适配候选上限而合并不同生命周期的事实。实际处理批次由 `memory.extraction_max_candidates_per_batch` 控制，达到上限继续分页并保留待办，不丢弃未返回事实
+  5. fact 的 create / reinforce / revise 必须携带 `durable=true`；三域均须 `evidence` 与 `evidence_rounds`；**条数按连贯个人主题决定，不按轮数、句子或属性标签折算**。优先补充既有主题，不把同一偏好及其原因拆成多条；不同主体或时效不强行合并。实际处理批次由 `memory.extraction_max_candidates_per_batch` 控制，达到上限继续分页并保留待办，不丢弃未返回事实
   6. 没有合格信息时返回空 candidates[]
 
 权重规则: 本模式由宿主把原轮次 committed_at 映射到上海自然日，数据库事件唯一键每日最多+1，不由模型比较今天。创建的首次证据日登记 creation、权重0；跨天证据逐日累计。缺少可信时间戳时跳过加权，不用提取日代替。Prompt 注入、查看和检索不加权；用户主动编辑/手动审阅更新按执行日登记。
 永久记忆: 普通命中时不返回候选且运行时拒绝覆盖；只有用户本轮明确要求记住、`explicit=true` 时才允许更新
 ```
 
-运行时传入经过安全过滤且按字符预算分页的用户与助手正文，不传推理、工具结果，不得读取 important。
+运行时传入经过安全过滤且按 DeepSeek token 预算分页的用户正文、引导正文和助手最终正文，不传推理、工具结果，不得读取 important。
+`context_only` 仅为理解提供背景，不作本批新证据。处理中间说明、重试残片与已撤回整合不提取。
 create/revise/forget 仅用户原文；reinforce 可用助手确定性正文，但须绑定旧碎片并给同轮用户明确确认的 `user_evidence`。
 不得用单纯复述注入记忆、“继续/都对”或猜测加权；助手正文不能改写正文或显式晋升。
 证据来源由宿主标为 user/assistant，权重统一称“不同日期出现次数”，同日跨来源最多 +1。
-满页或仍有遗漏时返回 `has_more=true`，按宿主 continuation 继续枚举未返回的事实；超限候选保存在待办，不丢弃。
+满页或仍有遗漏时返回 `has_more=true`，按宿主 continuation 继续整理未返回的主题；超限候选保存在待办，不丢弃。
 
 ### 模式二：记忆晋升（trigger = `"memory_promotion"`）
 
@@ -126,7 +139,7 @@ skill_retry_only=true 时只补技能，不重做晋升；conversion_sources 中
 
 ## 注意事项
 
-- 所有阈值从 `global_config.json → memory.tiers` 读取
+- 所有阈值从 `global_config.yaml → memory.tiers` 读取
 - `submit_memory_extraction()` 管线已废弃；保存/压缩、background、on_commit 共用宿主证据验证与持久化契约
 - 候选统一由调用方写入 MemoryStore；宿主验证 evidence_rounds 和检索 memory_ref，通过数据库按原证据日去重，每天最多+1；不要输出权重、日期或内容哈希
 - 候选文件名基础名称最长 20 字符，并遵守全层级唯一命名规则

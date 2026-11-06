@@ -9,6 +9,10 @@ from run.memory import (
     memory_extraction_candidate_limit,
     quoted_rounds,
     search_receipts,
+    memory_profile,
+    memory_domains_for_profile,
+    normalize_memory_domain,
+    MemoryError,
 )
 from run.memory import assistant_backing, extraction_rounds
 
@@ -40,11 +44,17 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
     if trigger == "manual_review" and not str(input_data.get("request") or "").strip():
         raise AgentOutputError("manual_review 输入缺少 request 字符串")
 
+    runner = context.runner
+    runtime_config = runner.config
     user_rounds: list[dict[str, Any]] = []
-    model_input = input_data
+    model_input = {
+        **input_data,
+        "memory_profile": memory_profile(runtime_config),
+        "memory_domains": list(memory_domains_for_profile(runtime_config)),
+    }
     if trigger == "context_compression":
         user_rounds = _user_only_rounds(input_data.get("rounds") or [])
-        model_input = {**input_data, "rounds": user_rounds}
+        model_input = {**model_input, "rounds": user_rounds}
 
     if trigger == "context_compression":
         from run.memory import run_extraction_pages
@@ -56,19 +66,25 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
         raise AgentOutputError(f"self_improve 输出缺少 {required} 数组")
     if trigger == "context_compression":
         rounds = input_data.get("rounds") or []
-        runner = getattr(context, "runner", None)
-        runtime_config = getattr(runner, "config", {}) if runner is not None else {}
         candidate_limit = memory_extraction_candidate_limit(runtime_config, len(rounds))
         accepted: list[dict[str, Any]] = []
         rejected = 0
         reasons: dict[str, int] = {}
         receipts = search_receipts(result.metadata)
-        store = (MemoryStore(runner.root, runner.user, runtime_config)
-                 if runner is not None and hasattr(runner, "root") else None)
+        store = MemoryStore(runner.root, runner.user, runtime_config)
         for candidate in result.data["candidates"]:
             if not isinstance(candidate, dict):
                 rejected += 1
                 reasons["invalid_candidate"] = reasons.get("invalid_candidate", 0) + 1
+                continue
+            try:
+                domain = normalize_memory_domain(candidate.get("memory_domain"))
+                if domain not in memory_domains_for_profile(runtime_config):
+                    raise MemoryError("domain_not_enabled")
+            except MemoryError as exc:
+                rejected += 1
+                reason = "domain_not_enabled" if str(exc) == "domain_not_enabled" else "invalid_memory_domain"
+                reasons[reason] = reasons.get(reason, 0) + 1
                 continue
             action = str(candidate.get("action") or "upsert").strip().casefold()
             original_rounds = candidate.get("evidence_rounds")
@@ -80,16 +96,15 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
             candidate["evidence_rounds"] = evidence_rounds
             candidate.pop("evidence_source", None)
             candidate.pop("evidence_sources", None)
-            if store is not None:
-                try:
-                    candidate = bind_reference(candidate, receipts, store)
-                except (ValueError, RuntimeError) as exc:
-                    rejected += 1
-                    reason = str(exc)
-                    reasons[reason] = reasons.get(reason, 0) + 1
-                    continue
+            try:
+                candidate = bind_reference(candidate, receipts, store)
+            except (ValueError, RuntimeError) as exc:
+                rejected += 1
+                reason = str(exc)
+                reasons[reason] = reasons.get(reason, 0) + 1
+                continue
             action = candidate.get("action", action)
-            if not evidence_is_user_quote and action == "reinforce" and store is not None:
+            if not evidence_is_user_quote and action == "reinforce":
                 assistant_rounds = quoted_rounds(
                     {**candidate, "evidence_rounds": original_rounds}
                     if original_rounds is not None else
@@ -114,11 +129,11 @@ def execute(context, input_data: dict[str, Any]) -> AgentRunResult:
                 continue
             if (
                 action not in {"upsert", "create", "reinforce", "revise"}
-                or candidate.get("durable") is not True
+                or (domain == "fact" and candidate.get("durable") is not True)
                 or not evidence_rounds
             ):
                 rejected += 1
-                reason = "invalid_action" if action not in {"upsert", "create", "reinforce", "revise"} else "not_durable" if candidate.get("durable") is not True else "invalid_user_quote"
+                reason = "invalid_action" if action not in {"upsert", "create", "reinforce", "revise"} else "not_durable" if domain == "fact" and candidate.get("durable") is not True else "invalid_user_quote"
                 reasons[reason] = reasons.get(reason, 0) + 1
                 continue
             accepted.append(candidate)
