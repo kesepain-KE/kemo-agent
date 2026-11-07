@@ -650,7 +650,7 @@ describe('新建对话关键路径', () => {
       ? '此对话仍被其他页面或客户端使用，尚未关闭，也未启动后台提取。请关闭其他页面后重试；异常断开的页面可能需要等待在线租约过期。'
       : '当前对话尚未确认关闭，未创建新对话，请重试。'
     expect(await screen.findByText(feedback)).toBeInTheDocument()
-    expect(app.getSearch()).toContain('session=s1')
+    await waitFor(() => expect(app.getSearch()).toContain('session=s1'))
     expect(creates).toBe(0)
     expect(useChatDraftStore.getState().drafts[chatDraftKey('kesepain', 's1')]?.text).toBe('关闭未完成时保留的草稿')
     await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('关闭未完成时保留的草稿'))
