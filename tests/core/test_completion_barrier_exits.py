@@ -15,10 +15,10 @@ from tests.core.test_agent_task_lifecycle import (
 from tests.media_input_support import MediaProvider
 
 
-def dispatch():
+def dispatch(*, wait=False):
     return ChatResponse(text="", tool_calls=[ToolCall(
         id="call-worker", name="subagent_dispatch",
-        arguments={"action": "call", "agent": "worker"},
+        arguments={"action": "call", "agent": "worker", "wait": wait},
     )])
 
 
@@ -45,9 +45,10 @@ def test_limited_exit_closes_root_as_limited_not_failed_or_waiting(setup, monkey
     from types import SimpleNamespace
     monkeypatch.setattr("run.conversation.main_orchestration.detect_task_plan_creation_boundary",
         lambda **kwargs: SimpleNamespace(stop_reason="task_plan_created", plan_id="test",
-                                         awaiting_user_approval=True))
+                                         awaiting_user_approval=True)
+        if kwargs["result_payload"].get("result", {}).get("status") == "completed" else None)
     JOBS["worker"] = lambda cancel: {"answer": "ready"}
-    provider = MediaProvider([dispatch(), dispatch()])
+    provider = MediaProvider([dispatch(wait=True)])
     events = list(iter_request_events(request(), root=root, provider_factory=lambda _: provider))
     assert events[-1].type == "done" and events[-1].metadata["status"] == "limited", events[-1].to_dict()
     assert root_record(root)["status"] == "limited"
@@ -101,7 +102,8 @@ def test_limited_integration_commit_failure_is_not_locked_as_limited(setup, monk
     from types import SimpleNamespace
     monkeypatch.setattr("run.conversation.main_orchestration.detect_task_plan_creation_boundary",
         lambda **kwargs: SimpleNamespace(stop_reason="task_plan_created", plan_id="test",
-                                         awaiting_user_approval=True))
+                                         awaiting_user_approval=True)
+        if kwargs["result_payload"].get("result", {}).get("status") == "completed" else None)
     JOBS["worker"] = lambda cancel: {"answer": "ready"}
     original, attempts = IntegrationStore.finish, []
 
@@ -113,7 +115,8 @@ def test_limited_integration_commit_failure_is_not_locked_as_limited(setup, monk
 
     monkeypatch.setattr(IntegrationStore, "finish", fail_first)
     events = list(iter_request_events(
-        request(), root=root, provider_factory=lambda _: MediaProvider([dispatch(), dispatch()]),
+        request(), root=root, provider_factory=lambda _: MediaProvider([dispatch(wait=True)]),
     ))
-    assert events[-1].type == "error"
+    assert events[-1].type == "error", events[-1].to_dict()
+    assert len(attempts) == 2
     assert root_record(root)["status"] == "failed"

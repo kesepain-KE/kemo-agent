@@ -376,8 +376,12 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             append_guidance(new_guidance)
             # Child and Shell notifications are runtime state in the virtual
             # tail, not invented user history or an extra persistence mechanism.
-            child_notice, shell_notice = coordinator.notifications(), shell.take()
             live, unseen = integration.pending()
+            # A result may commit after the event drain. Apply its boundary
+            # before deciding whether the now-idle integration needs inference.
+            if tool_runtime.has_events():
+                continue
+            child_notice, shell_notice = coordinator.notifications(), shell.take()
             dependencies_pending = bool(live or coordinator.pending() or shell.pending())
             live_tool_waiting = bool(live and not continuation)
             needs_request = continuation or bool(

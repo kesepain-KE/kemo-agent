@@ -224,5 +224,9 @@ class ToolRuntime:
                     raise value
                 result.append(value)
 
+    def has_events(self) -> bool:
+        with self._publish_lock:
+            return not self._events.empty()
+
     def wait(self, seconds: float = .1) -> None:
         self.changed.wait(seconds)

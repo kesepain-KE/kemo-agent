@@ -124,7 +124,8 @@ def test_t3_timed_out_child_is_failed_and_not_acknowledged_as_success(tmp_path, 
         root=tmp_path, provider_factory=lambda _: provider,
         tool_registry_factory=lambda *args: ToolRegistry({"subagent_dispatch": tool}),
     ))
-    result = next(event for event in events if event.type == "tool_call_result")
+    result = next(event for event in events
+                  if event.type == "tool_call_result" and not event.metadata["execution_live"])
     assert "result" in result.result, result.result
     assert result.result["ok"] is False
     assert result.result["result"]["ok"] is False

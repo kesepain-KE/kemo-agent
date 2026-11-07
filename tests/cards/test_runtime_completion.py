@@ -140,7 +140,7 @@ def test_mixed_plan_batch_preserves_prior_work_and_defers_following_effects(root
             release_plan.set()
         events = future.result(5)
     terminal = events[-1]
-    assert terminal.type == "done"
+    assert terminal.type == "done", terminal.to_dict()
     assert executed == (["before", "after"] if plan_status == "failed" else ["before"])
     assert len(requests) == (3 if plan_status == "failed" else 1)
     assert terminal.metadata["status"] == ("completed" if plan_status == "failed" else "limited")
@@ -152,6 +152,48 @@ def test_mixed_plan_batch_preserves_prior_work_and_defers_following_effects(root
     assert skipped[0].result["execution"]["executed"] is False
     assert not any(event.type == "tool_call_start" and event.tool_call_id == "callid_deferred"
                    for event in events)
+
+
+@pytest.mark.parametrize("plan_status", ["pending", "approved"])
+def test_plan_receipt_after_event_drain_stops_before_another_request(root, monkeypatch, plan_status):
+    original_events = ToolRuntime.events
+    delayed, requests = [], []
+
+    def defer_plan_receipt_once(self):
+        events = original_events(self)
+        for event in list(events):
+            if (not delayed and event.type == "tool_call_result"
+                    and event.tool_call_id == "callid_plan"
+                    and not event.metadata.get("execution_live")):
+                delayed.append(event)
+                events.remove(event)
+                # Reproduce publication just after the main loop's event drain.
+                with self._publish_lock:
+                    self._events.put(event)
+                    self.changed.set()
+        return events
+
+    monkeypatch.setattr(ToolRuntime, "events", defer_plan_receipt_once)
+
+    class Provider:
+        def create(self, request):
+            requests.append(request)
+            assert len(requests) == 1, "a created plan must stop before another inference"
+            return response(request, "", [
+                call("subagent_dispatch", "callid_plan",
+                     action="call", agent="task_plan", wait=True),
+            ])
+
+    events = list(run(root, Provider(), tools=[definition(root, lambda **_: {
+        "ok": True, "status": "completed", "data": {"action": "create"},
+        "plan": {"plan_id": "plan_test", "status": plan_status,
+                 "auto_accept": plan_status == "approved"},
+    }, name="subagent_dispatch")]))
+    assert delayed
+    assert events[-1].type == "done", events[-1].to_dict()
+    assert events[-1].metadata["status"] == "limited"
+    assert len(requests) == 1
+    assert events[-1].metadata["awaiting_user_approval"] == (plan_status == "pending")
 
 
 def test_required_shell_waits_for_receipt_then_resumes_without_reexecution(root, monkeypatch):
