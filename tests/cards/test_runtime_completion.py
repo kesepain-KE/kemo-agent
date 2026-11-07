@@ -1,5 +1,5 @@
 """Completion depends on persisted execution facts, including late receipts."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import threading
 import time
@@ -190,7 +190,7 @@ def test_required_shell_waits_for_receipt_then_resumes_without_reexecution(root,
             state = json.loads(text_from_content(requests[-1].input[-1].content).split("\n", 1)[1])["async_tasks"]
             assert state["pending_count"] == 2 and state["completion_blocked"]
             assert {task["id"] for task in state["pending_tasks"]} == set(job_ids)
-            with pytest.raises(TimeoutError):
+            with pytest.raises(FutureTimeoutError):
                 future.result(timeout=1.25)
             assert len(requests) == 2
             _finish(root, "alice", job_ids[0], exit_code=0, output_tail=["[stdout] first complete"])

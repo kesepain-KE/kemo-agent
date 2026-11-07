@@ -71,7 +71,8 @@ def _checked_outbound_file(raw: str, context: dict[str, Any]) -> Path:
     candidate = Path(os.path.abspath(candidate))
     allowed = (root / "users" / user / "download", root / "users" / user / "file_upload", root / "tmp")
     try:
-        if not any(candidate.is_relative_to(directory) for directory in allowed):
+        normalized = candidate.resolve()
+        if not any(normalized.is_relative_to(directory) for directory in allowed):
             raise PermissionError("文件外发仅限当前用户 download/file_upload 和项目 tmp")
         for ancestor in (candidate, *candidate.parents):
             if _is_link_or_junction(ancestor):

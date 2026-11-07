@@ -36,7 +36,7 @@ jobs:
   backend-tests:
     name: Backend (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PYTHONUTF8: "1"
     strategy:

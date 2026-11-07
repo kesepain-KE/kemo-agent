@@ -11,6 +11,7 @@ from run.cards import (
     CardConflictError, CardMeter, CardSessionClosedError, CardStore,
     CompactionBatch, effective_cards,
 )
+from run.infra.fulltext import load_simple
 
 
 @pytest.fixture
@@ -221,6 +222,7 @@ def test_schema_upgrade_preserves_raw_tools_and_corrects_response_terminal_statu
     before = store.raw_page("web", "s1")
     # Reconstruct the old CHECK on this temporary test database only.
     with sqlite3.connect(store.path) as db:
+        load_simple(db)
         db.execute("PRAGMA foreign_keys=OFF")
         start = SCHEMA.index("CREATE TABLE IF NOT EXISTS card_integrations")
         end = SCHEMA.index("CREATE INDEX IF NOT EXISTS idx_integrations_session")

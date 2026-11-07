@@ -591,10 +591,20 @@ def test_watchdog_is_not_tool_exit_and_late_result_is_not_reexecuted(root):
         assert entered.wait(2)
         deadline = time.monotonic() + 3
         events = []
-        while not events and time.monotonic() < deadline:
+        while not any(
+            event.type == "tool_call_result"
+            and event.metadata["status"] == "timed_out_running"
+            for event in events
+        ) and time.monotonic() < deadline:
             runtime.wait(.05)
             events += runtime.events()
-        assert events and events[0].metadata["execution_live"]
+        notice = next((
+            event for event in events
+            if event.type == "tool_call_result"
+            and event.metadata["status"] == "timed_out_running"
+        ), None)
+        assert notice is not None
+        assert notice.metadata["execution_live"]
         integration.finish("cancelled")
         with pytest.raises(CardConflictError):
             IntegrationStore(store, "web", "s1", "new").start()
