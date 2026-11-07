@@ -45,6 +45,43 @@ def test_main_request_fills_usage_and_only_reported_input_calibrates(root, usage
     assert [row[0] for row in observations] == ([17] if expected_input == 17 else [])
 
 
+def test_context_snapshot_is_emitted_before_provider_request(root):
+    from events import RunEvent
+
+    class Provider:
+        requests = 0
+
+        def create(self, request):
+            self.requests += 1
+            return KemoResponse(
+                request_id=request.request_id, model=request.model, status="completed",
+                output=[MessageItem.text("assistant", "done", phase="final_answer")],
+            )
+
+    provider = Provider()
+    events = run(root, provider)
+    event = next(events)
+
+    assert event.type == "context_window"
+    assert RunEvent.from_dict(event.to_dict()).type == "context_window"
+    assert provider.requests == 0
+    snapshot = event.metadata["context_snapshot"]
+    assert snapshot["available"] is True
+    assert snapshot["source"] == "cardstream"
+    assert snapshot["measurement"] == "local_estimate"
+    assert snapshot["total_tokens"] == sum(snapshot[key] for key in (
+        "system_prompt_tokens", "tool_schema_tokens", "conversation_tokens",
+        "summary_tokens", "other_tokens",
+    ))
+    assert snapshot["percent"] == round(
+        snapshot["total_tokens"] * 100 / snapshot["capacity_tokens"], 4
+    )
+
+    remaining = list(events)
+    assert remaining[-1].type == "done", remaining[-1].error
+    assert provider.requests == 1
+
+
 def test_stream_preserves_usage_from_prior_events_and_does_not_accumulate_snapshots(root):
     class Provider:
         def stream(self, request):
@@ -155,9 +192,8 @@ def test_terminal_only_usage_updates_cache_rate_before_tool_task_finishes(root, 
 
     provider = Provider()
     iterator = run(root, provider, stream=stream, tools=[definition(root, lambda **_: {"ok": True})])
-    first = next(iterator)
-    assert first.type == "usage", first.error
-    assert first.metadata["session_cache_hit_rate"] == 0.6
+    first_usage = next(event for event in iterator if event.type == "usage")
+    assert first_usage.metadata["session_cache_hit_rate"] == 0.6
     assert session_statistics(root, "alice", "web", "s1")["usage"]["cache_hit_rate"] == 0.6
     assert provider.requests == 1
     remaining = list(iterator)
@@ -179,7 +215,8 @@ def test_stream_failure_retains_usage_already_reported_to_the_user(root):
             raise ProviderError("stream disconnected", retryable=False)
 
     events = list(run(root, Provider(), stream=True))
-    assert events[0].metadata["session_cache_hit_rate"] == 0.6
+    usage_event = next(event for event in events if event.type == "usage")
+    assert usage_event.metadata["session_cache_hit_rate"] == 0.6
     assert events[-1].type == "error"
     saved = session_statistics(root, "alice", "web", "s1")["usage"]
     assert saved["input_tokens"] == 100
