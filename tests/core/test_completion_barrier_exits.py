@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
 from provider.schema import ChatResponse, ProviderError, ToolCall
 from run.agents import TaskCoordinator
-from run.cards import IntegrationStore
+from run.cards import CardStore, IntegrationStore
 from run.engine import iter_request_events
 from tests.core.test_agent_task_lifecycle import (
-    JOBS, setup, root_record,  # noqa: F401
+    JOBS, setup, root_record, eventually,  # noqa: F401
 )
 from tests.media_input_support import MediaProvider
 
@@ -76,6 +77,43 @@ def test_completed_error_and_generator_close_all_close_the_root(setup, route):
         assert events[-1].type == ("error" if route == "failed" else "done")
     record = root_record(root)
     assert record["status"] == route and record["finished_at"]
+
+
+def test_generator_close_before_child_registration_keeps_root_cancelled(setup, monkeypatch):
+    root, _ = setup
+    entered, release = threading.Event(), threading.Event()
+    executions = []
+    JOBS["worker"] = lambda cancel: executions.append("worker") or {"answer": "ready"}
+    original = TaskCoordinator.ownership
+
+    def delayed_ownership(coordinator, call_id):
+        entered.set()
+        assert release.wait(10)
+        return original(coordinator, call_id)
+
+    monkeypatch.setattr(TaskCoordinator, "ownership", delayed_ownership)
+    provider = MediaProvider([dispatch()])
+    iterator = iter_request_events(request(), root=root, provider_factory=lambda _: provider)
+    try:
+        for event in iterator:
+            if event.type == "tool_call_result":
+                assert event.metadata["execution_live"] is True
+                break
+        assert entered.wait(5)
+        iterator.close()
+        closed = root_record(root)
+    finally:
+        release.set()
+        iterator.close()
+    store = CardStore(root, "alice")
+    integration = IntegrationStore(
+        store, "web", "scope", store.snapshot("web", "scope").cards[0].integration_id,
+    )
+    eventually(lambda: not integration.live_executions())
+    record = root_record(root)
+    assert closed.get("status") == record.get("status") == "cancelled"
+    assert closed["finished_at"] == record["finished_at"] and record["finished_at"]
+    assert not executions
 
 
 def test_integration_commit_failure_cannot_leave_premature_completed_root(setup, monkeypatch):
