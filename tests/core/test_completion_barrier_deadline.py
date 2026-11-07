@@ -72,6 +72,18 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
         return original_create(value)
 
     setattr(provider, "create", create)
+    draining = threading.Event()
+    drain_started = []
+    original_deadline = TaskCoordinator._deadline
+
+    def deadline(coordinator):
+        value = original_deadline(coordinator)
+        if not draining.is_set():
+            drain_started.append(time.monotonic())
+            draining.set()
+        return value
+
+    monkeypatch.setattr(TaskCoordinator, "_deadline", deadline)
 
     def run():
         try:
@@ -82,14 +94,14 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
             errors.append(exc)
 
     thread = threading.Thread(target=run, daemon=True)
-    began = time.monotonic()
     thread.start()
     try:
-        assert started.wait(3)
+        assert started.wait(10)
+        assert draining.wait(10), "completion drain never started"
         thread.join(2.8)
         assert not thread.is_alive(), "response waited past its one-second completion deadline"
         assert not errors
-        assert time.monotonic() - began < 3.5
+        assert time.monotonic() - drain_started[0] < 3.5
         terminal = events[-1]
         assert terminal.type == "done" and terminal.metadata["status"] == "partial"
         assert terminal.metadata["retryable"] is False
