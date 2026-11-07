@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import queue
 import threading
+from datetime import datetime, timezone
 from typing import Any
 from contextlib import closing
 
@@ -244,6 +245,31 @@ def observed_exchange(stream, *, store, source, session_id, integration_id, inte
                 )["usage"].get("cache_hit_rate")
             yield event
     return accepted, provider_retry_recovery
+
+
+def request_context_snapshot(barrier):
+    occupancy = barrier.occupancy
+    history = barrier.snapshot.history
+    summary_tokens = sum(
+        card.view_tokens for card in history.cards if card.view_kind == "summary"
+    )
+    total_tokens = occupancy.total
+    return {
+        "available": True,
+        "source": "cardstream",
+        "measurement": "local_estimate",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "system_prompt_tokens": occupancy.fixed_tokens,
+        "tool_schema_tokens": occupancy.schema_tokens,
+        "conversation_tokens": occupancy.history_tokens - summary_tokens,
+        "summary_tokens": summary_tokens,
+        "other_tokens": occupancy.dynamic_tokens,
+        "total_tokens": total_tokens,
+        "capacity_tokens": occupancy.input_limit,
+        "percent": round(total_tokens * 100 / occupancy.input_limit, 4),
+        "cards_active": len(history.cards),
+        "last_seq": history.last_seq,
+    }
 
 
 def account_compression_failure(error, usage_total, context_stats):
