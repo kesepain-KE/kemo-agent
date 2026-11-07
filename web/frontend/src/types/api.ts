@@ -34,6 +34,7 @@ export type RunEventType =
   | 'media_input_update'
   | 'guidance_applied'
   | 'context_compression'
+  | 'context_window'
   | 'subagent_progress'
   | 'background_job_progress'
   | 'usage'
@@ -949,6 +950,7 @@ export interface OverviewResponse {
     capacity_tokens: number
     percent: number
     cards_active: number
+    last_seq?: number
   }
   session_context_stats: {
     selected: boolean
