@@ -68,6 +68,7 @@ def test_update_relocates_cardstream_with_committed_wal_and_keeps_original_backu
     assert not Path(str(previous) + "-wal").exists()
     assert not Path(str(previous) + "-shm").exists()
     assert stored_version(destination, "cards") == VERSIONS["cards"]
+    assert backups.directory is not None
     for path in (destination, backups.directory / previous.relative_to(tmp_path)):
         with closing(sqlite3.connect(path)) as db:
             load_simple(db)

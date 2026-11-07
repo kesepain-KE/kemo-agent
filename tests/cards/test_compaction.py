@@ -1,3 +1,6 @@
+from tests.type_assertions import require_type
+from provider.protocol.models import TextContent
+from provider.protocol.enums import ResponseStatus
 from dataclasses import replace
 import json
 from unittest.mock import patch
@@ -37,7 +40,7 @@ def test_summary_failure_reports_the_actual_cause(store):
     class Provider:
         def create(self, request):
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", "{not json at all")],
             )
 
@@ -59,7 +62,7 @@ def test_empty_summary_body_is_reported_separately_from_invalid_json(store):
     class Provider:
         def create(self, request):
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", "   ")],
             )
 
@@ -167,8 +170,8 @@ def test_adjacent_intact_tool_pair_is_native_but_detached_result_is_data(store):
     KemoRequest.create(model="test", input=intact)
     detached = protocol_items((result,))
     assert len(detached) == 1 and isinstance(detached[0], MessageItem)
-    assert "original_call" in detached[0].content[0].text
-    assert "exec_a" in detached[0].content[0].text
+    assert "original_call" in require_type(detached[0].content[0], TextContent).text
+    assert "exec_a" in require_type(detached[0].content[0], TextContent).text
     KemoRequest.create(model="test", input=detached)
     assert not any(isinstance(item, ToolCallItem) for item in detached)
 
@@ -292,7 +295,7 @@ def test_provider_summarizer_uses_native_readonly_request_and_same_prefix(store)
         def create(self, request):
             requests.append(request)
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", json.dumps(summary()))],
             )
 
@@ -315,7 +318,7 @@ def test_summary_tool_output_is_never_executed_or_committed(store):
     class Provider:
         def create(self, request):
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[ToolCallItem(id="call_x", call_id="callid_x", name="shell",
                                      arguments={"command": "do not execute"})],
             )

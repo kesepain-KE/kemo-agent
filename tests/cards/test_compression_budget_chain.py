@@ -1,4 +1,7 @@
 """Capacity failures reproduced across the actual compression/request chain."""
+from tests.type_assertions import require_present, require_type
+from provider.protocol.enums import MessageRole, ResponseStatus
+from provider.protocol.models import IncompleteDetails, MediaSource, Usage
 import base64
 import json
 from types import SimpleNamespace
@@ -22,12 +25,12 @@ from tests.media_input_support import PNG
 
 def reply(request, value=None, *, usage=None):
     return KemoResponse(
-        request_id=request.request_id, model=request.model, status="completed",
+        request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
         output=[MessageItem.text(
             "assistant", json.dumps(summary() if value is None else value),
             phase="final_answer",
         )],
-        usage=usage or {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        usage=Usage.model_validate(usage or {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}),
     )
 
 
@@ -149,9 +152,9 @@ def test_running_summary_response_is_polled_by_original_response_id(store, monke
             created.append(request)
             return KemoResponse(
                 id="resp_summary_running", request_id=request.request_id,
-                model=request.model, status="incomplete",
-                incomplete_details={"reason": "running"},
-                usage={"input_tokens": 100},
+                model=request.model, status=ResponseStatus.INCOMPLETE,
+                incomplete_details=IncompleteDetails.model_validate({"reason": "running"}),
+                usage=Usage.model_validate({"input_tokens": 100}),
             )
 
         def get_response(self, response_id):
@@ -190,16 +193,16 @@ def test_running_summary_response_that_never_finishes_respects_deadline(store, m
             requests.append(request)
             return KemoResponse(
                 id="resp_stuck_running", request_id=request.request_id,
-                model=request.model, status="incomplete",
-                incomplete_details={"reason": "running"},
+                model=request.model, status=ResponseStatus.INCOMPLETE,
+                incomplete_details=IncompleteDetails.model_validate({"reason": "running"}),
             )
 
         def get_response(self, response_id):
             queries.append(response_id)
             return KemoResponse(
                 id=response_id, request_id=requests[0].request_id,
-                model=requests[0].model, status="incomplete",
-                incomplete_details={"reason": "running"},
+                model=requests[0].model, status=ResponseStatus.INCOMPLETE,
+                incomplete_details=IncompleteDetails.model_validate({"reason": "running"}),
             )
 
     with pytest.raises(CompressionBudgetExhausted) as caught:
@@ -229,13 +232,13 @@ def test_output_truncation_retries_only_with_a_larger_supported_budget(store):
             if len(requests) == 1:
                 return KemoResponse(
                     request_id=request.request_id, model=request.model,
-                    status="incomplete",
-                    incomplete_details={
+                    status=ResponseStatus.INCOMPLETE,
+                    incomplete_details=IncompleteDetails.model_validate({
                         "reason": "output_truncated",
                         "details": {"finish_reason": "length"},
-                    },
-                    usage={"input_tokens": 100, "output_tokens": 256,
-                           "total_tokens": 356},
+                    }),
+                    usage=Usage.model_validate({"input_tokens": 100, "output_tokens": 256,
+                           "total_tokens": 356}),
                 )
             return reply(request)
 
@@ -265,12 +268,12 @@ def test_content_filter_failure_is_diagnostic_and_never_blindly_retried(store):
             requests.append(request)
             return KemoResponse(
                 request_id=request.request_id, model=request.model,
-                status="incomplete",
-                incomplete_details={
+                status=ResponseStatus.INCOMPLETE,
+                incomplete_details=IncompleteDetails.model_validate({
                     "reason": "content_filtered",
                     "details": {"finish_reason": "content_filter"},
-                },
-                usage={"input_tokens": 100, "output_tokens": 5, "total_tokens": 105},
+                }),
+                usage=Usage.model_validate({"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}),
             )
 
     with pytest.raises(CardCompactionError) as caught:
@@ -300,8 +303,8 @@ def test_truncation_without_a_larger_output_ceiling_is_not_retried(store):
             requests.append(request)
             return KemoResponse(
                 request_id=request.request_id, model=request.model,
-                status="incomplete",
-                incomplete_details={"reason": "output_truncated"},
+                status=ResponseStatus.INCOMPLETE,
+                incomplete_details=IncompleteDetails.model_validate({"reason": "output_truncated"}),
             )
 
     with pytest.raises(CardCompactionError, match="recovery=unavailable"):
@@ -365,24 +368,25 @@ def test_unproductive_automatic_compression_does_not_break_a_fitting_request(sto
 def test_native_base64_is_not_charged_as_plain_text_or_truncated(store):
     add(store, text="inspect")
     data = base64.b64encode(PNG + b"\0" * 65536).decode("ascii")
-    image = ImageContent(mime_type="image/png", source={"kind": "inline_base64", "data": data})
-    item = MessageItem(id="msg_native_image", role="user", content=[image])
+    image = ImageContent(mime_type="image/png", source=MediaSource.model_validate({"kind": "inline_base64", "data": data}))
+    item = MessageItem(id="msg_native_image", role=MessageRole.USER, content=[image])
     prepared = prepare_request(
         store, "web", "s1", system_prompt="fixed", dynamic_tail=lambda: {},
         tools=[], input_limit=12000, virtual_items=[item], transport="chat",
     )
     assert prepared.wire_tokens < 12000 and prepared.occupancy.dynamic_tokens < 12000
-    sent = prepared.snapshot.items()[-1].content[0]
-    assert sent.source.data == data
+    sent_item = require_type(prepared.snapshot.items()[-1], MessageItem)
+    sent = require_type(sent_item.content[0], ImageContent)
+    assert require_present(sent.source).data == data
 
 
 def test_native_media_usage_does_not_inflate_later_text_only_requests(store):
     add(store, text="inspect")
     image = ImageContent(
         mime_type="image/png",
-        source={"kind": "inline_base64", "data": base64.b64encode(PNG).decode("ascii")},
+        source=MediaSource.model_validate({"kind": "inline_base64", "data": base64.b64encode(PNG).decode("ascii")}),
     )
-    item = MessageItem(id="msg_calibrated_media", role="user", content=[image])
+    item = MessageItem(id="msg_calibrated_media", role=MessageRole.USER, content=[image])
     prepared = prepare_request(
         store, "web", "s1", system_prompt="fixed " * 60, dynamic_tail=lambda: {},
         tools=[], input_limit=12000, virtual_items=[item], transport="chat",

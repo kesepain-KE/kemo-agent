@@ -1,6 +1,7 @@
 """The real public entry, with temporary users and native fake Providers only."""
 from __future__ import annotations
 
+from provider.protocol.models import IncompleteDetails, Usage
 from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
@@ -60,12 +61,12 @@ def response(request, text="done", calls=()):
     calls = list(calls)
     return KemoResponse(
         request_id=request.request_id, model=request.model,
-        status="requires_action" if calls else "completed",
+        status=ResponseStatus.REQUIRES_ACTION if calls else ResponseStatus.COMPLETED,
         output=[
             *([MessageItem.text("assistant", text, phase="final_answer")] if text else []),
             *calls,
         ],
-        usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+        usage=Usage.model_validate({"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}),
     )
 
 
@@ -199,7 +200,7 @@ def test_response_level_invalid_tool_arguments_without_output_is_repaired(root):
                     model=request.model,
                     status=ResponseStatus.INCOMPLETE,
                     output=[],
-                    incomplete_details={
+                    incomplete_details=IncompleteDetails.model_validate({
                         "reason": IncompleteReason.INVALID_TOOL_ARGUMENTS,
                         "details": {
                             "invalid_tool_calls": [
@@ -210,7 +211,7 @@ def test_response_level_invalid_tool_arguments_without_output_is_repaired(root):
                                 }
                             ]
                         },
-                    },
+                    }),
                 )
             if len(requests) == 2:
                 return response(request, calls=[call(value="corrected")])
@@ -302,6 +303,7 @@ def test_cleanup_database_failure_preserves_the_original_failure_and_does_not_re
         events = list(run(root, Provider()))
     assert finish.call_count == 1
     error = events[-1]
+    assert error.error is not None
     assert error.type == "error" and error.error["exception_type"] == "RuntimeError"
     assert "original-provider-failure" in error.error["message"]
     assert error.metadata["cleanup_errors"] == [{"exception_type": "OSError"}]
@@ -482,10 +484,10 @@ def test_transient_terminal_failure_starts_a_new_request_and_records_its_usage(r
             requests.append(request)
             if len(requests) == 1:
                 return KemoResponse(
-                    request_id=request.request_id, model=request.model, status="failed",
-                    output=[], error={"type": "upstream_error", "code": "PROVIDER_UNAVAILABLE",
-                                      "message": "busy", "retryable": True},
-                    usage={"input_tokens": 11, "output_tokens": 2},
+                    request_id=request.request_id, model=request.model, status=ResponseStatus.FAILED,
+                    output=[], error=UnifiedError.model_validate({"type": "upstream_error", "code": "PROVIDER_UNAVAILABLE",
+                                      "message": "busy", "retryable": True}),
+                    usage=Usage.model_validate({"input_tokens": 11, "output_tokens": 2}),
                 )
             return response(request)
 
@@ -494,6 +496,7 @@ def test_transient_terminal_failure_starts_a_new_request_and_records_its_usage(r
     assert len(requests) == 2 and requests[0].request_id != requests[1].request_id
     assert requests[1].parent_request_id == requests[0].request_id
     assert requests[1].input == requests[0].input
+    assert events[-1].usage is not None
     assert events[-1].usage["provider_request_count"] == 2
     assert events[-1].usage["input_tokens"] == 13
     retry = next(event for event in events if event.type == "retrying")

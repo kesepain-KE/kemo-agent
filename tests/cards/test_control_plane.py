@@ -172,8 +172,12 @@ def test_close_and_bulk_delete_refuse_live_executions_and_roll_back_every_identi
     ):
         with pytest.raises(CardConflictError):
             action()
-    assert find_record(root, "alice", "web", "first")["lifecycle"] == "open"
-    assert store.session("web", "live")["lifecycle"] == "open"
+    found_record = find_record(root, "alice", "web", "first")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
+    found_record = store.session("web", "live")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
 
 
 def test_presence_is_source_scoped_and_release_sequence_cannot_be_reversed(root):
@@ -194,8 +198,12 @@ def test_other_document_lease_blocks_entire_bulk_delete(root):
     update_presence(root, "alice", "web", "second", "other", 1)
     with pytest.raises(CardConflictError):
         delete_all_sessions(root, "alice", "web", client_id="mine")
-    assert store.session("web", "first")["lifecycle"] == "open"
-    assert store.session("web", "second")["lifecycle"] == "open"
+    found_record = store.session("web", "first")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
+    found_record = store.session("web", "second")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
     count, deleted_files = delete_all_sessions(root, "alice", "web", client_id="other")
     assert (count, deleted_files) == (2, 0)
     assert store.raw_page("web", "first") == ()
@@ -204,12 +212,14 @@ def test_other_document_lease_blocks_entire_bulk_delete(root):
 def test_marks_survive_concurrent_metadata_mutation_and_stale_snapshots_cannot_overwrite_them(root):
     completed(root)
     stale = find_record(root, "alice", "web", "s1")
+    assert stale is not None
     update_session_marks(root, "alice", "web", "s1", favorite=True, pinned=True)
     with pytest.raises(CardConflictError, match="Stale metadata"):
         upsert_registry_record(root, "alice", {**stale, "title": "stale title"})
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(lambda n: mutate_registry_record(root, "alice", "web", "s1", lambda record: {**record, "title": str(n)}), range(10)))
     current = find_record(root, "alice", "web", "s1")
+    assert current is not None
     assert current["favorite"] and current["pinned_at"]
     assert current["updated_at"] >= stale["updated_at"]
 
@@ -220,7 +230,9 @@ def test_deleted_preferred_identity_is_not_reused_for_new_raw(root):
     delete_session(root, "alice", "web", "s1")
     new, created = get_or_reserve_active(root, "alice", "web", "browser", preferred_session_id="s1")
     assert created and new["session_id"] != "s1"
-    assert store.session("web", "s1")["lifecycle"] == "deleted"
+    found_record = store.session("web", "s1")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "deleted"
     assert store.raw_page("web", "s1") == ()
 
 
@@ -261,11 +273,15 @@ def test_memory_claim_coverage_is_raw_seq_and_compaction_does_not_advance_it(roo
     claim = claim_pending_memory(root, "alice", source="web", session_id="s1", input_tokens=1)
     assert (claim["memory_claim_start_seq"], claim["memory_claim_end_seq"]) == (1, 2)
     compact(store, "web", "s1", summarize=lambda _: summary())
-    assert store.session("web", "s1")["memory_processed_seq"] == 0
+    found_record = store.session("web", "s1")
+    assert found_record is not None
+    assert found_record["memory_processed_seq"] == 0
     finish_memory_claim(root, "alice", "web", "s1", claim_id=claim["memory_claim_id"])
     following = claim_pending_memory(root, "alice", input_tokens=1)
     assert following is None
-    assert store.session("web", "s1")["memory_processed_seq"] == 2
+    found_record = store.session("web", "s1")
+    assert found_record is not None
+    assert found_record["memory_processed_seq"] == 2
 
 
 @pytest.mark.parametrize("stolen", [True, False])
@@ -282,7 +298,9 @@ def test_late_memory_analysis_cannot_apply_after_claim_loss_or_expiry(root, stol
             config=load_config("alice", root), agent_runner=object(), claim=claim)
     assert result["status"] == "failed"
     persist.assert_not_called()
-    assert store.session("web", "s1")["memory_processed_seq"] == 0
+    found_record = store.session("web", "s1")
+    assert found_record is not None
+    assert found_record["memory_processed_seq"] == 0
 
 
 def test_background_title_cannot_overwrite_concurrent_manual_rename(root):

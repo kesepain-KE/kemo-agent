@@ -773,15 +773,21 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(model_calls, 0)
         self.assertIn("已创建并切换到新对话", result.text)
         self.assertIn("后台继续提取", result.text)
+        found_record = find_record(self.root, "alice", source, previous_session_id)
+        assert found_record is not None
         self.assertEqual(
-            find_record(self.root, "alice", source, previous_session_id)["lifecycle"],
+            found_record["lifecycle"],
             "closed",
         )
+        found_record = find_record(self.root, "alice", source, previous_session_id)
+        assert found_record is not None
         self.assertEqual(
-            find_record(self.root, "alice", source, previous_session_id)["memory_status"],
+            found_record["memory_status"],
             "queued",
         )
-        self.assertEqual(get_active(self.root, "alice", active_key)["session_id"], result.session_id)
+        found_record = get_active(self.root, "alice", active_key)
+        assert found_record is not None
+        self.assertEqual(found_record["session_id"], result.session_id)
         self.assertEqual(len(self.transport.sent), 1)
 
     def test_new_command_accepts_telegram_bot_mention(self) -> None:
@@ -844,7 +850,9 @@ class RouterTests(unittest.TestCase):
             session_messages(self.root, "alice", source, second["session_id"])[0]["content"],
             "second message",
         )
-        self.assertEqual(get_active(self.root, "alice", first_key)["session_id"], result.session_id)
+        found_record = get_active(self.root, "alice", first_key)
+        assert found_record is not None
+        self.assertEqual(found_record["session_id"], result.session_id)
 
     def test_unknown_slash_command_returns_help_without_model(self) -> None:
         model_calls = 0

@@ -377,8 +377,10 @@ class EngineAndCLITests(unittest.TestCase):
         self.assertEqual(received[0]["source"], "cli")
         self.assertTrue(received[0]["session_id"].startswith("conv_"))
         from run.history import find_record
+        found_record = find_record(root, "alice", "cli", received[0]["session_id"])
+        assert found_record is not None
         self.assertEqual(
-            find_record(root, "alice", "cli", received[0]["session_id"])["lifecycle"],
+            found_record["lifecycle"],
             "closed",
         )
         self.assertNotEqual(
@@ -409,9 +411,13 @@ class EngineAndCLITests(unittest.TestCase):
                 0,
             )
         from run.history import find_record
-        self.assertEqual(find_record(root, "alice", "cli", "first")["lifecycle"], "closed")
-        self.assertEqual(find_record(root, "alice", "cli", "first")["memory_status"], "queued")
-        self.assertEqual(find_record(root, "alice", "cli", "second")["lifecycle"], "closed")
+        found_record = find_record(root, "alice", "cli", "first")
+        assert found_record is not None
+        self.assertEqual(found_record["lifecycle"], "closed")
+        self.assertEqual(found_record["memory_status"], "queued")
+        found_record = find_record(root, "alice", "cli", "second")
+        assert found_record is not None
+        self.assertEqual(found_record["lifecycle"], "closed")
         handled, selected = cli._interactive_command(
             "/use first", root=root, user="alice", source="cli",
             session_id="second", stdout=output,

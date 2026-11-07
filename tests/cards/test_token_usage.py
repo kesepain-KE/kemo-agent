@@ -1,4 +1,6 @@
 """Usage is completed once per request across main, summary and child paths."""
+from provider.protocol.enums import ResponseStatus, StreamEventType
+from provider.protocol.models import Usage
 from types import SimpleNamespace
 
 import pytest
@@ -25,13 +27,14 @@ def test_main_request_fills_usage_and_only_reported_input_calibrates(root, usage
         def create(self, request):
             requests.append(request)
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", "done", phase="final_answer")], usage=usage,
             )
 
     events = list(run(root, Provider()))
     assert events[-1].type == "done", events[-1].error
     result = events[-1].usage
+    assert result is not None
     assert result["provider_request_count"] == 1
     assert result["output_tokens"] == count_text("done")
     expected_input = (
@@ -54,7 +57,7 @@ def test_context_snapshot_is_emitted_before_provider_request(root):
         def create(self, request):
             self.requests += 1
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", "done", phase="final_answer")],
             )
 
@@ -86,26 +89,27 @@ def test_stream_preserves_usage_from_prior_events_and_does_not_accumulate_snapsh
     class Provider:
         def stream(self, request):
             response = KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", "done", phase="final_answer")],
             )
             yield ProviderStreamEvent(
-                type="response.created", sequence=0,
+                type=StreamEventType.RESPONSE_CREATED, sequence=0,
                 request_id=request.request_id, response_id=response.id,
             )
             for sequence in (1, 2):
                 yield ProviderStreamEvent(
-                    type="usage.updated", sequence=sequence, previous_sequence=sequence - 1,
+                    type=StreamEventType.USAGE_UPDATED, sequence=sequence, previous_sequence=sequence - 1,
                     request_id=request.request_id, response_id=response.id,
-                    usage={"input_tokens": 17},
+                    usage=Usage.model_validate({"input_tokens": 17}),
                 )
             yield ProviderStreamEvent(
-                type="response.completed", sequence=3, previous_sequence=2,
+                type=StreamEventType.RESPONSE_COMPLETED, sequence=3, previous_sequence=2,
                 request_id=request.request_id, response_id=response.id, response=response,
             )
 
     events = list(run(root, Provider(), stream=True))
     assert events[-1].type == "done", events[-1].error
+    assert events[-1].usage is not None
     assert events[-1].usage["input_tokens"] == 17
     assert events[-1].usage["output_tokens"] == count_text("done")
     assert events[-1].usage["provider_request_count"] == 1
@@ -126,7 +130,7 @@ def test_session_cache_rate_is_live_and_partial_snapshots_do_not_count_twice(roo
     class Provider:
         def stream(self, request):
             response = KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", "done", phase="final_answer")],
             )
             snapshots = [
@@ -137,12 +141,12 @@ def test_session_cache_rate_is_live_and_partial_snapshots_do_not_count_twice(roo
             ]
             for sequence, usage in enumerate(snapshots):
                 yield ProviderStreamEvent(
-                    type="usage.updated", sequence=sequence,
+                    type=StreamEventType.USAGE_UPDATED, sequence=sequence,
                     previous_sequence=sequence - 1 if sequence else None,
-                    request_id=request.request_id, response_id=response.id, usage=usage,
+                    request_id=request.request_id, response_id=response.id, usage=Usage.model_validate(usage),
                 )
             yield ProviderStreamEvent(
-                type="response.completed", sequence=4, previous_sequence=3,
+                type=StreamEventType.RESPONSE_COMPLETED, sequence=4, previous_sequence=3,
                 request_id=request.request_id, response_id=response.id, response=response,
             )
 
@@ -177,16 +181,16 @@ def test_terminal_only_usage_updates_cache_rate_before_tool_task_finishes(root, 
             self.requests += 1
             return KemoResponse(
                 request_id=request.request_id, model=request.model,
-                status="requires_action" if self.requests == 1 else "completed",
+                status=ResponseStatus.REQUIRES_ACTION if self.requests == 1 else ResponseStatus.COMPLETED,
                 output=[call()] if self.requests == 1 else [MessageItem.text("assistant", "done", phase="final_answer")],
-                usage={"input_tokens": 100, "cached_input_tokens": 60 if self.requests == 1 else 100,
-                       "output_tokens": 2, "total_tokens": 102},
+                usage=Usage.model_validate({"input_tokens": 100, "cached_input_tokens": 60 if self.requests == 1 else 100,
+                       "output_tokens": 2, "total_tokens": 102}),
             )
 
         def stream(self, request):
             response = self.create(request)
             yield ProviderStreamEvent(
-                type="response.completed", sequence=0,
+                type=StreamEventType.RESPONSE_COMPLETED, sequence=0,
                 request_id=request.request_id, response_id=response.id, response=response,
             )
 
@@ -198,6 +202,7 @@ def test_terminal_only_usage_updates_cache_rate_before_tool_task_finishes(root, 
     assert provider.requests == 1
     remaining = list(iterator)
     assert remaining[-1].type == "done", remaining[-1].error
+    assert remaining[-1].usage is not None
     assert remaining[-1].usage["provider_request_count"] == 2
     assert session_statistics(root, "alice", "web", "s1")["usage"]["cache_hit_rate"] == 0.8
 
@@ -208,9 +213,9 @@ def test_stream_failure_retains_usage_already_reported_to_the_user(root):
     class Provider:
         def stream(self, request):
             yield ProviderStreamEvent(
-                type="usage.updated", sequence=0,
+                type=StreamEventType.USAGE_UPDATED, sequence=0,
                 request_id=request.request_id, response_id="resp_live_usage",
-                usage={"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 2},
+                usage=Usage.model_validate({"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 2}),
             )
             raise ProviderError("stream disconnected", retryable=False)
 
@@ -236,7 +241,7 @@ def test_subagent_attempt_fills_missing_usage_before_aggregation():
     class Provider:
         def create(self, wire):
             return KemoResponse(
-                request_id=wire.request_id, model=wire.model, status="completed",
+                request_id=wire.request_id, model=wire.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", "done", phase="final_answer")],
             )
 
@@ -258,7 +263,7 @@ def test_summary_request_records_local_compensation_when_gateway_omits_usage(sto
         def create(self, request):
             requests.append(request)
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[MessageItem.text("assistant", text)],
             )
 

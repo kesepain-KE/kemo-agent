@@ -1717,9 +1717,11 @@ class UnifiedProtocolTests(unittest.TestCase):
             for card in cards
         ))
         with store.db() as database:
+            found_record = store.session("web", "native")
+            assert found_record is not None
             integration = database.execute(
                 "SELECT record_json FROM card_integrations WHERE session_key=?",
-                (store.session("web", "native")["session_key"],),
+                (found_record["session_key"],),
             ).fetchone()
         diagnostics = json.loads(require_present(integration)["record_json"])["provider_request_diagnostics"]
         self.assertEqual(len(diagnostics), len(native.requests))

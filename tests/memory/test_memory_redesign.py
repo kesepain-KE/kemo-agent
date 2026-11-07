@@ -335,6 +335,7 @@ def test_real_history_cursor_waits_for_all_candidate_batches(store):
             clock.now.return_value = cycle
             recovered = recover_pending_memory(scheduler, store.user)
             record = find_record(store.root, store.user, "web", "pending")
+            assert record is not None
             assert not recovered["failed"]
             assert len(store.load_all()) == expected_count
             assert record["memory_processed_seq"] == (2 if expected_count == 5 else 0)

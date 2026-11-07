@@ -1012,7 +1012,7 @@ class MemoryManageTests(unittest.TestCase):
         ):
             for action in ("search_by_title", "search_by_content", "search_many"):
                 with self.subTest(mode=mode, regex=regex, sensitive=sensitive, action=action):
-                    params = ({"queries": [{"title": query, "content": query}]}
+                    params: dict[str, Any] = ({"queries": [{"title": query, "content": query}]}
                               if action == "search_many" else {"query": query})
                     result = run_memory_manage(
                         action, "all", **params, match_mode=mode, regex=regex,
@@ -1033,11 +1033,12 @@ class MemoryManageTests(unittest.TestCase):
                 ({"regex": True}, "正则"),
             ):
                 with self.subTest(action=action, options=options):
-                    params = ({"queries": [{"title": "["}]}
+                    params: dict[str, Any] = ({"queries": [{"title": "["}]}
                               if action == "search_many" else {"query": "["})
+                    invalid_params: dict[str, Any] = {**params, **options}
                     with self.assertRaisesRegex(ValueError, error):
                         run_memory_manage(
-                            action, "all", **params, **options,
+                            action, "all", **invalid_params,
                             context={"root": str(self.root), "user": "alice"},
                         )
 

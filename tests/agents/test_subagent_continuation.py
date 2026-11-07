@@ -1,6 +1,7 @@
 """Timeout/resume integration with real scheduling and fake local providers."""
 from __future__ import annotations
 
+from tests.type_assertions import require_type
 import json
 import threading
 import time
@@ -588,7 +589,7 @@ def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(w
         for request in main.requests[1:]:
             tool_results = [i for i in request.input if isinstance(i, ToolResultItem)]
             for result in tool_results:
-                payload = result.content[0].data
+                payload = require_type(result.content[0], JsonContent).data
                 assert set(payload["original_call"]) == {"name", "arguments"}
                 encoded = json.dumps(payload["result"])
                 assert '"tool_calls":' not in encoded and '"tool_records":' not in encoded

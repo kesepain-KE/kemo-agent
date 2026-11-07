@@ -1,3 +1,4 @@
+from tests.type_assertions import require_present
 import sqlite3
 import threading
 
@@ -59,7 +60,7 @@ def test_kemo_transport_and_runtime_retries_do_not_multiply():
         try:
             return transport.run(network, cancel_event=None)
         except ProviderError as error:
-            raise ProviderResponseError(error_event(error).error) from error
+            raise ProviderResponseError(require_present(error_event(error).error)) from error
 
     with pytest.raises(ProviderError) as caught:
         RetryManager(base_delay=0).call(exchange, replay_safe=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from provider.protocol.enums import ResponseStatus
 import pytest
 
 from provider.protocol.enums import MeasurementMode
@@ -23,7 +24,7 @@ def test_missing_usage_uses_the_shared_deepseek_counter_and_marks_estimates():
     response = KemoResponse(
         request_id=wire_request.request_id,
         model=wire_request.model,
-        status="completed",
+        status=ResponseStatus.COMPLETED,
         output=[MessageItem.text("assistant", "world")],
     )
 
@@ -35,6 +36,8 @@ def test_missing_usage_uses_the_shared_deepseek_counter_and_marks_estimates():
         "tools": [],
     })
     assert completed.usage.output_tokens == count_text("world")
+    assert completed.usage.input_tokens is not None
+    assert completed.usage.output_tokens is not None
     assert completed.usage.total_tokens == (
         completed.usage.input_tokens + completed.usage.output_tokens
     )
@@ -49,22 +52,24 @@ def test_gateway_exact_fields_are_preserved_and_only_missing_fields_are_filled()
     response = KemoResponse(
         request_id=wire_request.request_id,
         model=wire_request.model,
-        status="completed",
+        status=ResponseStatus.COMPLETED,
         output=[MessageItem.text("assistant", "world")],
-        usage={
+        usage=Usage.model_validate({
             "input_tokens": 17,
             "measurement": {
                 "mode": "gateway",
                 "exact": False,
                 "exact_fields": ["input_tokens"],
             },
-        },
+        }),
     )
 
     completed = complete_usage(wire_request, response)
 
     assert completed.usage.input_tokens == 17
     assert completed.usage.output_tokens == count_text("world")
+    assert completed.usage.input_tokens is not None
+    assert completed.usage.output_tokens is not None
     assert completed.usage.total_tokens == (
         completed.usage.input_tokens + completed.usage.output_tokens
     )
@@ -78,9 +83,9 @@ def test_complete_gateway_usage_is_returned_without_reinterpretation():
     response = KemoResponse(
         request_id=wire_request.request_id,
         model=wire_request.model,
-        status="completed",
+        status=ResponseStatus.COMPLETED,
         output=[MessageItem.text("assistant", "world")],
-        usage={
+        usage=Usage.model_validate({
             "input_tokens": 17,
             "output_tokens": 9,
             "total_tokens": 26,
@@ -89,7 +94,7 @@ def test_complete_gateway_usage_is_returned_without_reinterpretation():
                 "exact": True,
                 "exact_fields": ["input_tokens", "output_tokens", "total_tokens"],
             },
-        },
+        }),
     )
 
     assert complete_usage(wire_request, response).usage.model_dump() == response.usage.model_dump()
@@ -100,14 +105,14 @@ def test_exact_gateway_measurement_without_field_list_preserves_reported_values(
     response = KemoResponse(
         request_id=wire_request.request_id,
         model=wire_request.model,
-        status="completed",
+        status=ResponseStatus.COMPLETED,
         output=[MessageItem.text("assistant", "world")],
-        usage={
+        usage=Usage.model_validate({
             "input_tokens": 17,
             "output_tokens": 9,
             "total_tokens": 26,
             "measurement": {"mode": "gateway", "exact": True},
-        },
+        }),
     )
 
     completed = complete_usage(wire_request, response)
@@ -131,7 +136,7 @@ def test_reported_values_without_measurement_are_preserved_without_local_countin
     wire_request = request()
     response = KemoResponse(
         request_id=wire_request.request_id, model=wire_request.model,
-        status="completed", usage=raw, output=[MessageItem.text("assistant", "world")],
+        status=ResponseStatus.COMPLETED, usage=raw, output=[MessageItem.text("assistant", "world")],
     )
     completed = complete_usage(wire_request, response)
     assert completed.usage.input_tokens == raw["input_tokens"]
@@ -143,12 +148,12 @@ def test_reported_values_without_measurement_are_preserved_without_local_countin
 def test_explicit_estimates_are_replaced_and_never_become_calibration_evidence():
     wire_request = request()
     response = KemoResponse(
-        request_id=wire_request.request_id, model=wire_request.model, status="completed",
+        request_id=wire_request.request_id, model=wire_request.model, status=ResponseStatus.COMPLETED,
         output=[MessageItem.text("assistant", "world")],
-        usage={
+        usage=Usage.model_validate({
             "input_tokens": 999999, "output_tokens": 999999, "total_tokens": 1999998,
             "measurement": {"mode": "estimated"},
-        },
+        }),
     )
     completed = complete_usage(wire_request, response)
     assert completed.usage.input_tokens == count_request("system", wire_request.input, [])
@@ -160,15 +165,15 @@ def test_explicit_estimates_are_replaced_and_never_become_calibration_evidence()
 def test_partial_estimates_keep_exact_input_including_zero_and_preserve_cache():
     wire_request = request()
     response = KemoResponse(
-        request_id=wire_request.request_id, model=wire_request.model, status="completed",
+        request_id=wire_request.request_id, model=wire_request.model, status=ResponseStatus.COMPLETED,
         output=[MessageItem.text("assistant", "world")],
-        usage={
+        usage=Usage.model_validate({
             "input_tokens": 0, "output_tokens": 9999, "cached_input_tokens": 0,
             "measurement": {
                 "mode": "mixed", "exact_fields": ["input_tokens"],
                 "estimated_fields": ["output_tokens"],
             },
-        },
+        }),
     )
     completed = complete_usage(wire_request, response)
     assert completed.usage.input_tokens == completed.usage.cached_input_tokens == 0
@@ -184,7 +189,7 @@ def test_output_counts_reasoning_and_tools_without_charging_random_protocol_ids(
         ToolCallItem(id="call_a", call_id="callid_a", name="lookup", arguments={"q": "hello"}),
     ]
     response = KemoResponse(
-        request_id=wire_request.request_id, model=wire_request.model, status="requires_action",
+        request_id=wire_request.request_id, model=wire_request.model, status=ResponseStatus.REQUIRES_ACTION,
         output=output,
     )
     first = complete_usage(wire_request, response).usage
@@ -201,7 +206,7 @@ def test_batch_fallback_counts_the_input_once_and_all_generated_choices():
     wire_request = request()
     responses = [
         KemoResponse(
-            request_id=wire_request.request_id, model=wire_request.model, status="completed",
+            request_id=wire_request.request_id, model=wire_request.model, status=ResponseStatus.COMPLETED,
             choice_index=index, choice_count=2, output=[MessageItem.text("assistant", text)],
         ) for index, text in enumerate(("hello", "world"))
     ]
@@ -256,7 +261,7 @@ def test_updated_stream_components_invalidate_old_total_instead_of_reusing_stale
     previous = Usage(input_tokens=17, output_tokens=2, total_tokens=19)
     current = merge_usage_snapshots(Usage(output_tokens=5), previous)
     response = KemoResponse(
-        request_id=wire_request.request_id, model=wire_request.model, status="completed",
+        request_id=wire_request.request_id, model=wire_request.model, status=ResponseStatus.COMPLETED,
         output=[MessageItem.text("assistant", "world")], usage=current,
     )
     completed = complete_usage(wire_request, response)

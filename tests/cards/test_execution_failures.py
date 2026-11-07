@@ -8,6 +8,7 @@ import pytest
 
 from provider.adapters.compat import kemo_request_to_chat
 from provider.factory import provider_semaphore_status
+from provider.protocol.enums import ResponseStatus
 from provider.protocol.models import KemoRequest, KemoResponse, MessageItem, ToolCallItem
 from provider.request_pool import FairRequestPool
 from provider.retry import RetryManager
@@ -59,6 +60,7 @@ def test_summary_deadline_retains_old_views_and_the_slot_until_real_exit(store):
                 assert release.wait(3)
                 import json
                 return KemoResponse(request_id=request.request_id, model=request.model,
+                                    status=ResponseStatus.COMPLETED,
                                     output=[MessageItem.text("assistant", json.dumps(summary()))])
             finally:
                 exited.set()

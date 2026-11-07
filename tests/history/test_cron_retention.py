@@ -124,7 +124,9 @@ def test_hide_transaction_rolls_back_on_error(root):
         raise OSError("fixture failure")
     with patch("run.history.retention._hide", side_effect=fail), pytest.raises(OSError):
         cleanup_cron_history(root, "alice", now=NOW)
-    assert find_record(root, "alice", SOURCE, "old")["lifecycle"] == "closed"
+    found_record = find_record(root, "alice", SOURCE, "old")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "closed"
     assert len(history.cards) == 1
 
 

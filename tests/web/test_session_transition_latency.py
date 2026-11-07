@@ -40,13 +40,25 @@ def test_close_and_summary_only_touch_target_metadata(root):
     reserve_session(root, "alice", "web", "old", active_key="interactive:alice:page")
     reserve_session(root, "alice", "app", "old", active_key="app:alice:device")
     reserve_session(root, "bob", "web", "old")
-    assert close_session(root, "alice", "web", "old")["lifecycle"] == "closed"
-    assert queue_summary(root, "alice", "web", "old")["status"] == "none"
+    found_record = close_session(root, "alice", "web", "old")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "closed"
+    found_record = queue_summary(root, "alice", "web", "old")
+    assert found_record is not None
+    assert found_record["status"] == "none"
     assert read_active_binding(root, "alice", "interactive:alice:page") is None
-    assert read_active_binding(root, "alice", "app:alice:device")["session_id"] == "old"
-    assert find_record(root, "alice", "web", "fixture_1")["future_marker"] == "keep-1"
-    assert find_record(root, "alice", "app", "old")["lifecycle"] == "open"
-    assert find_record(root, "bob", "web", "old")["lifecycle"] == "open"
+    found_record = read_active_binding(root, "alice", "app:alice:device")
+    assert found_record is not None
+    assert found_record["session_id"] == "old"
+    found_record = find_record(root, "alice", "web", "fixture_1")
+    assert found_record is not None
+    assert found_record["future_marker"] == "keep-1"
+    found_record = find_record(root, "alice", "app", "old")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
+    found_record = find_record(root, "bob", "web", "old")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
 
 
 def test_save_queues_memory_without_reading_raw_transcripts(root):
@@ -66,7 +78,9 @@ def test_save_queues_memory_without_reading_raw_transcripts(root):
     assert result["memory"]["target_seq"] == 24
     assert result["summary"]["status"] == "queued"
     assert not any("from context_cards" in sql.casefold() for sql in statements)
-    assert history.cards == before and find_record(root, "alice", "web", "old")["memory_processed_seq"] == 0
+    found_record = find_record(root, "alice", "web", "old")
+    assert found_record is not None
+    assert history.cards == before and found_record["memory_processed_seq"] == 0
     summary_waker.assert_called_once()
     memory_waker.assert_called_once()
 
@@ -103,8 +117,12 @@ def test_targeted_metadata_update_rolls_back_bindings_on_failure(root):
         raise OSError("fixture failure")
     with patch.object(registry_store, "write_record", side_effect=fail), pytest.raises(OSError):
         close_session(root, "alice", "web", "old")
-    assert find_record(root, "alice", "web", "old")["lifecycle"] == "open"
-    assert read_active_binding(root, "alice", "interactive:alice")["session_id"] == "old"
+    found_record = find_record(root, "alice", "web", "old")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
+    found_record = read_active_binding(root, "alice", "interactive:alice")
+    assert found_record is not None
+    assert found_record["session_id"] == "old"
 
 
 def test_metadata_update_cannot_change_identity_or_revive_hidden_session(root):

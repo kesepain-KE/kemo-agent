@@ -80,12 +80,18 @@ def test_same_session_id_is_isolated_by_user_and_source(root):
 
 def test_reserved_identity_can_close_and_hide_without_raw(root):
     reserve_session(root, "alice", "web", "empty", active_key="browser")
-    assert get_active(root, "alice", "browser")["session_id"] == "empty"
-    assert close_session(root, "alice", "web", "empty")["lifecycle"] == "closed"
+    found_record = get_active(root, "alice", "browser")
+    assert found_record is not None
+    assert found_record["session_id"] == "empty"
+    found_record = close_session(root, "alice", "web", "empty")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "closed"
     assert get_active(root, "alice", "browser") is None
     assert delete_session(root, "alice", "web", "empty") == 1
     assert find_record(root, "alice", "web", "empty") is None
-    assert CardStore(root, "alice").session("web", "empty")["lifecycle"] == "deleted"
+    found_record = CardStore(root, "alice").session("web", "empty")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "deleted"
 
 
 def test_deleted_history_is_erased_and_identity_cannot_be_reused_by_late_writers(root):
@@ -105,7 +111,9 @@ def test_active_bindings_do_not_collide_across_sources(root):
     reserve_session(root, "alice", "message:telegram", "same", active_key="telegram")
     close_session(root, "alice", "web", "same")
     assert get_active(root, "alice", "browser") is None
-    assert get_active(root, "alice", "telegram")["source"] == "message:telegram"
+    found_record = get_active(root, "alice", "telegram")
+    assert found_record is not None
+    assert found_record["source"] == "message:telegram"
 
 
 def test_memory_claim_is_exclusive_and_advances_only_its_contiguous_raw_range(root):
@@ -182,7 +190,9 @@ def test_memory_is_not_claimed_until_integration_and_live_execution_exit(root):
 def test_summary_claim_is_exclusive_idempotent_and_keeps_raw(root):
     history = seed(root)
     close_session(root, "alice", "web", "s1")
-    assert queue_summary(root, "alice", "web", "s1")["status"] == "queued"
+    found_record = queue_summary(root, "alice", "web", "s1")
+    assert found_record is not None
+    assert found_record["status"] == "queued"
     claim = claim_pending_summary(root, "alice")
     assert claim_pending_summary(root, "alice") is None
     done = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
@@ -190,7 +200,9 @@ def test_summary_claim_is_exclusive_idempotent_and_keeps_raw(root):
     assert done["summary_completed_seq"] == 2
     assert done["summary_status"] == "completed"
     assert done["title_source"] == "summary"
-    assert queue_summary(root, "alice", "web", "s1")["status"] == "completed"
+    found_record = queue_summary(root, "alice", "web", "s1")
+    assert found_record is not None
+    assert found_record["status"] == "completed"
     assert claim_pending_summary(root, "alice") is None
     assert len(history.cards) == 2
 
@@ -219,7 +231,9 @@ def test_summary_failure_is_visible_and_manual_retry_resets_exhaustion(root):
         assert listed["summary_last_error"] == {"message": f"failure {attempt}"}
         mutate_registry_record(root, "alice", "web", "s1", lambda value: {**value, "summary_retry_at": ""})
     assert claim_pending_summary(root, "alice") is None
-    assert retry_summary(root, "alice", "web", "s1")["summary_status"] == "queued"
+    found_record = retry_summary(root, "alice", "web", "s1")
+    assert found_record is not None
+    assert found_record["summary_status"] == "queued"
     claim = claim_pending_summary(root, "alice")
     assert claim["summary_attempt_count"] == 1
     done = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],

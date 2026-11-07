@@ -60,5 +60,6 @@ def test_web_missing_terminal_is_an_explicit_failure(tmp_path):
     service = WebRunService(tmp_path, event_source=source)
     events = list(service.stream_chat("alice", "missing", "work", cancel_event=threading.Event()))
     assert events[-1].type == "error"
+    assert events[-1].error is not None
     assert events[-1].error["code"] == "RUN_MISSING_TERMINAL"
     assert not service._active_runs

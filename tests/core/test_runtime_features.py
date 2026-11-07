@@ -2021,6 +2021,7 @@ def run(*, context):
         self.assertEqual([event.type for event in events], ["context_window", "error"])
         terminal = events[-1]
         self.assertEqual(terminal.metadata["status"], "failed")
+        assert terminal.error is not None
         self.assertEqual(terminal.error["exception_type"], "ProviderCongestionError")
         window = require_present(session_history(root, 'alice', 'cli', 'provider-busy')).refresh()
         self.assertEqual(window.integrations[0]['status'], 'failed')
@@ -3017,6 +3018,7 @@ def run(*, context):
         self.assertEqual(len(provider.requests), 1)
         terminal = events[-1]
         self.assertTrue(terminal.metadata["committed"])
+        assert terminal.error is not None
         self.assertEqual(
             terminal.error["category"],
             "context_length_exceeded",

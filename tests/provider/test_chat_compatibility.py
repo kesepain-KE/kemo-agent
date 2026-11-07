@@ -191,6 +191,7 @@ def test_usage_fallback_counts_real_reasoning_and_tool_arguments(stream) -> None
             usage = events[-1].usage
         else:
             usage = transport.chat(request()).usage.to_dict()
+    assert usage is not None
     assert usage["estimated"]
     assert usage["completion_tokens"] > count_value("working") + count_value("check facts")
     assert usage["measurement"]["estimated_fields"] == [
@@ -210,6 +211,7 @@ def test_stream_usage_frames_are_cumulative_and_last_frame_can_also_contain_outp
     usage_events = [event for event in events if event.type == "usage"]
     assert len(usage_events) == 1
     usage = usage_events[0].usage
+    assert usage is not None
     assert usage["prompt_tokens"] == 17
     assert usage["completion_tokens"] == count_value("hello world")
     assert usage["total_tokens"] == 17 + count_value("hello world")
@@ -227,6 +229,7 @@ def test_stream_usage_alias_updates_replace_prior_snapshot_and_rederive_stale_to
     transport = OpenAIChatTransport(config())
     with patch("urllib.request.urlopen", return_value=FakeHTTPResponse(wire, content_type="text/event-stream")):
         usage = list(transport.chat_stream(request()))[-1].usage
+        assert usage is not None
     assert usage["prompt_tokens"] == 20
     assert usage["completion_tokens"] == 5
     assert usage["total_tokens"] == 25

@@ -78,10 +78,13 @@ def test_multi_tab_presence_survives_service_restart_and_expires(root):
 
 def test_closed_identity_requires_explicit_reopen_and_deleted_identity_stays_fenced(root):
     history = seed(root, "ended", data=True)
+    assert history is not None
     before = history.cards
     close_session(root, "alice", "web", "ended")
     assert not touch_web_session_lease(root, "alice", "ended", "late")
-    assert reopen_session(root, "alice", "web", "ended")["lifecycle"] == "open"
+    found_record = reopen_session(root, "alice", "web", "ended")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
     assert touch_web_session_lease(root, "alice", "ended", "page")
     assert history.cards == before
     delete_session(root, "alice", "web", "ended")
@@ -93,11 +96,14 @@ def test_empty_grace_is_independent_of_data_idle_threshold(root):
     seed(root, "data", data=True)
     result = inspect_stale_web_sessions(root, "alice", idle_seconds=7200)
     assert result["deleted_sessions"] == ["empty"] and result["queued_memory"] == []
-    assert find_record(root, "alice", "web", "data")["lifecycle"] == "open"
+    found_record = find_record(root, "alice", "web", "data")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
 
 
 def test_active_integration_and_maintenance_claim_are_protected(root):
     history = seed(root, "live", data=True)
+    assert history is not None
     integration = IntegrationStore(history.store, "web", "live", "live_id")
     integration.start()
     execution, _ = integration.register_tool("live_call", {"name": "work", "arguments": {}})
@@ -136,6 +142,7 @@ def test_session_lock_is_skipped_and_raw_data_never_treated_as_empty(root):
     finally:
         release.set()
         thread.join(3)
+    assert history is not None
     assert len(history.cards) == 2
 
 
@@ -161,7 +168,9 @@ def test_transaction_rechecks_racing_presence_and_rolls_back_hide(root):
         raise OSError("rollback")
     with patch.object(web_lifecycle, "_hide", side_effect=fail), pytest.raises(OSError):
         cleanup_empty_web_sessions(root, "alice")
-    assert find_record(root, "alice", "web", "empty")["lifecycle"] == "open"
+    found_record = find_record(root, "alice", "web", "empty")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
 
 
 def test_bounded_pages_scan_all_candidates_and_repeated_inspection_is_idempotent(root):
@@ -174,6 +183,7 @@ def test_bounded_pages_scan_all_candidates_and_repeated_inspection_is_idempotent
     assert inspect_stale_web_sessions(root, "alice", batch_size=1)["inspected"] == 0
     for n in range(3):
         record = find_record(root, "alice", "web", f"data{n}")
+        assert record is not None
         assert record["memory_target_seq"] == 2 and record["summary_target_seq"] == 2
 
 
@@ -182,7 +192,9 @@ def test_queue_failure_remains_recoverable_and_error_is_sanitized(root):
     first = inspect_stale_web_sessions(root, "alice", queue_memory=Mock(side_effect=RuntimeError("private detail")))
     assert first["errors"] == [{"session_id": "data", "exception_type": "RuntimeError"}]
     assert "private detail" not in json.dumps(first)
-    assert find_record(root, "alice", "web", "data")["offline_inspection_pending"]
+    found_record = find_record(root, "alice", "web", "data")
+    assert found_record is not None
+    assert found_record["offline_inspection_pending"]
     second = inspect_stale_web_sessions(root, "alice")
     assert second["queued_memory_count"] == 1 and second["error_count"] == 0
 
@@ -216,7 +228,9 @@ def test_startup_service_checks_users_and_offline_app_once(root):
     live = service.active_session("alice", "app_live_client", source="app")["session"]["session_id"]
     result = service.inspect_conversation_spaces_on_startup()
     assert result["state"] == "completed" and result["queued_memory"] == 3 and result["queued_summary"] == 3
-    assert find_record(root, "alice", "app", live)["lifecycle"] == "open"
+    found_record = find_record(root, "alice", "app", live)
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
     assert service.inspect_conversation_spaces_on_startup()["queued_memory"] == 0
     wake.assert_called_once()
     summary_wake.assert_called_once()

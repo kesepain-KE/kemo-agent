@@ -53,6 +53,7 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 1)
         record = find_record(self.root, "alice", "web", "stale")
+        assert record is not None
         self.assertEqual(record["lifecycle"], "closed")
         self.assertEqual(record["memory_status"], "queued")
         self.assertEqual(record["memory_queue_reason"], "idle_session_sweep")
@@ -67,7 +68,9 @@ class SessionLifecycleSweepTests(unittest.TestCase):
                        (fresh, session_key("web", "recent")))
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
-        self.assertEqual(find_record(self.root, "alice", "web", "recent")["lifecycle"], "open")
+        found_record = find_record(self.root, "alice", "web", "recent")
+        assert found_record is not None
+        self.assertEqual(found_record["lifecycle"], "open")
 
     def test_closed_session_with_unqueued_rounds_is_recovered(self) -> None:
         self.seed("closed")
@@ -75,8 +78,12 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
         self.assertEqual(result["requeued_closed"], 1)
-        self.assertEqual(find_record(self.root, "alice", "web", "closed")["memory_status"], "queued")
-        self.assertEqual(find_record(self.root, "alice", "web", "closed")["summary_status"], "queued")
+        found_record = find_record(self.root, "alice", "web", "closed")
+        assert found_record is not None
+        self.assertEqual(found_record["memory_status"], "queued")
+        found_record = find_record(self.root, "alice", "web", "closed")
+        assert found_record is not None
+        self.assertEqual(found_record["summary_status"], "queued")
 
     def test_closed_legacy_session_with_first_message_title_is_requeued(self) -> None:
         self.seed("legacy-title")
@@ -88,6 +95,7 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
 
         record = find_record(self.root, "alice", "web", "legacy-title")
+        assert record is not None
         self.assertEqual(result["requeued_closed"], 1)
         self.assertEqual(record["summary_status"], "queued")
         self.assertEqual(record["summary_target_seq"], 2)
@@ -105,7 +113,9 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         update_presence(self.root, "alice", "web", "leased", "browser", 1, now=self.now)
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
-        self.assertEqual(find_record(self.root, "alice", "web", "leased")["lifecycle"], "open")
+        found_record = find_record(self.root, "alice", "web", "leased")
+        assert found_record is not None
+        self.assertEqual(found_record["lifecycle"], "open")
 
     def test_online_app_lease_is_skipped(self) -> None:
         self.seed("app-live", source="app")
@@ -114,7 +124,9 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         ))
         result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(result["closed"], 0)
-        self.assertEqual(find_record(self.root, "alice", "app", "app-live")["lifecycle"], "open")
+        found_record = find_record(self.root, "alice", "app", "app-live")
+        assert found_record is not None
+        self.assertEqual(found_record["lifecycle"], "open")
 
     def test_one_failure_does_not_stop_following_sessions(self) -> None:
         self.seed("first")
@@ -129,11 +141,17 @@ class SessionLifecycleSweepTests(unittest.TestCase):
         with patch("run.scheduler.session_sweep.queue_memory_extraction", side_effect=fail_first):
             result = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertTrue(result["errors"])
-        self.assertEqual(find_record(self.root, "alice", "web", "first")["lifecycle"], "closed")
-        self.assertEqual(find_record(self.root, "alice", "web", "second")["lifecycle"], "closed")
+        found_record = find_record(self.root, "alice", "web", "first")
+        assert found_record is not None
+        self.assertEqual(found_record["lifecycle"], "closed")
+        found_record = find_record(self.root, "alice", "web", "second")
+        assert found_record is not None
+        self.assertEqual(found_record["lifecycle"], "closed")
         recovered = sweep_idle_sessions(self.root, "alice", now=self.now, idle_seconds=86400)
         self.assertEqual(recovered["requeued_closed"], 1)
-        self.assertEqual(find_record(self.root, "alice", "web", "first")["memory_status"], "queued")
+        found_record = find_record(self.root, "alice", "web", "first")
+        assert found_record is not None
+        self.assertEqual(found_record["memory_status"], "queued")
 
 
 if __name__ == "__main__":

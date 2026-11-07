@@ -229,7 +229,8 @@ def test_waiting_parent_still_rejects_wrong_ownership(tmp_path, mismatch):
         owner['attempt_id'] = 'stale-attempt'
     else:
         fields[mismatch] = 'other'
-    child = AgentTask('wrong-child', 'worker', {}, **fields)
+    child = AgentTask('wrong-child', 'worker', {},
+                      source=fields['source'], session_id=fields['session_id'])
     with pytest.raises(ValueError, match='主任务已收束或子任务归属无效'):
         coordinator.ledger.register(child, owner)
     assert coordinator.children() == []

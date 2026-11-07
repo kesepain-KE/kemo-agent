@@ -157,7 +157,7 @@ class KnowledgeFilesystemTests(unittest.TestCase):
         for path in (".", "../escape.md", "kemo-graph-storage/db.md", ".secret/note.md", "classify.sqlite3"):
             for method, kwargs in (("DELETE", {}), ("POST", {"json": {"kind": "directory"}})):
                 with self.subTest(path=path, method=method):
-                    self.assertEqual(self.entry(method, path, **kwargs).status_code, 400)
+                    self.assertEqual(self.entry(method, path, json=kwargs.get("json")).status_code, 400)
         self.assertTrue(self.user.is_dir())
         self.assertFalse((self.root / "users/alice/escape.md").exists())
         self.assertEqual(self.entry("POST", "new.md", scope="other", json={"kind": "file"}).status_code, 400)

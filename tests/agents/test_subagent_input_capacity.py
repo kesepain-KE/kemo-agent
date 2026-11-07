@@ -1,4 +1,5 @@
 """Sub-agent requests obey the same complete-input/output capacity contract."""
+from provider.protocol.enums import ResponseStatus
 import json
 
 import pytest
@@ -32,7 +33,7 @@ class Provider:
         else:
             output = [MessageItem.text("assistant", json.dumps(OUTPUT))]
         return KemoResponse(
-            request_id=request.request_id, model=request.model, status="completed", output=output,
+            request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED, output=[*output],
         )
 
 

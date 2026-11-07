@@ -171,9 +171,10 @@ def test_completed_live_read_is_reexecuted_after_finishing_during_provider_reque
     finished = threading.Event()
     call = ("file", {"action": "read_range", "path": "same.txt", "start_line": 1})
     provider = ScriptedProvider([
-        ChatResponse(text="", tool_calls=[ToolCall(f"call-{index}", *call)])
-        for index in range(2)
-    ] + [ChatResponse(text="done")])
+        *(ChatResponse(text="", tool_calls=[ToolCall(f"call-{index}", *call)])
+          for index in range(2)),
+        ChatResponse(text="done"),
+    ])
     original_chat = provider.chat
 
     def wait_for_read_to_finish(request):

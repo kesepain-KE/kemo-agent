@@ -47,7 +47,9 @@ def response(title="历史简介", summary="可读摘要"):
 
 
 def record(root):
-    return find_record(root, "alice", "web", "s1")
+    value = find_record(root, "alice", "web", "s1")
+    assert value is not None
+    return value
 
 
 def clear_backoff(root, kind="summary"):

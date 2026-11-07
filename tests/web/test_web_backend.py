@@ -2579,15 +2579,19 @@ class WebBackendTests(unittest.TestCase):
         _, root = self.make_root()
         history = card_seed(root)
         before = find_record(root, "alice", "web", "s1")
+        assert before is not None
         app = create_app(service=WebRunService(root))
         response = self.request(app, "PATCH", "/api/users/alice/sessions/s1", json={"title": "  我的重要对话  "})
         self.assertEqual(response.status_code, 200, response.text)
         after = find_record(root, "alice", "web", "s1")
+        assert after is not None
         self.assertEqual(after["title"], "我的重要对话")
         self.assertEqual(after["updated_at"], before["updated_at"])
         raw = history.cards
         history.store.append("web", "s1", "new", "user_text", {"text": "new input"}, level="initial")
-        self.assertEqual(find_record(root, "alice", "web", "s1")["title"], "我的重要对话")
+        found_record = find_record(root, "alice", "web", "s1")
+        assert found_record is not None
+        self.assertEqual(found_record["title"], "我的重要对话")
         self.assertEqual(history.cards[:-1], raw)
 
     def test_session_list_uses_cursor_pagination_and_raw_body_search(self):
@@ -2636,6 +2640,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertTrue(response.json()["deleted"])
         self.assertEqual(history.cards, [])
         tombstone = history.store.session("web", "s1")
+        assert tombstone is not None
         self.assertEqual(tombstone["lifecycle"], "deleted")
         self.assertEqual(tombstone["record_json"], "{}")
         self.assertEqual(tombstone["last_seq"], 0)
@@ -2653,7 +2658,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(result["absorbed_cards"], 2)
         self.assertEqual([c.raw_payload_json for c in history.cards], [c.raw_payload_json for c in before])
         self.assertEqual(result["memory"]["target_seq"], 2)
-        self.assertEqual(find_record(root, "alice", "web", "s1")["memory_processed_seq"], 0)
+        found_record = find_record(root, "alice", "web", "s1")
+        assert found_record is not None
+        self.assertEqual(found_record["memory_processed_seq"], 0)
 
     def test_session_manual_compression_queues_memory_without_synchronous_extraction(self):
         _, root = self.make_root()
@@ -2703,7 +2710,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(first["status"], "completed")
         self.assertEqual([r["seq"] for r in seen], [1, 2, 3, 4])
         self.assertEqual(repeated["status"], "skipped")
-        self.assertEqual(find_record(root, "alice", "web", "s1")["memory_processed_seq"], 4)
+        found_record = find_record(root, "alice", "web", "s1")
+        assert found_record is not None
+        self.assertEqual(found_record["memory_processed_seq"], 4)
 
     def test_extract_memory_route_forwards_to_service(self) -> None:
         fake = FakeService()

@@ -1,4 +1,6 @@
 """Completion depends on persisted execution facts, including late receipts."""
+from provider.protocol.models import RefusalContent
+from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import threading
@@ -359,7 +361,7 @@ def test_delayed_ui_receipt_cannot_discard_a_final_that_already_consumed_it(root
             assert "consumed-result" in request.model_dump_json()
             if len(requests) == 2:
                 return KemoResponse(
-                    request_id=request.request_id, model=request.model, status="completed",
+                    request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                     output=[MessageItem.text("assistant", "final result", phase="final_answer")],
                 )
             raise AssertionError("a final that consumed the result must close the turn")
@@ -395,7 +397,7 @@ def test_missing_final_body_is_bounded_and_never_a_false_completion(root, monkey
                 "blank": [MessageItem.text("assistant", " \n ")],
             }[kind]
             return KemoResponse(request_id=request.request_id, model=request.model,
-                                status="completed", output=output)
+                                status=ResponseStatus.COMPLETED, output=output)
 
     events = list(run(root, Provider()))
     assert len(requests) == (2 if recover else 6), events[-1].error
@@ -411,6 +413,7 @@ def test_missing_final_body_is_bounded_and_never_a_false_completion(root, monkey
         assert events[-1].metadata["text"] == "actual final"
     else:
         assert events[-1].type == "error" and events[-1].metadata["status"] == "failed"
+        assert events[-1].error is not None
         assert events[-1].error["code"] == "missing_final_answer"
         assert events[-1].error["attempt_count"] == 6
         assert not finals
@@ -420,7 +423,7 @@ def test_commentary_and_final_answer_are_persisted_separately(root):
     class Provider:
         def create(self, request):
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[
                     MessageItem.text("assistant", "checking", phase="commentary"),
                     MessageItem.text("assistant", "finished", phase="final_answer"),
@@ -436,7 +439,7 @@ def test_commentary_and_final_answer_are_persisted_separately(root):
     from run.cards.assembly import protocol_items
 
     replayed = [
-        item.phase.value if hasattr(item.phase, "value") else item.phase
+        item.phase
         for item in protocol_items(tuple(history(root)))
         if isinstance(item, MessageItem) and item.role == "assistant"
     ]
@@ -454,7 +457,7 @@ def test_tool_task_accepts_a_typed_final_after_interim_prose(root):
             assert "正在检查文件" in request.model_dump_json()
             assert all(tool.name != "submit_final_answer" for tool in request.tools or [])
             return KemoResponse(
-                request_id=request.request_id, model=request.model, status="completed",
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                 output=[
                     MessageItem.text("assistant", "还需要核对执行结果", phase="commentary"),
                     MessageItem.text("assistant", "已核验的最终结果", phase="final_answer"),
@@ -518,11 +521,12 @@ def test_schema_invalid_empty_response_still_fails_without_replay(root):
         def create(self, request):
             requests.append(request)
             return KemoResponse(request_id=request.request_id, model=request.model,
-                                status="completed", output=[])
+                                status=ResponseStatus.COMPLETED, output=[])
 
     events = list(run(root, Provider()))
     assert len(requests) == 1
     assert events[-1].type == "error"
+    assert events[-1].error is not None
     assert events[-1].error["exception_type"] == "ValidationError"
     assert not any(card.raw_level == "final" for card in history(root))
 
@@ -535,14 +539,12 @@ def test_explicit_refusal_is_a_final_deliverable_without_a_text_block(root, enco
         def create(self, request):
             requests.append(request)
             message = (MessageItem(
-                           id="msg_refusal", role="assistant", phase="final_answer",
+                           id="msg_refusal", role=MessageRole.ASSISTANT, phase=MessagePhase.FINAL_ANSWER,
                            refusal="cannot perform this action",
                        )
                        if encoding == "field" else
-                       MessageItem(id="msg_refusal", role="assistant", content=[{
-                           "type": "refusal", "text": "cannot perform this action",
-                       }], phase="final_answer"))
-            return KemoResponse(request_id=request.request_id, model=request.model, status="completed",
+                       MessageItem(id="msg_refusal", role=MessageRole.ASSISTANT, content=[RefusalContent(text="cannot perform this action")], phase=MessagePhase.FINAL_ANSWER))
+            return KemoResponse(request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                                 output=[message])
 
     events = list(run(root, Provider()))

@@ -1,6 +1,7 @@
 """Native media is one-shot; ordinary user/guidance history is not."""
 from __future__ import annotations
 
+from provider.protocol.models import MediaSource
 import base64
 import json
 from pathlib import Path
@@ -110,9 +111,9 @@ def test_media_consumed_by_accepted_response_not_final_body(
 def test_inline_media_is_transient_and_never_persisted_as_base64(tmp_path, provider_type):
     make_root(tmp_path, provider_type=provider_type)
     tool(tmp_path, "echo")
-    image = ImageContent(mime_type="image/png", source={
+    image = ImageContent(mime_type="image/png", source=MediaSource.model_validate({
         "kind": "inline_base64", "data": base64.b64encode(PNG).decode("ascii"),
-    })
+    }))
     provider = MediaProvider([
         ChatResponse(text="", tool_calls=[ToolCall("first", "echo", {"step": 1})]),
         ChatResponse(text="", tool_calls=[ToolCall("second", "echo", {"step": 2})]),

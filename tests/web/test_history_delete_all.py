@@ -76,11 +76,14 @@ def test_all_purges_every_source_and_reservation_but_preserves_other_user_files(
         "deleted_sessions": 7, "raw_preserved": False,
     }
     assert service.sessions("alice", source="all")["sessions"] == []
-    assert bob.session("web", "shared")["lifecycle"] == "open"
+    found_record = bob.session("web", "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
     assert bob.raw_page("web", "shared") == bob_raw
     for source in sources:
         assert stores[0].raw_page(source, "shared") == ()
         tombstone = stores[0].session(source, "shared")
+        assert tombstone is not None
         assert tombstone["lifecycle"] == "deleted"
         assert tombstone["record_json"] == "{}"
         assert tombstone["last_seq"] == tombstone["active_tokens"] == 0
@@ -103,9 +106,13 @@ def test_default_only_purges_web_and_readonly_single_mutation_is_rejected(servic
     seed(service, "message:nya_desk_pet")
     response = request(service, "/api/users/alice/sessions")
     assert response.status_code == 200 and response.json()["source"] == "web"
-    assert store.session("web", "shared")["lifecycle"] == "deleted"
+    found_record = store.session("web", "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "deleted"
     assert store.raw_page("web", "shared") == ()
-    assert store.session("message:nya_desk_pet", "shared")["lifecycle"] == "open"
+    found_record = store.session("message:nya_desk_pet", "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
     assert store.raw_page("message:nya_desk_pet", "shared")
     rejected = request(service, "/api/users/alice/sessions/shared?source=message:nya_desk_pet")
     assert rejected.status_code == 400
@@ -120,7 +127,9 @@ def test_single_pinned_favorite_delete_erases_history_and_keeps_other_sessions(s
     seed(service, session_id="keep")
     service.mark_session("alice", "shared", pinned=True, favorite=True)
     before_app, before_keep = store.raw_page("app", "shared"), store.raw_page("web", "keep")
-    generation = store.session("web", "shared")["generation"]
+    found_record = store.session("web", "shared")
+    assert found_record is not None
+    generation = found_record["generation"]
     with store.db(write=True) as db:
         deleted_rowids = {row[0] for row in db.execute(
             "SELECT rowid FROM context_cards WHERE session_key=?", (session_key("web", "shared"),)
@@ -132,8 +141,10 @@ def test_single_pinned_favorite_delete_erases_history_and_keeps_other_sessions(s
 
     assert response.status_code == 200 and response.json()["deleted"]
     assert store.raw_page("web", "shared") == ()
-    assert store.session("web", "shared")["record_json"] == "{}"
-    assert store.session("web", "shared")["generation"] != generation
+    found_record = store.session("web", "shared")
+    assert found_record is not None
+    assert found_record["record_json"] == "{}"
+    assert found_record["generation"] != generation
     assert store.raw_page("app", "shared") == before_app
     assert store.raw_page("web", "keep") == before_keep
     assert request(service, "/api/users/alice/sessions/shared").status_code == 404
@@ -183,8 +194,12 @@ def test_active_run_blocks_entire_batch(service, source):
     seed(service, source)
     service._active_runs["busy"] = ActiveRun("busy", "alice", "shared", source=source)
     assert request(service, "/api/users/alice/sessions?source=all").status_code == 409
-    assert store.session("web", "shared")["lifecycle"] == "open"
-    assert store.session(source, "shared")["lifecycle"] == "open"
+    found_record = store.session("web", "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
+    found_record = store.session(source, "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
 
 
 @pytest.mark.parametrize("closed_response", [False, True])
@@ -197,8 +212,12 @@ def test_durable_integration_or_unconfirmed_tool_blocks_entire_batch(service, cl
         integration.register_tool("call-live", {"name": "write", "arguments": {}})
         integration.finish("cancelled")
     assert request(service, "/api/users/alice/sessions?source=all").status_code == 409
-    assert store.session("web", "shared")["lifecycle"] == "open"
-    assert store.session("cli", "other")["lifecycle"] == "open"
+    found_record = store.session("web", "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
+    found_record = store.session("cli", "other")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
 
 
 @pytest.mark.parametrize("source", ["web", "app"])
@@ -207,8 +226,12 @@ def test_other_live_document_lease_blocks_all_with_source_scoping(service, sourc
     seed(service, "app")
     assert touch_session_lease(service.root, "alice", source, "shared", "other-document")
     assert request(service, "/api/users/alice/sessions?source=all&client_id=client-mine-123").status_code == 409
-    assert store.session("web", "shared")["lifecycle"] == "open"
-    assert store.session("app", "shared")["lifecycle"] == "open"
+    found_record = store.session("web", "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
+    found_record = store.session("app", "shared")
+    assert found_record is not None
+    assert found_record["lifecycle"] == "open"
 
 
 def test_own_and_expired_other_leases_allow_idempotent_delete(service):
@@ -262,7 +285,9 @@ def test_stale_writer_cannot_resurrect_a_deleted_identity(service):
         reserve_session(service.root, "alice", "cli", "reserved-only")
     assert store.raw_page("message:nya_desk_pet", "shared") == ()
     assert find_record(service.root, "alice", "message:nya_desk_pet", "shared") is None
-    assert store.session("cli", "reserved-only")["session_key"] == session_key("cli", "reserved-only")
+    found_record = store.session("cli", "reserved-only")
+    assert found_record is not None
+    assert found_record["session_key"] == session_key("cli", "reserved-only")
 
 
 def test_empty_user_creates_no_card_database_and_unknown_user_is_rejected(service):

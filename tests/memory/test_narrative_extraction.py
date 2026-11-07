@@ -11,14 +11,9 @@ from run.memory.analysis import extract_card_memory
 from run.memory.evidence import quoted_rounds
 from run.memory.extraction import MemoryWorkPending, run_extraction_pages, source_pages
 from run.agents import AgentRunResult
-from tests.cards.test_runtime import root as runtime_root
+from tests.cards.test_runtime import root
 from tests.cards.test_store import summary
 from tests.card_history_support import seed_history
-
-
-@pytest.fixture
-def root(tmp_path, monkeypatch):
-    return runtime_root.__wrapped__(tmp_path, monkeypatch)
 
 
 def completed_analysis(**kwargs):
@@ -57,7 +52,9 @@ def test_more_than_500_tool_cards_do_not_separate_user_guidance_and_final(root):
     assert [r["seq"] for r in records] == [initial.seq, guidance.seq, final.seq]
     assert [r["level"] for r in records] == ["initial", "guidance", "final"]
     assert all(r["card_id"] and r["integration_id"] == "narrative" for r in records)
-    assert store.session("web", "s1")["memory_processed_seq"] == final.seq
+    found_record = store.session("web", "s1")
+    assert found_record is not None
+    assert found_record["memory_processed_seq"] == final.seq
 
 
 def test_withdrawn_integration_is_not_memory_evidence(root):
@@ -79,7 +76,9 @@ def test_withdrawn_integration_is_not_memory_evidence(root):
     assert outcome["status"] == "completed", outcome
     records = analyze.call_args.kwargs["rounds"]
     assert [r["seq"] for r in records] == [1, 2]
-    assert history.store.session("web", "s1")["memory_processed_seq"] == 4
+    found_record = history.store.session("web", "s1")
+    assert found_record is not None
+    assert found_record["memory_processed_seq"] == 4
 
 
 def test_huge_answer_pages_keep_user_context_and_lossless_offsets():

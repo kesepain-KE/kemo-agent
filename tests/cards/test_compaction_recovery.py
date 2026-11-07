@@ -1,4 +1,5 @@
 """Recovery exercises the real integration; no tools or RAW are replayed."""
+from provider.protocol.enums import ResponseStatus
 import json
 
 import pytest
@@ -12,23 +13,13 @@ from run.cards import (
 )
 from run.conversation.provider_events import is_context_length_exceeded
 from tests.cards.test_runtime import call, definition, response, run
-from tests.cards.test_runtime import root as runtime_root
-from tests.cards.test_store import store as card_store
+from tests.cards.test_runtime import root
+from tests.cards.test_store import store
 from tests.cards.test_store import add, summary
 
 
-@pytest.fixture
-def root(tmp_path, monkeypatch):
-    return runtime_root.__wrapped__(tmp_path, monkeypatch)
-
-
-@pytest.fixture
-def store(tmp_path):
-    return card_store.__wrapped__(tmp_path)
-
-
 def checkpoint(request, value=None):
-    return KemoResponse(request_id=request.request_id, model=request.model, status="completed",
+    return KemoResponse(request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                         output=[MessageItem.text("assistant", json.dumps(value or summary()))])
 
 
@@ -114,7 +105,8 @@ def test_preventative_failure_keeps_fitting_request_but_manual_failure_is_explic
 
     prepared = prepare_request(store, "web", "s1", system_prompt="", dynamic_tail=lambda: {},
                                tools=[], input_limit=limit, summarize=fail)
-    assert prepared.compaction is None and prepared.compaction_error is not None
+    assert prepared.compaction is None
+    assert isinstance(prepared.compaction_error, CardCompactionError)
     assert prepared.compaction_error.compression_usage["input_tokens"] == 7
     assert prepared.wire_tokens <= limit
     assert store.snapshot("web", "s1") == before
@@ -146,7 +138,7 @@ def test_markdown_checkpoint_is_accepted_without_a_four_key_schema(store):
 
     class Provider:
         def create(self, request):
-            return KemoResponse(request_id=request.request_id, model=request.model, status="completed",
+            return KemoResponse(request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                                 output=[MessageItem.text("assistant",
                                     "# Current task\nContinue the verified investigation.\n"
                                     "## Pending\nCheck the final test output.")])
@@ -154,6 +146,7 @@ def test_markdown_checkpoint_is_accepted_without_a_four_key_schema(store):
     result = compact(store, "web", "s1", summarize=ProviderSummarizer(
         Provider(), {}, model="test", system_prompt="", input_limit=10000,
         retry=RetryManager(max_retries=0)))
+    assert result.snapshot.cards[0].view_payload is not None
     assert "checkpoint" in result.snapshot.cards[0].view_payload
 
 
@@ -166,7 +159,7 @@ def test_rejected_candidate_changes_repair_prompt_not_only_request_id(store):
         def create(self, request):
             requests.append(request)
             if len(requests) == 1:
-                return KemoResponse(request_id=request.request_id, model=request.model, status="completed",
+                return KemoResponse(request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                                     output=[MessageItem.text("assistant", "{}")])
             return checkpoint(request)
 

@@ -159,7 +159,7 @@ def test_file_transport_health_does_not_persist_host_failures_as_dead(tmp_path, 
     transport = FileMessageTransport(MessagePluginConfig.load(tmp_path, directory))
     store = LogStore(tmp_path)
     before = store.read_message_route_state(transport.config.machine_id)
-    transport._detect.check = Mock(side_effect=exception("host-control"))
+    setattr(transport._detect, "check", Mock(side_effect=exception("host-control")))
 
     with pytest.raises(exception):
         transport.check_health()
@@ -171,7 +171,7 @@ def test_file_transport_health_still_reports_plugin_failure(tmp_path):
     (tmp_path / "users/alice").mkdir(parents=True)
     directory = _write_file_plugin(tmp_path)
     transport = FileMessageTransport(MessagePluginConfig.load(tmp_path, directory))
-    transport._detect.check = Mock(side_effect=RuntimeError("plugin unavailable"))
+    setattr(transport._detect, "check", Mock(side_effect=RuntimeError("plugin unavailable")))
 
     result = transport.check_health()
 
