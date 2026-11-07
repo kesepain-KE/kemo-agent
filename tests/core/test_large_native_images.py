@@ -57,7 +57,17 @@ def test_large_tool_image_reaches_next_request_and_retry_losslessly(tmp_path, mo
             decoded = base64.b64decode(blocks[0].source.data)
             assert decoded == path.read_bytes()
             assert hashlib.sha256(decoded).hexdigest() == blocks[0].checksum_sha256
-            assert kemo_request_to_chat(request).messages[-1]["content"][-1]["type"] == "image_url"
+            wire_messages = kemo_request_to_chat(request).messages
+            images = [
+                item
+                for message in wire_messages
+                if isinstance(message["content"], list)
+                for item in message["content"]
+                if item.get("type") == "image_url"
+            ]
+            assert len(images) == 1
+            wire_data = images[0]["image_url"]["url"].split(",", 1)[1]
+            assert base64.b64decode(wire_data) == path.read_bytes()
         else:
             assert blocks[0].source is None and blocks[0].asset_id.startswith("asset_remote_")
     assert len(provider.uploads) == (1 if provider_type == "kemo" else 0)

@@ -22,7 +22,7 @@ from run.agents.contracts import (
     AgentRunError, AgentRunResult, AgentToolRetryError,
     _parse_json_object, resolve_agent_provider_config, validate_json_schema,
 )
-from run.agents.continuation import restore_items
+from run.agents.continuation import restore_items, response_items_for_next_request
 from run.agents.loop_safepoints import drain_tool, wrap_request
 from run.agents.budgets import SegmentBudget, capture_budget, stopped_result, overridable, provider_attempt, validate_input_budget
 from run.agents.controls import take_guidance
@@ -45,48 +45,6 @@ if TYPE_CHECKING:
 
 
 _STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
-
-
-def _response_items_for_next_request(output: list[Any]) -> list[Any]:
-    """Copy Provider output into local history with request-unique IDs.
-
-    Provider item and tool-call IDs are only guaranteed to be unique inside a
-    single response. A subagent request carries several response iterations,
-    so every local item and tool call needs a fresh identity. Tool results
-    created by the runner use the normalized call IDs and remain linked.
-    """
-    call_id_map: dict[str, str] = {}
-    normalized_call_ids: dict[int, str] = {}
-    for item in output:
-        if not isinstance(item, ToolCallItem):
-            continue
-        call_id = f"callid_{uuid.uuid4().hex}"
-        normalized_call_ids[id(item)] = call_id
-        call_id_map.setdefault(item.call_id, call_id)
-
-    normalized: list[Any] = []
-    for item in output:
-        prefix = (
-            "rs"
-            if isinstance(item, ReasoningItem)
-            else (
-                "call"
-                if isinstance(item, ToolCallItem)
-                else (
-                    "result"
-                    if isinstance(item, ToolResultItem)
-                    else "msg" if isinstance(item, MessageItem) else "item"
-                )
-            )
-        )
-        updates = {"id": f"{prefix}_{uuid.uuid4().hex}"}
-        if isinstance(item, ToolCallItem):
-            updates["call_id"] = normalized_call_ids[id(item)]
-        elif isinstance(item, ToolResultItem) and item.call_id in call_id_map:
-            updates["call_id"] = call_id_map[item.call_id]
-        item = item.model_copy(update=updates)
-        normalized.append(item)
-    return normalized
 
 
 def run_model(
@@ -465,7 +423,7 @@ def run_model(
                 retryable=response.status != ResponseStatus.CANCELLED,
                 cancelled=response.status == ResponseStatus.CANCELLED,
             )
-        normalized_output = _response_items_for_next_request(response.output)
+        normalized_output = response_items_for_next_request(response.output)
         media_inputs.acknowledge()
         shell_inbox.acknowledge()
         calls = [

@@ -944,10 +944,12 @@ def run(*, context):
         self.assertEqual(
             [event.type for event in events],
             [
+                "context_window",
                 "reasoning_delta",
                 "usage",
                 "tool_call_start",
                 "tool_call_result",
+                "context_window",
                 "text_delta",
                 "usage",
                 "done",
@@ -1911,6 +1913,7 @@ def run(*, context):
                 root=root,
                 provider_factory=lambda _: provider,
             )
+            self.assertEqual(next(iterator).type, "context_window")
             first = next(iterator)
             self.assertEqual((first.type, first.content), ("text_delta", "A"))
             self.assertFalse(provider.resumed_after_first)
@@ -1966,10 +1969,11 @@ def run(*, context):
                     provider_factory=lambda _: EmptyStreamProvider(),
                 )
             )
-        self.assertEqual([event.type for event in events], ["error"])
-        self.assertIn("完整终态", require_present(events[0].error)["message"])
-        self.assertTrue(events[0].metadata["committed"])
-        self.assertEqual(events[0].metadata["status"], "failed")
+        self.assertEqual([event.type for event in events], ["context_window", "error"])
+        terminal = events[-1]
+        self.assertIn("完整终态", require_present(terminal.error)["message"])
+        self.assertTrue(terminal.metadata["committed"])
+        self.assertEqual(terminal.metadata["status"], "failed")
         window = require_present(session_history(root, 'alice', 'cli', 'missing-done')).refresh()
         self.assertEqual(len(window.integrations), 1)
         failed_metric = window.integrations[0]
@@ -2002,9 +2006,10 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual([event.type for event in events], ["error"])
-        self.assertEqual(events[0].metadata["status"], "failed")
-        self.assertEqual(events[0].error["exception_type"], "ProviderCongestionError")
+        self.assertEqual([event.type for event in events], ["context_window", "error"])
+        terminal = events[-1]
+        self.assertEqual(terminal.metadata["status"], "failed")
+        self.assertEqual(terminal.error["exception_type"], "ProviderCongestionError")
         window = require_present(session_history(root, 'alice', 'cli', 'provider-busy')).refresh()
         self.assertEqual(window.integrations[0]['status'], 'failed')
 
@@ -2302,7 +2307,7 @@ def run(*, context):
             events = list(iter_request_events(
                 {"user": "alice", "source": "cli", "session_id": "visible-no-replay", "prompt": "go", "stream": True},
                 root=root, provider_factory=lambda _: provider))
-        self.assertEqual([e.type for e in events], ["text_delta", "error"])
+        self.assertEqual([e.type for e in events], ["context_window", "text_delta", "error"])
         self.assertEqual(len(provider.requests), 1)
         history = require_present(session_history(root, "alice", "cli", "visible-no-replay"))
         self.assertEqual([m["content"] for m in history.messages], ["go", "已输出的正文"])
@@ -2957,11 +2962,12 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual([event.type for event in events], ["error"])
+        self.assertEqual([event.type for event in events], ["context_window", "error"])
         self.assertEqual(len(provider.requests), 1)
-        self.assertTrue(events[0].metadata["committed"])
+        terminal = events[-1]
+        self.assertTrue(terminal.metadata["committed"])
         self.assertEqual(
-            events[0].error["category"],
+            terminal.error["category"],
             "context_length_exceeded",
         )
         window = require_present(session_history(root, 'alice', 'cli', 'context-unrecoverable')).refresh()
@@ -3010,6 +3016,7 @@ def run(*, context):
         self.assertEqual(
             [event.type for event in events],
             [
+                "context_window",
                 "text_delta",
                 "error",
             ],
@@ -3051,6 +3058,7 @@ def run(*, context):
                 provider_factory=lambda _: cancel_provider,
                 cancel_event=cancel,
             )
+            self.assertEqual(next(iterator).type, "context_window")
             self.assertEqual(next(iterator).type, "text_delta")
             cancel.set()
             cancelled_events = list(iterator)

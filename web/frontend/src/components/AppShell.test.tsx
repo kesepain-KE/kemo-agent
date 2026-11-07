@@ -2297,7 +2297,7 @@ describe('AppShell navigation', () => {
       fireEvent.keyDown(composer, { key: 'Enter' })
     }
     fireEvent.change(composer, { target: { value: '跟进C' } })
-    fireEvent.click(screen.getByRole('button', { name: '下一轮发送' }))
+    fireEvent.keyDown(composer, { key: 'Enter' })
     fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     expect(screen.getAllByRole('article', { name: /^消息跟进 \d+$/ })).toHaveLength(3)
     expect(guidanceRequests).toBe(0)
@@ -2351,7 +2351,7 @@ describe('AppShell navigation', () => {
     expect(await screen.findByText('智能体已读取该引导并继续运行')).toBeInTheDocument()
 
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '结果放入临时区' } })
-    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter' })
     fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     await waitFor(() => expect(screen.getByText('结果放入临时区')).toBeInTheDocument())
@@ -2415,7 +2415,7 @@ describe('AppShell navigation', () => {
       new File(['video'], 'clip.mp4', { type: 'video/mp4' }),
     ] } })
     expect(await screen.findByLabelText('待发送附件：voice.mp3')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '消息跟进' })).toBeEnabled()
+    expect(composer).toBeEnabled()
     fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true })
 
     await waitFor(() => expect(guidanceBody).toMatchObject({
@@ -2543,7 +2543,7 @@ describe('AppShell navigation', () => {
     fireEvent.change(fileInput!, { target: { files: [new File(['audio'], 'queued.mp3', { type: 'audio/mpeg' })] } })
     expect(await screen.findByLabelText('待发送附件：queued.mp3')).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '作为第二轮继续处理' } })
-    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '消息内容' }), { key: 'Enter' })
     fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     fireEvent.click(await screen.findByRole('button', { name: '展开跟进消息' }))
@@ -2591,7 +2591,7 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(chatRequestCount).toBe(1))
 
     fireEvent.change(composer, { target: { value: '你给修一下网关' } })
-    fireEvent.click(screen.getByRole('button', { name: '消息跟进' }))
+    fireEvent.keyDown(composer, { key: 'Enter' })
     fireEvent.click(screen.getByRole('button', { name: '展开跟进消息' }))
     fireEvent.click(screen.getByRole('button', { name: '本轮引导' }))
     firstStreamController.enqueue(encoder.encode('event: done\ndata: {"type":"done","metadata":{"committed":true}}\n\n'))
@@ -3089,11 +3089,20 @@ describe('AppShell navigation', () => {
     let closedSession = ''
     let reopenedSession = ''
     const sessions = [
-      { ...session('s1', '当前工作', 3), state: 'open' },
-      { ...session('s2', '项目复盘', 8), state: 'closed' },
+      { ...session('s1', '当前工作', 3), title_source: 'manual', state: 'open' },
+      { ...session('s2', '项目复盘', 8), title_source: 'manual', state: 'closed' },
     ]
+    const requestedQueries: string[] = []
     server.use(
-      http.get('/api/users/kesepain/sessions', () => HttpResponse.json({ user: 'kesepain', source: 'web', sessions })),
+      http.get('/api/users/kesepain/sessions', ({ request }) => {
+        const query = new URL(request.url).searchParams.get('query') || ''
+        requestedQueries.push(query)
+        return HttpResponse.json({
+          user: 'kesepain',
+          source: 'web',
+          sessions: query ? sessions.filter((item) => item.title.includes(query)) : [sessions[0]],
+        })
+      }),
       http.post('/api/users/kesepain/sessions/:sessionId/extract-memory', ({ params }) => {
         extractedSession = String(params.sessionId)
         return HttpResponse.json({ status: 'completed', user: 'kesepain', source: 'web', session_id: params.sessionId, integration_number: 3, candidates: 0, extraction: { status: 'completed', candidate_count: 0 } })
@@ -3114,8 +3123,11 @@ describe('AppShell navigation', () => {
     fireEvent.click(await screen.findByTitle('搜索历史对话'))
 
     const historyDrawer = await screen.findByRole('dialog', { name: '历史对话' })
-    fireEvent.change(within(historyDrawer).getByRole('textbox', { name: '搜索历史对话名称' }), { target: { value: '项目' } })
+    const searchInput = within(historyDrawer).getByRole('textbox', { name: '搜索历史对话名称' })
+    fireEvent.change(searchInput, { target: { value: '项目' } })
+    fireEvent.click(within(historyDrawer).getByRole('button', { name: '搜索历史对话' }))
     fireEvent.click(await within(historyDrawer).findByRole('button', { name: '打开对话 项目复盘' }))
+    expect(requestedQueries).toContain('项目')
     const switchDialog = screen.getByRole('alertdialog', { name: '确认切换历史对话？' })
     expect(switchDialog.parentElement?.parentElement).toBe(document.body)
     fireEvent.click(within(switchDialog).getByRole('button', { name: '确认切换' }))
@@ -3144,8 +3156,8 @@ describe('AppShell navigation', () => {
           source: 'all',
           date: selectedDate,
           sessions: selectedDate === '2026-09-24'
-            ? [{ ...session('dated-session', '日期归档', 2), state: 'closed', updated_at: '2026-09-24T08:00:00+00:00' }]
-            : [{ ...session('s1', '当前工作', 3), state: 'open' }],
+            ? [{ ...session('dated-session', '日期归档', 2), title_source: 'manual', state: 'closed', updated_at: '2026-09-24T08:00:00+00:00' }]
+            : [{ ...session('s1', '当前工作', 3), title_source: 'manual', state: 'open' }],
           has_more: false,
           next_cursor: '',
         })
@@ -3154,7 +3166,7 @@ describe('AppShell navigation', () => {
         reopenedSession = String(params.sessionId)
         return HttpResponse.json({
           user: 'kesepain', source: 'web', session_id: params.sessionId, reopened: true,
-          session: { ...session('dated-session', '日期归档', 2), state: 'open' },
+          session: { ...session('dated-session', '日期归档', 2), title_source: 'manual', state: 'open' },
         })
       }),
       http.get('/api/users/kesepain/sessions/dated-session/history', () => HttpResponse.json(cardHistory({
@@ -3169,6 +3181,7 @@ describe('AppShell navigation', () => {
     const calendar = screen.getByRole('dialog', { name: '选择历史归档日期' })
     fireEvent.click(within(calendar).getByRole('button', { name: '2026年9月24日' }))
 
+    await waitFor(() => expect(requestedDates).toContain('2026-09-24'))
     expect(await within(historyDrawer).findByText('日期归档')).toBeInTheDocument()
     expect(requestedDates).toContain('2026-09-24')
     expect(within(historyDrawer).queryByText('当前工作')).not.toBeInTheDocument()

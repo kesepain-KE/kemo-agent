@@ -15,7 +15,7 @@ SURFACES = (
     "web/frontend/package-lock.json", "readme.md", "README_EN.md", "agents.md",
     "config/global_soul.md", "knowledge/global/overview/project-introduction.md",
     "knowledge/global/release/version-and-update-modules.md",
-    "knowledge/global/runtime/provider-reliability.md", "knowledge/global/modules/builtin-expansions.md",
+    "knowledge/global/modules/builtin-expansions.md",
 )
 
 

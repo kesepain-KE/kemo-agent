@@ -17,13 +17,50 @@ from typing import Any
 from pydantic import TypeAdapter
 from provider.protocol.diagnostics import redact_diagnostic_text
 from provider.protocol.enums import MessageRole
-from provider.protocol.models import Item, JsonContent, MessageItem, ToolCallItem, ToolResultItem
+from provider.protocol.models import (
+    Item, JsonContent, MessageItem, ReasoningItem, ToolCallItem, ToolResultItem,
+)
 from run.config import user_dir, _contains_reparse_point
 
 MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024
 MAX_RESUME_ROUNDS = 32
 _TASK = re.compile(r"agent-task-[a-f0-9]{32}")
 _SECRETS = re.compile(r"(?:^|_)(?:api_key|api_token|password|passwd|secret|credential|credentials|authorization|cookie|cookies|private_key|access_token|refresh_token|session_token|auth_token|token)$")
+
+
+def response_items_for_next_request(output: list[Any]) -> list[Any]:
+    """Normalize Provider-scoped IDs before storing output across iterations."""
+    call_id_map: dict[str, str] = {}
+    normalized_call_ids: dict[int, str] = {}
+    for item in output:
+        if not isinstance(item, ToolCallItem):
+            continue
+        call_id = f"callid_{uuid.uuid4().hex}"
+        normalized_call_ids[id(item)] = call_id
+        call_id_map.setdefault(item.call_id, call_id)
+
+    normalized: list[Any] = []
+    for item in output:
+        prefix = (
+            "rs"
+            if isinstance(item, ReasoningItem)
+            else (
+                "call"
+                if isinstance(item, ToolCallItem)
+                else (
+                    "result"
+                    if isinstance(item, ToolResultItem)
+                    else "msg" if isinstance(item, MessageItem) else "item"
+                )
+            )
+        )
+        updates = {"id": f"{prefix}_{uuid.uuid4().hex}"}
+        if isinstance(item, ToolCallItem):
+            updates["call_id"] = normalized_call_ids[id(item)]
+        elif isinstance(item, ToolResultItem) and item.call_id in call_id_map:
+            updates["call_id"] = call_id_map[item.call_id]
+        normalized.append(item.model_copy(update=updates))
+    return normalized
 
 
 def definition_digest(definition) -> str:

@@ -19,11 +19,9 @@ from cron.scheduler import (
 )
 from cron.collector import COLLECTION_ACTIONS, CollectorSupervisor, collector_status
 from message.identity import IdentityResolver
-from message.plugin import (
-    FileMessageTransport,
-    MessagePluginIssue,
-    discover_message_plugins,
-)
+from message.discovery import discover_message_plugins
+from message.plugin import FileMessageTransport
+from message.plugin_contracts import MessagePluginIssue
 from message.router import MessageRouter, RouteResult
 from message.state import ProcessedMessageStore
 from message.transport import (

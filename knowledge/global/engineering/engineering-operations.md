@@ -84,7 +84,7 @@ Web 是实例管理员认证模型，不把 WEB_USERNAME 当作 users 目录账�
 
 [机制 / L2] 运行中引导“已接收”不等于已生效；以 `guidance_applied` 或终态/历史 `guidance_details` 为准。真终态未投递标为 `ok=false,status=not_applied` 并提示重发，不能宣称已执行或后端自动排入下一轮；网页跟进队列另行负责下一轮发送。详见 `knowledge/global/overview/architecture-overview.md`。
 
-迁移 history/tasks/logs/memory 前读取 `knowledge/global/runtime/storage-and-persistence.md`：拒绝超前/非法版本，既有库迁移前用 SQLite backup 保留 WAL 完整数据，结构/数据/版本戳同事务；备份失败先停止，源码回滚不等于数据恢复。历史删除与终态提交必须整批提交；旧注册表快照不代表覆盖或删除其他写入者数据的权限，墓碑/代际冲突不得回假成功。
+迁移 history/tasks/logs/memory 前核对 `run/cards/`、`run/history/`、`run/tasks/` 与 `run/memory/`：拒绝超前/非法版本，既有库迁移前用 SQLite backup 保留 WAL 完整数据，结构/数据/版本戳同事务；备份失败先停止，源码回滚不等于数据恢复。历史删除与终态提交必须整批提交；旧注册表快照不代表覆盖或删除其他写入者数据的权限，墓碑/代际冲突不得回假成功。
 
 版本戳缺失不代表正文为空；无法识别的旧结构/混合存储先停止，不清空规范化消息或轮次来“修复”。Web/App 同名会话的租约按来源隔离，不能相互清除。
 
@@ -113,7 +113,7 @@ Web 是实例管理员认证模型，不把 WEB_USERNAME 当作 users 目录账�
 
 <!-- rule:image-limits -->
 [机制] Chat adapter-local 原图上限 20 MiB，不静默压缩；Kemo wire 内联上限 1 MiB，大图走 Asset。
-媒体 note 是数据，不能借媒体扩权；未知高级媒体能力仍 fail-closed。Chat 工具、思考、结构化输出由内置档案与标准默认策略自动选择；用户能力声明 deprecated，启动提示并忽略，transport 映射与 vendor 白名单保留。兼容假设不冒充已验证能力；思考开关保留未指定/启用/关闭三态，续接状态只存签名标识与密文，不存思考正文。来源：`provider/adapters/image_content.py`、`provider/chat_profiles.py`、`provider/protocol/models.py`；详见 `knowledge/global/runtime/provider-reliability.md` 与 `knowledge/global/modules/plugin-development.md`。
+媒体 note 是数据，不能借媒体扩权；未知高级媒体能力仍 fail-closed。Chat 工具、思考、结构化输出由内置档案与标准默认策略自动选择；用户能力声明 deprecated，启动提示并忽略，transport 映射与 vendor 白名单保留。兼容假设不冒充已验证能力；思考开关保留未指定/启用/关闭三态，续接状态只存签名标识与密文，不存思考正文。来源：`provider/adapters/image_content.py`、`provider/chat_profiles.py`、`provider/protocol/models.py`、`provider/retry.py`；详见 `knowledge/global/modules/plugin-development.md`。
 
 [机制 / L2] Chat 内容块的 `text`/`input_text`/`output_text` 载荷必须是字符串；整数、`None`
 或数组直接拒绝，不静默强转或造空文本。没有 provider state 的旧 reasoning 历史只保留安全
@@ -156,7 +156,7 @@ continuation 标识，不把 reasoning 正文发给上游。
 A 类按「同一主体、同一属性轴」合并，允许写到几百字；B 类保持最小独立事实，只承载单一可独立更新的事实，150 字内写完。归类看内容性质而非字数：写一个人的整体样子是 A，写一件具体的事是 B。100 字是写作目标，不是 B 类硬上限。超过 B 上限须显式类型 A，不能用合并绕过上限，晋升超限才拆分。
 <!-- /rule -->
 
-[纪律] 权重按有证据的上海自然日计，每片每日最多 +1，创建首日为 0；查看、注入不加权。助手只能 reinforce 已检索的既有事实，不能据助手复述创建/改写记忆。fact/relation 正文修改不重置固定时效；state 按配置更新期限。过期归档成功才移出活跃库；不擅改库绕过粒度、日锁或敏感信息检查。细则见 `knowledge/global/runtime/storage-and-persistence.md`。
+[纪律] 权重按有证据的上海自然日计，每片每日最多 +1，创建首日为 0；查看、注入不加权。助手只能 reinforce 已检索的既有事实，不能据助手复述创建/改写记忆。fact/relation 正文修改不重置固定时效；state 按配置更新期限。过期归档成功才移出活跃库；不擅改库绕过粒度、日锁或敏感信息检查。实现见 `run/memory/lifecycle.md`。
 
 **技能与记忆联动**：用户主动创建/修改/升级用户或共享技能，先按技能名与主题用 memory_manage search_many tier=all 查相关记忆；命中后提醒可融合，默认继续保留记忆，不自动删除，只有明确同意后才执行融合/整理。未表态不阻塞技能处理；self_improve 自动生成技能不等待确认，技能与来源记忆分别保留。
 
@@ -172,14 +172,14 @@ A 类按「同一主体、同一属性轴」合并，允许写到几百字；B �
 
 [机制 / L2] 运行中用 revise_remaining 修正连续 pending 后缀，显式提供依赖；已开始步骤不得删改，删除采用物理删除。修正后无失败步骤则自动继续，retry_failed=true 才重置失败步骤；旧 revision 返回 plan_revision_conflict，重读后再提交。显式 skip_step 仅跳过 pending 非关键分支。
 
-[机制 / L1] 子代理默认只交付结论、必要证据、产物和未完成事项，不返回工具轨迹。公开本地 LLM 非串行业务任务支持时间/工具预算停止后保存现场与已有结论；实际退出且安全快照有效时可显式 resume。`output_truncated` 仅允许从请求前快照显式续跑，不自动重试或执行截断调用；其他失败不获恢复权。call/resume 的 max_tool_calls 为每段额度，正整数覆盖默认、0 不限次数，timeout 指定本段秒数。续跑重新计时并获得新段额度，累计次数/用量保留；内部重试不重置额度。list 披露预算与有效插件，guide 安全点引导，split 显式拆分剩余工作；不自动无限续跑或重派，不扩权、不重复已有副作用，先核对关联后台 Shell。详见 `knowledge/global/runtime/agent-task-coordination.md`。
+[机制 / L1] 子代理默认只交付结论、必要证据、产物和未完成事项，不返回工具轨迹。公开本地 LLM 非串行业务任务支持时间/工具预算停止后保存现场与已有结论；实际退出且安全快照有效时可显式 resume。`output_truncated` 仅允许从请求前快照显式续跑，不自动重试或执行截断调用；其他失败不获恢复权。call/resume 的 max_tool_calls 为每段额度，正整数覆盖默认、0 不限次数，timeout 指定本段秒数。续跑重新计时并获得新段额度，累计次数/用量保留；内部重试不重置额度。list 披露预算与有效插件，guide 安全点引导，split 显式拆分剩余工作；不自动无限续跑或重派，不扩权、不重复已有副作用，先核对关联后台 Shell。详见 `run/agents/`。
 结论投影先移除运行时封装，保留业务 Schema 的同名字段，继续脱敏凭据和限制输出。
 
 [机制 / L2] 主任务所有退出路径由finally兜底幂等收尾，limited按受限结束记录，不悬挂为waiting_children或冒称成功；正常completed须在历史提交成功后封口。重复收尾不覆盖既有终态或结束时间，取消仍须尊重子执行器真实退出。limited结束后，同会话后续主任务可按原条件显式resume/split；不抢占活跃父任务。
 
 [机制 / L2] 正常工具、必需Shell及子任务按各自预算等待；主请求动态尾部披露剩余依赖数与状态。仅取消收尾或只剩超时／取消仍未退出等受阻依赖时，启用绝对deadline（max(1秒, 2×agent_runtime.default_timeout)）。收尾到点保存已有正文为partial并列出未完成项；存活执行仍占槽并保护同一会话，新请求报SessionExecutionBusyError且不自动重跑。实际退出后解除保护，迟到结果不重启主响应、不改写收口时间。
 
-长任务保持同一Run、整合与引导邮箱；partial保留原响应与未完成项，不另起Run自动续跑，也不解除残留子任务的真实执行保护。详见 `knowledge/global/runtime/long-task-runtime.md`。
+长任务保持同一Run、整合与引导邮箱；partial保留原响应与未完成项，不另起Run自动续跑，也不解除残留子任务的真实执行保护。详见 `run/conversation/main_orchestration.py` 与 `run/scheduler/runtime_host.py`。
 
 自然语言创建/编辑定时任务，必须先用 `time_plan`，不得直接猜测时间参数，再用 `task_time` 的 create/update；删除前先 `task_time get`。先读 `agents/time_plan/trigger.md`；仅内部程序/API 已确定完整参数时可直接调度。任务未获授权不因生成计划自动获得执行授权。
 
@@ -221,7 +221,7 @@ Kemo 网关状态是独立只读连接，未激活不得猜测地址、扫描端
 [机制 / L1] 工具 Schema 声明且显式提供有效 timeout 时，可替换外层看门狗基准并加清单宽限，不能声称框架因此改写插件内部 deadline。子代理运行预算、dispatch 外层看门狗、后台 shell 期限是不同层，公式与边界见 `knowledge/global/modules/plugin-development.md`。
 
 子任务 wait=false 不解除主任务依赖；普通子任务与主模型共享 API 请求并发池，维护代理有独立串行规则。取消/deadline 不把活线程写假终态，不提前释放执行槽或会话执行保护；主响应到点以partial收口不代表必要依赖已完成，不能并发接管。关闭标签页不停止任务，实际状态以执行记录为准。
-空间按安装根/用户/来源/会话公平派发和等待 API；同空间多开窗口不增加配额，空闲执行额度可借用，有界队列保留其他空间入队余量。非抢占，不承诺满载时立即启动；细则见 `knowledge/global/runtime/agent-task-coordination.md`。
+空间按安装根/用户/来源/会话公平派发和等待 API；同空间多开窗口不增加配额，空闲执行额度可借用，有界队列保留其他空间入队余量。非抢占，不承诺满载时立即启动；实现见 `run/agents/task_ledger.py`。
 
 [机制 / L2] 工具残留配额按安装根/角色/工具分桶；8个残留或废弃满5分钟时，新独立调用可从清单入口改用进程，原执行保护保留，不能自动重跑。网页与历史将timed_out_running显示为“超时后未确认退出”，保留回执与已知耗时，主响应结束不把它改成失败。file写、shell及external_message清单入口强制进程隔离；外部消息只迁移经验证的目录发送出口，无可隔离出口则明确拒绝。详见工具专题。
 
@@ -283,7 +283,7 @@ Kemo 网关状态是独立只读连接，未激活不得猜测地址、扫描端
 是否可关闭还取决于实际调度、租约和执行状态，不是所有来源统一按网页宽限清理；只读/closed 会话不隐式复活。
 <!-- /rule -->
 
-Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑；attempt_id 用于追溯一次执行，取消不计成功。维护出错或存活未知有诊断，不得把未知当成功或把仍活着的线程当已退出。详见 `knowledge/global/runtime/task-automation.md`。
+Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑；attempt_id 用于追溯一次执行，取消不计成功。维护出错或存活未知有诊断，不得把未知当成功或把仍活着的线程当已退出。实现见 `run/tasks/lifecycle.md`。
 
 [机制 / L2] 系统任务仅明确无数据变化的成功省略逐次日志；变化未知/为真及每次 partial/failed 即时留痕，另按任务累计小时统计。未激活网关正文保持稳定，检查时间留诊断/清单，不伪装业务变化。仓库结构化日志保留30天（cron.log_retention_days），环境变量优先、写入时读取；定时任务历史会话仍独立保留7天。感知和拓展由独立采集进程执行，默认分别5秒和30秒；拓展采用cron.task_cron_system.expand_update.interval_seconds，同根拓展模块最多4个并行刷新。主对话只读快照，采集不承接对话或迁移WebSocket。细则见调度与持久化专题。
 
@@ -300,7 +300,7 @@ Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑�
 
 <!-- rule:provider-retries -->
 [机制] 主模型单次逻辑请求额外重试基线为 5 次（`provider_runtime.max_retries`）；上限 5 次，子代理单次运行累计额外重试上限为 5 次（`run/retry/policy.py` 的 `MAX_RETRIES`）。
-接受完整响应不恢复单次运行的累计重试额度。Kemo 单次传输独立最多6次尝试，复用同一请求正文与ID；传输预算耗尽不被外层重新放大。主请求的瞬时失败可在同一整合内恢复：中断正文与思考先保存不完整快照，完整失败终态或已有片段时使用新request_id，已执行工具不重跑；已输出媒体不自动重放。auth、内部异常及确定性4xx（408/429除外）立即失败，服务端retryable只能缩小范围；保留Retry-After并受有界退避约束。SystemExit/KeyboardInterrupt/GeneratorExit/MemoryError原样传播。普通 HTTP 400 和413不触发旧轮次恢复；容量在主请求屏障检查，失败不裁掉RAW。恢复、续传与重放边界见 `knowledge/global/runtime/provider-reliability.md`。
+接受完整响应不恢复单次运行的累计重试额度。Kemo 单次传输独立最多6次尝试，复用同一请求正文与ID；传输预算耗尽不被外层重新放大。主请求的瞬时失败可在同一整合内恢复：中断正文与思考先保存不完整快照，完整失败终态或已有片段时使用新request_id，已执行工具不重跑；已输出媒体不自动重放。auth、内部异常及确定性4xx（408/429除外）立即失败，服务端retryable只能缩小范围；保留Retry-After并受有界退避约束。SystemExit/KeyboardInterrupt/GeneratorExit/MemoryError原样传播。普通 HTTP 400 和413不触发旧轮次恢复；容量在主请求屏障检查，失败不裁掉RAW。实现见 `provider/retry.py` 与 `run/conversation/provider_exchange.py`。
 仅思考或commentary不作为最终正文。必要依赖尚未结束时可作为阶段响应等待；没有必要依赖却缺少最终交付时，按上述有界额度恢复，耗尽后明确失败。已处理回执不清除最终正文候选；仅真实新引导、未处理结果或后续工具调用使候选转为interim，完成屏障满足后只提交一次final。
 工具调用是当前整合中的中间步骤；运行时执行并回送工具结果，模型据此继续处理。不要等待固定时长，也不要调用或臆造 `submit_final_answer` 一类提交工具。阶段正文与最终正文由 Provider 响应 phase 区分，宿主还会检查必要工具、后台任务和新引导是否收敛；普通回答正文无需另行提交。最终正文直接说明实际结果、核验依据与未完成项；文件证据检查路径及文件状态，测试证据核对 Shell 退出状态。无法完成时如实说明已完成部分和阻塞，不把推断写成执行事实。
 <!-- /rule -->
@@ -309,7 +309,7 @@ Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑�
 
 <!-- rule:context-budget -->
 [机制] CardStream 配置基线：`agents.token_limit=1000000`、`agents.output_reserve=8192`、`agents.token_compression_ratio=0.3`；主请求前占用超过有效输入上限的80%时自动压缩。比例是软目标，实际容量/缩减与原子提交是硬门槛；明确超限才原整合压缩恢复，不重跑工具。预防压缩失败而请求仍可用时保留原 VIEW 继续，详见架构专题。
-来源：`config/global_config.yaml`，用户覆盖后以有效配置为准。对话历史由每用户 `cards.sqlite3` 管理，RAW 追加后不可变；VIEW 可压缩。目标是有效历史Token乘比例，固定上下文、动态尾部与工具Schema另行计量；所有历史卡片均可压缩，候选验证后原子提交，失败不改变已提交VIEW。上游上下文超限恢复只在请求实际缩小后播报重试，容量不可缩小时保留原超限诊断结束，见 `knowledge/global/runtime/provider-reliability.md`。旧window、轮数配置与context_manage退出运行，不读取、迁移或删除旧历史文件。
+来源：`config/global_config.yaml`，用户覆盖后以有效配置为准。对话历史由每用户 `cards.sqlite3` 管理，RAW 追加后不可变；VIEW 可压缩。目标是有效历史Token乘比例，固定上下文、动态尾部与工具Schema另行计量；所有历史卡片均可压缩，候选验证后原子提交，失败不改变已提交VIEW。上游上下文超限恢复只在请求实际缩小后播报重试，容量不可缩小时保留原超限诊断结束，见 `provider/retry.py` 与 `run/conversation/provider_exchange.py`。旧window、轮数配置与context_manage退出运行，不读取、迁移或删除旧历史文件。
 主请求与摘要请求按各自实际输出额度计算输入预算，输出先受模型上限约束；历史目标还受剩余容量限制。
 过大的前缀先按完整卡片分片；单张超大卡片仅拆只读摘要输入并保留来源偏移，RAW 不截断，临时摘要不提前提交，全部片段共用压缩时限与额外重试额度；
 提交前检查完整请求容量，失败保留原VIEW及独立新到卡片。原生媒体载荷不按文字Token计量，用量统计仍以实际回执为准。
@@ -331,23 +331,23 @@ Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑�
 | 用户意图或症状 | 资料入口 |
 |---|---|
 | 请求怎么流转、旧会话只读、压缩或缓存失效 | `knowledge/global/overview/architecture-overview.md` |
-| 历史删除半状态、并发覆盖、旧库迁移、记忆时效或日志 | `knowledge/global/runtime/storage-and-persistence.md` |
+| 历史删除半状态、并发覆盖、旧库迁移、记忆时效或日志 | `run/cards/`、`run/history/`、`run/memory/` |
 | 按日期找对话、分页看归档原文 | `plugins/history_search/SKILL.md` |
 | 配置值从哪来、用户覆盖、密钥/地址优先级 | `knowledge/global/engineering/configuration-reference.md` |
 | 人格/手册该写什么、发现摘要、模块之间如何选择 | `knowledge/global/engineering/prompt-authoring-standard.md` |
 | 调用工具、超长回执、媒体排队、期限或执行线程 | `knowledge/global/modules/plugin-development.md` |
 | 创建技能/代理/拓展/感知、授权与配置面板 | `knowledge/global/modules/module-development.md` |
 | 接外部消息平台、三入口或相对导入 | `knowledge/global/modules/external-message-route-creation.md` |
-| 自动维护、定时计划、重启待确认、执行记录 | `knowledge/global/runtime/task-automation.md` |
-| 默认长任务、取消、partial与完成屏障 | `knowledge/global/runtime/long-task-runtime.md` |
-| 子任务后台进度、并行排序、结果续接与主任务屏障 | `knowledge/global/runtime/agent-task-coordination.md` |
-| Provider 重试、SSE、图片、能力 unknown 或 reasoning | `knowledge/global/runtime/provider-reliability.md` |
+| 自动维护、定时计划、重启待确认、执行记录 | `run/tasks/lifecycle.md`、`cron/` |
+| 默认长任务、取消、partial与完成屏障 | `run/conversation/main_orchestration.py`、`run/scheduler/runtime_host.py` |
+| 子任务后台进度、并行排序、结果续接与主任务屏障 | `run/agents/task_ledger.py` |
+| Provider 重试、SSE、图片、能力 unknown 或 reasoning | `provider/retry.py`、`run/conversation/provider_exchange.py` |
 | 版本基线、内核/模块更新边界 | `knowledge/global/release/version-and-update-modules.md` |
 | 模块完成后如何独立验证 | `knowledge/global/modules/module-template-validation.md` |
 | 新用户骨架、知识目录、索引或用户数据路径 | `knowledge/global/engineering/knowledge-and-user-data.md` |
 | 页面布局、侧栏底色、头像折叠过程、长任务提问恢复/过程展开滚动/跟随气泡定位、认证、语言/背景、透明度/毛玻璃 | `knowledge/global/web/frontend-conventions.md` |
 | 记忆搜索/只读/无权重、标签筛选、文档草稿与分页 | `knowledge/global/web/frontend-conventions.md` |
-| 历史收藏置顶/全部删除、相关文件/复制路径、右侧工作面板 | `knowledge/global/web/frontend-conventions.md`、`knowledge/global/runtime/storage-and-persistence.md` |
+| 历史收藏置顶/全部删除、相关文件/复制路径、右侧工作面板 | `knowledge/global/web/frontend-conventions.md`、`run/cards/`、`run/history/` |
 | 上下文圆环明细、会话 Token 命中率、多主任务分组、消息日志与状态预览 | `knowledge/global/web/frontend-conventions.md` |
 | 网关/设备连接、激活与操控边界 | `knowledge/global/modules/builtin-expansions.md` |
 | 项目是什么、当前版本及功能概况 | `knowledge/global/overview/project-introduction.md` |

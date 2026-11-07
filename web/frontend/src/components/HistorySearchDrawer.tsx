@@ -522,7 +522,7 @@ export function HistorySearchDrawer({
                             >{session.summary}</span>
                           : null}
                   <small>{sourceLabel} · {session.integration_count || 0} 次整合 · {session.last_seq || 0} 张卡片 · {formatDateTime(session.updated_at)}</small>
-                  <small className={memoryStatus === 'failed' ? styles.memoryFailed : styles.memoryState}>{t("记忆")}{memoryStatus} · RAW seq {memoryProcessed}/{memoryTarget}</small>
+                  <small className={memoryStatus === 'failed' ? styles.memoryFailed : styles.memoryState}>{t("记忆")} {memoryStatus} · RAW seq {memoryProcessed}/{memoryTarget}</small>
                 </span>
                 <span className={`${styles.stateBadge} ${active ? styles.activeBadge : ''}`}>
                   {active ? t('当前对话') : !mutable ? (session.run_state === 'running' ? '渠道使用中' : t('只读')) : session.state === 'closed' ? t('已保存') : t('历史对话')}

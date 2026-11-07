@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from run.infra import sqlite_migrations
+from run.infra.fulltext import load_simple
 from tests.persistence.test_sqlite_migration_safety import (
     KINDS, VERSIONS, db_path, seed_version, snapshot, stored_version,
 )
@@ -69,6 +70,7 @@ def test_update_relocates_cardstream_with_committed_wal_and_keeps_original_backu
     assert stored_version(destination, "cards") == VERSIONS["cards"]
     for path in (destination, backups.directory / previous.relative_to(tmp_path)):
         with closing(sqlite3.connect(path)) as db:
+            load_simple(db)
             assert db.execute("SELECT body FROM audit_sentinel ORDER BY rowid").fetchall() == [
                 ("keep original data",), ("committed in WAL",),
             ]

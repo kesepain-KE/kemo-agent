@@ -67,10 +67,14 @@ def build_release_tree(root: Path, version: str = "1.2.7") -> None:
     (root / "cli.py").write_text('VERSION = "%s"\n' % version, encoding="utf-8")
     knowledge = root / "knowledge" / "global"
     knowledge.mkdir(parents=True, exist_ok=True)
-    (knowledge / "knowledge/global/overview/project-introduction.md").write_text(
+    introduction = knowledge / "overview" / "project-introduction.md"
+    introduction.parent.mkdir(parents=True, exist_ok=True)
+    introduction.write_text(
         f"当前稳定版本为 `{version}`。\n", encoding="utf-8"
     )
-    (knowledge / "knowledge/global/release/version-and-update-modules.md").write_text(
+    version_guide = knowledge / "release" / "version-and-update-modules.md"
+    version_guide.parent.mkdir(parents=True, exist_ok=True)
+    version_guide.write_text(
         '```json\n{"name": "kemo-agent", "version": "%s"}\n```\n' % version,
         encoding="utf-8",
     )
@@ -153,11 +157,11 @@ class CheckVersionsTests(unittest.TestCase):
                 + "\nCompatible kemo-adapter-api 0.8.2\n",
                 encoding="utf-8",
             )
-            (root / "knowledge" / "global" / "knowledge/global/overview/project-introduction.md").write_text(
+            (root / "knowledge" / "global" / "overview" / "project-introduction.md").write_text(
                 "当前稳定版本为 `1.3.0`。配套 kemo-adapter-api 0.8.2。\n",
                 encoding="utf-8",
             )
-            (root / "knowledge" / "global" / "knowledge/global/release/version-and-update-modules.md").write_text(
+            (root / "knowledge" / "global" / "release" / "version-and-update-modules.md").write_text(
                 '```json\n{"name": "kemo-agent", "version": "1.3.0", '
                 '"compatibility": {"kemo-adapter-api": "0.8.2"}}\n```\n',
                 encoding="utf-8",

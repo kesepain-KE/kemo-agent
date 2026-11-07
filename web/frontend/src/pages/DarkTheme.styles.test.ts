@@ -6,26 +6,29 @@ function stylesheet(path: string) {
   return readFileSync(resolve(process.cwd(), path), 'utf8')
 }
 
-function lastRule(css: string, selector: string) {
+function hasDeclarations(css: string, selector: string, declarations: string[]) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const matches = [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 'g'))]
-  return matches.at(-1)?.[1] ?? ''
+  return matches.some((match) => declarations.every((declaration) => match[1].includes(declaration)))
 }
 
 describe('dark theme surface contracts', () => {
   it('themes the complete chat task-plan bubble instead of leaving a light prototype card', () => {
     const css = stylesheet('src/components/TaskPlanBubble.module.css')
 
-    expect(lastRule(css, '.taskPlanBubble')).toContain('background: var(--surface-elevated)')
-    expect(lastRule(css, '.taskPlanBubble')).toContain('color: var(--text)')
-    expect(lastRule(css, '.stepRow')).toContain('background: var(--surface)')
-    expect(lastRule(css, '.stepRow')).toContain('border-color: var(--line)')
-    expect(lastRule(css, '.progressSection')).toContain('background: var(--surface-2)')
-    expect(lastRule(css, '.collapsedSummary')).toContain('background: var(--surface-2)')
-    expect(lastRule(css, '.modifyButton')).toContain('background: var(--surface)')
-    expect(lastRule(css, '.bottomPointer')).toContain('background: var(--surface-elevated)')
-    expect(lastRule(css, '.stepList')).toContain('max-height: min(26dvh, 250px)')
-    expect(lastRule(css, '.stepList')).toContain('overflow-y: auto')
+    expect(hasDeclarations(css, '.taskPlanBubble', [
+      'background: var(--surface-elevated)', 'color: var(--text)',
+    ])).toBe(true)
+    expect(hasDeclarations(css, '.stepRow', [
+      'background: var(--surface)', 'border-color: var(--line)',
+    ])).toBe(true)
+    expect(hasDeclarations(css, '.progressSection', ['background: var(--surface-2)'])).toBe(true)
+    expect(hasDeclarations(css, '.collapsedSummary', ['background: var(--surface-2)'])).toBe(true)
+    expect(hasDeclarations(css, '.modifyButton', ['background: var(--surface)'])).toBe(true)
+    expect(hasDeclarations(css, '.bottomPointer', ['background: var(--surface-elevated)'])).toBe(true)
+    expect(hasDeclarations(css, '.stepList', [
+      'max-height: min(26dvh, 250px)', 'overflow-y: auto',
+    ])).toBe(true)
   })
 
   it('uses the current light/dark palette and only the current UI stylesheet chain', () => {

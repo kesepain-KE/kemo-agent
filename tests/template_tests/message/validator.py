@@ -8,9 +8,9 @@ from typing import Any
 
 from message.plugin import (
     MessagePluginConfig,
-    discover_message_plugins,
     parse_message_buffer,
 )
+from message.discovery import discover_message_plugins
 from run.config import validate_user_name
 
 from tests.template_tests.base import begin_report, record_exception, run_check

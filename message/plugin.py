@@ -33,7 +33,6 @@ from message.plugin_contracts import (
     BufferedMessage,
     MessagePluginConfig,
     MessagePluginError,
-    MessagePluginIssue,
     _MAX_ATTACHMENT_BYTES,
     _MAX_TEXT_ATTACHMENT_CHARS,
     _PendingEnvelope,
@@ -769,34 +768,3 @@ class FileMessageTransport:
                 callback(self.name, exc)
             except Exception as error:
                 raise_if_host_exception(error)
-
-
-def discover_message_plugins(
-    root: Path,
-) -> tuple[list[FileMessageTransport], list[MessagePluginIssue]]:
-    """Discover valid direct child plugins without executing unrelated files."""
-    base = root.resolve() / "message" / "out"
-    if not base.is_dir():
-        return [], []
-    transports: list[FileMessageTransport] = []
-    issues: list[MessagePluginIssue] = []
-    machine_ids: set[str] = set()
-    platforms: set[str] = set()
-    for directory in sorted(
-        (item for item in base.iterdir() if item.is_dir()),
-        key=lambda item: item.name.casefold(),
-    ):
-        try:
-            config = MessagePluginConfig.load(root.resolve(), directory)
-            if config.machine_id in machine_ids:
-                raise MessagePluginError(f"machine_id 重复：{config.machine_id}")
-            if config.platform in platforms:
-                raise MessagePluginError(f"platform 重复：{config.platform}")
-            transport = FileMessageTransport(config)
-            transports.append(transport)
-            machine_ids.add(config.machine_id)
-            platforms.add(config.platform)
-        except BaseException as exc:
-            raise_if_host_exception(exc)
-            issues.append(MessagePluginIssue(directory.name, directory, str(exc)))
-    return transports, issues

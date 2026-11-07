@@ -22,11 +22,11 @@ from message.identity import (
     IdentityResolver,
     filter_tool_registry,
 )
+from message.discovery import discover_message_plugins
 from message.plugin import (
     FileMessageTransport,
     MessagePluginConfig,
     MessagePluginError,
-    discover_message_plugins,
     parse_message_buffer,
 )
 from message.router import MessageRouteError, MessageRouter, RouteResult

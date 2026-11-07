@@ -5,9 +5,9 @@ from message.plugin import (
     FileMessageTransport,
     MessagePluginConfig,
     MessagePluginError,
-    discover_message_plugins,
     parse_message_buffer,
 )
+from message.discovery import discover_message_plugins
 from message.schema import MessageContractError, MessageEnvelope, OutboundMessage
 from message.transport import (
     MockTransport,

@@ -11,6 +11,8 @@ import time
 from typing import Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
+from run.infra.fulltext import load_simple
+
 
 class SchemaMigrationError(RuntimeError):
     """An unsupported schema or an unsafe migration must stop initialization."""
@@ -44,6 +46,7 @@ def backup_database(source: Path, destination: Path, *, timeout: float = 30.0) -
             source.as_uri() + "?mode=ro", uri=True, timeout=5.0
         )) as reader, closing(sqlite3.connect(partial)) as writer:
             reader.backup(writer, pages=256, progress=progress, sleep=0.05)
+            load_simple(writer)
             check = writer.execute("PRAGMA quick_check").fetchone()
             if check is None or check[0] != "ok":
                 raise SchemaMigrationError("SQLite 备份完整性检查失败")

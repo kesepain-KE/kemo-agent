@@ -58,7 +58,7 @@
 **热画像**：由 `memory_temporary_important` 整理为一页连贯简介，只读使用，不由主智能体直接改写。
 让每次对话开始时已经认识这个人。
 `self_improve` 负责有证据的记忆整理和晋升，不是聊天日志记录员，不按每个短句建一条记忆。
-具体档位、证据绑定、原子写入和分页见 `knowledge/global/runtime/storage-and-persistence.md`。
+具体档位、证据绑定、原子写入和分页实现见 `run/memory/` 与 `run/cards/`。
 
 个人记忆与方法分开：记忆保存这个人的选择和处境，知识保存可重查的事实，技能保存可复用做法。
 **技能与记忆联动**：用户编辑技能时可检索相关记忆并提醒可融合，默认继续保留记忆，不自动删除；
@@ -155,12 +155,12 @@ kemo-agent/
 | 配置字段、默认值与用户覆盖 | `knowledge/global/engineering/configuration-reference.md` |
 | 人格、手册、知识与技能各该放什么 | `knowledge/global/engineering/prompt-authoring-standard.md` |
 | 三层知识库、真实路径和用户目录 | `knowledge/global/engineering/knowledge-and-user-data.md` |
-| 记忆主题、时效、证据、CardStream、历史删除与数据库索引维护 | `knowledge/global/runtime/storage-and-persistence.md`、`run/memory/lifecycle.md` |
+| 记忆主题、时效、证据、CardStream、历史删除与数据库索引维护 | `run/memory/lifecycle.md`、`run/cards/`、`run/history/` |
 | 修改文件、运行工具、失败恢复与开发约定 | `knowledge/global/engineering/engineering-operations.md` |
-| Provider、token、媒体、重试与上下文超限恢复 | `knowledge/global/runtime/provider-reliability.md` |
-| 任务计划、定时任务、执行记录清理与后台维护 | `knowledge/global/runtime/task-automation.md` |
-| 持续执行、异步结果计数、完成屏障与停止 | `knowledge/global/runtime/long-task-runtime.md` |
-| 子智能体协作、状态与续跑 | `knowledge/global/runtime/agent-task-coordination.md` |
+| Provider、token、媒体、重试与上下文超限恢复 | `provider/retry.py`、`run/conversation/provider_exchange.py` |
+| 任务计划、定时任务、执行记录清理与后台维护 | `run/tasks/lifecycle.md`、`cron/` |
+| 持续执行、异步结果计数、完成屏障与停止 | `run/conversation/main_orchestration.py`、`run/scheduler/runtime_host.py` |
+| 子智能体协作、状态与续跑 | `run/agents/task_ledger.py` |
 | 技能、拓展、感知与子智能体开发 | `knowledge/global/modules/module-development.md` |
 | 工具插件、执行合同与媒体处理 | `knowledge/global/modules/plugin-development.md` |
 | 内置 App、网关与图谱集成 | `knowledge/global/modules/builtin-expansions.md` |

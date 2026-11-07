@@ -25,6 +25,7 @@ COHESIVE_LONG_MODULES = {
     "web/frontend/src/api/client.ts": "single HTTP transport facade grouped by backend resource",
     "web/frontend/src/pages/ChatPage.tsx": "chat lifecycle composition root; rendering lives in ChatPageView and workflows in chatWorkflows",
     "web/frontend/src/pages/SettingsPage.tsx": "settings composition root; reusable controls and normalization live in settingsSupport",
+    "run/conversation/main_orchestration.py": "single conversation lifecycle composition root; request and event helpers live in adjacent modules",
 }
 
 
