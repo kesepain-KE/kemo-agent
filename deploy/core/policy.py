@@ -34,7 +34,7 @@ def protected(name: str, extra=()) -> bool:
     for item in (*PROTECTED, *extra):
         if name == item.rstrip('/') or (item.endswith('/') and name.startswith(item)):
             return True
-    parts = PurePosixPath(name).parts
+    parts: tuple[str, ...] = PurePosixPath(name).parts
     base = parts[-1]
     if any(p in {'__pycache__', 'node_modules', '.pytest_cache', '.kemo-deploy'} for p in parts):
         return True
@@ -43,11 +43,11 @@ def protected(name: str, extra=()) -> bool:
     if any(fnmatch.fnmatch(base, pattern) for pattern in ('*.sqlite3*', '*.db', '*.lock', '*.pid', '*.pyc', '*.log')):
         return True
     module_files: tuple[str, ...] = ()
-    if parts[0] == 'expand' and len(parts) >= 3 and parts[1] in {'global', 'share'}:
+    if len(parts) >= 3 and parts[0] == 'expand' and parts[1] in {'global', 'share'}:
         module_files = parts[3:]
-    elif parts[0] == 'sense' and len(parts) >= 2:
+    elif len(parts) >= 2 and parts[0] == 'sense':
         module_files = parts[2:]
-    elif parts[0] == 'skills' and len(parts) >= 2:
+    elif len(parts) >= 2 and parts[0] == 'skills':
         module_files = parts[1:]
     if module_files:
         if base in LOCAL_NAMES or base.startswith('_') and base not in {'__init__.py', '__main__.py'}:
@@ -60,16 +60,16 @@ def protected(name: str, extra=()) -> bool:
 def merge_file(name: str) -> bool:
     if name == 'config/global_config.yaml':
         return True
-    parts = PurePosixPath(name).parts
+    parts: tuple[str, ...] = PurePosixPath(name).parts
     expand_manifest = (
-        parts[0] == 'expand'
-        and len(parts) >= 4
+        len(parts) >= 4
+        and parts[0] == 'expand'
         and parts[1] in {'global', 'share'}
         and parts[-1] == 'module.yaml'
     )
     sense_manifest = (
-        parts[0] == 'sense'
-        and len(parts) >= 3
+        len(parts) >= 3
+        and parts[0] == 'sense'
         and parts[-1] == 'module.yaml'
     )
     return (expand_manifest or sense_manifest
@@ -77,9 +77,8 @@ def merge_file(name: str) -> bool:
 
 
 def local_module(name: str) -> bool:
-    parts = PurePosixPath(name).parts
+    parts: tuple[str, ...] = PurePosixPath(name).parts
     return (
-        parts[0] == 'expand' and len(parts) >= 3 and parts[1] in {'global', 'share'}
-        or parts[0] == 'sense'
-        or parts[0] == 'skills'
+        len(parts) >= 3 and parts[0] == 'expand' and parts[1] in {'global', 'share'}
+        or parts[:1] in {('sense',), ('skills',)}
     )

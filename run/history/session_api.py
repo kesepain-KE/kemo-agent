@@ -43,6 +43,8 @@ def queue_memory_extraction(root, user, source, session_id, *, target_seq=None, 
             current["memory_status"] = "queued"
         return current
     updated = mutate_registry_record(root, user, source, session_id, queue)
+    if updated is None:
+        return {"status": "skipped", "reason": "no_history"}
     return {"status": updated["memory_status"], "target_seq": updated["memory_target_seq"],
             "processed_seq": updated["memory_processed_seq"]}
 

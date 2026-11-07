@@ -117,7 +117,8 @@ def prepare_request(
                 if on_compaction_start is not None:
                     on_compaction_start({
                         "history_tokens_before": history.history_tokens,
-                        "absorbed_cards": len(batch.cards),
+                        "absorbed_cards": len(select_batch(
+                            history, ratio, max_history_tokens=available).cards),
                     })
                 try:
                     result = compact(store, source, session_id, summarize=summarize,

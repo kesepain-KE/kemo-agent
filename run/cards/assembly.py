@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from provider.protocol.models import (
-    Item, JsonContent, MessageItem, ReasoningItem, ToolCallItem, ToolResultItem,
+    Item, JsonContent, MessageItem, ProviderState, ReasoningItem, ToolCallItem, ToolResultItem,
 )
 from run.cards.models import Card, CardSnapshot, historical_data_text, json_text, user_content
 
@@ -55,10 +55,11 @@ def protocol_items(cards: tuple[Card, ...], *, model: str = "") -> list[Item]:
                     if not isinstance(opaque, dict) or (opaque.get("model") or payload.get("provider_model")) != model:
                         continue
                     try:
-                        item = ReasoningItem(id=_item_id(card, f"rs_{index}"), provider_state=opaque)
+                        state = ProviderState.model_validate(opaque)
+                        item = ReasoningItem(id=_item_id(card, f"rs_{index}"), provider_state=state)
                     except (ValidationError, TypeError, ValueError):
                         continue
-                    expires = item.provider_state.expires_at
+                    expires = state.expires_at
                     # Naive/malformed expiry is not evidence of valid reusable
                     # state. Drop only the optional opaque state, never history.
                     if expires is None or (expires.tzinfo is not None and expires > datetime.now(timezone.utc)):
@@ -67,10 +68,10 @@ def protocol_items(cards: tuple[Card, ...], *, model: str = "") -> list[Item]:
                 # as historical assistant reasoning or manufactured instructions.
             content = user_content(payload) if role == "user" else payload.get("content")
             if isinstance(content, list) and content:
-                output.append(MessageItem(
-                    id=_item_id(card), role=role, content=content,
-                    phase=payload.get("phase") if role == "assistant" else None,
-                ))
+                output.append(MessageItem.model_validate({
+                    "id": _item_id(card), "role": role, "content": content,
+                    "phase": payload.get("phase") if role == "assistant" else None,
+                }))
             else:
                 output.append(MessageItem.text(role, content if isinstance(content, str)
                                                else str(payload.get("text") or ""),

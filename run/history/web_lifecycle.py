@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import time
+from typing import Any
 
 from run.cards import CardConflictError, CardStore, json_text, session_key
 from run.history.registry_store import mutate_registry_record, session_record
@@ -146,8 +147,10 @@ def inspect_stale_web_sessions(root, user, *, now=None, protected_sessions=(), s
     from run.history.session_ops import queue_summary as default_summary
     memory, summary = queue_memory or queue_memory_extraction, queue_summary or default_summary
     current = time.time() if now is None else float(now)
-    result = {key: [] for key in ("closed_sessions", "queued_memory", "queued_summary",
-                                  "deleted_sessions", "preserved_sessions", "errors")}
+    result: dict[str, Any] = {
+        key: [] for key in ("closed_sessions", "queued_memory", "queued_summary",
+                           "deleted_sessions", "preserved_sessions", "errors")
+    }
     result.update(inspected=0, skipped_busy=0, error_count=0)
     for key in ("closed", "deleted", "preserved", "queued_memory", "queued_summary"):
         result[f"{key}_count"] = 0

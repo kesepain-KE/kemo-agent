@@ -103,8 +103,8 @@ def compact(
         failure.compression_latency_ms = int(getattr(candidate, "latency_ms", 0))
         raise failure from error
     except Exception as error:
-        error.compression_usage = dict(getattr(candidate, "usage", {}) or {})
-        error.compression_latency_ms = int(getattr(candidate, "latency_ms", 0))
+        setattr(error, "compression_usage", dict(getattr(candidate, "usage", {}) or {}))
+        setattr(error, "compression_latency_ms", int(getattr(candidate, "latency_ms", 0)))
         raise
     return CompactionResult(
         after, snapshot.history_tokens, after.history_tokens, len(batch.cards),

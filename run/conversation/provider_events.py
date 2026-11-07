@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 import copy
 import threading
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Generator, Iterator
 
 from events import RunEvent
 from provider.protocol.diagnostics import (
@@ -510,7 +510,7 @@ def provider_events(
     on_response: Callable[[KemoResponse], None] | None = None,
     defer_tool_validation: bool = False,
     allow_output_truncated_retry: bool = False,
-) -> Iterator[RunEvent]:
+) -> Generator[RunEvent, None, None]:
     stream: Callable[..., Iterable[ProviderStreamEvent]] | None = getattr(provider, "stream", None)
     create = getattr(provider, "create", None)
     if protocol_request.stream:

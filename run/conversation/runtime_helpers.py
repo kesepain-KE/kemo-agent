@@ -5,14 +5,14 @@ import copy
 import queue
 import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from contextlib import closing
 
 from events import RunEvent
 
 from events import error_event
 from provider.protocol.diagnostics import sanitize_provider_diagnostic
-from provider.protocol.models import MessageItem, ReasoningItem, ToolCallItem
+from provider.protocol.models import MessageItem, ReasoningItem, RefusalContent, TextContent, ToolCallItem
 from run.conversation.provider_projection import final_answer_messages
 from run.infra import EngineError
 
@@ -44,7 +44,7 @@ def positive(config: dict, name: str, default: int) -> int:
 def drain(channel, *, closing=False) -> list:
     method = getattr(channel, "drain_or_close" if closing else "drain", None)
     if callable(method):
-        return method()
+        return cast(list, method())
     values = []
     while channel is not None:
         try:
@@ -57,7 +57,7 @@ def drain(channel, *, closing=False) -> list:
 def close_mailbox(channel) -> list:
     method = getattr(channel, "close_and_drain", None)
     if callable(method):
-        return method()
+        return cast(list, method())
     close = getattr(channel, "close", None)
     if callable(close):
         close()
@@ -89,7 +89,8 @@ def response_payloads(
         ) else None
         return {
             "text": "\n".join(
-                "".join(block.text for block in item.content if block.type in {"text", "refusal"})
+                "".join(block.text for block in item.content
+                        if isinstance(block, (TextContent, RefusalContent)))
                 or item.refusal or "" for item in messages),
             "content": [block.model_dump(mode="json", exclude_none=True)
                         for item in messages for block in item.content],

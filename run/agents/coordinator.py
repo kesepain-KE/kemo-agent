@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any, Callable
 
 from run.agents.task_ledger import TaskLedger, _FINAL, _LIVE, _SIGNAL, now
 
@@ -161,7 +162,8 @@ class TaskCoordinator:
             if task_id not in self.delivered:
                 self.delivered.append(task_id)
 
-    def wait(self, cancel_event=None, *, wake=None, pending=None):
+    def wait(self, cancel_event=None, *, wake=None,
+             pending: Callable[[], list[dict[str, Any]]] | None = None):
         if self.started:
             self.ledger.update(self.id, status="waiting_children")
         while True:

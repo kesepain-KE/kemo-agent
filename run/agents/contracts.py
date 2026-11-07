@@ -13,6 +13,9 @@ from events import RunEvent
 from run.agents import AgentDefinition
 from run.config import provider_runtime_config, resolve_agent_model
 
+if TYPE_CHECKING:
+    from run.agents.continuation import ContinuationState
+
 class AgentRunError(RuntimeError):
     if TYPE_CHECKING:
         retry_budget_exhausted: bool
@@ -279,6 +282,11 @@ class AgentOutputError(AgentRunError):
 
 class AgentProviderError(AgentRunError):
     """A Provider response failure with safe retry classification metadata."""
+
+    if TYPE_CHECKING:
+        continuation: ContinuationState
+        partial_result: AgentRunResult
+        process_terminated: bool
 
     def __init__(
         self,

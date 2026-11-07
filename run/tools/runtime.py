@@ -72,7 +72,7 @@ class ToolRuntime:
 
     @staticmethod
     def _error(error: BaseException) -> dict[str, Any]:
-        detail = {
+        detail: dict[str, Any] = {
             "exception_type": str(getattr(error, "remote_exception_type", "") or type(error).__name__),
             "message": diagnostic_text(str(error)),
         }

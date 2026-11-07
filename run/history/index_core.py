@@ -8,7 +8,7 @@ from pathlib import Path
 import threading
 from uuid import uuid4
 
-from run.cards import CardStore
+from run.cards import CardConflictError, CardStore
 from run.config import user_dir
 from run.history.registry_store import (
     mutate_registry_record, read_active_binding, read_registry_record, upsert_registry_record,
@@ -91,6 +91,8 @@ def reserve_session(root: Path, user: str, source: str, session_id: str, *,
         store = CardStore(root, user)
         state = store.ensure_session(source, session_id)
         record = find_record(root, user, source, session_id)
+        if record is None:
+            raise CardConflictError("Session was deleted before reservation completed")
         record.setdefault("conversation_id", session_id)
         record.setdefault("chain", chain_for_source(source))
         record.update(metadata)

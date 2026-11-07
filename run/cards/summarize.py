@@ -6,7 +6,7 @@ import json
 import re
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, cast
 from uuid import uuid4
 
 from provider.factory import provider_request_slot
@@ -188,6 +188,7 @@ class ProviderSummarizer:
         output_budget = capacity["output_reserve"]
         usage_total, previous, offset = new_usage_total(), None, 0
         fragment_offset = 0
+        serialized = ""
         retries_left = self.retry.max_retries
 
         def spend_retry(number, error):
@@ -312,12 +313,12 @@ class ProviderSummarizer:
                             )
                             raise error
 
-                        def query():
+                        def query(fetch=cast(Callable[[str], KemoResponse], get_response)):
                             def invoke_query(stopped):
                                 with provider_priority(1), provider_request_slot(
                                     self.config, cancel_event=stopped,
                                 ):
-                                    return get_response(response_id)
+                                    return fetch(response_id)
 
                             return budget.call(
                                 invoke_query,
@@ -468,8 +469,9 @@ class ProviderSummarizer:
                     fragment_offset = 0
                     count = 1
                 offset += count
+            assert previous is not None
             return SummaryCandidate(previous, usage_total, int((time.monotonic() - started) * 1000))
         except Exception as error:
-            error.compression_usage = usage_total
-            error.compression_latency_ms = int((time.monotonic() - started) * 1000)
+            setattr(error, "compression_usage", usage_total)
+            setattr(error, "compression_latency_ms", int((time.monotonic() - started) * 1000))
             raise

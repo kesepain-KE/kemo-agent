@@ -1,6 +1,11 @@
 """Shared capacity estimates and inspection, not a second context engine."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from run.context.service import context_status as context_status
+
 from run.context.compression_budget import (
     CompressionBudget, CompressionBudgetExhausted, CompressionCancelledError,
 )

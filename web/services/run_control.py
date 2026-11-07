@@ -260,7 +260,7 @@ class RunControlServiceMixin:
             normalized_source,
             normalized_session,
         )
-        if summary.get("status") == "queued" and self.summary_waker is not None:
+        if summary is not None and summary.get("status") == "queued" and self.summary_waker is not None:
             self.summary_waker()
         if memory.get("status") == "queued" and self.memory_waker is not None:
             self.memory_waker()

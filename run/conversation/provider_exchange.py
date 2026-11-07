@@ -12,7 +12,7 @@ from events import RunEvent
 from provider.factory import provider_request_slot
 from provider.protocol.diagnostics import safe_invalid_tool_details
 from provider.protocol.enums import IncompleteReason, ResponseStatus
-from provider.protocol.models import KemoRequest, KemoResponse, ToolCallItem, Usage
+from provider.protocol.models import IncompleteDetails, KemoRequest, KemoResponse, ToolCallItem, Usage
 from provider.retry import RetryCancelled, RetryManager, transient
 from provider.schema import ProviderError
 from run.conversation.provider_events import provider_events
@@ -49,7 +49,7 @@ class ProviderResponseError(ProviderError):
         self.stop_reason = detail.get("stop_reason")
         self.incomplete_details = detail.get("incomplete_details")
         self.provider_exception_type = detail.get("exception_type")
-        self.code = detail.get("code")
+        self.code = str(detail.get("code") or "")
         self.retry_scope = detail.get("retry_scope")
 
 
@@ -79,10 +79,9 @@ def _response_from_tool_argument_error(
         status=ResponseStatus.INCOMPLETE,
         model=request.model,
         usage=usage or Usage(),
-        incomplete_details={
-            "reason": IncompleteReason.INVALID_TOOL_ARGUMENTS,
-            "details": safe_details,
-        },
+        incomplete_details=IncompleteDetails(
+            reason=IncompleteReason.INVALID_TOOL_ARGUMENTS, details=safe_details,
+        ),
     )
 
 

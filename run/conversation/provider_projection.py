@@ -5,7 +5,9 @@ import json
 from typing import Any
 
 from provider.protocol.diagnostics import redact_diagnostic_text, sanitize_provider_diagnostic
-from provider.protocol.models import KemoResponse, MessageItem, ProviderState, ToolCallItem
+from provider.protocol.models import (
+    KemoResponse, MessageItem, ProviderState, RefusalContent, TextContent, ToolCallItem,
+)
 
 
 _MAX_DURABLE_RESPONSE_CHARS = 256_000
@@ -22,7 +24,8 @@ def final_answer_messages(response: KemoResponse) -> list[MessageItem]:
         if isinstance(item, MessageItem) and item.role == "assistant"
         and item.status == "completed" and item.phase == "final_answer"
         and (str(item.refusal or "").strip() or any(
-            block.type not in {"text", "refusal"} or block.text.strip() for block in item.content
+            not isinstance(block, (TextContent, RefusalContent)) or block.text.strip()
+            for block in item.content
         ))
     ]
     return messages

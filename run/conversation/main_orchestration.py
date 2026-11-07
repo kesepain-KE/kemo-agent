@@ -231,14 +231,14 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                         if isinstance(block, dict) and block.get("type") != "text"
                     ]
                     if media_blocks:
-                        virtual_media.append(MessageItem(
-                            id="msg_guidance_media_" + uuid4().hex,
-                            role="user", content=[{
+                        virtual_media.append(MessageItem.model_validate({
+                            "id": "msg_guidance_media_" + uuid4().hex,
+                            "role": "user", "content": [{
                                 "type": "text", "text":
                                 "[本次模型请求已携带运行中新增的原生媒体，请现在直接读取；"
                                 f"无需等待最终回复或下一条用户消息。guidance_id={item.id}]",
                             }, *media_blocks],
-                        ))
+                        }))
 
         def metadata(status, **extra):
             snapshot = store.snapshot(source, session_id)
@@ -486,7 +486,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                     raise overflow_error
                 yield RunEvent(type="retrying", metadata={"phase": "context_recovery",
                     "retry_attempt": overflow_attempts, "max_retries": 3,
-                    "failed_request_id": native_request.request_id, "committed": False})
+                    "failed_request_id": request_diagnostics[-1]["request_id"], "committed": False})
             if compress_only:
                 result = metadata("completed", compressed=barrier.compaction is not None)
                 integration.continuation(False)
@@ -528,7 +528,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 integration.request_finished(continuation_required=True)
                 request_inflight = False
                 if getattr(error, "failed_usage", None):
-                    record_provider_request(usage_total, usage_from_dict(error.failed_usage))
+                    record_provider_request(usage_total, usage_from_dict(getattr(error, "failed_usage")))
                 if observed_text or observed_reasoning:
                     store.append(source, session_id, integration_id, "agent_text", {
                         "text": "".join(observed_text), "reasoning": "".join(observed_reasoning),
@@ -710,7 +710,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             })
             compression_started.clear()
         if error is not overflow_error and getattr(error, "failed_usage", None):
-            record_provider_request(usage_total, usage_from_dict(error.failed_usage))
+            record_provider_request(usage_total, usage_from_dict(getattr(error, "failed_usage")))
         account_compression_failure(error, usage_total, context_stats)
         cleanup_attempted = True
         cleanup_errors = []

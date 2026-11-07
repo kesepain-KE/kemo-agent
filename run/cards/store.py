@@ -212,6 +212,7 @@ class CardStore:
                 for row in db.execute("SELECT * FROM context_cards WHERE session_key=? AND token_active=1",
                                       (key,)).fetchall():
                     card = Card.from_row(row)
+                    assert card.view_kind is not None and card.view_payload is not None
                     tokens = self.meter.tokens(card.view_kind, card.view_payload)
                     total += tokens
                     db.execute("UPDATE context_cards SET view_tokens=?,meter_key=?,"

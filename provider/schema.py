@@ -28,6 +28,8 @@ class ProviderError(RuntimeError):
 
     if TYPE_CHECKING:
         code: str
+        cancelled: bool
+        failed_usage: dict[str, Any]
         retry_exhausted: bool
         retry_attempts: int
         retry_max_attempts: int

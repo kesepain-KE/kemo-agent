@@ -11,7 +11,9 @@ def read_archive(root, user, *, archive_id, cursor="", role="any", limit=50, pag
     source, identity, generation = archive_identity(root, user, archive_id)
     key, scope = session_key(source, identity), user_scope(root, user)
     with archive_database(root, user) as db:
-        session = None if db is None else db.execute(
+        if db is None:
+            raise ValueError("CardStream 会话不存在或已经删除")
+        session = db.execute(
             "SELECT * FROM card_sessions WHERE session_key=? AND generation=? AND lifecycle!='deleted'",
             (key, generation)).fetchone()
         if session is None:

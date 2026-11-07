@@ -218,7 +218,7 @@ class MaintenanceScheduler:
                 }
             saved = finish_summary_claim(
                 self.root, user, source, identity, claim_id=claim_id,
-                summary_checkpoint=None, **summary,
+                summary_checkpoint=None, title=summary["title"], summary=summary["summary"],
             )
             if saved is None:
                 raise MaintenanceError("历史简介认领已失效")

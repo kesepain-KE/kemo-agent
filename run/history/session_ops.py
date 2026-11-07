@@ -88,9 +88,9 @@ def update_summary_checkpoint(root, user, source, session_id, *, claim_id, **cha
     return mutate_registry_record(root, user, source, session_id, mutate)
 
 
-def list_records(root, user, *, source=None, limit=50, **filters):
+def list_records(root, user, *, source=None, limit: int | None = 50, **filters):
     return query_session_records(root, user, source=source, limit=limit, **filters)[0]
 
 
-def list_records_page(root, user, *, source=None, limit=50, **filters):
+def list_records_page(root, user, *, source=None, limit: int | None = 50, **filters):
     return query_session_records(root, user, source=source, limit=limit, **filters)
