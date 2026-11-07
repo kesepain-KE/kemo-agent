@@ -685,7 +685,6 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                             event, tool_call_id=call.call_id,
                             metadata={**event.metadata, "parent_run_id": run_id}))
                     if call.arguments.get("action") == "call":
-                        coordinator.ensure_started()
                         context["task_ownership_factory"] = lambda call=call: coordinator.ownership(call.call_id)
                     elif call.arguments.get("action") in {"resume", "guide"}:
                         context["task_ownership"] = coordinator.ownership(call.call_id)

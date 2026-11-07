@@ -69,7 +69,7 @@ def test_completed_error_and_generator_close_all_close_the_root(setup, route):
     iterator = iter_request_events(request(), root=root, provider_factory=lambda _: provider)
     if route == "cancelled":
         for event in iterator:
-            if event.type == "tool_call_result":
+            if event.type == "tool_call_result" and not event.metadata["execution_live"]:
                 break
         iterator.close()
     else:
@@ -79,7 +79,7 @@ def test_completed_error_and_generator_close_all_close_the_root(setup, route):
     assert record["status"] == route and record["finished_at"]
 
 
-def test_generator_close_before_child_registration_keeps_root_cancelled(setup, monkeypatch):
+def test_generator_close_before_child_registration_blocks_late_dispatch(setup, monkeypatch):
     root, _ = setup
     entered, release = threading.Event(), threading.Event()
     executions = []
@@ -101,7 +101,7 @@ def test_generator_close_before_child_registration_keeps_root_cancelled(setup, m
                 break
         assert entered.wait(5)
         iterator.close()
-        closed = root_record(root)
+        assert not (root / "users/alice/runtime/agent_tasks.sqlite3").exists()
     finally:
         release.set()
         iterator.close()
@@ -110,9 +110,7 @@ def test_generator_close_before_child_registration_keeps_root_cancelled(setup, m
         store, "web", "scope", store.snapshot("web", "scope").cards[0].integration_id,
     )
     eventually(lambda: not integration.live_executions())
-    record = root_record(root)
-    assert closed.get("status") == record.get("status") == "cancelled"
-    assert closed["finished_at"] == record["finished_at"] and record["finished_at"]
+    assert not (root / "users/alice/runtime/agent_tasks.sqlite3").exists()
     assert not executions
 
 

@@ -53,6 +53,8 @@ class TaskCoordinator:
 
     def ensure_started(self):
         with self._start_lock:
+            if self._finished_status is not None:
+                raise ValueError("主任务已收束，不能再启动子任务")
             if not self.started:
                 self.ledger.create_root(
                     self.id, self.source, self.session_id, self.run_id,
@@ -245,8 +247,12 @@ class TaskCoordinator:
         return receipt
 
     def finish(self, status, *, defer_terminal=False):
-        if not self.started or self._finished_status is not None:
-            return self._finish_receipt
+        with self._start_lock:
+            if not self.started:
+                self._finished_status = self._finished_status or status
+                return self._finish_receipt
+            if self._finished_status is not None:
+                return self._finish_receipt
         if self._prepared_finish and self._prepared_finish[0] == status:
             _, receipt, changes = self._prepared_finish
             return self._seal_finish(status, receipt=receipt, defer_terminal=defer_terminal, **changes)
