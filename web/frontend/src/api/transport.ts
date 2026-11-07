@@ -65,6 +65,7 @@ export const runEventSchema = z
       'media_input_update',
       'guidance_applied',
       'context_compression',
+      'context_window',
       'subagent_progress',
       'background_job_progress',
       'usage',
