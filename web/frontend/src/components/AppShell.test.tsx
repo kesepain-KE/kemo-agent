@@ -2818,7 +2818,7 @@ describe('AppShell navigation', () => {
     expect(document.querySelector('.context-drawer-body')).toHaveClass('drawer-body')
   })
 
-  it('缓存命中率随 usage 事件实时刷新，切换会话不串线且不额外轮询 overview', async () => {
+  it('上下文占用和缓存命中率随运行事件实时刷新，切换会话不串线', async () => {
     server.use(http.get('/api/users/kesepain/sessions/s2/history', () => HttpResponse.json(cardHistory({
       user: 'kesepain', source: 'web', session_id: 's2',
       messages: [], integrations: [], integration_traces: [],
@@ -2840,6 +2840,20 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(controller).toBeDefined())
     const initialReads = overviewReads
+    const emitContextWindow = async () => {
+      await act(async () => {
+        controller!.enqueue(new TextEncoder().encode(`event: context_window\ndata: ${JSON.stringify({
+          type: 'context_window',
+          metadata: { context_snapshot: {
+            available: true, source: 'cardstream', measurement: 'local_estimate',
+            captured_at: '2026-11-07T00:00:00Z', system_prompt_tokens: 30000,
+            tool_schema_tokens: 5000, conversation_tokens: 20000, summary_tokens: 4000,
+            other_tokens: 1000, total_tokens: 60000, capacity_tokens: 120000,
+            percent: 50, cards_active: 5, last_seq: 12,
+          } },
+        })}\n\n`))
+      })
+    }
     const emitRate = async (rate: number | null) => {
       await act(async () => {
         controller!.enqueue(new TextEncoder().encode(`event: usage\ndata: ${JSON.stringify({
@@ -2855,6 +2869,14 @@ describe('AppShell navigation', () => {
         queryKey: overviewKey,
         queryFn: () => new Promise((resolve) => { releaseStaleOverview = () => resolve(staleOverview) }),
       }).catch(() => undefined)
+      await emitContextWindow()
+      expect(app.client.getQueryData(overviewKey)).toMatchObject({
+        context_snapshot: { total_tokens: 60000, percent: 50 },
+        context_window: {
+          tokens: { total_tokens: 60000, percent: 50, system_prompt_tokens: 30000 },
+          conversation: { cards_active: 5, last_seq: 12 },
+        },
+      })
       await emitRate(0.7532)
       expect(await screen.findByRole('button', { name: '缓存命中 75.32%' })).toBeInTheDocument()
       await act(async () => {
@@ -2862,6 +2884,13 @@ describe('AppShell navigation', () => {
         await staleRefresh
       })
       expect(app.client.getQueryData(overviewKey)).toMatchObject({ context: { usage: { cache_hit_rate: 0.7532 } } })
+      expect(app.client.getQueryData(overviewKey)).toMatchObject({
+        context_snapshot: { total_tokens: 60000, percent: 50 },
+      })
+      fireEvent.click(screen.getByRole('button', { name: '查看上下文用量' }))
+      expect(within(screen.getByRole('dialog', { name: '上下文用量' }))
+        .getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50')
+      fireEvent.keyDown(document, { key: 'Escape' })
       expect(screen.getByRole('button', { name: '缓存命中 75.32%' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
       fireEvent.click(screen.getByRole('button', { name: '缓存命中 75.32%' }))
