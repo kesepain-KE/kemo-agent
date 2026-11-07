@@ -26,6 +26,7 @@ _DETERMINISTIC_CATEGORIES = frozenset({
 _TRANSIENT_CATEGORIES = frozenset({
     "connection_error", "transport_error", "timeout", "upstream_error",
     "gateway_error", "execution_capacity", "tool_error",
+    "provider_incomplete", "output_truncated",
 })
 _TRANSIENT_ERRORS = frozenset({
     "timeouterror", "providertimeouterror", "connectionerror",

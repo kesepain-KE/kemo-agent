@@ -267,12 +267,12 @@ def run_model(
                             tools=tool_definitions,
                             generation={"max_output_tokens": request_max_tokens},
                             reasoning=(
-                                ReasoningConfig(
-                                    enabled=True,
-                                    effort=reasoning_selection.effort,
-                                    return_mode="content",
-                                    context="auto",
-                                )
+                                ReasoningConfig.model_validate({
+                                    "enabled": True,
+                                    "effort": reasoning_selection.effort,
+                                    "return": "content",
+                                    "context": "auto",
+                                })
                                 if reasoning_selection.enabled
                                 and reasoning_selection.effort
                                 else None
@@ -401,7 +401,10 @@ def run_model(
                     cancelled=response.status == ResponseStatus.CANCELLED,
                 )
             if response.status == ResponseStatus.INCOMPLETE:
-                incomplete = incomplete_retry_metadata(response.incomplete_details)
+                incomplete = incomplete_retry_metadata(
+                    response.incomplete_details,
+                    allow_output_truncated_retry=True,
+                )
                 error = AgentProviderError(
                     f"子代理 Provider 响应未完整结束：{incomplete['reason']}",
                     category=str(
@@ -599,7 +602,7 @@ def run_model(
                         raise
                     except Exception as exc:
                         capacity_limited = isinstance(exc, ToolExecutionCapacityError)
-                        error = {
+                        tool_error: dict[str, Any] = {
                             "message": safe_provider_message(
                                 str(exc),
                                 "工具调用失败",
@@ -612,19 +615,19 @@ def run_model(
                         for field in ("category", "retry_after_ms", "still_running"):
                             value = getattr(exc, field, None)
                             if isinstance(value, (bool, int, float)):
-                                error[field] = value
+                                tool_error[field] = value
                             elif isinstance(value, str) and value.strip():
-                                error[field] = value.strip()[:160]
+                                tool_error[field] = value.strip()[:160]
                         retryable = getattr(exc, "retryable", None)
                         if isinstance(retryable, bool) and getattr(
                             exc,
                             "retryable_declared",
                             True,
                         ):
-                            error["retryable"] = retryable
+                            tool_error["retryable"] = retryable
                         payload = {
                             "ok": False,
-                            "error": error,
+                            "error": tool_error,
                         }
                         if bool(getattr(exc, "still_running", False)):
                             failures.unavailable.add(call.name)

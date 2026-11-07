@@ -90,7 +90,8 @@
   模型内部重试不重置本段工具预算；结论收尾不再开放业务工具，也不保证成功。
   旧版 failed + AgentToolLimitError 会提示 resume_candidate；允许显式申请续跑，
   但仍须有匹配定义/轮次/身份的有效私有安全点，不能恢复任意失败或从头补跑。
-- Provider 响应以 `output_truncated` 结束时不自动重试，也不执行该响应中的工具调用。
+- Provider 响应以 `output_truncated` 结束时，按累计 Provider 重试额度自动重试，最多额外5次
+  （含首次共6次尝试）；保留请求前上下文和已完成调用，不接受截断内容，也不执行该响应中的工具调用。
   若任务已实际退出且匹配的安全快照有效，status 会标记 `resumable=true`；主智能体可显式
   resume，从该请求之前的安全点继续，并保留之前已完成的工具结果。旧版记录可直接尝试显式
   resume，框架会重新校验实际终态和快照；其他失败不因此获得恢复权。
@@ -180,7 +181,7 @@
 ```json
 {
   "name": "subagent_dispatch",
-  "description": "发现和调度当前用户可用的公开子代理。普通本地 LLM 非串行业务代理 call/resume 省略 wait 默认后台提交并行执行，共用 Provider API 请求池；仍是主任务必要依赖，框架按稳定提交序号交付同批结果，无需反复查询状态。可显式 resume 有有效安全点的 output_truncated 失败；不会自动重试截断响应。显式 wait=true 同步等待；特殊规划、串行维护和外部代理默认同步。",
+  "description": "发现和调度当前用户可用的公开子代理。普通本地 LLM 非串行业务代理 call/resume 省略 wait 默认后台提交并行执行，共用 Provider API 请求池；仍是主任务必要依赖，框架按稳定提交序号交付同批结果，无需反复查询状态。output_truncated 按累计 Provider 额度有界重试，耗尽后可显式 resume 有有效安全点的失败任务。显式 wait=true 同步等待；特殊规划、串行维护和外部代理默认同步。",
   "input_schema": {
     "type": "object",
     "properties": {

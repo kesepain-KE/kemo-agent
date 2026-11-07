@@ -584,7 +584,7 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.data, SUMMARY)
         self.assertEqual(len(provider.requests), 2)
 
-    def test_runner_retries_deterministic_incomplete_response_five_times(self) -> None:
+    def test_runner_bounds_output_truncation_retries(self) -> None:
         class TruncatedProvider(MockProvider):
             def create(_self, request):
                 _self.requests.append(request)
@@ -596,25 +596,28 @@ class SubAgentRuntimeTests(unittest.TestCase):
                         "reason": IncompleteReason.OUTPUT_TRUNCATED,
                         "details": {
                             "finish_reason": "length",
-                            "category": "upstream_error",
+                            "category": "output_truncated",
                             "retryable": True,
                         },
                     },
                        })
 
         provider = TruncatedProvider()
-        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+        with (
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0),
+        ):
             with self.assertRaises(AgentProviderError) as raised:
                 self.runner(provider).run(
                     "schema_worker",
                     {"previous_summary": None, "rounds": [], "trigger": "manual"},
                 )
 
-        # R1 3.3: output truncation is deterministic, even with remote true.
-        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(len(provider.requests), 6)
         self.assertTrue(raised.exception.retryable_declared)
         self.assertFalse(raised.exception.retryable)
-        self.assertFalse(getattr(raised.exception, "retry_budget_exhausted", False))
+        self.assertTrue(raised.exception.retry_budget_exhausted)
+        self.assertEqual(raised.exception.retry_attempts, 6)
         self.assertEqual(raised.exception.code, "output_truncated")
 
     def test_runner_retries_transient_incomplete_response(self) -> None:
