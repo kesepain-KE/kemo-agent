@@ -56,7 +56,8 @@ from run.conversation.runtime_helpers import (
     positive as _positive, build_failure_metadata, response_payloads,
     call_is_explicitly_async as _call_is_explicitly_async,
     duplicate_execution_should_block as _duplicate_execution_should_block, observed_exchange,
-    account_compression_failure, prepare_runtime_request, runtime_dynamic_tail,
+    account_compression_failure, prepare_runtime_request, request_context_snapshot,
+    runtime_dynamic_tail,
 )
 
 def run_conversation(request, *, root: Path, provider_factory, tool_registry_factory,
@@ -500,6 +501,9 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             request_diagnostics.append(provider_request_diagnostic(native_request, bundle, iteration=iteration, attempt=1))
             if cancel_event.is_set():
                 raise RetryCancelled("用户停止了当前整合")
+            yield RunEvent(type="context_window", metadata={
+                "context_snapshot": request_context_snapshot(barrier),
+            })
             integration.request_started()
             request_inflight = True
             observed_text.clear()
