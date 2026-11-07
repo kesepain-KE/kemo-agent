@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from provider.protocol.models import KemoResponse
 
 from tests.type_assertions import http_headers, require_type
@@ -327,16 +329,40 @@ class UnifiedProtocolTests(unittest.TestCase):
         self.assertTrue(
             incomplete_retry_metadata({"reason": "empty_output"})["retryable"]
         )
+        self.assertTrue(
+            incomplete_retry_metadata(
+                {"reason": "output_truncated"},
+                allow_output_truncated_retry=True,
+            )["retryable"]
+        )
+        self.assertFalse(
+            incomplete_retry_metadata(
+                {
+                    "reason": "output_truncated",
+                    "category": "auth_error",
+                    "status_code": 401,
+                },
+                allow_output_truncated_retry=True,
+            )["retryable"]
+        )
+        self.assertTrue(
+            incomplete_retry_metadata(
+                {"reason": "output_truncated"},
+                fallback_category="output_truncated",
+                allow_output_truncated_retry=True,
+            )["retryable"]
+        )
         self.assertFalse(
             incomplete_retry_metadata(
                 {"reason": "empty_output", "retryable": False}
             )["retryable"]
         )
-        for fallback in (
+        fallbacks: tuple[dict[str, Any], ...] = (
             {"fallback_category": "content_filter"},
             {"fallback_code": "invalid_request"},
             {"fallback_status_code": 400},
-        ):
+        )
+        for fallback in fallbacks:
             with self.subTest(fallback=fallback):
                 decision = incomplete_retry_metadata(
                     {},

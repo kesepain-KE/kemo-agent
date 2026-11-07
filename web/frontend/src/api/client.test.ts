@@ -4,6 +4,8 @@ import { server } from '../test/server'
 import {
   AVATAR_UPDATED_EVENT,
   commandPlan,
+  createKnowledgeEntry,
+  transferKnowledgeEntry,
   cancelRun,
   deleteAllSessions,
   editPlan,
@@ -28,6 +30,25 @@ import {
   touchSessionLease,
   releaseSessionLease,
 } from './client'
+
+describe('knowledge JSON requests', () => {
+  it('creation and transfer declare JSON instead of browser text/plain', async () => {
+    const headers: Array<string | null> = []
+    server.use(
+      http.post('/api/users/alice/knowledge/user/entry', ({ request }) => {
+        headers.push(request.headers.get('content-type'))
+        return HttpResponse.json({ created: true })
+      }),
+      http.patch('/api/users/alice/knowledge/user/entry', ({ request }) => {
+        headers.push(request.headers.get('content-type'))
+        return HttpResponse.json({ target_scope: 'shared', new_relative_path: 'note.md' })
+      }),
+    )
+    await createKnowledgeEntry('alice', 'user', 'note.md', 'file')
+    await transferKnowledgeEntry('alice', 'user', 'note.md', 'copy', 'shared', 'note.md')
+    expect(headers).toEqual(['application/json', 'application/json'])
+  })
+})
 
 describe('ordered document presence', () => {
   it('marks run cancellation as cascading only on explicit request', async () => {

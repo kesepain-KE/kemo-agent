@@ -132,7 +132,7 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
                                        path: str = Query(...)) -> dict[str, Any]:
         return await asyncio.to_thread(backend.transfer_knowledge_entry, user, scope, path,
                                       action=body.action, target_scope=body.target_scope,
-                                      target_path=body.target_path)
+                                      target_path=body.target_path, auto_rename=body.auto_rename)
 
     @app.delete("/api/users/{user}/knowledge/{scope}/entry")
     async def delete_knowledge_entry(user: str, scope: str, path: str = Query(...)) -> dict[str, Any]:

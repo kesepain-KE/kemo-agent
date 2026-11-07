@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import threading
 from typing import Any, TYPE_CHECKING
 
 from run.config import IGNORED_RUNTIME_DIRECTORY_NAMES, MainAgentSourcePolicy, load_config
@@ -16,6 +17,9 @@ from web.services._paths import _reject_link_path, _safe_relative_target
 
 if TYPE_CHECKING:
     from web.service import WebRunService
+
+
+_TRANSFER_LOCK = threading.Lock()
 
 
 class KnowledgeServiceMixin:
@@ -174,33 +178,48 @@ class KnowledgeServiceMixin:
 
     def transfer_knowledge_entry(
         self, user: Any, scope: Any, path: Any, *, action: str,
-        target_scope: str, target_path: str,
+        target_scope: str, target_path: str, auto_rename: bool = False,
     ) -> dict[str, Any]:
         name, scope, source = self._knowledge_entry_target(user, scope, path)
         _, target_scope, target = self._knowledge_entry_target(name, target_scope, target_path)
-        if not source.exists():
-            raise NotFoundError(f"知识条目不存在：{path}")
-        if target.exists():
-            raise ConflictError(f"目标已存在：{target_path}")
-        if target.is_relative_to(source):
-            raise InvalidRequestError("不能将目录复制或移动到自身内部")
-        if source.is_dir():
-            self._validate_knowledge_subtree(source)
-        else:
-            self._knowledge_target(name, scope, path)
-            self._knowledge_target(name, target_scope, target_path)
         if action not in {"copy", "move"}:
             raise InvalidRequestError("action 只允许 copy 或 move")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if action == "move":
-            shutil.move(str(source), str(target))
-        elif source.is_dir():
-            shutil.copytree(source, target)
-        else:
-            shutil.copy2(source, target)
+        # Naming and transfer share a lock so concurrent pastes cannot overwrite
+        # a name selected by another request in this server.
+        with _TRANSFER_LOCK:
+            if not source.exists():
+                raise NotFoundError(f"知识条目不存在：{path}")
+            directory = source.is_dir()
+            if target != source and target.is_relative_to(source):
+                raise InvalidRequestError("不能将目录复制或移动到自身内部")
+            if directory:
+                self._validate_knowledge_subtree(source)
+            else:
+                self._knowledge_target(name, scope, path)
+                self._knowledge_target(name, target_scope, target_path)
+            if action == "copy" and auto_rename:
+                original = target
+                suffix = "" if directory else original.suffix
+                stem = original.name[:-len(suffix)] if suffix else original.name
+                number = 0
+                while os.path.lexists(target):
+                    number += 1
+                    counter = "" if number == 1 else f" ({number})"
+                    target = original.with_name(f"{stem} - 副本{counter}{suffix}")
+            elif target.exists():
+                raise ConflictError(f"目标已存在：{target_path}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if action == "move":
+                shutil.move(str(source), str(target))
+            elif directory:
+                shutil.copytree(source, target)
+            else:
+                shutil.copy2(source, target)
         return {
             "user": name, "scope": scope, "relative_path": path,
-            "target_scope": target_scope, "new_relative_path": target_path, "action": action,
+            "target_scope": target_scope,
+            "new_relative_path": target.relative_to(self._knowledge_root(name, target_scope)[1]).as_posix(),
+            "action": action,
         }
 
     def delete_knowledge_entry(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:

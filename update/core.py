@@ -527,12 +527,12 @@ def _update_builtin_global_expand(
             obsolete.unlink()
         changed = True
 
-    source_manifest = source / "expand.json"
-    target_manifest = target / "expand.json"
+    source_manifest = source / "module.yaml"
+    target_manifest = target / "module.yaml"
     if not source_manifest.is_file():
-        warnings.append(f"源缺少文件: {relative}/expand.json")
+        warnings.append(f"源缺少文件: {relative}/module.yaml")
     else:
-        manifest = read_json(source_manifest)
+        manifest = read_yaml(source_manifest)
         # ``recent_update`` belongs to the deployment runtime, not the source
         # release.  Ignore an accidentally committed source timestamp on a
         # fresh install; an existing target value is copied below.
@@ -540,7 +540,7 @@ def _update_builtin_global_expand(
         config_path = target / config_file
         active = config_path.is_file()
         try:
-            current = read_json(target_manifest) if target_manifest.is_file() else {}
+            current = read_yaml(target_manifest) if target_manifest.is_file() else {}
         except Exception:
             current = {}
         if relative == KEMO_GRAPH_EXPAND:
@@ -567,23 +567,23 @@ def _update_builtin_global_expand(
             # A fresh install and an explicitly deactivated installation both
             # remain inactive because neither has an explicit boolean true in
             # its existing local manifest.
-            active = current.get("open_input") is True
-        manifest["open_input"] = active
+            active = current.get("input_open") is True
+        manifest["input_open"] = active
         if current:
-            if current.get("input_health") in {"正常", "异常"}:
-                manifest["input_health"] = current["input_health"]
+            if current.get("health") in {"正常", "异常"}:
+                manifest["health"] = current["health"]
             recent_update = current.get("recent_update")
             if isinstance(recent_update, str) and recent_update.strip():
                 manifest["recent_update"] = recent_update
         try:
-            target_manifest_value = read_json(target_manifest) if target_manifest.is_file() else None
+            target_manifest_value = read_yaml(target_manifest) if target_manifest.is_file() else None
         except Exception:
             target_manifest_value = None
         if target_manifest_value != manifest:
             if dry_run:
-                print(f"[dry-run]  更新  {relative}/expand.json")
+                print(f"[dry-run]  更新  {relative}/module.yaml")
             else:
-                write_json_atomic(target_manifest, manifest)
+                write_yaml_atomic(target_manifest, manifest)
             changed = True
 
     source_input = source / "input_data.md"

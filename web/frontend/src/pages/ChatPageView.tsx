@@ -345,7 +345,7 @@ export function ChatPageView(props: ChatPageViewProps) {
     uploadFeedback, setUploadFeedback, setPendingUploads, editingSource, cancelEditAndResend,
     regenerateLastResponse, uploadFiles, setCapabilityDrawerOpen,
     setKnowledgeDrawerOpen, sendGuidance, send, stopCurrentRun, knowledgeDrawerOpen,
-    knowledgeQuery, referenceKnowledge, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
+    knowledgeQuery, referenceKnowledge, referenceKnowledgeDirectory, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
     referenceCapability,
   } = props
   const visibleFollowUpCount = followUpQueue.filter((message: { status: string }) => message.status !== 'guiding').length
@@ -601,11 +601,15 @@ return (
     </div>
     <KnowledgeReferenceDrawer
       open={knowledgeDrawerOpen}
+      user={user}
+      roots={knowledgeQuery.data?.roots ?? []}
+      directories={knowledgeQuery.data?.directories ?? []}
       documents={knowledgeQuery.data?.documents ?? []}
       loading={knowledgeQuery.isLoading || knowledgeQuery.isFetching}
       error={knowledgeQuery.isError}
       onClose={() => setKnowledgeDrawerOpen(false)}
       onReference={referenceKnowledge}
+      onReferenceDirectory={referenceKnowledgeDirectory}
     />
     <CapabilityReferenceDrawer
       open={capabilityDrawerOpen}

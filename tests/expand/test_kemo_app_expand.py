@@ -7,6 +7,7 @@ from tests.type_assertions import require_present
 import asyncio
 import hashlib
 import importlib.util
+import yaml
 import json
 import os
 from pathlib import Path
@@ -84,7 +85,7 @@ finally:
     else:
         sys.modules["panel_control"] = _previous_panel_control
 
-from run.config import read_expand_meta  # noqa: E402
+from run.modules import read_manifest, ModuleSpecError  # noqa: E402
 from web.services.module_panels import load_module_panel  # noqa: E402
 
 
@@ -204,7 +205,7 @@ class KemoAppExpandTests(unittest.TestCase):
 
     def test_bridge_declares_current_version(self) -> None:
         source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
-        manifest = json.loads((MODULE_ROOT / "expand.json").read_text(encoding="utf-8"))
+        manifest = yaml.safe_load((MODULE_ROOT / "module.yaml").read_text(encoding="utf-8"))
         self.assertIn('VERSION = "1.1.5"', source)
         self.assertIn("v1.1.5", manifest["explain"])
         self.assertIn("**1.1.5**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
@@ -674,18 +675,19 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertNotIn('pattern="^(minimal|low|medium|high|max)$"', source)
 
     def test_manifest_is_discoverable_with_runtime_health_snapshot(self) -> None:
-        meta = read_expand_meta(MODULE_ROOT)
-        self.assertTrue(meta.valid, meta.error)
-        self.assertFalse(meta.open_input)
+        meta = read_manifest(MODULE_ROOT, kind_hint="expand", scope="global")
+        self.assertEqual(meta.kind, "expand")
+        self.assertFalse(meta.input_open)
         # The background collector may update the tracked manifest from the
         # distributable inactive snapshot to the current live health while the
         # test suite is running. Both are valid discovery states; capability
         # and executable entry points must remain stable.
-        self.assertIn(meta.input_health, {"正常", "异常"})
-        self.assertTrue(meta.open_control)
-        self.assertEqual(meta.start_update, "data_update.py")
-        self.assertEqual(meta.start_expand, "start_expand.py")
-        manifest = json.loads((MODULE_ROOT / "expand.json").read_text(encoding="utf-8"))
+        self.assertIn(meta.health, {"正常", "异常"})
+        self.assertTrue(meta.control_open)
+        self.assertEqual(meta.update_script.name, "data_update.py")
+        assert meta.control_script is not None
+        self.assertEqual(meta.control_script.name, "start_expand.py")
+        manifest = yaml.safe_load((MODULE_ROOT / "module.yaml").read_text(encoding="utf-8"))
         if "recent_update" in manifest:
             self.assertIsInstance(manifest["recent_update"], str)
             self.assertTrue(manifest["recent_update"].strip())
@@ -750,10 +752,10 @@ class KemoAppExpandTests(unittest.TestCase):
     def test_uninitialized_update_never_probes_localhost(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            manifest_path = root / "expand.json"
+            manifest_path = root / "module.yaml"
             input_path = root / "input_data.md"
             manifest_path.write_text(
-                (MODULE_ROOT / "expand.json").read_text(encoding="utf-8"),
+                (MODULE_ROOT / "module.yaml").read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
             with (
@@ -768,9 +770,9 @@ class KemoAppExpandTests(unittest.TestCase):
             self.assertFalse(result["active"])
             urlopen.assert_not_called()
             self.assertIn("未激活", input_path.read_text(encoding="utf-8"))
-            refreshed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertFalse(refreshed_manifest["open_input"])
-            self.assertEqual(refreshed_manifest["input_health"], "正常")
+            refreshed_manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            self.assertFalse(refreshed_manifest["input_open"])
+            self.assertEqual(refreshed_manifest["health"], "正常")
 
     def test_start_refuses_to_spawn_before_initialization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1213,8 +1215,8 @@ class KemoAppExpandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_path = root / "input_data.md"
-            manifest_path = root / "expand.json"
-            manifest_path.write_text((MODULE_ROOT / "expand.json").read_text("utf-8"), "utf-8")
+            manifest_path = root / "module.yaml"
+            manifest_path.write_text((MODULE_ROOT / "module.yaml").read_text("utf-8"), "utf-8")
             state = {"initialized": True, "configured": True, "missing": []}
             with (
                 mock.patch.object(bridge_update, "INPUT_PATH", input_path),
@@ -1228,17 +1230,17 @@ class KemoAppExpandTests(unittest.TestCase):
             self.assertEqual(result["status"], "inactive")
             self.assertFalse(result["active"])
             status.assert_not_called()
-            manifest = json.loads(manifest_path.read_text("utf-8"))
-            self.assertFalse(manifest["open_input"])
-            self.assertEqual(manifest["input_health"], "正常")
+            manifest = yaml.safe_load(manifest_path.read_text("utf-8"))
+            self.assertFalse(manifest["input_open"])
+            self.assertEqual(manifest["health"], "正常")
 
     def test_corrupt_activation_file_is_reported_as_abnormal_without_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_path = root / "input_data.md"
-            manifest_path = root / "expand.json"
+            manifest_path = root / "module.yaml"
             activation = root / "_activated.json"
-            manifest_path.write_text((MODULE_ROOT / "expand.json").read_text("utf-8"), "utf-8")
+            manifest_path.write_text((MODULE_ROOT / "module.yaml").read_text("utf-8"), "utf-8")
             activation.write_text("{not-json", encoding="utf-8")
             state = {"initialized": True, "configured": True, "missing": []}
             with (
@@ -1256,9 +1258,9 @@ class KemoAppExpandTests(unittest.TestCase):
             self.assertEqual(result["diagnosis"]["error_code"], "activation_file_invalid_json")
             status.assert_not_called()
             execute.assert_not_called()
-            manifest = json.loads(manifest_path.read_text("utf-8"))
-            self.assertFalse(manifest["open_input"])
-            self.assertEqual(manifest["input_health"], "异常")
+            manifest = yaml.safe_load(manifest_path.read_text("utf-8"))
+            self.assertFalse(manifest["input_open"])
+            self.assertEqual(manifest["health"], "异常")
             output = input_path.read_text(encoding="utf-8")
             self.assertIn("激活记录异常", output)
             self.assertIn("不会检查、启动或恢复桥接服务", output)
@@ -1332,10 +1334,10 @@ class KemoAppExpandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_path = root / "input_data.md"
-            manifest_path = root / "expand.json"
+            manifest_path = root / "module.yaml"
             activation = root / "_activated.json"
             manifest_path.write_text(
-                (MODULE_ROOT / "expand.json").read_text(encoding="utf-8"),
+                (MODULE_ROOT / "module.yaml").read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
             activation.write_text(

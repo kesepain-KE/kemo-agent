@@ -6,6 +6,7 @@ import io
 import urllib.request
 from tests.type_assertions import http_headers
 
+import yaml
 import json
 from pathlib import Path
 import sys
@@ -21,7 +22,7 @@ MODULE_ROOT = ROOT / "expand" / "global" / "kemo_gateway_status"
 sys.path.insert(0, str(MODULE_ROOT))
 import gateway_status as gateway  # noqa: E402
 
-from run.config import read_expand_meta  # noqa: E402
+from run.modules import read_manifest, ModuleSpecError  # noqa: E402
 
 
 def status_payload() -> dict[str, object]:
@@ -113,17 +114,18 @@ class GatewayStatusExpandTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.module = Path(self.temporary.name)
-        (self.module / "expand.json").write_text(
+        (self.module / "module.yaml").write_text(
             json.dumps({
-                "name": "Kemo 网关运行状态",
-                "explain": "test",
-                "open_input": False,
-                "input_data": "input_data.md",
-                "input_health": "正常",
-                "start_update": "data_update.py",
-                "open_control": True,
-                "start_expand": "start_expand.py",
-                "start_control": "expand_control.md",
+                'name': 'Kemo 网关运行状态',
+                'explain': 'test',
+                'input_open': False,
+                'input_file': 'input_data.md',
+                'health': '正常',
+                'update_script': 'data_update.py',
+                'control_open': True,
+                'control_script': 'start_expand.py',
+                'control_entry': 'expand_control.md',
+                'kind': 'expand',
             }, ensure_ascii=False),
             "utf-8",
         )
@@ -132,7 +134,7 @@ class GatewayStatusExpandTests(unittest.TestCase):
             gateway,
             BASE_DIR=self.module,
             CONFIG_PATH=self.module / "gateway_config.json",
-            MANIFEST_PATH=self.module / "expand.json",
+            MANIFEST_PATH=self.module / "module.yaml",
             INPUT_PATH=self.module / "input_data.md",
             LAST_RUN_PATH=self.module / "_last_run.json",
             DATA_PATH=self.module / "data" / "gateway_status.json",
@@ -147,31 +149,31 @@ class GatewayStatusExpandTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_real_manifest_is_discoverable_and_defaults_to_inactive(self) -> None:
-        meta = read_expand_meta(MODULE_ROOT)
-        self.assertTrue(meta.valid, meta.error)
-        self.assertFalse(meta.open_input)
-        self.assertTrue(meta.open_control)
-        self.assertEqual(meta.start_update, "data_update.py")
+        meta = read_manifest(MODULE_ROOT, kind_hint="expand", scope="global")
+        self.assertEqual(meta.kind, "expand")
+        self.assertFalse(meta.input_open)
+        self.assertTrue(meta.control_open)
+        self.assertEqual(meta.update_script.name, "data_update.py")
 
     def test_unconfigured_update_is_successful_but_does_not_enable_injection(self) -> None:
         result = gateway.update_snapshot()
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "inactive")
-        manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
-        self.assertFalse(manifest["open_input"])
-        self.assertEqual(manifest["input_health"], "正常")
+        manifest = yaml.safe_load((self.module / "module.yaml").read_text("utf-8"))
+        self.assertFalse(manifest["input_open"])
+        self.assertEqual(manifest["health"], "正常")
         self.assertFalse((self.module / "data" / "gateway_status.json").exists())
 
     def test_inactive_check_time_does_not_change_collected_business_data(self) -> None:
         from cron.system_execution import module_data_signature
 
         gateway._inactive_output("2026-10-31 19:00:00")
-        first = module_data_signature(self.module, "expand.json")
+        first = module_data_signature(self.module, "module.yaml")
         original = (self.module / "input_data.md").read_bytes()
         gateway._inactive_output("2026-10-31 19:00:30")
         self.assertEqual((self.module / "input_data.md").read_bytes(), original)
-        self.assertEqual(module_data_signature(self.module, "expand.json"), first)
-        manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
+        self.assertEqual(module_data_signature(self.module, "module.yaml"), first)
+        manifest = yaml.safe_load((self.module / "module.yaml").read_text("utf-8"))
         self.assertEqual(manifest["recent_update"], "2026-10-31 19:00:30")
 
     def test_activation_persists_only_token_config_and_secret_free_outputs(self) -> None:
@@ -188,9 +190,9 @@ class GatewayStatusExpandTests(unittest.TestCase):
         self.assertNotIn("status-secret-token", json.dumps(result, ensure_ascii=False))
         config = json.loads((self.module / "gateway_config.json").read_text("utf-8"))
         self.assertEqual(config["status_token"], "status-secret-token")
-        manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
-        self.assertTrue(manifest["open_input"])
-        self.assertEqual(manifest["input_health"], "正常")
+        manifest = yaml.safe_load((self.module / "module.yaml").read_text("utf-8"))
+        self.assertTrue(manifest["input_open"])
+        self.assertEqual(manifest["health"], "正常")
 
         persisted = "\n".join(
             path.read_text("utf-8")
@@ -310,8 +312,8 @@ class GatewayStatusExpandTests(unittest.TestCase):
         self.assertFalse((self.module / "gateway_config.json").exists())
         self.assertFalse((self.module / "data" / "gateway_status.json").exists())
         self.assertFalse((self.module / "artifacts" / "gateway_status.png").exists())
-        manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
-        self.assertFalse(manifest["open_input"])
+        manifest = yaml.safe_load((self.module / "module.yaml").read_text("utf-8"))
+        self.assertFalse(manifest["input_open"])
 
     def test_unchanged_snapshot_does_not_rewrite_prompt_or_artifacts(self) -> None:
         gateway._atomic_json(  # noqa: SLF001 - module-local fixture
@@ -343,19 +345,15 @@ class GatewayStatusExpandTests(unittest.TestCase):
 
     def test_manifest_recent_update_never_moves_backwards(self) -> None:
         gateway._atomic_json(  # noqa: SLF001 - module-local fixture
-            self.module / "expand.json",
-            {
-                "open_input": True,
-                "input_health": "正常",
-                "recent_update": "2026-08-16 12:03:00",
-            },
+            self.module / "module.yaml",
+            {'input_open': True, 'health': '正常', 'recent_update': '2026-08-16 12:03:00', 'kind': 'expand'},
         )
         gateway._update_manifest(  # noqa: SLF001 - module-local fixture
             active=True,
             healthy=True,
             update_time="2026-08-16 12:00:00",
         )
-        manifest = json.loads((self.module / "expand.json").read_text("utf-8"))
+        manifest = yaml.safe_load((self.module / "module.yaml").read_text("utf-8"))
         self.assertEqual(manifest["recent_update"], "2026-08-16 12:03:00")
 
 

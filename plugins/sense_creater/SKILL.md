@@ -55,7 +55,7 @@
 
 - 创建采用临时目录发布，发布后立即校验；失败会删除整个新模块。
 - 模块目录及清单引用文件不得是符号链接或目录联接，也不得跳出 `sense/`。
-- `sense.json` 严格包含五个字段：`name`、`data_md`、`recent_update`、`health`、`start_update`。
+- `module.yaml` 使用统一合同：`kind: sense`、`name`、`explain`、`health`、`update_script`、`input_open`、`control_open: false`；注入开启时还需 `input_file`，`recent_update` 可选。创建和校验均使用 `run/modules/manifest.py`。
 - 自定义 Python 在写入前检查语法和疑似硬编码凭据；认证信息必须从模块目录自己的 `.env` 读取。模块子进程不会隐式继承框架根目录的 Provider/Web 凭据。
 - `sense.md` 全文可能进入 system prompt，只应保存允许所有启用该模块的用户看到的数据。
 - 默认 `module/panel.json` 只允许框架内置 `refresh`；值文件和状态文件不会自动进入 Prompt。
@@ -76,7 +76,7 @@
         "description": "list=列出模块，create=创建模块，validate=校验模块"
       },
       "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$", "description": "create/validate 使用的模块目录名"},
-      "explain": {"type": "string", "maxLength": 2000, "description": "create 使用的一句话功能说明，不写入 sense.json"},
+      "explain": {"type": "string", "maxLength": 2000, "description": "create 使用的一句话功能说明，写入 module.yaml"},
       "sense_content": {"type": "string", "maxLength": 100000, "description": "create 使用的初始 sense.md Markdown 数据模板"},
       "data_update": {"type": "string", "maxLength": 500000, "description": "create 可选自定义 data_update.py；不传则使用安全骨架"}
     },

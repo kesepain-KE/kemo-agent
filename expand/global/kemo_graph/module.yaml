@@ -1,0 +1,11 @@
+kind: expand
+name: Kemo Graph 外挂文档站
+explain: 注册外部或内置知识图谱文档库，仅在用户明确要求时查询、同步或构建
+input_open: true
+input_file: input_data.md
+health: 正常
+update_script: data_update.py
+control_open: true
+control_script: start_expand.py
+control_entry: expand_control.md
+recent_update: '2026-11-07 16:55:00'

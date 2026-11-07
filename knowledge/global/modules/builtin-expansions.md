@@ -132,7 +132,7 @@ System Prompt 的替代层。
 
 Web“用户配置”页允许管理员修改知识图谱协议、IP/主机、端口和 `allow_remote`，并提供
 “检测知识图谱后端”按钮。地址修改只更新 `base_url` / `allow_remote`，必须保留
-`admin_users`、Library 注册、来源目录、超时、ACL 和 Store 配置；不会修改 `expand.json`
+`admin_users`、Library 注册、来源目录、超时、ACL 和 Store 配置；不会修改 `module.yaml`
 或 Prompt 注入开关。
 
 本地回环地址允许 HTTP；非回环地址必须显式 `allow_remote=true` 且使用 HTTPS。在线检测调用

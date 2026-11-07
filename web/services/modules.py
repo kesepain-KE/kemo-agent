@@ -427,9 +427,11 @@ class MessageExpandServiceMixin:
                         "root": self._project_path(directory),
                         "path": self._project_path(module),
                         "relative_path": module_name,
-                        "has_register": (module / "expand.json").is_file(),
+                        "has_register": (module / "module.yaml").is_file(),
                         "valid": valid,
                         "error": health.get("error") or "",
+                        "reason": health.get("reason"),
+                        "field": health.get("field"),
                         "whitelisted": whitelisted,
                         "active_for_main_agent": valid and whitelisted,
                         "input_health": health.get("input_health") or "异常",
@@ -495,6 +497,8 @@ class MessageExpandServiceMixin:
                 "injected_items": selection.injected_items,
                 "estimated_tokens": estimate_text_tokens(selection.text),
                 "truncated": selection.truncated,
+                "dropped": [{"key": key, "reason": reason} for key, reason in selection.dropped],
+                "clipped": list(selection.clipped),
                 "prompt_section": "expand_data",
                 "prompt_position": "System Prompt / Expand Data",
             },
@@ -583,7 +587,7 @@ class MessageExpandServiceMixin:
         if result.get("ok") is not True:
             reason = str(result.get("reason") or "未知错误")
             try:
-                record_module_health(target / "expand.json", "expand", healthy=False)
+                record_module_health(target / "module.yaml", "expand", healthy=False)
                 record_expand_runtime(
                     target,
                     "update",
@@ -597,7 +601,7 @@ class MessageExpandServiceMixin:
                 f"拓展模块更新失败：{normalized_scope}:{logical_name}（{reason[-1000:]}）"
             )
         try:
-            record_module_health(target / "expand.json", "expand", healthy=True)
+            record_module_health(target / "module.yaml", "expand", healthy=True)
             record_expand_runtime(
                 target,
                 "update",

@@ -55,18 +55,19 @@ class ExternalAgentBridgeTests(unittest.TestCase):
         (self.root / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")
         module = self.root / "users" / "alice" / "expand" / "remote_bridge"
         module.mkdir()
-        (module / "expand.json").write_text(
+        (module / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": "remote_bridge",
-                    "explain": "external agent bridge",
-                    "open_input": False,
-                    "input_data": "input_data.md",
-                    "input_health": "正常",
-                    "start_update": "data_update.py",
-                    "open_control": True,
-                    "start_expand": "start_expand.py",
-                    "start_control": "expand_control.md",
+                    'name': 'remote_bridge',
+                    'explain': 'external agent bridge',
+                    'input_open': False,
+                    'input_file': 'input_data.md',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'control_open': True,
+                    'control_script': 'start_expand.py',
+                    'control_entry': 'expand_control.md',
+                    'kind': 'expand',
                 }
             ),
             "utf-8",

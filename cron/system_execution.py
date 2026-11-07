@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import yaml
 from pathlib import Path
 import re
 from typing import Any
@@ -27,10 +28,8 @@ def module_data_signature(module_root: Path, manifest_name: str) -> str | None:
         manifest = module_root / manifest_name
         if _is_link_or_junction(manifest) or manifest.stat().st_size > 262144:
             return None
-        metadata = json.loads(manifest.read_text(encoding="utf-8"))
-        raw = metadata.get("input_data")
-        if not isinstance(raw, str) or not raw.strip():
-            raw = metadata.get("data_md")
+        metadata = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        raw = metadata.get("input_file")
         if not isinstance(raw, str) or not raw.strip():
             return None
         relative = Path(raw)
@@ -57,7 +56,7 @@ def module_data_signature(module_root: Path, manifest_name: str) -> str | None:
         metadata.pop("recent_update", None)  # Collection time is not collected data.
         canonical = json.dumps(metadata, sort_keys=True, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(canonical + b"\0" + payload).hexdigest()
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         return None
 
 

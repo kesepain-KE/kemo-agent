@@ -54,7 +54,7 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
   脱敏错误写入 `module/status.json`，不保存完整响应。
 
 两个命令都继续执行远程地址安全合同：非回环地址必须显式允许远程且使用 HTTPS；它们不改变
-`expand.json`、Prompt 注入开关或数据注入正文。
+`module.yaml`、Prompt 注入开关或数据注入正文。
 
 ### 本地操作
 

@@ -228,14 +228,18 @@ class PromptPipelineTests(unittest.TestCase):
             "def main():\n    return None\n",
             "utf-8",
         )
-        (module / "sense.json").write_text(
+        (module / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": display_name or name,
-                    "data_md": "sense.md",
-                    "recent_update": recent_update,
-                    "health": health,
-                    "start_update": "data_update.py",
+                    'name': display_name or name,
+                    'input_file': 'sense.md',
+                    'recent_update': recent_update,
+                    'health': health,
+                    'update_script': 'data_update.py',
+                    'kind': 'sense',
+                    'explain': 'fixture perception',
+                    'input_open': True,
+                    'control_open': False,
                 },
                 ensure_ascii=False,
             ),
@@ -270,18 +274,21 @@ class PromptPipelineTests(unittest.TestCase):
             f"## 注入层\n\n{control_injection}\n\n## 操作层\n\n{operation_text}",
             "utf-8",
         )
-        (module / "expand.json").write_text(
+        (module / "data_update.py").write_text("def update(): return True\n", "utf-8")
+        (module / "start_expand.py").write_text("def execute(command, params): return {}\n", "utf-8")
+        (module / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": display_name or name,
-                    "explain": f"{name} expand module",
-                    "open_input": open_input,
-                    "input_data": "input_data.md",
-                    "input_health": input_health,
-                    "start_update": "data_update.py",
-                    "open_control": open_control,
-                    "start_expand": "start_expand.py",
-                    "start_control": "expand_control.md",
+                    'name': display_name or name,
+                    'explain': f'{name} expand module',
+                    'input_open': open_input,
+                    'input_file': 'input_data.md',
+                    'health': input_health,
+                    'update_script': 'data_update.py',
+                    'control_open': open_control,
+                    'control_script': 'start_expand.py',
+                    'control_entry': 'expand_control.md',
+                    'kind': 'expand',
                 },
                 ensure_ascii=False,
             ),
@@ -728,17 +735,17 @@ class PromptPipelineTests(unittest.TestCase):
         _, root, config = self.make_root()
         sense = self.write_sense_module(root, "weather", "OLD_OBSERVATION", health="异常")
         (sense / "sense.md").rename(sense / "observations.md")
-        manifest = json.loads((sense / "sense.json").read_text("utf-8"))
-        manifest["data_md"] = "observations.md"
-        (sense / "sense.json").write_text(json.dumps(manifest), "utf-8")
+        manifest = yaml.safe_load((sense / "module.yaml").read_text("utf-8"))
+        manifest["input_file"] = "observations.md"
+        (sense / "module.yaml").write_text(json.dumps(manifest), "utf-8")
         expand = self.write_expand_module(
             root, "user", "device", input_text="DEVICE_SNAPSHOT",
             control_injection="Read or control device", operation_text="UNREAD_COMMANDS",
         )
         (expand / "expand_control.md").rename(expand / "operations.md")
-        manifest = json.loads((expand / "expand.json").read_text("utf-8"))
-        manifest["start_control"] = "operations.md"
-        (expand / "expand.json").write_text(json.dumps(manifest), "utf-8")
+        manifest = yaml.safe_load((expand / "module.yaml").read_text("utf-8"))
+        manifest["control_entry"] = "operations.md"
+        (expand / "module.yaml").write_text(json.dumps(manifest), "utf-8")
         tail = read_dynamic_tail(root, "alice", config, source="web", session_id="scope")
         perception = tail["perception"]["text"]
         self.assertIn("sense/weather/observations.md", perception)
@@ -1386,11 +1393,12 @@ class PromptPipelineTests(unittest.TestCase):
         for budget in (0, 5, 200, len(first_data) + 25, len(full.text) - 10):
             with self.subTest(budget=budget):
                 selection = registry.select_expand(max_chars=budget)
-                self.assertEqual(selection.text, full.text[:budget])
+                self.assertLessEqual(len(selection.text), budget)
+                self.assertTrue(selection.truncated)
                 for piece in selection.data_pieces:
                     self.assertLess(piece.start, len(selection.text))
                     self.assertLessEqual(piece.end, len(selection.text))
-                    self.assertEqual(selection.data_fragment(piece.key), selection.text[piece.start:piece.end])
+                    self.assertEqual(selection.data_fragment(piece.key), selection.text[piece.start:piece.data_end])
                 self.assertNotIn("SECOND_CONTROL", selection.data_text)
                 self.assertNotIn("CONTROL\n", selection.data_text)
         self.assertEqual(registry.select_expand(max_chars=0).data_text, "")
@@ -1414,7 +1422,7 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertEqual(empty.text, "")
         self.assertEqual(empty.pieces, ())
 
-    def test_expand_switches_health_and_missing_control_file_are_independent(
+    def test_expand_switches_allow_stale_data_but_reject_missing_enabled_control(
         self,
     ) -> None:
         _, root, _ = self.make_root()
@@ -1445,12 +1453,14 @@ class PromptPipelineTests(unittest.TestCase):
         selection = registry.select_expand(max_chars=4000)
         self.assertNotIn("INPUT_DISABLED", selection.text)
         self.assertIn("CONTROL_ONLY", selection.text)
-        self.assertNotIn("UNHEALTHY_INPUT", selection.text)
+        self.assertIn("UNHEALTHY_INPUT", selection.text)
+        self.assertIn("异常数据不可当作当前事实", selection.text)
         self.assertIn("HEALTH_INDEPENDENT_CONTROL", selection.text)
-        self.assertIn("DATA_STILL_AVAILABLE", selection.text)
+        self.assertNotIn("DATA_STILL_AVAILABLE", selection.text)
         self.assertNotIn("[global:missing_control]\n## 操控能力", selection.text)
         status = registry.selection_diagnostics()["expand"]["global"]["health_status"]
-        self.assertTrue(status["missing_control"]["valid"])
+        self.assertFalse(status["missing_control"]["valid"])
+        self.assertEqual(status["missing_control"]["reason"], "file_missing")
         self.assertEqual(status["unhealthy"]["input_health"], "异常")
 
     def test_expand_invalid_manifests_are_diagnosed_and_scope_user_isolation_holds(
@@ -1462,21 +1472,21 @@ class PromptPipelineTests(unittest.TestCase):
         missing_field = self.write_expand_module(
             root, "global", "missing_field", input_text="MISSING_FIELD"
         )
-        missing_payload = json.loads((missing_field / "expand.json").read_text("utf-8"))
-        missing_payload.pop("input_health")
-        (missing_field / "expand.json").write_text(json.dumps(missing_payload), "utf-8")
+        missing_payload = yaml.safe_load((missing_field / "module.yaml").read_text("utf-8"))
+        missing_payload.pop("health")
+        (missing_field / "module.yaml").write_text(json.dumps(missing_payload), "utf-8")
         bad_bool = self.write_expand_module(
             root, "global", "bad_bool", input_text="BAD_BOOL"
         )
-        bad_payload = json.loads((bad_bool / "expand.json").read_text("utf-8"))
-        bad_payload["open_input"] = "true"
-        (bad_bool / "expand.json").write_text(json.dumps(bad_payload), "utf-8")
+        bad_payload = yaml.safe_load((bad_bool / "module.yaml").read_text("utf-8"))
+        bad_payload["input_open"] = "true"
+        (bad_bool / "module.yaml").write_text(json.dumps(bad_payload), "utf-8")
         traversal = self.write_expand_module(
             root, "global", "traversal", input_text="TRAVERSAL"
         )
-        traversal_payload = json.loads((traversal / "expand.json").read_text("utf-8"))
-        traversal_payload["input_data"] = "../outside.md"
-        (traversal / "expand.json").write_text(json.dumps(traversal_payload), "utf-8")
+        traversal_payload = yaml.safe_load((traversal / "module.yaml").read_text("utf-8"))
+        traversal_payload["input_file"] = "../outside.md"
+        (traversal / "module.yaml").write_text(json.dumps(traversal_payload), "utf-8")
 
         self.write_expand_module(
             root, "global", "global_ok", input_text="GLOBAL_LAYER", open_control=False
@@ -1550,11 +1560,11 @@ class PromptPipelineTests(unittest.TestCase):
         selection = registry.select_perception(max_chars=20000)
 
         keys = [piece.key for piece in selection.pieces]
-        self.assertIn("sensors", keys)
-        self.assertIn("cameras", keys)
+        self.assertIn("sense:sensors", keys)
+        self.assertIn("sense:cameras", keys)
         for piece in selection.pieces:
             fragment = selection.fragment(piece.key)
-            self.assertTrue(fragment.startswith(f"[{piece.key}]\n"))
+            self.assertTrue(fragment.startswith(f"[{piece.key.split(':', 1)[1]}]\n"))
             self.assertEqual(fragment, selection.text[piece.start:piece.end])
         self.assertEqual(
             "\n\n".join(selection.fragment(p.key) for p in selection.pieces),
@@ -1572,13 +1582,14 @@ class PromptPipelineTests(unittest.TestCase):
         missing_field = base / "missing_field"
         missing_field.mkdir()
         (missing_field / "sense.md").write_text("MISSING_FIELD_DATA", "utf-8")
-        (missing_field / "sense.json").write_text(
+        (missing_field / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": "missing field",
-                    "recent_update": "2026-07-19 12:00:00",
-                    "health": "正常",
-                    "start_update": "data_update.py",
+                    'name': 'missing field',
+                    'recent_update': '2026-07-19 12:00:00',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'kind': 'expand',
                 }
             ),
             "utf-8",
@@ -1586,18 +1597,22 @@ class PromptPipelineTests(unittest.TestCase):
 
         broken_json = base / "broken_json"
         broken_json.mkdir()
-        (broken_json / "sense.json").write_text("{broken", "utf-8")
+        (broken_json / "module.yaml").write_text("{broken", "utf-8")
 
         missing_file = base / "missing_file"
         missing_file.mkdir()
-        (missing_file / "sense.json").write_text(
+        (missing_file / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": "missing file",
-                    "data_md": "sense.md",
-                    "recent_update": "2026-07-19 12:00:00",
-                    "health": "正常",
-                    "start_update": "data_update.py",
+                    'name': 'missing file',
+                    'input_file': 'sense.md',
+                    'recent_update': '2026-07-19 12:00:00',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'kind': 'sense',
+                    'explain': 'fixture perception',
+                    'input_open': True,
+                    'control_open': False,
                 }
             ),
             "utf-8",
@@ -1605,14 +1620,18 @@ class PromptPipelineTests(unittest.TestCase):
 
         traversal = base / "traversal"
         traversal.mkdir()
-        (traversal / "sense.json").write_text(
+        (traversal / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": "traversal",
-                    "data_md": "../outside.md",
-                    "recent_update": "2026-07-19 12:00:00",
-                    "health": "正常",
-                    "start_update": "data_update.py",
+                    'name': 'traversal',
+                    'input_file': '../outside.md',
+                    'recent_update': '2026-07-19 12:00:00',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'kind': 'sense',
+                    'explain': 'fixture perception',
+                    'input_open': True,
+                    'control_open': False,
                 }
             ),
             "utf-8",

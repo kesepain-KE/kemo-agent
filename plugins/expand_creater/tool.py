@@ -6,12 +6,11 @@ import os
 import re
 import shutil
 import uuid
-from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from run.memory import contains_sensitive_credential
-from run.config import read_expand_meta
+from run.modules import ModuleSpecError, read_manifest, write_manifest
 from run.config import validate_user_name
 from web.services.module_panels import load_module_panel
 from plugins._creator_security import (
@@ -28,27 +27,8 @@ _RESERVED_HEADING_RE = re.compile(r"^##\s+(?:注入层|操作层)\s*$", re.MULTI
 _SENSITIVE_NAME_RE = re.compile(
     r"(?i)(?:api_?key|token|password|passwd|secret|cookie|private_?key|验证码|密码|密钥|令牌)"
 )
-_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-_REQUIRED_EXPAND_FIELDS = {
-    "name",
-    "explain",
-    "open_input",
-    "input_data",
-    "input_health",
-    "start_update",
-    "open_control",
-    "start_expand",
-    "start_control",
-}
-_OPTIONAL_EXPAND_FIELDS = {"recent_update"}
-_FILE_FIELDS = {
-    "input_data": ".md",
-    "start_update": ".py",
-    "start_expand": ".py",
-    "start_control": ".md",
-}
 _CREATE_FILES = (
-    "expand.json",
+    "module.yaml",
     "expand_control.md",
     "start_expand.py",
     "data_update.py",
@@ -217,21 +197,6 @@ def _copy_panel_template(
         _write_text(target / filename, content)
 
 
-def _read_manifest(module_dir: Path) -> tuple[dict[str, Any], list[str]]:
-    path = module_dir / "expand.json"
-    if _is_link(path):
-        return {}, ["expand.json 不允许是符号链接或目录联接"]
-    if not path.is_file():
-        return {}, ["expand.json 缺失"]
-    try:
-        value = json.loads(path.read_text("utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return {}, [f"expand.json 不可读或 JSON 无效：{exc}"]
-    if not isinstance(value, dict):
-        return {}, ["expand.json 根节点必须是对象"]
-    return value, []
-
-
 def _validate_python(path: Path, field: str, errors: list[str]) -> None:
     try:
         source = path.read_text("utf-8-sig")
@@ -249,76 +214,29 @@ def _run_validate(root: Path, scope: str, user: str, name: str) -> dict[str, Any
     if not module_dir.is_dir():
         return {"ok": False, "action": "validate", "scope": scope, "module": name, "path": relative, "valid": False, "errors": ["模块目录不存在"]}
 
-    manifest, errors = _read_manifest(module_dir)
-    if manifest:
-        missing = sorted(_REQUIRED_EXPAND_FIELDS - set(manifest))
-        unknown = sorted(set(manifest) - _REQUIRED_EXPAND_FIELDS - _OPTIONAL_EXPAND_FIELDS)
-        if missing:
-            errors.append("expand.json 缺少字段：" + ", ".join(missing))
-        if unknown:
-            errors.append("expand.json 包含未知字段：" + ", ".join(unknown))
-        for field in ("name", "explain"):
-            if not isinstance(manifest.get(field), str) or not manifest[field].strip():
-                errors.append(f"{field} 必须是非空字符串")
-        for field in ("open_input", "open_control"):
-            if not isinstance(manifest.get(field), bool):
-                errors.append(f"{field} 必须是布尔值")
-        if manifest.get("input_health") not in {"正常", "异常"}:
-            errors.append("input_health 必须是“正常”或“异常”")
-        recent_update = manifest.get("recent_update")
-        if recent_update is not None:
-            if not isinstance(recent_update, str):
-                errors.append("recent_update 必须是字符串")
+    errors = []
+    spec = None
+    try:
+        spec = read_manifest(module_dir, kind_hint="expand", scope=scope)
+    except ModuleSpecError as exc:
+        errors.append(str(exc))
+    if spec:
+        _validate_python(spec.update_script, "update_script", errors)
+        if spec.control_open:
+            _validate_python(cast(Path, spec.control_script), "control_script", errors)
+            try:
+                control = cast(Path, spec.control_entry).read_text("utf-8-sig")
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"control_entry 不可读：{exc}")
             else:
-                try:
-                    datetime.strptime(recent_update.strip(), _TIME_FORMAT)
-                except ValueError:
-                    errors.append(f"recent_update 必须符合 {_TIME_FORMAT}")
-
-        for field, suffix in _FILE_FIELDS.items():
-            file_name = manifest.get(field)
-            if not isinstance(file_name, str) or not file_name.strip():
-                errors.append(f"{field} 必须是非空字符串")
-                continue
-            file_name = file_name.strip()
-            if Path(file_name).name != file_name or Path(file_name).suffix.casefold() != suffix:
-                errors.append(f"{field} 必须是模块目录内的 {suffix} 文件名")
-                continue
-            target = module_dir / file_name
-            if _is_link(target):
-                errors.append(f"{field} 指向的文件不允许是符号链接或目录联接：{file_name}")
-            elif not target.is_file():
-                errors.append(f"{field} 指向的文件不存在：{file_name}")
-            elif suffix == ".py":
-                _validate_python(target, field, errors)
-
-        control_name = manifest.get("start_control")
-        if isinstance(control_name, str) and Path(control_name).name == control_name:
-            control_path = module_dir / control_name
-            if control_path.is_file() and not _is_link(control_path):
-                try:
-                    control = control_path.read_text("utf-8-sig")
-                except (OSError, UnicodeError) as exc:
-                    errors.append(f"start_control 不可读：{exc}")
-                else:
-                    injection_match = re.search(r"^##\s+注入层\s*$", control, re.MULTILINE)
-                    operation_match = re.search(r"^##\s+操作层\s*$", control, re.MULTILINE)
-                    if injection_match is None:
-                        errors.append("start_control 缺少 ## 注入层")
-                    if operation_match is None:
-                        errors.append("start_control 缺少 ## 操作层")
-                    if injection_match and operation_match:
-                        if operation_match.start() <= injection_match.end():
-                            errors.append("start_control 必须先写注入层，再写操作层")
-                        else:
-                            if not control[injection_match.end():operation_match.start()].strip():
-                                errors.append("start_control 注入层内容不能为空")
-                            if not control[operation_match.end():].strip():
-                                errors.append("start_control 操作层内容不能为空")
-
-    runtime_meta = read_expand_meta(module_dir)
-    if not runtime_meta.valid and runtime_meta.error and runtime_meta.error not in errors:
-        errors.append(f"运行时校验失败：{runtime_meta.error}")
+                injection = re.search(r"^##\s+注入层\s*$", control, re.MULTILINE)
+                operation = re.search(r"^##\s+操作层\s*$", control, re.MULTILINE)
+                if injection is None or operation is None:
+                    errors.append("control_entry 缺少 ## 注入层 或 ## 操作层")
+                elif operation.start() <= injection.end():
+                    errors.append("control_entry 必须先写注入层，再写操作层")
+                elif not control[injection.end():operation.start()].strip() or not control[operation.end():].strip():
+                    errors.append("control_entry 注入层和操作层内容不能为空")
     panel_enabled = False
     panel_path = module_dir / "module" / "panel.json"
     if panel_path.exists() or _is_link(panel_path):
@@ -335,9 +253,9 @@ def _run_validate(root: Path, scope: str, user: str, name: str) -> dict[str, Any
         "path": relative,
         "valid": not errors,
         "errors": errors,
-        "name": str(manifest.get("name") or name) if manifest else name,
-        "explain": str(manifest.get("explain") or "") if manifest else "",
-        "input_health": str(manifest.get("input_health") or "未知") if manifest else "未知",
+        "name": spec.name if spec else name,
+        "explain": spec.explain if spec else "",
+        "input_health": spec.health if spec else "未知",
         "panel_enabled": panel_enabled,
     }
 
@@ -419,22 +337,17 @@ def _run_create(
         raise FileExistsError(f"拓展模块已存在：{scope}:{name}")
 
     manifest = {
-        "name": name,
-        "explain": explain_text,
-        "open_input": open_input,
-        "input_data": "input_data.md",
-        "input_health": "异常",
-        "start_update": "data_update.py",
-        "open_control": True,
-        "start_expand": "start_expand.py",
-        "start_control": "expand_control.md",
+        "kind": "expand", "name": name, "explain": explain_text,
+        "input_open": open_input, "input_file": "input_data.md", "health": "异常",
+        "update_script": "data_update.py", "control_open": True,
+        "control_script": "start_expand.py", "control_entry": "expand_control.md",
     }
     control = f"## 注入层\n\n{injection_text}\n\n## 操作层\n\n{operations_text}\n"
     temporary = base / f".{name}.{uuid.uuid4().hex}.tmp"
     published = False
     try:
         temporary.mkdir()
-        _write_text(temporary / "expand.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        write_manifest(temporary / "module.yaml", manifest)
         _write_text(temporary / "expand_control.md", control)
         _write_text(temporary / "start_expand.py", start_code)
         _write_text(temporary / "data_update.py", update_code)

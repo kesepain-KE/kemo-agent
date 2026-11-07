@@ -342,18 +342,19 @@ class UpdateSafetyContractTests(unittest.TestCase):
             source = root / "source" / "expand" / "global" / "kemo_gateway_status"
             target_root = root / "target"
             _write_json(
-                source / "expand.json",
+                source / "module.yaml",
                 {
-                    "name": "Kemo 网关运行状态",
-                    "explain": "只读状态",
-                    "open_input": False,
-                    "input_data": "input_data.md",
-                    "input_health": "正常",
-                    "start_update": "data_update.py",
-                    "open_control": True,
-                    "start_expand": "start_expand.py",
-                    "start_control": "expand_control.md",
-                    "recent_update": "2026-08-23 01:56:44",
+                    'name': 'Kemo 网关运行状态',
+                    'explain': '只读状态',
+                    'input_open': False,
+                    'input_file': 'input_data.md',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'control_open': True,
+                    'control_script': 'start_expand.py',
+                    'control_entry': 'expand_control.md',
+                    'recent_update': '2026-08-23 01:56:44',
+                    'kind': 'expand',
                 },
             )
             details: list[str] = []
@@ -371,12 +372,12 @@ class UpdateSafetyContractTests(unittest.TestCase):
                 warnings=warnings,
             )
 
-            installed = json.loads(
+            installed = yaml.safe_load(
                 (
                     target_root
                     / "expand" / "global"
                     / "kemo_gateway_status"
-                    / "expand.json"
+                    / "module.yaml"
                 ).read_text(encoding="utf-8")
             )
             self.assertNotIn("recent_update", installed)

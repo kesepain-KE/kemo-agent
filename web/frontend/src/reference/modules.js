@@ -61,7 +61,7 @@ export function renderSensePage(ctx) {
 
   inner.appendChild(pageHead({
     title: tr('感知'),
-    desc: '全局感知模块按目录注册，一个目录一个模块，读取 sense/<module>/sense.json。区分「采集到的数据」与「真正进入 Prompt 的片段」── 二者经常不同。',
+    desc: '全局感知模块按目录注册，一个目录一个模块，读取 sense/<module>/module.yaml。区分「采集到的数据」与「真正进入 Prompt 的片段」── 二者经常不同。',
     actions: [
       h('button.btn.btn-outline', { onclick: () => refreshPage() },
         h('span', { html: icon('refresh', 'icon-sm') }), tr('重新读取')),

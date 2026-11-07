@@ -479,7 +479,7 @@ export const handlers = [
         control_injection_markdown: '灯光控制可用', control_operation_markdown: '用户要求开灯时调用 start_expand.py',
         collected_markdown: '# 灯光状态\n客厅已开启', injected_markdown: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', injected_tokens: 18,
         data_injected_markdown: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', data_injected_tokens: 18,
-        files: [{ name: 'expand.json', relative_path: 'example/expand.json', size: 64, updated_at: 1 }], updated_at: 1,
+        files: [{ name: 'module.yaml', relative_path: 'example/module.yaml', size: 64, updated_at: 1 }], updated_at: 1,
       }] },
       { scope: 'shared', root: 'expand/share', items: [] },
       { scope: 'user', root: 'users/kesepain/expand', items: [] },

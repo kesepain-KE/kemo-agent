@@ -29,8 +29,14 @@ from provider.adapters.compat import (
     chat_stream_to_protocol,
     kemo_request_to_chat,
 )
-from provider.protocol.enums import MessagePhase, MessageRole, ResponseStatus
+from provider.protocol.enums import (
+    MessagePhase,
+    MessageRole,
+    ResponseStatus,
+    StreamEventType,
+)
 from provider.protocol.models import (
+    IncompleteDetails,
     KemoResponse,
     MessageItem,
     ModelCapabilities,
@@ -39,6 +45,7 @@ from provider.protocol.models import (
     ToolCallItem,
     UnifiedError,
 )
+from provider.protocol.streaming import ProviderStreamEvent
 from provider.schema import ChatResponse, ProviderError, ToolCall, Usage
 from run.agents import AgentRunResult
 from run.extensions import describe_uploaded_asset
@@ -1012,18 +1019,19 @@ def run(*, context):
         )
         (expand / "data_update.py").write_text("def update():\n    return True\n", "utf-8")
         (expand / "start_expand.py").write_text("def execute(command, params):\n    return {}\n", "utf-8")
-        (expand / "expand.json").write_text(
+        (expand / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": "live",
-                    "explain": "live data",
-                    "open_input": True,
-                    "input_data": "input_data.md",
-                    "input_health": "正常",
-                    "start_update": "data_update.py",
-                    "open_control": False,
-                    "start_expand": "start_expand.py",
-                    "start_control": "expand_control.md",
+                    'name': 'live',
+                    'explain': 'live data',
+                    'input_open': True,
+                    'input_file': 'input_data.md',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'control_open': False,
+                    'control_script': 'start_expand.py',
+                    'control_entry': 'expand_control.md',
+                    'kind': 'expand',
                 },
                 ensure_ascii=False,
             ),
@@ -1043,14 +1051,18 @@ def run(*, context):
         sense_data = sense / "sense.md"
         sense_data.write_text("SENSE_REQUEST_ONE", "utf-8")
         (sense / "data_update.py").write_text("def update():\n    return True\n", "utf-8")
-        (sense / "sense.json").write_text(
+        (sense / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": "live",
-                    "data_md": "sense.md",
-                    "recent_update": "2026-08-07 20:00:00",
-                    "health": "正常",
-                    "start_update": "data_update.py",
+                    'name': 'live',
+                    'input_file': 'sense.md',
+                    'recent_update': '2026-08-07 20:00:00',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'kind': 'sense',
+                    'explain': 'fixture perception',
+                    'input_open': True,
+                    'control_open': False,
                 },
                 ensure_ascii=False,
             ),
@@ -2560,32 +2572,68 @@ def run(*, context):
         window = require_present(session_history(root, 'alice', 'cli', 'explicit-no-retry')).refresh()
         self.assertEqual(window.integrations[0]['status'], 'failed')
 
-    def test_deterministic_incomplete_reason_uses_full_run_retry_budget(
-        self,
-    ) -> None:
-        _, root = self.make_root()
+    def test_output_truncated_provider_response_retries_and_recovers(self) -> None:
+        _, root = self.make_root(stream=True)
 
         class TruncatedProvider:
             def __init__(_self) -> None:
                 _self.requests = []
 
-            def create(_self, request):
+            def stream(_self, request):
                 _self.requests.append(request)
-                return KemoResponse.model_validate({
-                           'request_id': request.request_id,
-                           'status': ResponseStatus.INCOMPLETE,
-                           'model': request.model,
-                           'incomplete_details': {
-                        "reason": "output_truncated",
-                        "details": {
-                            "finish_reason": "max_tokens", "category": "upstream_error",
-                            "status_code": 503, "retryable": True,
-                        },
-                    },
-                       })
+                if len(_self.requests) == 1:
+                    response = KemoResponse(
+                        request_id=request.request_id,
+                        status=ResponseStatus.INCOMPLETE,
+                        model=request.model,
+                        output=[
+                            ToolCallItem(
+                                id="call_partial",
+                                call_id="callid_partial",
+                                name="lookup",
+                                arguments={"value": "x"},
+                            )
+                        ],
+                        incomplete_details=IncompleteDetails.model_validate({
+                            "reason": "output_truncated",
+                            "details": {
+                                "finish_reason": "max_tokens",
+                                "category": "upstream_error",
+                                "status_code": 503,
+                                "retryable": True,
+                            },
+                        }),
+                    )
+                    event_type = StreamEventType.RESPONSE_INCOMPLETE
+                else:
+                    response = KemoResponse(
+                        request_id=request.request_id,
+                        status=ResponseStatus.COMPLETED,
+                        model=request.model,
+                        output=[
+                            MessageItem.text(
+                                MessageRole.ASSISTANT,
+                                "截断后已恢复",
+                                phase=MessagePhase.FINAL_ANSWER,
+                            )
+                        ],
+                    )
+                    event_type = StreamEventType.RESPONSE_COMPLETED
+                yield ProviderStreamEvent(
+                    type=event_type,
+                    sequence=0,
+                    request_id=request.request_id,
+                    response_id=response.id,
+                    response=response,
+                )
 
         provider = TruncatedProvider()
-        with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
+        self.write_tool(root / "plugins", "lookup", "plugin")
+        with (
+            patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+            patch("provider.retry.RetryManager.delay", return_value=0),
+            patch("run.tools.runtime.execute_tool") as execute_tool,
+        ):
             events = list(
                 iter_request_events(
                     {
@@ -2599,13 +2647,16 @@ def run(*, context):
                 )
             )
 
-        self.assertEqual(len(provider.requests), 1)
-        self.assertEqual([event.type for event in events].count("retrying"), 0)
-        self.assertEqual(events[-1].type, "error")
-        self.assertFalse(require_present(events[-1].error)["retryable"])
-        self.assertFalse(require_present(events[-1].error).get("retry_budget_exhausted", False))
-        self.assertEqual(require_present(events[-1].error)["stop_reason"], "output_truncated")
-        self.assertTrue(events[-1].metadata["committed"])
+        retries = [event for event in events if event.type == "retrying"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(events[-1].type, "done", events[-1].to_dict())
+        self.assertEqual(events[-1].metadata["text"], "截断后已恢复")
+        self.assertEqual(len(provider.requests), 2)
+        self.assertNotEqual(provider.requests[0].request_id, provider.requests[1].request_id)
+        self.assertEqual(provider.requests[1].parent_request_id, provider.requests[0].request_id)
+        self.assertEqual(provider.requests[1].attempt, 2)
+        self.assertEqual([event.type for event in events].count("tool_call_start"), 0)
+        execute_tool.assert_not_called()
 
     def test_transient_incomplete_metadata_retries_and_recovers(self) -> None:
         _, root = self.make_root()

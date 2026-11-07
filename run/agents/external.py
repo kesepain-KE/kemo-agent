@@ -214,7 +214,7 @@ def discover_external_agents(root: Path, user: str) -> tuple[ExternalAgentBindin
                 _, meta = resolve_expand(
                     base, user, scope, module_dir.name, require_control=True
                 )
-                if not meta.open_control:
+                if not meta.control_open:
                     continue
                 bindings.extend(
                     _load_bindings(bridge_path, scope=scope, module=module_dir.name)

@@ -1100,6 +1100,16 @@ export function ChatPage() {
     })
     setKnowledgeDrawerOpen(false)
   }
+  const referenceKnowledgeDirectory = (scope: 'user' | 'shared' | 'global', relativePath: string, name: string) => {
+    const referenceId = `${scope}:${relativePath}`
+    const marker = `[知识库目录引用 ${referenceId}]`
+    setDraft((current) => {
+      if (current.includes(marker)) return current
+      const existing = current.trimEnd()
+      return existing ? `${existing}\n${marker} ${name}` : `${marker} ${name}`
+    })
+    setKnowledgeDrawerOpen(false)
+  }
   const referenceCapability = (item: CapabilityReferenceItem) => {
     const marker = capabilityReferenceMarker(item)
     const reference = capabilityReferenceLine(item)
@@ -1146,7 +1156,7 @@ export function ChatPage() {
     regenerateLastResponse,
     uploadFiles, setCapabilityDrawerOpen,
     setKnowledgeDrawerOpen, sendGuidance, send, stopCurrentRun, knowledgeDrawerOpen,
-    knowledgeQuery, referenceKnowledge, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
+    knowledgeQuery, referenceKnowledge, referenceKnowledgeDirectory, capabilityDrawerOpen, capabilityItems, expandsQuery, skillsQuery,
     referenceCapability,
   }} />
     <GlobalConfirmDialog open={Boolean(clearTarget)} title="清空此对话？"

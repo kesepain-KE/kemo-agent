@@ -452,13 +452,14 @@ export async function putKnowledgeDocument(user: string, scope: string, path: st
 
 export async function createKnowledgeEntry(user: string, scope: string, path: string, kind: 'file' | 'directory'): Promise<Record<string, unknown>> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/entry?path=${encodeURIComponent(path)}`, {
-    method: 'POST', body: JSON.stringify({ kind }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind }),
   })
 }
 
-export async function transferKnowledgeEntry(user: string, scope: string, path: string, action: 'copy' | 'move', targetScope: string, targetPath: string): Promise<Record<string, unknown>> {
+export async function transferKnowledgeEntry(user: string, scope: string, path: string, action: 'copy' | 'move', targetScope: string, targetPath: string, autoRename = false): Promise<{ target_scope: string; new_relative_path: string }> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/entry?path=${encodeURIComponent(path)}`, {
-    method: 'PATCH', body: JSON.stringify({ action, target_scope: targetScope, target_path: targetPath }),
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, target_scope: targetScope, target_path: targetPath, ...(autoRename ? { auto_rename: true } : {}) }),
   })
 }
 

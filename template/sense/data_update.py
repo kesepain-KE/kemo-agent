@@ -8,7 +8,7 @@ RuntimeHost 会按配置周期在隔离子进程中调用零参数 ``update()``�
 
 输出：
 - ``sense.md``：进入 System Prompt 的最新感知数据；
-- ``sense.json``：最近成功时间与健康状态；
+- ``module.yaml``：最近成功时间与健康状态；
 - ``_last_run.json``：最近一次执行结果。
 - ``module/status.json``：仅供 Web 用户配置面板读取的脱敏状态。
 
@@ -19,6 +19,7 @@ RuntimeHost 会按配置周期在隔离子进程中调用零参数 ``update()``�
 from __future__ import annotations
 
 import json
+import yaml
 import os
 import sys
 import uuid
@@ -30,7 +31,7 @@ from typing import Any
 BASE_DIR = Path(__file__).resolve().parent
 SENSE_MD_PATH = BASE_DIR / "sense.md"
 STATUS_PATH = BASE_DIR / "_last_run.json"
-MANIFEST_PATH = BASE_DIR / "sense.json"
+MANIFEST_PATH = BASE_DIR / "module.yaml"
 PANEL_VALUES_PATH = BASE_DIR / "module" / "panel.values.json"
 PANEL_STATUS_PATH = BASE_DIR / "module" / "status.json"
 HOST_TZ = timezone(timedelta(hours=8))
@@ -112,9 +113,9 @@ def monotonic_timestamp(previous: Any, candidate: str) -> str:
 
 
 def write_manifest_health(*, healthy: bool, update_time: str) -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text("utf-8-sig"))
+    manifest = yaml.safe_load(MANIFEST_PATH.read_text("utf-8-sig"))
     if not isinstance(manifest, dict):
-        raise ValueError("sense.json 顶层必须是 JSON 对象")
+        raise ValueError("module.yaml 顶层必须是 YAML 映射")
     manifest["health"] = "正常" if healthy else "异常"
     if healthy:
         manifest["recent_update"] = monotonic_timestamp(
@@ -122,7 +123,7 @@ def write_manifest_health(*, healthy: bool, update_time: str) -> None:
         )
     atomic_write(
         MANIFEST_PATH,
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False),
     )
 
 

@@ -328,7 +328,7 @@ class ExpandCallPluginTests(unittest.TestCase):
         config_path.write_text("{}", "utf-8")
         (module / "start_expand.py").write_text(
             "def execute(command, params=None):\n"
-            "    return {'ok': True, 'artifacts': [{'path': '../expand.json'}]}\n",
+            "    return {'ok': True, 'artifacts': [{'path': '../module.yaml'}]}\n",
             "utf-8",
         )
         with self.assertRaisesRegex(ExpandRuntimeError, "artifact"):
@@ -348,7 +348,7 @@ class ExpandCallPluginTests(unittest.TestCase):
                 "    (root / 'artifacts').mkdir(exist_ok=True)\n"
                 "    (root / 'artifacts' / 'first.txt').write_text('first', encoding='utf-8')\n"
                 "    return {'ok': True, 'artifacts': ["
-                "{'path': 'artifacts/first.txt'}, {'path': '../expand.json'}]}\n"
+                "{'path': 'artifacts/first.txt'}, {'path': '../module.yaml'}]}\n"
             )
         )
         with self.assertRaisesRegex(ExpandRuntimeError, "artifact"):

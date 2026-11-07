@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from run.modules import ModuleSpecError, read_manifest, write_manifest
 from run.memory import contains_sensitive_credential
 from web.services.module_panels import load_module_panel
 from plugins._creator_security import (
@@ -21,7 +22,6 @@ from plugins._creator_security import (
 
 
 _ACTIONS = frozenset({"list", "create", "validate"})
-_SENSE_JSON_FIELDS = {"name", "data_md", "recent_update", "health", "start_update"}
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _SENSITIVE_NAME_RE = re.compile(
     r"(?i)(?:api_?key|token|password|passwd|secret|cookie|private_?key|验证码|密码|密钥|令牌)"
@@ -32,7 +32,7 @@ _MAX_EXPLAIN_CHARS = 2_000
 _MAX_MARKDOWN_CHARS = 100_000
 _MAX_CODE_CHARS = 500_000
 _CREATE_FILES = (
-    "sense.json",
+    "module.yaml",
     "sense.md",
     "data_update.py",
     "module/panel.json",
@@ -136,71 +136,24 @@ def _module_dir(root: Path, name: Any) -> tuple[str, Path, Path]:
     return module_name, base, module
 
 
-def _read_manifest(module: Path) -> tuple[dict[str, Any], list[str]]:
-    path = module / "sense.json"
-    if _is_link(path):
-        return {}, ["sense.json 不允许是符号链接或目录联接"]
-    if not path.is_file():
-        return {}, ["sense.json 缺失"]
-    try:
-        value = json.loads(path.read_text("utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return {}, [f"sense.json 不可读或 JSON 无效：{exc}"]
-    if not isinstance(value, dict):
-        return {}, ["sense.json 根节点必须是对象"]
-    return value, []
-
-
 def _run_validate(root: Path, name: Any) -> dict[str, Any]:
     module_name, _, module = _module_dir(root, name)
     errors: list[str] = []
-    manifest: dict[str, Any] = {}
+    spec = None
     if _is_link(module):
         errors.append("模块目录不允许是符号链接或目录联接")
     elif not module.is_dir():
         errors.append("模块目录不存在")
     else:
-        manifest, errors = _read_manifest(module)
-        if manifest:
-            missing = sorted(_SENSE_JSON_FIELDS - set(manifest))
-            unknown = sorted(set(manifest) - _SENSE_JSON_FIELDS)
-            if missing:
-                errors.append("sense.json 缺少字段：" + ", ".join(missing))
-            if unknown:
-                errors.append("sense.json 包含未知字段：" + ", ".join(unknown))
-            for field in sorted(_SENSE_JSON_FIELDS):
-                if not isinstance(manifest.get(field), str) or not manifest[field].strip():
-                    errors.append(f"{field} 必须是非空字符串")
-            health = manifest.get("health")
-            if isinstance(health, str) and health.strip() not in {"正常", "异常"}:
-                errors.append("health 必须是“正常”或“异常”")
-            recent_update = manifest.get("recent_update")
-            if isinstance(recent_update, str) and recent_update.strip():
-                try:
-                    datetime.strptime(recent_update.strip(), _TIME_FORMAT)
-                except ValueError:
-                    errors.append(f"recent_update 必须符合 {_TIME_FORMAT}")
-
-            file_fields = {"data_md": ".md", "start_update": ".py"}
-            for field, suffix in file_fields.items():
-                raw_name = manifest.get(field)
-                if not isinstance(raw_name, str) or not raw_name.strip():
-                    continue
-                file_name = raw_name.strip()
-                if Path(file_name).name != file_name or Path(file_name).suffix.casefold() != suffix:
-                    errors.append(f"{field} 必须是模块目录内的 {suffix} 文件名")
-                    continue
-                target = module / file_name
-                if _is_link(target):
-                    errors.append(f"{field} 指向的文件不允许是符号链接或目录联接：{file_name}")
-                elif not target.is_file():
-                    errors.append(f"{field} 指向的文件不存在：{file_name}")
-                elif suffix == ".py":
-                    try:
-                        source = target.read_text("utf-8-sig")
-                        compile(source, target.name, "exec")
-                    except (OSError, UnicodeError, SyntaxError) as exc:
-                        errors.append(f"start_update Python 代码无效：{exc}")
+        try:
+            spec = read_manifest(module, kind_hint="sense", scope="global")
+        except ModuleSpecError as exc:
+            errors.append(str(exc))
+        if spec:
+            try:
+                compile(spec.update_script.read_text("utf-8-sig"), spec.update_script.name, "exec")
+            except (OSError, UnicodeError, SyntaxError) as exc:
+                errors.append(f"update_script Python 代码无效：{exc}")
     panel_enabled = False
     panel_path = module / "module" / "panel.json"
     if panel_path.exists() or _is_link(panel_path):
@@ -215,9 +168,9 @@ def _run_validate(root: Path, name: Any) -> dict[str, Any]:
         "name": module_name,
         "valid": not errors,
         "errors": errors,
-        "health": str(manifest.get("health") or "异常") if manifest else "异常",
-        "recent_update": str(manifest.get("recent_update") or "") if manifest else "",
-        "data_md": str(manifest.get("data_md") or "") if manifest else "",
+        "health": spec.health if spec else "异常",
+        "recent_update": spec.recent_update or "" if spec else "",
+        "data_md": spec.input_file.name if spec and spec.input_file else "",
         "panel_enabled": panel_enabled,
     }
 
@@ -309,17 +262,16 @@ def _run_create(
     if module.exists() or _is_link(module):
         raise FileExistsError(f"感知模块已存在：{module_name}")
     manifest = {
-        "name": module_name,
-        "data_md": "sense.md",
+        "kind": "sense", "name": module_name, "explain": explain_text,
+        "input_file": "sense.md", "input_open": True, "control_open": False,
         "recent_update": datetime.now(_BEIJING).strftime(_TIME_FORMAT),
-        "health": "正常",
-        "start_update": "data_update.py",
+        "health": "正常", "update_script": "data_update.py",
     }
     temporary = base / f".{module_name}.{uuid.uuid4().hex}.tmp"
     published = False
     try:
         temporary.mkdir()
-        _write_text(temporary / "sense.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        write_manifest(temporary / "module.yaml", manifest)
         _write_text(temporary / "sense.md", sense_body)
         _write_text(temporary / "data_update.py", update_source)
         _copy_panel_template(temporary / "module", module_name)

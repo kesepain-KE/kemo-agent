@@ -15,12 +15,12 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, cast
 
 from run.extensions.attachments import validate_media_file
 from run.config import load_config
 from run.extensions.module_runtime import _atomic_json, module_execution_lock, run_protocol_process
-from run.config import ExpandMeta, read_expand_meta
+from run.modules import ModuleSpec, ModuleSpecError, read_manifest
 from run.config import MainAgentSourcePolicy
 
 
@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import os
 import json
 import sys
 from pathlib import Path
@@ -94,6 +95,9 @@ def error_metadata(exc: BaseException) -> dict:
 try:
     entry_path = Path(sys.argv[1]).resolve()
     module_root = Path(sys.argv[2]).resolve()
+    # New invocations load source even after same-second edits of equal size.
+    sys.dont_write_bytecode = True
+    sys.pycache_prefix = str(module_root / f".module-bytecode-{os.getpid()}")
     request = json.loads(sys.stdin.read())
     if not isinstance(request, dict):
         raise TypeError("拓展调用请求必须是 JSON 对象")
@@ -214,7 +218,7 @@ def resolve_expand(
     module: str,
     *,
     require_control: bool = True,
-) -> tuple[Path, ExpandMeta]:
+) -> tuple[Path, ModuleSpec]:
     """Resolve one module using the current user's Expand source policy."""
 
     root = root.resolve()
@@ -244,10 +248,11 @@ def resolve_expand(
     except ValueError as exc:
         raise ExpandRuntimeError("拓展模块解析后越出对应作用域") from exc
 
-    meta = read_expand_meta(module_dir)
-    if not meta.valid:
-        raise ExpandRuntimeError(f"拓展模块配置无效：{meta.error}")
-    if require_control and not meta.open_control:
+    try:
+        meta = read_manifest(module_dir, kind_hint="expand", scope=normalized_scope)
+    except ModuleSpecError as exc:
+        raise ExpandRuntimeError(f"拓展模块配置无效：{exc}") from exc
+    if require_control and not meta.control_open:
         raise ExpandRuntimeError(f"拓展模块没有开放操控能力：{normalized_module}")
     return module_dir, meta
 
@@ -542,10 +547,10 @@ def invoke_expand(
     if params is not None and not isinstance(params, dict):
         raise ExpandRuntimeError("params 必须是 JSON 对象")
     module_root, meta = resolve_expand(root, user, scope, module)
-    entry = module_root / meta.start_expand
+    entry = cast(Path, meta.control_script)
     _reject_link_components(module_root, entry)
     if not entry.is_file() or _is_link(entry):
-        raise ExpandRuntimeError("start_expand 不是安全的普通文件")
+        raise ExpandRuntimeError("control_script 不是安全的普通文件")
     request_text = json.dumps(
         {
             "command": command,

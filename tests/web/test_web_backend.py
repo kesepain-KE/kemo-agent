@@ -5171,17 +5171,22 @@ class WebBackendTests(unittest.TestCase):
             (module / "sense.md").write_text(module_name, "utf-8")
             (module / "data_update.py").write_text(
                 "from pathlib import Path\n"
-                f"Path('sense.md').write_text('{module_name} refreshed', encoding='utf-8')\n",
+                "def update():\n"
+                f"    Path('sense.md').write_text('{module_name} refreshed', encoding='utf-8')\n",
                 "utf-8",
             )
-            (module / "sense.json").write_text(
+            (module / "module.yaml").write_text(
                 json.dumps(
                     {
-                        "name": f"{module_name} display",
-                        "data_md": "sense.md",
-                        "recent_update": "2026-07-19 12:00:00",
-                        "health": "正常" if module_name == "runtime" else "异常",
-                        "start_update": "data_update.py",
+                        'name': f'{module_name} display',
+                        'input_file': 'sense.md',
+                        'recent_update': '2026-07-19 12:00:00',
+                        'health': '正常' if module_name == 'runtime' else '异常',
+                        'update_script': 'data_update.py',
+                        'kind': 'sense',
+                        'explain': 'fixture perception',
+                        'input_open': True,
+                        'control_open': False,
                     },
                     ensure_ascii=False,
                 ),
@@ -5244,18 +5249,19 @@ class WebBackendTests(unittest.TestCase):
                 "utf-8",
             )
             (module / "start_expand.py").write_text("print('ok')\n", "utf-8")
-            (module / "expand.json").write_text(
+            (module / "module.yaml").write_text(
                 json.dumps(
                     {
-                        "name": f"{scope} display",
-                        "explain": f"{scope} extension",
-                        "open_input": True,
-                        "input_data": "input_data.md",
-                        "input_health": "正常",
-                        "start_update": "data_update.py",
-                        "open_control": True,
-                        "start_expand": "start_expand.py",
-                        "start_control": "expand_control.md",
+                        'name': f'{scope} display',
+                        'explain': f'{scope} extension',
+                        'input_open': True,
+                        'input_file': 'input_data.md',
+                        'health': '正常',
+                        'update_script': 'data_update.py',
+                        'control_open': True,
+                        'control_script': 'start_expand.py',
+                        'control_entry': 'expand_control.md',
+                        'kind': 'expand',
                     },
                     ensure_ascii=False,
                 ),
@@ -5722,7 +5728,7 @@ class WebBackendTests(unittest.TestCase):
         self.assertFalse(broken_source["enabled"])
         self.assertFalse(broken_source["valid"])
         self.assertEqual(broken_source["health"], "异常")
-        self.assertIn("sense.json", broken_source["error"])
+        self.assertIn("module.yaml", broken_source["error"])
         self.assertNotIn("must not be injected", sense.text)
         self.assertNotIn('"project"', sense.text)
         injection_content = sense.json()["injection"]["content"]
@@ -5759,14 +5765,15 @@ class WebBackendTests(unittest.TestCase):
 
         runtime_dotenv = root / "sense" / "runtime" / ".env"
         runtime_dotenv.write_text("not-an-assignment\n", "utf-8")
-        with patch("web.services.sense.subprocess.run") as sense_process:
+        with patch("run.extensions.module_runtime.subprocess.Popen") as sense_process:
             invalid_environment = self.request(
                 app,
                 "POST",
                 "/api/users/alice/sense/runtime/refresh",
             )
         self.assertEqual(invalid_environment.status_code, 500)
-        self.assertIn("感知模块环境无效：runtime", invalid_environment.text)
+        self.assertIn("感知模块更新失败：runtime", invalid_environment.text)
+        self.assertIn("模块 .env 无效", invalid_environment.text)
         sense_process.assert_not_called()
         runtime_dotenv.unlink()
 

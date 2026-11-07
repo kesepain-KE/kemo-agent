@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import yaml
 import json
 import shutil
 import threading
@@ -13,7 +14,7 @@ import pytest
 
 from provider.schema import ChatResponse, ProviderError, ToolCall
 from run.agents import AgentRunner
-from run.config import read_expand_meta
+from run.modules import read_manifest, ModuleSpecError
 from run.engine import iter_request_events
 from run.tools import ConsecutiveIdenticalToolCallTracker
 from tests.agents.test_general_worker import OUTPUT, workspace  # noqa: F401
@@ -397,10 +398,11 @@ def test_failed_expand_query_is_reexecuted_after_provider_retry(workspace, monke
 
 def test_removed_expand_reuse_policy_is_rejected_from_module_manifest(tmp_path):
     repository = Path(__file__).resolve().parents[2]
-    raw = json.loads((repository / "template/expand/expand.json").read_text("utf-8"))
+    raw = yaml.safe_load((repository / "template/expand/module.yaml").read_text("utf-8"))
     raw["reuse_policy"] = {"reuse": ["status"]}
-    (tmp_path / "expand.json").write_text(json.dumps(raw), "utf-8")
-    assert not read_expand_meta(tmp_path).valid
+    (tmp_path / "module.yaml").write_text(json.dumps(raw), "utf-8")
+    with pytest.raises(ModuleSpecError, match="unknown_field"):
+        read_manifest(tmp_path, kind_hint="expand", scope="user")
 
 
 def test_every_builtin_action_has_an_explicit_classification():

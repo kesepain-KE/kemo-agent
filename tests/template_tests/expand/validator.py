@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import cast
 from pathlib import Path
 
 from run.extensions import EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER
 from run.extensions import run_protocol_process
-from run.config import load_prompt_source_registry, read_expand_meta
+from run.config import load_prompt_source_registry
+from run.modules import ModuleSpecError, read_manifest
 from web.services.module_panels import load_module_panel, module_panel_response
 
 from tests.template_tests.base import (
@@ -69,16 +71,17 @@ def _validate(
     with sandbox(repository_root=repository_root) as root:
         prepare_user(root, user)
         module = copy_candidate(target, root / "users" / user / "expand" / target.name)
-        meta = read_expand_meta(module)
-        if not meta.valid:
-            report.failed("expand.manifest", meta.error)
+        try:
+            meta = read_manifest(module, kind_hint="expand", scope="user")
+        except ModuleSpecError as exc:
+            report.failed("expand.manifest", str(exc))
             return
         report.passed(
             "expand.manifest",
-            "expand.json 可被真实拓展清单解析器读取",
+            "module.yaml 可被真实拓展清单解析器读取",
             name=meta.name,
-            input_enabled=meta.open_input,
-            control_enabled=meta.open_control,
+            input_enabled=meta.input_open,
+            control_enabled=meta.control_open,
         )
 
         panel_path = module / "module" / "panel.json"
@@ -102,7 +105,7 @@ def _validate(
                 containers=len(panel["containers"]),
             )
 
-        update_entry = module / meta.start_update
+        update_entry = module / meta.update_script.name
         update_imported = run_check(
             report,
             "expand.update_import",
@@ -143,23 +146,24 @@ def _validate(
         if update_status == "failed":
             return
 
-        current = read_expand_meta(module)
-        input_path = module / current.input_data
-        if not current.valid:
-            report.failed("expand.input_output", current.error)
+        try:
+            current = read_manifest(module, kind_hint="expand", scope="user")
+        except ModuleSpecError as exc:
+            report.failed("expand.input_output", str(exc))
             return
-        input_text = input_path.read_text("utf-8-sig").strip() if input_path.is_file() else ""
-        if current.open_input and not input_text:
+        input_path = current.input_file
+        input_text = input_path.read_text("utf-8-sig").strip() if input_path and input_path.is_file() else ""
+        if current.input_open and not input_text:
             report.failed("expand.input_output", "采集已开启，但 input_data Markdown 出口为空")
             return
-        if updated and current.input_health != "正常":
-            report.failed("expand.input_output", "更新完成后 input_health 未变为“正常”")
+        if updated and current.health != "正常":
+            report.failed("expand.input_output", "更新完成后 health 未变为“正常”")
             return
         report.passed(
             "expand.input_output",
             "采集端通过清单声明的 Markdown 摘要出口连接 Prompt",
             chars=len(input_text),
-            health=current.input_health,
+            health=current.health,
         )
         if panel is not None:
             panel_response = module_panel_response(module, "expand")
@@ -182,8 +186,7 @@ def _validate(
         diagnostics = registry.selection_diagnostics().get("expand", {}).get("user", {})
         discovered = target.name in diagnostics.get("selected", [])
         input_connected = (
-            not current.open_input
-            or current.input_health != "正常"
+            not current.input_open
             or not input_text
             or input_text in selection.text
         )
@@ -192,11 +195,11 @@ def _validate(
         else:
             report.failed("expand.prompt_injection", "拓展未进入 Prompt 来源选择结果")
 
-        if not current.open_control:
+        if not current.control_open:
             report.passed("expand.control_import", "清单明确关闭操控端；无需执行入口")
             report.skipped("expand.control_roundtrip", "操控端未开放")
             return
-        control_entry = module / current.start_expand
+        control_entry = cast(Path, current.control_script)
         control_imported = run_check(
             report,
             "expand.control_import",

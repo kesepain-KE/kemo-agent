@@ -6,7 +6,7 @@ python -m tests.template_tests.expand --target users/<user>/expand/<name>
 
 ## 必须成立
 
-- `expand.json` 可解析，所有声明入口和出口都留在模块边界内；
+- `module.yaml` 可解析，所有声明入口和出口都留在模块边界内；
 - 采集端提供同步零参数 `update()` 或 `main()`，成功时刷新清单声明的 Markdown
   Prompt 摘要出口和健康状态；
 - Prompt 来源注册器能够发现采集数据和操控说明；

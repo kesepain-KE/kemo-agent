@@ -8,6 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from run.modules import ModuleSpecError, read_manifest
 from pathlib import Path
 from typing import Any, Callable
 
@@ -283,7 +284,7 @@ def _update_modules(
 ) -> dict[str, Any]:
     """Run declared sense/expand updaters in bounded child processes."""
 
-    manifest_name = "sense.json" if category == "sense" else "expand.json"
+    manifest_name = "module.yaml"
     if _is_link_or_junction(modules_dir):
         return {
             "status": "failed",
@@ -362,53 +363,13 @@ def _update_modules(
             continue
 
         manifest_path = entry / manifest_name
-        if not manifest_path.is_file():
-            continue
-        if _is_link_or_junction(manifest_path):
-            reject(logical_name, f"{manifest_name} 不能是符号链接或目录联接")
-            continue
         try:
-            metadata = json.loads(manifest_path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            reject(logical_name, f"无法读取有效的 {manifest_name}: {exc}", exc)
+            spec = read_manifest(entry, kind_hint="sense" if category == "sense" else "expand", scope="global")
+        except ModuleSpecError as exc:
+            reject(logical_name, str(exc), exc)
             continue
-        if not isinstance(metadata, dict):
-            reject(logical_name, f"{manifest_name} 顶层必须是 JSON 对象")
-            continue
-
-        start_update = metadata.get("start_update")
-        if not isinstance(start_update, str) or not start_update.strip():
-            reject(logical_name, f"{manifest_name} 缺少非空 start_update")
-            continue
-        relative = Path(start_update.strip())
-        if relative.is_absolute() or ".." in relative.parts:
-            reject(logical_name, "start_update 必须是模块目录内的相对路径")
-            continue
-
         module_root = entry.resolve()
-        candidate = entry / relative
-        current = entry
-        unsafe_component = False
-        for part in relative.parts:
-            if part in {"", "."}:
-                continue
-            current = current / part
-            if _is_link_or_junction(current):
-                unsafe_component = True
-                break
-        if unsafe_component:
-            reject(logical_name, "start_update 路径不能经过符号链接或目录联接")
-            continue
-
-        update_path = candidate.resolve()
-        try:
-            update_path.relative_to(module_root)
-        except ValueError:
-            reject(logical_name, "start_update 解析后越出模块目录")
-            continue
-        if not update_path.is_file():
-            reject(logical_name, f"start_update 文件不存在：{start_update}")
-            continue
+        update_path = spec.update_script
 
         before_data = module_data_signature(module_root, manifest_name)
         run_started = time.monotonic()

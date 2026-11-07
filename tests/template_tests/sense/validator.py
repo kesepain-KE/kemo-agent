@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import cast
 from pathlib import Path
 
-from run.config import _read_sense_meta, load_prompt_source_registry
+from run.config import load_prompt_source_registry
+from run.modules import ModuleSpecError, read_manifest
 from web.services.module_panels import load_module_panel, module_panel_response
 
 from tests.template_tests.base import begin_report, check_module_update, run_check
@@ -55,16 +57,17 @@ def _validate(
 ) -> None:
     with sandbox(repository_root=repository_root) as root:
         module = copy_candidate(target, root / "sense" / target.name)
-        meta = _read_sense_meta(module)
-        if not meta.valid:
-            report.failed("sense.manifest", meta.error)
+        try:
+            meta = read_manifest(module, kind_hint="sense", scope="global")
+        except ModuleSpecError as exc:
+            report.failed("sense.manifest", str(exc))
             return
         report.passed(
             "sense.manifest",
-            "sense.json 可被真实感知清单解析器读取",
+            "module.yaml 可被真实感知清单解析器读取",
             name=meta.name,
-            update=meta.start_update,
-            output=meta.data_md,
+            update=meta.update_script.name,
+            output=meta.input_file.name if meta.input_file else None,
         )
         panel_path = module / "module" / "panel.json"
         panel, panel_error = load_module_panel(module, "sense")
@@ -86,7 +89,7 @@ def _validate(
                 path=str(panel_path.relative_to(module)),
                 containers=len(panel["containers"]),
             )
-        entry = module / meta.start_update
+        entry = module / meta.update_script.name
         imported = run_check(
             report,
             "sense.update_import",
@@ -126,16 +129,20 @@ def _validate(
         )
         if update_status == "failed":
             return
-        current = _read_sense_meta(module)
-        if not current.valid:
-            report.failed("sense.output", current.error)
+        try:
+            current = read_manifest(module, kind_hint="sense", scope="global")
+        except ModuleSpecError as exc:
+            report.failed("sense.output", str(exc))
             return
-        output_text = current.data_md_path.read_text("utf-8-sig").strip()
-        if not output_text:
+        output_text = (
+            cast(Path, current.input_file).read_text("utf-8-sig").strip()
+            if current.input_open else ""
+        )
+        if current.input_open and not output_text:
             report.failed("sense.output", "清单声明的 Markdown 数据出口为空")
             return
         if updated and current.health != "正常":
-            report.failed("sense.output", "更新完成后 sense.json.health 未变为“正常”")
+            report.failed("sense.output", "更新完成后 module.yaml.health 未变为“正常”")
             return
         report.passed(
             "sense.output",
@@ -160,7 +167,9 @@ def _validate(
             )
         registry = load_prompt_source_registry(root, "contract_user")
         selection = registry.select_perception(max_chars=1_000_000)
-        if selection.original_items >= 1 and output_text in selection.text:
+        if not current.input_open and not selection.text:
+            report.passed("sense.prompt_injection", "清单关闭数据注入，Prompt 未注入感知输出")
+        elif selection.original_items >= 1 and output_text in selection.text:
             report.passed("sense.prompt_injection", "真实 Prompt 来源注册器可发现并注入感知输出")
         else:
             report.failed("sense.prompt_injection", "感知输出未进入 Prompt 来源选择结果")

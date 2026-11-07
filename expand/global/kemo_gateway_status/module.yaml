@@ -1,0 +1,11 @@
+kind: expand
+name: Kemo 网关运行状态
+explain: 使用独立 STATUS_TOKEN 读取 Kemo 网关的脱敏运行状态、调用统计和版本信息，并生成状态图表
+input_open: false
+input_file: input_data.md
+health: 正常
+update_script: data_update.py
+control_open: true
+control_script: start_expand.py
+control_entry: expand_control.md
+recent_update: '2026-11-07 16:58:33'

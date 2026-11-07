@@ -42,6 +42,16 @@ _NON_RETRYABLE_INCOMPLETE_REASONS = frozenset(
         "user_cancelled",
     }
 )
+_OUTPUT_TRUNCATION_MARKERS = frozenset(
+    {
+        "length",
+        "max_completion_tokens",
+        "max_output_length",
+        "max_output_tokens",
+        "max_tokens",
+        "output_truncated",
+    }
+)
 _NON_RETRYABLE_INCOMPLETE_CATEGORIES = frozenset(
     {
         "auth_error",
@@ -295,11 +305,13 @@ def incomplete_retry_metadata(
     fallback_category: Any = "",
     fallback_code: Any = "",
     fallback_status_code: Any = None,
+    allow_output_truncated_retry: bool = False,
 ) -> dict[str, Any]:
     """Project extensible incomplete details into one safe retry decision.
 
     Output limits, policy filters and cancellation are deterministic for an
-    unchanged request and therefore override an erroneous ``retryable=true``.
+    unchanged request and therefore override an erroneous ``retryable=true``,
+    unless a caller explicitly permits bounded output-truncation recovery.
     Unknown incomplete reasons keep the runtime's historical bounded-retry
     behaviour unless an enclosing structured Provider error declares a
     fallback decision.
@@ -341,14 +353,37 @@ def incomplete_retry_metadata(
         maximum=120_000,
     )
 
+    output_truncated = (
+        reason == "output_truncated"
+        or (
+            reason in {"incomplete", "other"}
+            and finish_reason in _OUTPUT_TRUNCATION_MARKERS
+        )
+    )
+    retrying_truncation = allow_output_truncated_retry and output_truncated
     deterministic = (
-        reason in _NON_RETRYABLE_INCOMPLETE_REASONS
-        or finish_reason in _NON_RETRYABLE_INCOMPLETE_REASONS
-        or declared_category in _NON_RETRYABLE_INCOMPLETE_CATEGORIES
+        (
+            reason in _NON_RETRYABLE_INCOMPLETE_REASONS
+            and not (retrying_truncation and reason in _OUTPUT_TRUNCATION_MARKERS)
+        )
+        or (
+            finish_reason in _NON_RETRYABLE_INCOMPLETE_REASONS
+            and not (retrying_truncation and finish_reason in _OUTPUT_TRUNCATION_MARKERS)
+        )
+        or (
+            declared_category in _NON_RETRYABLE_INCOMPLETE_CATEGORIES
+            and not (retrying_truncation and declared_category == "output_truncated")
+        )
     )
     deterministic_fallback = (
         fallback_status in _NON_RETRYABLE_PROVIDER_STATUSES
-        or fallback_category_name in _NON_RETRYABLE_INCOMPLETE_CATEGORIES
+        or (
+            fallback_category_name in _NON_RETRYABLE_INCOMPLETE_CATEGORIES
+            and not (
+                retrying_truncation
+                and fallback_category_name == "output_truncated"
+            )
+        )
         or fallback_error_code in _NON_RETRYABLE_INCOMPLETE_CODES
     )
     declared = source.get("retryable")

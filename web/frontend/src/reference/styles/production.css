@@ -1827,6 +1827,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .knowledge-tree-row:hover, .knowledge-directory-entry:hover { background: var(--bg-hover); }
 .knowledge-tree-row.is-active, .knowledge-directory-entry.is-selected { background: var(--accent-soft); color: var(--text-primary); }
 .knowledge-tree-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.knowledge-tree-row.is-cut, .knowledge-directory-entry.is-cut { opacity: .45; }
+.knowledge-clipboard-status {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-3);
+  margin-bottom: var(--s-3); padding: var(--s-2) var(--s-3); border-left: 2px solid var(--text-secondary);
+  color: var(--text-secondary); font-size: var(--t-sm);
+}
+.knowledge-clipboard-status[hidden] { display: none; }
 .knowledge-tree-toggle { display: grid; place-items: center; width: 16px; flex-shrink: 0; }
 .knowledge-entry-icon { display: grid; place-items: center; color: var(--text-tertiary); flex-shrink: 0; }
 .knowledge-entry-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

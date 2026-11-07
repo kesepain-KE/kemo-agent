@@ -19,7 +19,7 @@ from errors import GraphExpandError
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "graph_config.json"
-MANIFEST_PATH = BASE_DIR / "expand.json"
+MANIFEST_PATH = BASE_DIR / "module.yaml"
 INPUT_PATH = BASE_DIR / "input_data.md"
 LAST_RUN_PATH = BASE_DIR / "_last_run.json"
 DATA_DIR = BASE_DIR / "data"

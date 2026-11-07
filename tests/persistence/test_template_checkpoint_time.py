@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import yaml
 import json
 from pathlib import Path
 import tempfile
@@ -22,8 +23,8 @@ def _load_template(path: Path, module_name: str):
 @pytest.mark.parametrize(
     ("relative", "manifest_name", "health_field"),
     [
-        ("template/sense/data_update.py", "sense.json", "health"),
-        ("template/expand/data_update.py", "expand.json", "input_health"),
+        ("template/sense/data_update.py", "module.yaml", "health"),
+        ("template/expand/data_update.py", "module.yaml", "input_health"),
     ],
 )
 def test_manifest_recent_update_never_moves_backwards(
@@ -48,5 +49,5 @@ def test_manifest_recent_update_never_moves_backwards(
             update_time="2026-08-16 12:00:00",
         )
 
-        stored = json.loads(manifest.read_text("utf-8"))
+        stored = yaml.safe_load(manifest.read_text("utf-8"))
         assert stored["recent_update"] == "2026-08-16 12:03:00"

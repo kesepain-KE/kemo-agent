@@ -89,6 +89,7 @@ import type { ShellOutletContext } from './appShellTypes'
 import { useChatRunRegistry } from './useChatRunRegistry'
 import { CompressionStatusIndicator } from './CompressionStatusIndicator'
 import { useCompressionStatus } from '../store/compressionStatus'
+import { useKnowledgeClipboard } from '../store/knowledgeClipboard'
 import {
   CONVERSATION_COMMAND_EVENT,
   chatRunKey,
@@ -247,6 +248,7 @@ export function AppShell() {
 
   useLayoutEffect(() => {
     useUiStore.getState().activateLanguage(user)
+    useKnowledgeClipboard.getState().activateUser(user)
   }, [user])
 
   useEffect(() => {
@@ -653,6 +655,7 @@ export function AppShell() {
     setLogoutPending(true)
     try {
       await logoutAuth()
+      useKnowledgeClipboard.getState().clear()
       queryClient.removeQueries({
         predicate: (query) => query.queryKey[0] !== 'auth-status',
       })

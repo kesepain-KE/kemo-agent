@@ -112,7 +112,7 @@ class UpdateModuleTests(unittest.TestCase):
                 module = Path(relative)
                 for name in files:
                     write(source / module / name, f"new {name}")
-                write_json(source / module / "expand.json", {"open_input": False})
+                write_json(source / module / "module.yaml", {"input_open": False})
                 write(source / module / "input_data.md", "source status")
                 write_json(
                     source / module / "module" / "panel.values.json",
@@ -214,7 +214,7 @@ class UpdateModuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             write(root / "expand" / "share" / "register.py", "old register")
-            write(root / "expand" / "share" / "weather" / "expand.json", "old manifest")
+            write(root / "expand" / "share" / "weather" / "module.yaml", "old manifest")
             write(root / "expand" / "share" / "weather" / "module.py", "old module")
             write(root / "operator-note.txt", "keep")
 
@@ -224,7 +224,7 @@ class UpdateModuleTests(unittest.TestCase):
             write(root / "expand" / "share" / "register.py", "new register")
             write(root / "expand" / "share" / "weather" / "module.py", "new module")
             write(root / "expand" / "share" / "weather" / "new.py", "failed update")
-            write(root / "expand" / "share" / "new_module" / "expand.json", "failed update")
+            write(root / "expand" / "share" / "new_module" / "module.yaml", "failed update")
 
             backup_update.restore_backup(backup_dir=backup, root=root)
 
@@ -462,21 +462,18 @@ class UpdateModuleTests(unittest.TestCase):
             module = Path(core_update.GATEWAY_STATUS_EXPAND)
             for name in core_update.GATEWAY_STATUS_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "expand.json", {
-                "name": "Kemo 网关运行状态",
-                "open_input": False,
-                "input_health": "正常",
-            })
+            write_json(source / module / "module.yaml", {'name': 'Kemo 网关运行状态', 'input_open': False, 'health': '正常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "gateway_config.json", {
                 "base_url": "http://127.0.0.1:7531",
                 "status_token": "local-secret",
             })
-            write_json(target / module / "expand.json", {
-                "name": "old",
-                "open_input": True,
-                "input_health": "异常",
-                "recent_update": "2026-07-28 12:00:00",
+            write_json(target / module / "module.yaml", {
+                'name': 'old',
+                'input_open': True,
+                'health': '异常',
+                'recent_update': '2026-07-28 12:00:00',
+                'kind': 'expand',
             })
             write(target / module / "input_data.md", "local runtime status")
             write(target / module / "data" / "gateway_status.json", "local snapshot")
@@ -491,9 +488,9 @@ class UpdateModuleTests(unittest.TestCase):
                 json.loads((target / module / "gateway_config.json").read_text("utf-8"))["status_token"],
                 "local-secret",
             )
-            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
-            self.assertTrue(manifest["open_input"])
-            self.assertEqual(manifest["input_health"], "异常")
+            manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
+            self.assertTrue(manifest["input_open"])
+            self.assertEqual(manifest["health"], "异常")
             self.assertEqual(manifest["recent_update"], "2026-07-28 12:00:00")
 
     def test_core_installs_kemo_graph_expand_and_preserves_local_state(self) -> None:
@@ -504,11 +501,7 @@ class UpdateModuleTests(unittest.TestCase):
             module = Path(core_update.KEMO_GRAPH_EXPAND)
             for name in core_update.KEMO_GRAPH_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "expand.json", {
-                "name": "Kemo Graph 外挂文档站",
-                "open_input": False,
-                "input_health": "正常",
-            })
+            write_json(source / module / "module.yaml", {'name': 'Kemo Graph 外挂文档站', 'input_open': False, 'health': '正常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "graph_config.json", {
                 "schema_version": 1,
@@ -519,11 +512,12 @@ class UpdateModuleTests(unittest.TestCase):
             write_json(target / module / "auto_update_state.json", {"pending_domains": ["global:knowledge"]})
             write_json(target / module / "_last_run.json", {"status": "ok"})
             write_json(target / module / "_runtime.json", {"running": False})
-            write_json(target / module / "expand.json", {
-                "name": "old",
-                "open_input": True,
-                "input_health": "异常",
-                "recent_update": "2026-08-05 12:00:00",
+            write_json(target / module / "module.yaml", {
+                'name': 'old',
+                'input_open': True,
+                'health': '异常',
+                'recent_update': '2026-08-05 12:00:00',
+                'kind': 'expand',
             })
             write(target / module / "input_data.md", "local graph status")
             write(target / module / "data" / "kemo_graph_status.json", "local snapshot")
@@ -568,9 +562,9 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertEqual((target / module / "artifacts" / "query.json").read_text("utf-8"), "local query artifact")
             self.assertTrue((target / module / "_last_run.json").is_file())
             self.assertTrue((target / module / "_runtime.json").is_file())
-            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
-            self.assertFalse(manifest["open_input"])
-            self.assertEqual(manifest["input_health"], "异常")
+            manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
+            self.assertFalse(manifest["input_open"])
+            self.assertEqual(manifest["health"], "异常")
             self.assertEqual(manifest["recent_update"], "2026-08-05 12:00:00")
 
     def test_core_keeps_valid_kemo_graph_activation(self) -> None:
@@ -581,7 +575,7 @@ class UpdateModuleTests(unittest.TestCase):
             module = Path(core_update.KEMO_GRAPH_EXPAND)
             for name in core_update.KEMO_GRAPH_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "expand.json", {"open_input": False})
+            write_json(source / module / "module.yaml", {"input_open": False})
             write(source / module / "input_data.md", "new catalog")
             write_json(target / module / "graph_config.json", {
                 "schema_version": 2,
@@ -590,8 +584,8 @@ class UpdateModuleTests(unittest.TestCase):
                 "libraries": [{"id": "docs", "kind": "service_default", "enabled": True}],
             })
             core_update.update(source, target, assume_yes=True)
-            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
-            self.assertTrue(manifest["open_input"])
+            manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
+            self.assertTrue(manifest["input_open"])
 
     def test_core_updates_kemo_app_expand_and_preserves_local_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -601,11 +595,7 @@ class UpdateModuleTests(unittest.TestCase):
             module = Path(core_update.KEMO_APP_EXPAND)
             for name in core_update.KEMO_APP_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "expand.json", {
-                "name": "kemo app 桥接服务",
-                "open_input": False,
-                "input_health": "异常",
-            })
+            write_json(source / module / "module.yaml", {'name': 'kemo app 桥接服务', 'input_open': False, 'health': '异常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "config.json", {
                 "token_sha256": "a" * 64,
@@ -618,11 +608,12 @@ class UpdateModuleTests(unittest.TestCase):
             })
             write_json(target / module / "credential_registry.json", {"local": True})
             write_json(target / module / "_runtime.json", {"running": True})
-            write_json(target / module / "expand.json", {
-                "name": "old",
-                "open_input": True,
-                "input_health": "正常",
-                "recent_update": "2026-08-11 20:00:00",
+            write_json(target / module / "module.yaml", {
+                'name': 'old',
+                'input_open': True,
+                'health': '正常',
+                'recent_update': '2026-08-11 20:00:00',
+                'kind': 'expand',
             })
             write(target / module / "input_data.md", "local bridge status")
             write(target / module / "logs" / "server.log", "local log")
@@ -647,9 +638,9 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertTrue(json.loads((target / module / "credential_registry.json").read_text("utf-8"))["local"])
             self.assertTrue(json.loads((target / module / "_runtime.json").read_text("utf-8"))["running"])
             self.assertEqual((target / module / "logs" / "server.log").read_text("utf-8"), "local log")
-            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
-            self.assertTrue(manifest["open_input"])
-            self.assertEqual(manifest["input_health"], "正常")
+            manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
+            self.assertTrue(manifest["input_open"])
+            self.assertEqual(manifest["health"], "正常")
             self.assertEqual(manifest["recent_update"], "2026-08-11 20:00:00")
 
     def test_core_preserves_active_kemo_app_when_readiness_is_temporarily_invalid(self) -> None:
@@ -660,11 +651,7 @@ class UpdateModuleTests(unittest.TestCase):
             module = Path(core_update.KEMO_APP_EXPAND)
             for name in core_update.KEMO_APP_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "expand.json", {
-                "name": "kemo app 桥接服务",
-                "open_input": False,
-                "input_health": "异常",
-            })
+            write_json(source / module / "module.yaml", {'name': 'kemo app 桥接服务', 'input_open': False, 'health': '异常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "config.json", {
                 "token_sha256": "a" * 64,
@@ -673,16 +660,12 @@ class UpdateModuleTests(unittest.TestCase):
                 "users_path": "users.json",
             })
             write_json(target / module / "users.json", {})
-            write_json(target / module / "expand.json", {
-                "name": "old",
-                "open_input": True,
-                "input_health": "异常",
-            })
+            write_json(target / module / "module.yaml", {'name': 'old', 'input_open': True, 'health': '异常', 'kind': 'expand'})
 
             core_update.update(source, target, assume_yes=True)
 
-            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
-            self.assertTrue(manifest["open_input"])
+            manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
+            self.assertTrue(manifest["input_open"])
             self.assertEqual(
                 json.loads((target / module / "config.json").read_text("utf-8"))["session_secret"],
                 "",
@@ -700,7 +683,7 @@ class UpdateModuleTests(unittest.TestCase):
             module = Path(core_update.KEMO_APP_EXPAND)
             for name in core_update.KEMO_APP_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "expand.json", {"open_input": False})
+            write_json(source / module / "module.yaml", {"input_open": False})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "config.json", {
                 "token_sha256": "a" * 64,
@@ -712,12 +695,12 @@ class UpdateModuleTests(unittest.TestCase):
             write_json(target / module / "users.json", {
                 "alice": {"enabled": True, "salt": "salt", "hash": "hash"},
             })
-            write_json(target / module / "expand.json", {"open_input": False})
+            write_json(target / module / "module.yaml", {"input_open": False})
 
             core_update.update(source, target, assume_yes=True)
 
-            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
-            self.assertFalse(manifest["open_input"])
+            manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
+            self.assertFalse(manifest["input_open"])
 
     def test_core_keeps_new_kemo_app_install_inactive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -727,17 +710,13 @@ class UpdateModuleTests(unittest.TestCase):
             module = Path(core_update.KEMO_APP_EXPAND)
             for name in core_update.KEMO_APP_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "expand.json", {
-                "name": "kemo app 桥接服务",
-                "open_input": False,
-                "input_health": "异常",
-            })
+            write_json(source / module / "module.yaml", {'name': 'kemo app 桥接服务', 'input_open': False, 'health': '异常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
 
             core_update.update(source, target, assume_yes=True)
 
-            manifest = json.loads((target / module / "expand.json").read_text("utf-8"))
-            self.assertFalse(manifest["open_input"])
+            manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
+            self.assertFalse(manifest["input_open"])
 
     def test_agents_merge_does_not_delete_local_only_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

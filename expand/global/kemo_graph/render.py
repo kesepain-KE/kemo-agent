@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import yaml
 from datetime import datetime
 from typing import Any
 
@@ -174,25 +175,15 @@ def catalog_markdown(config: GraphConfig | None) -> str:
 
 
 def _update_manifest(*, active: bool, healthy: bool) -> None:
-    try:
-        manifest = json.loads(MANIFEST_PATH.read_text("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        manifest = {}
+    manifest = yaml.safe_load(MANIFEST_PATH.read_text("utf-8"))
     previous_update = manifest.get("recent_update")
     checkpoint = _checkpoint_time()
     manifest.update({
-        "name": "Kemo Graph 外挂文档站",
-        "explain": "注册外部或内置知识图谱文档库，仅在用户明确要求时查询、同步或构建",
-        "open_input": active,
-        "input_data": "input_data.md",
-        "input_health": "正常" if healthy else "异常",
-        "start_update": "data_update.py",
-        "open_control": True,
-        "start_expand": "start_expand.py",
-        "start_control": "expand_control.md",
+        "input_open": active,
+        "health": "正常" if healthy else "异常",
         "recent_update": _monotonic_timestamp(previous_update, checkpoint),
     })
-    atomic_json(MANIFEST_PATH, manifest)
+    atomic_text(MANIFEST_PATH, yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False))
 
 
 def refresh_catalog() -> dict[str, Any]:

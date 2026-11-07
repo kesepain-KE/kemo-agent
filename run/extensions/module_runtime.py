@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
+import yaml
+
+from run.modules import write_manifest
 from run.config import ConfigError, dotenv_values
 from run.infra import cancellable_subprocess_kwargs, terminate_process_tree
 
@@ -83,6 +86,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import os
 import json
 import sys
 from pathlib import Path
@@ -106,6 +110,9 @@ def emit(payload: dict, *, stream) -> None:
 try:
     update_path = Path(sys.argv[1]).resolve()
     module_root = Path(sys.argv[2]).resolve()
+    # New invocations load source even after same-second edits of equal size.
+    sys.dont_write_bytecode = True
+    sys.pycache_prefix = str(module_root / f".module-bytecode-{os.getpid()}")
     sys.path.insert(0, str(module_root))
     if update_path.parent != module_root:
         sys.path.insert(0, str(update_path.parent))
@@ -366,10 +373,10 @@ def record_module_health(
 
     if _is_link(manifest_path):
         raise OSError(f"{manifest_path.name} 不能是符号链接或目录联接")
-    payload = json.loads(manifest_path.read_text("utf-8"))
+    payload = yaml.safe_load(manifest_path.read_text("utf-8-sig"))
     if not isinstance(payload, dict):
-        raise ValueError(f"{manifest_path.name} 顶层必须是 JSON 对象")
-    field = "health" if category == "sense" else "input_health"
+        raise ValueError(f"{manifest_path.name} 顶层必须是 YAML 映射")
+    field = "health"
     next_health = "正常" if healthy else "异常"
     previous_health = str(payload.get(field) or "")
     payload[field] = next_health
@@ -393,7 +400,7 @@ def record_module_health(
             return
     elif previous_health == next_health:
         return
-    _atomic_json(manifest_path, payload)
+    write_manifest(manifest_path, payload)
 
 
 def _tail(handle: Any, *, limit: int = _MAX_CAPTURE_BYTES) -> str:

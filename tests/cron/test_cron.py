@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import yaml
 import json
 import tempfile
 import threading
@@ -548,17 +549,22 @@ class ExecutorTests(unittest.TestCase):
 
     def test_system_module_updates_support_update_and_main(self) -> None:
         modules = (
-            ("sense", "sense.json", "update_entry", "update"),
-            ("sense", "sense.json", "main_entry", "main"),
-            ("expand/global", "expand.json", "expand_entry", "main"),
+            ("sense", "module.yaml", "update_entry", "update"),
+            ("sense", "module.yaml", "main_entry", "main"),
+            ("expand/global", "module.yaml", "expand_entry", "main"),
         )
         for parent, manifest, name, function_name in modules:
             directory = self.root / parent / name
             directory.mkdir(parents=True)
             (directory / manifest).write_text(
-                json.dumps({"start_update": "data_update.py"}),
+                json.dumps({
+                    "kind": "sense" if parent == "sense" else "expand", "name": name,
+                    "explain": "fixture", "health": "正常", "update_script": "data_update.py",
+                    "input_open": True, "input_file": "data.md", "control_open": False,
+                }),
                 "utf-8",
             )
+            (directory / "data.md").write_text("snapshot", "utf-8")
             (directory / "data_update.py").write_text(
                 "from pathlib import Path\n"
                 f"def {function_name}():\n"
@@ -605,17 +611,24 @@ class ExecutorTests(unittest.TestCase):
 
         escape = sense / "escape"
         escape.mkdir(parents=True)
-        (escape / "sense.json").write_text(
-            json.dumps({"start_update": "../../outside.py"}),
+        (escape / "module.yaml").write_text(
+            json.dumps({
+                "kind": "sense", "name": "escape", "explain": "fixture", "health": "正常",
+                "update_script": "../../outside.py", "input_open": False, "control_open": False,
+            }),
             "utf-8",
         )
         invalid = sense / "invalid_json"
         invalid.mkdir()
-        (invalid / "sense.json").write_text("{", "utf-8")
+        (invalid / "module.yaml").write_text("{", "utf-8")
         missing_callable = sense / "missing_callable"
         missing_callable.mkdir()
-        (missing_callable / "sense.json").write_text(
-            json.dumps({"start_update": "data_update.py"}),
+        (missing_callable / "module.yaml").write_text(
+            json.dumps({
+                "kind": "sense", "name": "missing_callable", "explain": "fixture",
+                "health": "正常", "update_script": "data_update.py",
+                "input_open": False, "control_open": False,
+            }),
             "utf-8",
         )
         (missing_callable / "data_update.py").write_text("VALUE = 1\n", "utf-8")
@@ -638,8 +651,8 @@ class ExecutorTests(unittest.TestCase):
             {"escape", "invalid_json", "missing_callable"},
         )
         reasons = {item["module"]: item["reason"] for item in result["errors"]}
-        self.assertIn("相对路径", reasons["escape"])
-        self.assertIn("有效的 sense.json", reasons["invalid_json"])
+        self.assertIn("path_escape", reasons["escape"])
+        self.assertIn("unreadable", reasons["invalid_json"])
         self.assertIn("update() 或 main()", reasons["missing_callable"])
 
     def test_expand_updates_are_scoped_to_system_roots_or_one_user(self) -> None:
@@ -651,13 +664,15 @@ class ExecutorTests(unittest.TestCase):
         )
         for directory, marker in modules:
             directory.mkdir(parents=True)
-            (directory / "expand.json").write_text(
+            (directory / "module.yaml").write_text(
                 json.dumps({
-                    "start_update": "data_update.py",
-                    "input_health": "异常",
+                    "kind": "expand", "name": marker, "explain": "fixture",
+                    "update_script": "data_update.py", "health": "异常",
+                    "input_open": True, "input_file": "data.md", "control_open": False,
                 }),
                 "utf-8",
             )
+            (directory / "data.md").write_text("snapshot", "utf-8")
             (directory / "data_update.py").write_text(
                 "from pathlib import Path\n"
                 "def update():\n"
@@ -706,15 +721,17 @@ class ExecutorTests(unittest.TestCase):
     def test_module_failure_result_is_not_reported_as_success(self) -> None:
         module = self.root / "users" / "alice" / "expand" / "broken"
         module.mkdir(parents=True)
-        manifest_path = module / "expand.json"
+        manifest_path = module / "module.yaml"
         manifest_path.write_text(
             json.dumps({
-                "start_update": "data_update.py",
-                "input_health": "正常",
+                "kind": "expand", "name": "broken", "explain": "fixture",
+                "update_script": "data_update.py", "health": "正常",
                 "recent_update": "2026-07-20 08:00:00",
+                "input_open": True, "input_file": "data.md", "control_open": False,
             }),
             "utf-8",
         )
+        (module / "data.md").write_text("snapshot", "utf-8")
         (module / "data_update.py").write_text(
             "def update():\n"
             "    return {'ok': False, 'error': 'sensor offline'}\n",
@@ -736,21 +753,23 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["failed"], ["broken"])
         self.assertIn("sensor offline", result["errors"][0]["reason"])
-        manifest = json.loads(manifest_path.read_text("utf-8"))
-        self.assertEqual(manifest["input_health"], "异常")
+        manifest = yaml.safe_load(manifest_path.read_text("utf-8"))
+        self.assertEqual(manifest["health"], "异常")
         self.assertEqual(manifest["recent_update"], "2026-07-20 08:00:00")
 
     def test_module_update_timeout_marks_module_failed(self) -> None:
         module = self.root / "users" / "alice" / "expand" / "slow"
         module.mkdir(parents=True)
-        manifest_path = module / "expand.json"
+        manifest_path = module / "module.yaml"
         manifest_path.write_text(
             json.dumps({
-                "start_update": "data_update.py",
-                "input_health": "正常",
+                "kind": "expand", "name": "slow", "explain": "fixture",
+                "update_script": "data_update.py", "health": "正常",
+                "input_open": True, "input_file": "data.md", "control_open": False,
             }),
             "utf-8",
         )
+        (module / "data.md").write_text("snapshot", "utf-8")
         (module / "data_update.py").write_text(
             "import time\n"
             "def update():\n"
@@ -774,7 +793,7 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(result["errors"][0]["exception_type"], "TimeoutExpired")
         self.assertIn("0.05 秒", result["errors"][0]["reason"])
         self.assertEqual(
-            json.loads(manifest_path.read_text("utf-8"))["input_health"],
+            yaml.safe_load(manifest_path.read_text("utf-8"))["health"],
             "异常",
         )
 

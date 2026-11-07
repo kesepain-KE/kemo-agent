@@ -48,7 +48,7 @@ python -m tests.template_tests --kind auto --target <path>
 
 ### 拓展
 
-- 检查 `expand.json`、模块边界、Markdown 数据出口、Prompt 注册和健康状态。
+- 检查 `module.yaml`、模块边界、Markdown 数据出口、Prompt 注册和健康状态。
 - 采集端验证同步零参数 `update()` 或 `main()`。
 - 操控端验证 `execute(command, params)` 及兼容旧入口的 JSON 子进程协议。
 - `input_data.md` 只需保存适合注入 Prompt 的摘要或资源引用；操控结果和大型 artifacts 不要求绕经该文件。
@@ -62,7 +62,7 @@ python -m tests.template_tests --kind auto --target <path>
 
 ### 感知
 
-- 检查 `sense.json` 和声明路径。
+- 检查 `module.yaml` 和声明路径。
 - 验证同步零参数 `update()` 或 `main()`。
 - 成功采集后检查 Markdown 出口、时间、健康状态以及真实 Prompt 来源发现。
 - 采集内容可以来自传感器、浏览器、数据库、API、文件或媒体管线，测试不限制内部实现。

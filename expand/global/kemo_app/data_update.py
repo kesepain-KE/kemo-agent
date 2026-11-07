@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import yaml
 import os
 import time
 import urllib.request
@@ -18,7 +19,7 @@ from panel_control import write_status
 
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_PATH = BASE_DIR / "input_data.md"
-MANIFEST_PATH = BASE_DIR / "expand.json"
+MANIFEST_PATH = BASE_DIR / "module.yaml"
 CONNECTIONS_PATH = BASE_DIR / "_connections.json"
 ACTIVATION_PATH = BASE_DIR / "_activated.json"
 MIN_LAUNCH_INTERVAL_SECONDS = 60
@@ -70,14 +71,14 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _set_manifest(*, active: bool, healthy: bool, update_time: str = "") -> None:
-    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload = yaml.safe_load(MANIFEST_PATH.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("expand.json 顶层必须是 JSON 对象")
-    previous_active = bool(payload.get("open_input"))
-    previous_health = str(payload.get("input_health") or "")
+        raise ValueError("module.yaml 顶层必须是 YAML 映射")
+    previous_active = bool(payload.get("input_open"))
+    previous_health = str(payload.get("health") or "")
     next_health = "正常" if healthy else "异常"
-    payload["open_input"] = active
-    payload["input_health"] = next_health
+    payload["input_open"] = active
+    payload["health"] = next_health
     if active and healthy and update_time:
         previous_update = _parse_time(payload.get("recent_update"))
         current_update = _parse_time(update_time)
@@ -95,7 +96,7 @@ def _set_manifest(*, active: bool, healthy: bool, update_time: str = "") -> None
             payload["recent_update"] = update_time
     elif not active:
         payload.pop("recent_update", None)
-    _atomic_json(MANIFEST_PATH, payload)
+    _atomic_text(MANIFEST_PATH, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
 
 
 def _persistence_time(value: datetime) -> str:

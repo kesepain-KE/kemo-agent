@@ -5,6 +5,7 @@ from tests.type_assertions import http_headers
 from tests.type_assertions import require_present
 
 import json
+import yaml
 from io import BytesIO
 import os
 from pathlib import Path
@@ -29,7 +30,7 @@ import start_expand  # noqa: E402
 from plugins.kemo_graph import tool as graph_tool  # noqa: E402
 from plugins.kemo_graph.tool import run as graph_guide  # noqa: E402
 from plugins.manifest import parse_plugin_manifest  # noqa: E402
-from run.config import read_expand_meta  # noqa: E402
+from run.modules import read_manifest, ModuleSpecError  # noqa: E402
 from web.services.module_panels import load_module_panel  # noqa: E402
 
 
@@ -44,19 +45,20 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.source = self.root / "documents" / "project"
         self.store.mkdir(parents=True)
         self.source.mkdir(parents=True)
-        self.manifest = self.module / "expand.json"
+        self.manifest = self.module / "module.yaml"
         self.manifest.write_text(
             json.dumps({
-                "name": "Kemo Graph 外挂文档站",
-                "explain": "test",
-                "open_input": False,
-                "input_data": "input_data.md",
-                "input_health": "正常",
-                "start_update": "data_update.py",
-                "open_control": True,
-                "start_expand": "start_expand.py",
-                "start_control": "expand_control.md",
-                "recent_update": "2026-08-05 12:00:00",
+                'name': 'Kemo Graph 外挂文档站',
+                'explain': 'test',
+                'input_open': False,
+                'input_file': 'input_data.md',
+                'health': '正常',
+                'update_script': 'data_update.py',
+                'control_open': True,
+                'control_script': 'start_expand.py',
+                'control_entry': 'expand_control.md',
+                'recent_update': '2026-08-05 12:00:00',
+                'kind': 'expand',
             }, ensure_ascii=False),
             "utf-8",
         )
@@ -131,11 +133,12 @@ class KemoGraphExpandTests(unittest.TestCase):
         }
 
     def test_real_manifest_is_a_valid_expand_module(self) -> None:
-        meta = read_expand_meta(MODULE_ROOT)
-        self.assertTrue(meta.valid, meta.error)
-        self.assertTrue(meta.open_control)
-        self.assertEqual(meta.start_update, "data_update.py")
-        self.assertEqual(meta.start_expand, "start_expand.py")
+        meta = read_manifest(MODULE_ROOT, kind_hint="expand", scope="global")
+        self.assertEqual(meta.kind, "expand")
+        self.assertTrue(meta.control_open)
+        self.assertEqual(meta.update_script.name, "data_update.py")
+        assert meta.control_script is not None
+        self.assertEqual(meta.control_script.name, "start_expand.py")
 
     def test_user_panel_exposes_endpoint_configuration_and_backend_check(self) -> None:
         panel, error = load_module_panel(MODULE_ROOT, "expand")
@@ -711,17 +714,13 @@ class KemoGraphExpandTests(unittest.TestCase):
     def test_manifest_recent_update_never_moves_backwards(self) -> None:
         self.paths["MANIFEST_PATH"].write_text(
             json.dumps(
-                {
-                    "recent_update": "2099-08-16 12:03:00",
-                    "open_input": True,
-                    "input_health": "正常",
-                },
+                {'recent_update': '2099-08-16 12:03:00', 'input_open': True, 'health': '正常', 'kind': 'expand'},
                 ensure_ascii=False,
             ),
             "utf-8",
         )
         render._update_manifest(active=True, healthy=True)  # noqa: SLF001
-        manifest = json.loads(self.paths["MANIFEST_PATH"].read_text("utf-8"))
+        manifest = yaml.safe_load(self.paths["MANIFEST_PATH"].read_text("utf-8"))
         self.assertEqual(manifest["recent_update"], "2099-08-16 12:03:00")
 
     def test_public_catalog_uses_cached_document_counters_without_network(self) -> None:

@@ -92,21 +92,26 @@ def test_module_change_evidence_is_from_declared_data_not_an_updated_label(tmp_p
     modules = tmp_path / "expand"
     module = modules / "demo"
     module.mkdir(parents=True)
-    manifest = {"start_update": "update.py", "input_data": "input_data.md", "input_health": "正常"}
-    if change == "unknown":
-        manifest.pop("input_data")
-    path = module / "expand.json"
+    manifest = {
+        "kind": "expand", "name": "demo", "explain": "fixture",
+        "health": "异常" if change == "health" else "正常",
+        "update_script": "update.py", "input_file": "input_data.md", "input_open": True,
+        "control_open": False,
+    }
+    path = module / "module.yaml"
     path.write_text(json.dumps(manifest), encoding="utf-8")
     (module / "update.py").write_text("# offline fixture", encoding="utf-8")
     data = module / "input_data.md"
-    data.write_text("stable data", encoding="utf-8")
+    data.write_text("x" * 1_048_577 if change == "unknown" else "stable data", encoding="utf-8")
 
     def update(*_args, **_kwargs):
         if change == "data":
             data.write_text("changed data", encoding="utf-8")
         elif change in {"health", "timestamp"}:
             value = json.loads(path.read_text(encoding="utf-8"))
-            value["open_input" if change == "health" else "recent_update"] = True
+            value["health" if change == "health" else "recent_update"] = (
+                "正常" if change == "health" else "2026-10-30 10:05:00"
+            )
             path.write_text(json.dumps(value), encoding="utf-8")
         return {"ok": False, "reason": "offline failure"} if change == "failed" else {"ok": True}
 
@@ -120,8 +125,8 @@ def test_module_change_evidence_is_from_declared_data_not_an_updated_label(tmp_p
 @pytest.mark.parametrize(
     ("manifest_name", "data_key", "timestamp_line"),
     [
-        ("sense.json", "data_md", "_数据来源：Open-Meteo；采集时间：2026-10-30 10:00:00_"),
-        ("expand.json", "input_data", "> 最近采集：2026-10-30 10:00:00（北京时间）"),
+        ("module.yaml", "input_file", "_数据来源：Open-Meteo；采集时间：2026-10-30 10:00:00_"),
+        ("module.yaml", "input_file", "> 最近采集：2026-10-30 10:00:00（北京时间）"),
     ],
 )
 def test_module_signature_uses_declared_data_file_and_ignores_collection_time(
@@ -160,13 +165,18 @@ def test_module_signature_uses_declared_data_file_and_ignores_collection_time(
 def test_sense_collection_timestamp_noop_is_hourly_aggregated(tmp_path, monkeypatch):
     module = tmp_path / "sense" / "weather"
     module.mkdir(parents=True)
-    manifest = module / "sense.json"
+    manifest = module / "module.yaml"
     manifest.write_text(
         json.dumps({
-            "data_md": "sense.md",
-            "health": "正常",
-            "recent_update": "2026-10-30 10:00:00",
-            "start_update": "update.py",
+            'name': 'weather',
+            'input_file': 'sense.md',
+            'health': '正常',
+            'recent_update': '2026-10-30 10:00:00',
+            'update_script': 'update.py',
+            'kind': 'sense',
+            'explain': 'fixture perception',
+            'input_open': True,
+            'control_open': False,
         }),
         encoding="utf-8",
     )
@@ -203,7 +213,7 @@ def test_sense_collection_timestamp_noop_is_hourly_aggregated(tmp_path, monkeypa
 
 @pytest.mark.parametrize("reparse", [False, True])
 def test_module_evidence_without_new_pathlib_junction_api(tmp_path, monkeypatch, reparse):
-    (tmp_path / "expand.json").write_text('{"input_data":"data.md"}', encoding="utf-8")
+    (tmp_path / "module.yaml").write_text('{"input_file":"data.md"}', encoding="utf-8")
     (tmp_path / "data.md").write_text("stable", encoding="utf-8")
     original = Path.lstat
 
@@ -215,7 +225,7 @@ def test_module_evidence_without_new_pathlib_junction_api(tmp_path, monkeypatch,
 
     monkeypatch.delattr(Path, "is_junction", raising=False)
     monkeypatch.setattr(Path, "lstat", attributes)
-    assert (module_data_signature(tmp_path, "expand.json") is None) is reparse
+    assert (module_data_signature(tmp_path, "module.yaml") is None) is reparse
 
 
 def test_simulated_day_of_three_stable_collectors_stays_below_200_rows(tmp_path, monkeypatch):

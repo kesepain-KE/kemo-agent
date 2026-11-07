@@ -1,0 +1,10 @@
+kind: expand
+name: my_expand
+explain: 描述此拓展模块的功能
+input_open: true
+input_file: input_data.md
+health: 异常
+update_script: data_update.py
+control_open: true
+control_script: start_expand.py
+control_entry: expand_control.md

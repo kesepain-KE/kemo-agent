@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import yaml
 import os
 import ssl
 from io import BytesIO
@@ -19,7 +20,7 @@ from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "gateway_config.json"
-MANIFEST_PATH = BASE_DIR / "expand.json"
+MANIFEST_PATH = BASE_DIR / "module.yaml"
 INPUT_PATH = BASE_DIR / "input_data.md"
 LAST_RUN_PATH = BASE_DIR / "_last_run.json"
 DATA_PATH = BASE_DIR / "data" / "gateway_status.json"
@@ -702,12 +703,12 @@ def _render_chart(snapshot: dict[str, Any], target: Path) -> None:
 
 
 def _update_manifest(*, active: bool, healthy: bool, update_time: str) -> None:
-    payload = json.loads(MANIFEST_PATH.read_text("utf-8"))
-    payload["open_input"] = active
-    payload["input_health"] = "正常" if healthy else "异常"
+    payload = yaml.safe_load(MANIFEST_PATH.read_text("utf-8"))
+    payload["input_open"] = active
+    payload["health"] = "正常" if healthy else "异常"
     if healthy:
         payload["recent_update"] = _monotonic_timestamp(payload.get("recent_update"), update_time)
-    _atomic_json(MANIFEST_PATH, payload)
+    _atomic_text(MANIFEST_PATH, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
 
 
 def _inactive_output(update_time: str) -> None:

@@ -1,5 +1,6 @@
 import { t as tr } from '../i18n'
 import { h, pageHead, chooseFile, mutate, Api, Store, icon, onClickOutside, toast, LIVE_KNOWLEDGE, makeSearchBox, fill, emptyState, fmtBytes, fmtRelative, renderMarkdownWithWidgets, Overlay, refreshPage, copyText } from './shared.js'
+import { canPasteKnowledge, isCutEntry, isWithin, pasteKnowledgeClipboard, useKnowledgeClipboard } from '../store/knowledgeClipboard'
 
 const SCOPES = ['user', 'shared', 'global'];
 export const SCOPE_LABEL = {
@@ -12,6 +13,8 @@ const parentPath = (path) => path.split('/').slice(0, -1).join('/');
 const joinPath = (parent, name) => [parent, name].filter(Boolean).join('/');
 
 export function renderKnowledgePage(ctx) {
+  const user = Store.user;
+  useKnowledgeClipboard.getState().activateUser(user);
   const state = ctx.viewState;
   let activeScope = state.knowledgeScope || 'all';
   let directoryPath = state.knowledgeDirectory || '';
@@ -29,8 +32,12 @@ export function renderKnowledgePage(ctx) {
   let loading = false;
   let previewMode = 'preview';
   let closeMenu = () => {};
+  let marked = new Set(state.knowledgeMarked || []);
+  let anchor = '';
+  let focusedEntry = state.knowledgeFocused || '';
   const treeHost = h('nav.knowledge-tree', { role: 'tree', 'aria-label': tr('知识目录') });
   const listHost = h('section.knowledge-directory-panel');
+  const clipboardHost = h('div.knowledge-clipboard-status', { role: 'status', hidden: true });
   const editorHost = h('section.knowledge-preview-panel', { 'aria-label': tr('知识文件预览') });
   const page = h('div.page.knowledge-page', h('div.page-inner.wide'));
   const inner = page.firstElementChild;
@@ -39,7 +46,7 @@ export function renderKnowledgePage(ctx) {
   function remember() {
     Object.assign(state, { knowledgeScope: activeScope, knowledgeDirectory: directoryPath,
       knowledgeSelected: selected ? key(selected) : '', knowledgeQuery: query,
-      knowledgeExpanded: [...expanded] });
+      knowledgeExpanded: [...expanded], knowledgeMarked: [...marked], knowledgeFocused: focusedEntry });
   }
   function closeContextMenu() { closeMenu(); }
   function currentDirectory() {
@@ -47,18 +54,84 @@ export function renderKnowledgePage(ctx) {
       (entries.find(entry => entry.scope === activeScope && entry.kind === 'directory' && entry.relative_path === directoryPath)
        || roots.find(root => root.scope === activeScope));
   }
+  const clipboard = () => {
+    const value = useKnowledgeClipboard.getState().clipboard;
+    return value?.user === user ? value : null;
+  };
+  const pending = () => ctx.busy || useKnowledgeClipboard.getState().pending;
+  function pasteDirectory(entry) {
+    return entry.kind === 'directory' ? entry
+      : entries.find(item => item.scope === entry.scope && item.kind === 'directory' && item.relative_path === parentPath(entry.relative_path))
+        || roots.find(root => root.scope === entry.scope);
+  }
+  function markedEntries(entry) {
+    return marked.has(key(entry)) ? entries.filter(item => marked.has(key(item))) : [entry];
+  }
+  function copyEntries(entry, action) {
+    if (entry.root || pending()) return;
+    useKnowledgeClipboard.getState().setClipboard(user, markedEntries(entry), action);
+  }
+  async function pasteInto(directory) {
+    const source = clipboard();
+    if (pending() || !source || !canPasteKnowledge(source, directory) || !await canLeave() || !ctx.active) return;
+    remember();
+    let transferred = [];
+    await mutate(async () => {
+      try { transferred = await pasteKnowledgeClipboard(user, directory); }
+      catch (error) {
+        // Earlier entries of a multi-selection may already have moved.
+        await ctx.refresh();
+        throw error;
+      }
+    }, tr(source.action === 'copy' ? '知识条目已复制' : '知识条目已移动'), () => {
+      state.knowledgeScope = directory.scope;
+      state.knowledgeDirectory = directory.relative_path;
+      state.knowledgeMarked = transferred.map(item => `${item.scope}:${item.path}`);
+      const moved = selected && source.action === 'move' && transferred.find(item =>
+        item.source.scope === selected.scope && isWithin(selected.relative_path, item.source.relative_path));
+      if (moved) state.knowledgeSelected = `${moved.scope}:${moved.path}${selected.relative_path.slice(moved.source.relative_path.length)}`;
+      expanded.add(`${directory.scope}:`);
+      let path = '';
+      for (const part of directory.relative_path.split('/').filter(Boolean)) {
+        path = joinPath(path, part);
+        expanded.add(`${directory.scope}:${path}`);
+      }
+      state.knowledgeExpanded = [...expanded];
+    });
+  }
+  function drawClipboard() {
+    const source = clipboard();
+    clipboardHost.hidden = !source;
+    fill(clipboardHost);
+    if (!source) return;
+    const name = source.entries.length === 1 ? source.entries[0].name : tr('{count} 个条目', { count: source.entries.length });
+    clipboardHost.append(h('span', tr(source.action === 'copy' ? '待粘贴副本：{name}' : '待移动：{name}', { name })),
+      h('button.icon-btn', { 'aria-label': tr('取消知识条目操作'), onclick: () => useKnowledgeClipboard.getState().clear() },
+        h('span', { html: icon('close', 'icon-sm') })));
+  }
+  function drawNavigation() {
+    const focused = document.activeElement?.closest('[data-entry]');
+    const host = focused && (treeHost.contains(focused) ? treeHost : listHost.contains(focused) ? listHost : null);
+    const entry = focused?.dataset.entry;
+    drawTree(); drawList(); drawClipboard();
+    if (host && entry) host.querySelector(`[data-entry="${CSS.escape(entry)}"]`)?.focus({ preventScroll: true });
+  }
   async function canLeave() {
     return draft === savedContent || await Overlay.confirm({ title: tr('放弃未保存的修改？'),
       description: tr('离开后将丢弃当前文件的未保存修改。'), confirmLabel: tr('放弃修改') });
   }
-  async function browse(entry) {
+  async function browse(entry, expand = true) {
     if (!await canLeave() || !ctx.active) return;
     activeScope = entry.scope;
     directoryPath = entry.kind === 'directory' ? entry.relative_path : parentPath(entry.relative_path);
+    focusedEntry = key(entry);
+    marked = new Set(entry.kind === 'file' ? [key(entry)] : []);
     expanded.add(`${entry.scope}:`);
     const parts = directoryPath.split('/').filter(Boolean);
     parts.forEach((_, index) => expanded.add(`${entry.scope}:${parts.slice(0, index + 1).join('/')}`));
-    if (entry.kind === 'directory') expanded.add(key(entry));
+    if (entry.kind === 'directory') {
+      if (expand) expanded.add(key(entry)); else expanded.delete(key(entry));
+    }
     else {
       selected = entry;
       previewMode = 'preview';
@@ -101,20 +174,15 @@ export function renderKnowledgePage(ctx) {
       const directory = entry.kind === 'directory';
       const open = directory && (expanded.has(key(entry)) || Boolean(query));
       const active = directory ? entry.scope === activeScope && entry.relative_path === directoryPath : selected && key(entry) === key(selected);
-      const row = h('div.knowledge-tree-row' + (active ? '.is-active' : ''), {
+      const row = h('div.knowledge-tree-row' + (active ? '.is-active' : '') + (isCutEntry(clipboard(), entry) ? '.is-cut' : ''), {
         role: 'treeitem', tabindex: '0', 'aria-level': String(depth + 1),
         ...(directory ? { 'aria-expanded': String(open) } : {}),
         'aria-selected': String(Boolean(active)), 'aria-label': entry.name, title: entry.relative_path || entry.absolute_path,
         style: { '--tree-depth': depth },
-        onclick: (event) => {
-          if (event.target.closest('.knowledge-tree-toggle')) {
-            if (open) expanded.delete(key(entry)); else expanded.add(key(entry));
-            remember(); drawTree();
-          } else void browse(entry);
-        },
+        onclick: () => void browse(entry, !open),
         oncontextmenu: event => showContextMenu(event, entry),
         onkeydown: event => {
-          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void browse(entry); }
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void browse(entry, !open); }
           if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); showContextMenu(event, entry); }
           if (directory && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
             event.preventDefault();
@@ -164,11 +232,28 @@ export function renderKnowledgePage(ctx) {
       : children(directory);
     listHost.append(h('div.knowledge-panel-head', breadcrumb,
       directory ? h('button.icon-btn', { title: tr('目录操作'), 'aria-label': tr('目录操作'), onclick: event => showContextMenu(event, directory) }, h('span', { html: icon('moreH') })) : null));
-    const list = h('div.knowledge-directory-list', { role: 'list', 'aria-label': tr('当前目录') });
+    const list = h('div.knowledge-directory-list', { role: 'listbox', tabindex: '0',
+      'aria-multiselectable': 'true', 'aria-label': tr('当前目录'),
+      oncontextmenu: event => { if (directory) showContextMenu(event, directory); } });
     rows.forEach(entry => {
       if (query && entry.root && !branchMatches(entry)) return;
-      list.appendChild(h('div.knowledge-directory-entry' + (selected && key(selected) === key(entry) ? '.is-selected' : ''), { role: 'listitem', oncontextmenu: event => showContextMenu(event, entry) },
-        h('button.knowledge-entry-open', { onclick: () => void browse(entry) },
+      list.appendChild(h('div.knowledge-directory-entry' + (marked.has(key(entry)) ? '.is-selected' : '') + (isCutEntry(clipboard(), entry) ? '.is-cut' : ''),
+        { role: 'option', 'aria-selected': String(marked.has(key(entry))), 'aria-label': entry.name,
+          tabindex: '-1', dataset: { entry: key(entry) }, oncontextmenu: event => showContextMenu(event, entry) },
+        h('button.knowledge-entry-open', { onclick: event => {
+          focusedEntry = key(entry);
+          if (!entry.root && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+            if (event.shiftKey && anchor) {
+              const start = rows.findIndex(item => key(item) === anchor);
+              const end = rows.indexOf(entry);
+              marked = new Set(rows.slice(Math.min(start < 0 ? end : start, end), Math.max(start, end) + 1).filter(item => !item.root).map(key));
+            } else {
+              if (marked.has(key(entry))) marked.delete(key(entry)); else marked.add(key(entry));
+              anchor = key(entry);
+            }
+            remember(); drawNavigation();
+          } else { anchor = key(entry); void browse(entry); }
+        } },
           h('span.knowledge-entry-icon', { html: icon(entry.kind === 'directory' ? 'folder' : 'fileText') }),
           h('span.knowledge-entry-copy', h('strong', { title: entry.name }, entry.name),
             h('small', entry.root ? entry.relative_path || LIVE_KNOWLEDGE.roots.find(root => root.scope === entry.scope).relative_path :
@@ -217,8 +302,35 @@ export function renderKnowledgePage(ctx) {
     ));
   }
   function draw() {
-    drawTree(); drawList(); drawEditor();
+    drawNavigation(); drawEditor();
   }
+  function handleClipboardKey(event, menuEntry) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || target.closest('input, textarea, select, [contenteditable="true"]')
+      || !(event.ctrlKey || event.metaKey) || pending()) return;
+    const command = event.key.toLowerCase();
+    if (command === 'a' && !menuEntry && target.closest('.knowledge-directory-list') && activeScope !== 'all') {
+      event.preventDefault();
+      marked = new Set([...listHost.querySelectorAll('[data-entry]')].map(row => row.dataset.entry));
+      remember(); drawNavigation();
+      listHost.querySelector('.knowledge-directory-list')?.focus();
+      return;
+    }
+    const selectedKey = target.closest('[data-entry]')?.dataset.entry
+      || (listHost.contains(target) && marked.size ? marked.values().next().value : focusedEntry);
+    const entry = menuEntry || entries.find(item => key(item) === selectedKey)
+      || roots.find(root => key(root) === focusedEntry);
+    if ((command === 'c' || command === 'x') && entry && !entry.root) {
+      event.preventDefault(); copyEntries(entry, command === 'c' ? 'copy' : 'move'); closeContextMenu();
+    } else if (command === 'v') {
+      const directory = menuEntry ? pasteDirectory(menuEntry) : treeHost.contains(target) && entry ? pasteDirectory(entry) : currentDirectory();
+      if (directory && canPasteKnowledge(clipboard(), directory)) {
+        event.preventDefault(); closeContextMenu(); void pasteInto(directory);
+      }
+    }
+  }
+  treeHost.addEventListener('keydown', handleClipboardKey);
+  listHost.addEventListener('keydown', handleClipboardKey);
   function pathDialog(title, entry, mode) {
     const creating = mode === 'file' || mode === 'directory';
     const renaming = mode === 'rename';
@@ -226,21 +338,21 @@ export function renderKnowledgePage(ctx) {
     const initial = creating ? joinPath(parent, mode === 'file' ? 'untitled.md' : tr('新建文件夹')) : entry.relative_path;
     const input = h('input.input', { value: initial, 'aria-label': tr(renaming ? '名称' : '相对路径'), required: true });
     if (renaming) input.value = entry.name;
-    const scopeSelect = h('select.select', { 'aria-label': tr('目标知识库') }, SCOPES.map(scope => h('option', { value: scope, selected: scope === entry.scope }, SCOPE_LABEL[scope])));
     const form = h('form.knowledge-path-form', { onsubmit: async event => {
       event.preventDefault();
       const value = input.value.trim();
       if (!value || !await canLeave() || !ctx.active) return;
       if (renaming && /[/\\]/.test(value)) { input.setCustomValidity(tr('名称不能包含路径分隔符')); input.reportValidity(); return; }
-      const targetScope = creating || renaming ? entry.scope : scopeSelect.value;
+      const targetScope = entry.scope;
       const targetPath = renaming ? joinPath(parentPath(entry.relative_path), value) : value;
       const wasSelected = selected && selected.scope === entry.scope && (selected.relative_path === entry.relative_path || selected.relative_path.startsWith(entry.relative_path + '/'));
       submit.disabled = true;
       const success = await mutate(() => creating
         ? Api.createKnowledgeEntry(Store.user, entry.scope, targetPath, mode)
-        : Api.transferKnowledgeEntry(Store.user, entry.scope, entry.relative_path, renaming ? 'move' : mode, targetScope, targetPath),
+        : Api.transferKnowledgeEntry(Store.user, entry.scope, entry.relative_path, 'move', targetScope, targetPath),
       tr('知识目录已更新'), () => {
-        if (wasSelected && mode !== 'copy') state.knowledgeSelected = `${targetScope}:${targetPath}${selected.relative_path.slice(entry.relative_path.length)}`;
+        if (renaming) useKnowledgeClipboard.getState().discard(entry.scope, entry.relative_path);
+        if (wasSelected && renaming) state.knowledgeSelected = `${targetScope}:${targetPath}${selected.relative_path.slice(entry.relative_path.length)}`;
         if (creating && mode === 'file') state.knowledgeSelected = `${targetScope}:${targetPath}`;
         state.knowledgeScope = targetScope;
         state.knowledgeDirectory = creating && mode === 'directory' ? targetPath : parentPath(targetPath);
@@ -253,7 +365,6 @@ export function renderKnowledgePage(ctx) {
       if (!success && ctx.active) submit.disabled = false;
     } });
     input.addEventListener('input', () => input.setCustomValidity(''));
-    if (!creating && !renaming) form.appendChild(h('label', tr('目标知识库'), scopeSelect));
     form.append(h('label', tr(renaming ? '名称' : '相对路径'), input), h('small.knowledge-path-hint', tr('路径相对于所选知识库根目录；同名目标不会被覆盖。')));
     const submit = h('button.btn.btn-primary', { type: 'submit' }, tr('确认'));
     form.appendChild(h('div.knowledge-dialog-actions', h('button.btn.btn-ghost', { type: 'button', onclick: () => dialog.close() }, tr('取消')), submit));
@@ -266,6 +377,7 @@ export function renderKnowledgePage(ctx) {
       detail: `${SCOPE_LABEL[entry.scope]} / ${entry.relative_path}`, confirmLabel: tr('删除'), tone: 'danger' });
     if (!confirmed || !ctx.active) return;
     await mutate(() => Api.deleteKnowledgeEntry(Store.user, entry.scope, entry.relative_path), tr('知识条目已删除'), () => {
+      useKnowledgeClipboard.getState().discard(entry.scope, entry.relative_path);
       if (selected?.scope === entry.scope && (selected.relative_path === entry.relative_path || selected.relative_path.startsWith(entry.relative_path + '/'))) state.knowledgeSelected = '';
       state.knowledgeScope = entry.scope;
       state.knowledgeDirectory = parentPath(entry.relative_path);
@@ -273,6 +385,11 @@ export function renderKnowledgePage(ctx) {
   }
   function showContextMenu(event, entry) {
     event.preventDefault(); event.stopPropagation(); closeContextMenu();
+    const trigger = event.currentTarget;
+    const rect = trigger.getBoundingClientRect();
+    focusedEntry = key(entry);
+    if (!entry.root && (!listHost.contains(trigger) || !marked.has(key(entry)))) marked = new Set([key(entry)]);
+    remember(); drawNavigation();
     const root = LIVE_KNOWLEDGE.roots.find(root => root.scope === entry.scope);
     const separator = root.absolute_path.includes('\\') ? '\\' : '/';
     const absolute = root.absolute_path.replace(/[\\/]$/, '') + (entry.relative_path ? separator + entry.relative_path.split('/').join(separator) : '');
@@ -280,8 +397,9 @@ export function renderKnowledgePage(ctx) {
     const actions = [
       ['重命名', 'penLine', () => pathDialog('重命名', entry, 'rename'), entry.root],
       ['删除', 'trash', () => void removeEntry(entry), entry.root],
-      ['复制', 'copy', () => pathDialog('复制', entry, 'copy'), entry.root],
-      ['移动', 'folder', () => pathDialog('移动', entry, 'move'), entry.root],
+      ['复制', 'copy', () => copyEntries(entry, 'copy'), entry.root || pending()],
+      ['剪切', 'cut', () => copyEntries(entry, 'move'), entry.root || pending()],
+      ['粘贴', 'paste', () => void pasteInto(pasteDirectory(entry)), pending() || !canPasteKnowledge(clipboard(), pasteDirectory(entry))],
       ['复制相对路径', 'link', () => void copyText(joinPath(root.relative_path, entry.relative_path))],
       ['复制绝对路径', 'link', () => void copyText(absolute)],
       ['新建文件', 'fileText', () => pathDialog('新建文件', entry, 'file')],
@@ -290,8 +408,6 @@ export function renderKnowledgePage(ctx) {
     actions.forEach(([label, symbol, action, disabled]) => menu.appendChild(h('button.menu-item', { role: 'menuitem', disabled: Boolean(disabled), onclick: () => { closeContextMenu(); action(); } },
       h('span', { html: icon(symbol, 'icon-sm') }), tr(label))));
     document.body.appendChild(menu);
-    const trigger = event.currentTarget;
-    const rect = trigger.getBoundingClientRect();
     const x = event.type === 'contextmenu' ? event.clientX : rect.left;
     const y = event.type === 'contextmenu' ? event.clientY : rect.bottom;
     menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -299,7 +415,11 @@ export function renderKnowledgePage(ctx) {
     const cleanup = onClickOutside(menu, closeContextMenu);
     closeMenu = () => { cleanup(); menu.remove(); };
     menu.addEventListener('keydown', keyEvent => {
-      if (keyEvent.key === 'Escape') { keyEvent.stopPropagation(); closeContextMenu(); trigger.focus(); }
+      handleClipboardKey(keyEvent, entry);
+      if (keyEvent.key === 'Escape') {
+        keyEvent.stopPropagation(); closeContextMenu();
+        treeHost.querySelector(`[data-entry="${CSS.escape(key(entry))}"]`)?.focus();
+      }
       if (['ArrowDown', 'ArrowUp'].includes(keyEvent.key)) {
         keyEvent.preventDefault();
         const items = [...menu.querySelectorAll('button:not(:disabled)')];
@@ -327,7 +447,9 @@ export function renderKnowledgePage(ctx) {
     } }, h('span', { html: icon('upload', 'icon-sm') }), tr('导入文件')),
     h('button.btn.btn-primary', { onclick: event => showContextMenu(event, currentDirectory() || roots[0]) }, h('span', { html: icon('plus', 'icon-sm') }), tr('新建')),
   ] }),
+  clipboardHost,
   h('div.knowledge-workspace', h('aside.knowledge-tree-panel', h('div.knowledge-panel-head', h('strong', tr('知识目录'))), treeHost), listHost, editorHost));
+  ctx.registerCleanup(useKnowledgeClipboard.subscribe(() => { if (ctx.active) drawNavigation(); }));
   draw();
   if (selected) void loadDocument(selected);
   return page;

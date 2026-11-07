@@ -71,6 +71,21 @@ Web、APP、CLI、定时任务及外部消息的完整历史（含未加载记�
 知识库分类|Knowledge category|Categoría de conocimiento|Catégorie de connaissances|Wissenskategorie|Categoria de conhecimento|Категория знаний|ナレッジの分類|지식 베이스 분류
 筛选知识分类|Filter categories|Filtrar categorías|Filtrer les catégories|Kategorien filtern|Filtrar categorias|Фильтр категорий|分類を絞り込む|지식 분류 필터
 关闭知识库引用|Close knowledge reference|Cerrar referencia|Fermer les références|Wissensreferenz schließen|Fechar referência|Закрыть ссылки на знания|ナレッジ参照を閉じる|지식 참조 닫기
+引用文件夹相对路径|Reference folder path|Referenciar ruta de carpeta|Référencer le chemin du dossier|Ordnerpfad referenzieren|Referenciar caminho da pasta|Сослаться на путь папки|フォルダーパスを参照|폴더 경로 참조
+引用此文件|Reference this file|Referenciar este archivo|Référencer ce fichier|Diese Datei referenzieren|Referenciar este arquivo|Сослаться на этот файл|このファイルを参照|이 파일 참조
+待粘贴副本：{name}|Ready to paste: {name}|Listo para pegar: {name}|Prêt à coller : {name}|Bereit zum Einfügen: {name}|Pronto para colar: {name}|Готово к вставке: {name}|貼り付け待ち: {name}|붙여넣기 대기: {name}
+待移动：{name}|Ready to move: {name}|Listo para mover: {name}|Prêt à déplacer : {name}|Bereit zum Verschieben: {name}|Pronto para mover: {name}|Готово к перемещению: {name}|移動待ち: {name}|이동 대기: {name}
+知识条目已复制|Knowledge item copied|Elemento copiado|Élément copié|Wissenseintrag kopiert|Item copiado|Элемент скопирован|ナレッジ項目をコピーしました|지식 항목 복사됨
+知识条目已移动|Knowledge item moved|Elemento movido|Élément déplacé|Wissenseintrag verschoben|Item movido|Элемент перемещён|ナレッジ項目を移動しました|지식 항목 이동됨
+知识条目已重命名|Knowledge item renamed|Elemento renombrado|Élément renommé|Wissenseintrag umbenannt|Item renomeado|Элемент переименован|ナレッジ項目の名前を変更しました|지식 항목 이름 변경됨
+副本|Copy|Copia|Copie|Kopie|Cópia|Копия|コピー|복사본
+剪切|Cut|Cortar|Couper|Ausschneiden|Recortar|Вырезать|切り取り|잘라내기
+{count} 个条目|{count} items|{count} elementos|{count} éléments|{count} Einträge|{count} itens|Элементов: {count}|{count} 件の項目|항목 {count}개
+请输入有效名称|Enter a valid name|Introduce un nombre válido|Saisissez un nom valide|Geben Sie einen gültigen Namen ein|Insira um nome válido|Введите допустимое имя|有効な名前を入力してください|유효한 이름을 입력하세요
+处理中…|Processing…|Procesando…|Traitement…|Wird verarbeitet…|Processando…|Обработка…|処理中…|처리 중…
+取消知识条目操作|Cancel knowledge item operation|Cancelar operación|Annuler l’opération|Wissensaktion abbrechen|Cancelar operação|Отменить операцию|ナレッジ操作をキャンセル|지식 작업 취소
+关闭预览|Close preview|Cerrar vista previa|Fermer l’aperçu|Vorschau schließen|Fechar prévia|Закрыть просмотр|プレビューを閉じる|미리 보기 닫기
+请调整搜索词。|Adjust the search term.|Ajusta el término de búsqueda.|Modifiez le terme de recherche.|Suchbegriff anpassen.|Ajuste o termo de busca.|Измените поисковый запрос.|検索語を変更してください。|검색어를 조정하세요.
 暂无知识文件|No knowledge files|Sin archivos de conocimiento|Aucun fichier de connaissances|Keine Wissensdateien|Sem arquivos de conhecimento|Нет файлов знаний|ナレッジファイルなし|지식 파일 없음
 没有匹配的知识文件|No matching knowledge files|No hay archivos coincidentes|Aucun fichier correspondant|Keine passenden Wissensdateien|Nenhum arquivo correspondente|Нет подходящих файлов|一致するファイルなし|일치하는 지식 파일 없음
 正在加载知识库|Loading knowledge|Cargando conocimiento|Chargement des connaissances|Wissen wird geladen|Carregando conhecimento|Загрузка базы знаний|ナレッジを読み込み中|지식 베이스 불러오는 중

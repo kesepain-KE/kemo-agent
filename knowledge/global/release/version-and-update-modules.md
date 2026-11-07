@@ -94,7 +94,7 @@ python -m update --check
   → 输出逐板块汇总并释放更新锁
 ```
 
-任一板块、迁移、前端构建、依赖刷新或版本提交失败时，本轮立即停止，保留旧版本号，并使用更新前备份自动恢复受版本管理的源码路径。`users/`、运行时数据库、Cron 运行状态、本地拓展凭据和采集数据不会因恢复而被覆盖；内置拓展的 `expand.json`、`input_data.md` 等运行状态也按部署机状态前向保留，失败后不保证回滚到旧采集快照。数据库迁移仍是向前操作，因此生产环境仍应独立备份用户数据。
+任一板块、迁移、前端构建、依赖刷新或版本提交失败时，本轮立即停止，保留旧版本号，并使用更新前备份自动恢复受版本管理的源码路径。`users/`、运行时数据库、Cron 运行状态、本地拓展凭据和采集数据不会因恢复而被覆盖；内置拓展的 `module.yaml`、`input_data.md` 等运行状态也按部署机状态前向保留，失败后不保证回滚到旧采集快照。数据库迁移仍是向前操作，因此生产环境仍应独立备份用户数据。
 
 ### 在线写者拒绝与停机边界
 
@@ -142,7 +142,7 @@ CLI 及本安装内的自定义解释器进程均保守视为可能写者；其�
 - `cron/task_cron_system/*.json` 更新静态任务定义时保留部署机的 `next_run_at`、`latest_run_at` 和 `status`；本地独有系统任务及日志不删除。
 - `config/global_config.yaml` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。1.3.2 有一个窄范围旧默认迁移：当本地框架版本不高于 1.3.1、目标版本不低于 1.3.2，且 `cron.session_idle_close_seconds` 仍精确等于旧默认值 `86400`、新版本默认值为 `5400` 时，自动改为 `5400`；其他自定义值不变。
 - 更新 `expand/global/register.py`、`sense/register.py`、`expand/share/register.py`、`skills/register.py`，不会删除这些资源根目录中的自定义模块。
-- `expand/global/kemo_app/`、`expand/global/kemo_gateway_status/` 与 `expand/global/kemo_graph/` 是三个系统内置拓展：core 同步其全部运行代码、`module/panel.json` 和模块说明；新增 Python 文件若未进入内置清单，正式基准测试会失败。`expand.json` 按本地激活状态合并，`module/panel.values.json` 只在缺失时用发布默认值初始化；真实配置、凭据、`module/status.json`、状态摘要、采集数据、图表、数据库和运行锁继续保留。
+- `expand/global/kemo_app/`、`expand/global/kemo_gateway_status/` 与 `expand/global/kemo_graph/` 是三个系统内置拓展：core 同步其全部运行代码、`module/panel.json` 和模块说明；新增 Python 文件若未进入内置清单，正式基准测试会失败。`module.yaml` 按本地激活状态合并，`module/panel.values.json` 只在缺失时用发布默认值初始化；真实配置、凭据、`module/status.json`、状态摘要、采集数据、图表、数据库和运行锁继续保留。
 - core 源码同步成功后先执行 `pip install -r requirements.txt`；依赖刷新成功后才补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。这样，前端构建或依赖安装失败时不会先改用户数据库。初始化失败时自动进入恢复流程；更新器不扫描或导入其他存储格式。
 
 ## agents — 内置子智能体

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -110,6 +111,48 @@ class KnowledgeFilesystemTests(unittest.TestCase):
         self.assertEqual((self.user / "source/a.md").read_text("utf-8"), "source")
         self.assertFalse((self.user / "source/nested").exists())
 
+    def test_paste_generates_unique_copy_names_without_overwriting_files_or_folders(self):
+        (self.user / "note.md").write_text("source", "utf-8")
+        for expected in ("note - 副本.md", "note - 副本 (2).md"):
+            response = self.entry("PATCH", "note.md", json={
+                "action": "copy", "target_scope": "user", "target_path": "note.md", "auto_rename": True,
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["new_relative_path"], expected)
+            self.assertEqual((self.user / expected).read_text("utf-8"), "source")
+        (self.user / "folder.v1/nested").mkdir(parents=True)
+        (self.user / "folder.v1/nested/a.txt").write_text("nested", "utf-8")
+        response = self.entry("PATCH", "folder.v1", json={
+            "action": "copy", "target_scope": "user", "target_path": "folder.v1", "auto_rename": True,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["new_relative_path"], "folder.v1 - 副本")
+        self.assertEqual((self.user / "folder.v1 - 副本/nested/a.txt").read_text("utf-8"), "nested")
+        invalid = self.entry("PATCH", "folder.v1", json={
+            "action": "copy", "target_scope": "user", "target_path": "folder.v1/nested/child", "auto_rename": True,
+        })
+        self.assertEqual(invalid.status_code, 400)
+        self.assertFalse((self.user / "folder.v1/nested/child").exists())
+
+    def test_concurrent_pastes_choose_distinct_destinations_and_preserve_existing_data(self):
+        (self.user / "note.md").write_text("source", "utf-8")
+        target = self.root / "knowledge/share"
+        (target / "note.md").write_text("keep existing", "utf-8")
+        backend = WebRunService(self.root)
+        def paste(_):
+            return backend.transfer_knowledge_entry("alice", "user", "note.md", action="copy",
+                target_scope="shared", target_path="note.md", auto_rename=True)["new_relative_path"]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            paths = list(pool.map(paste, range(4)))
+        self.assertEqual(len(set(paths)), 4)
+        self.assertEqual((target / "note.md").read_text("utf-8"), "keep existing")
+        self.assertTrue(all((target / path).read_text("utf-8") == "source" for path in paths))
+        conflict = self.entry("PATCH", "note.md", json={
+            "action": "move", "target_scope": "shared", "target_path": "note.md",
+        })
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual((self.user / "note.md").read_text("utf-8"), "source")
+
     def test_root_traversal_private_runtime_and_hidden_entries_are_protected(self):
         for path in (".", "../escape.md", "kemo-graph-storage/db.md", ".secret/note.md", "classify.sqlite3"):
             for method, kwargs in (("DELETE", {}), ("POST", {"json": {"kind": "directory"}})):
@@ -139,6 +182,14 @@ class KnowledgeFilesystemTests(unittest.TestCase):
         self.assertNotIn("redirect", {item["relative_path"] for item in view["directories"]})
         self.assertEqual(self.entry("DELETE", "redirect/private.md").status_code, 400)
         self.assertEqual((outside / "private.md").read_text("utf-8"), "private")
+        (self.user / "note.md").write_text("source", "utf-8")
+        os.symlink(outside / "missing.md", self.user / "note - 副本.md")
+        copied = self.entry("PATCH", "note.md", json={
+            "action": "copy", "target_scope": "user", "target_path": "note.md", "auto_rename": True,
+        })
+        self.assertEqual(copied.status_code, 200, copied.text)
+        self.assertEqual(copied.json()["new_relative_path"], "note - 副本 (2).md")
+        self.assertFalse((outside / "missing.md").exists())
 
     def test_document_validation_is_kept_at_real_file_boundary(self):
         self.assertEqual(self.entry("POST", "bad.exe", json={"kind": "file"}).status_code, 400)

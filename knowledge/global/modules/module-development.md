@@ -30,48 +30,71 @@ Windows 后台采集和框架发起的 `expand_call` 操作由框架隐藏终端
 
 ### 最小框架合同与自由实现
 
-框架把 `<expand-root>/<name>/` 这个直接子目录视为一个完整拓展，只关心 `expand.json` 及其声明的数据、说明、采集和操控入口。创建器附带的几个文件只是可运行的最小合同，不是拓展目录的标准结构或规模上限。
+框架把 `<expand-root>/<name>/` 这个直接子目录视为一个完整拓展，只关心 `module.yaml` 及其声明的数据、说明、采集和操控入口。创建器附带的几个文件只是可运行的最小合同，不是拓展目录的标准结构或规模上限。
 
 拓展目录内部可以自由包含任意数量和层级的源码、资源、配置、依赖与构建产物，也可以直接容纳一个完整开源项目；框架不会因为文件未出现在模板中就拒绝、删除、注册、注入或自动执行它。极小功能可以只有最小入口，大型功能可以保留原工程结构并使用声明入口作为适配层。不要为了迎合模板把整个工程塞进 `data_update.py` 或 `start_expand.py`，也不要反过来强迫简单拓展采用复杂分层。
 
 清单引用的文件必须位于模块目录内，不得使用绝对路径、`..`、符号链接或目录联接跳出作用域。这是作用域安全边界，不限制模块目录内部采用何种工程结构。
 
-### expand.json
+### module.yaml
 
-```json
-{
-  "name": "room_light",
-  "explain": "读取并控制房间灯光状态",
-  "open_input": true,
-  "input_data": "input_data.md",
-  "input_health": "正常",
-  "start_update": "data_update.py",
-  "open_control": true,
-  "start_expand": "start_expand.py",
-  "start_control": "expand_control.md"
-}
+```yaml
+kind: expand
+name: room_light
+explain: 读取并控制房间灯光状态
+input_open: true
+input_file: input_data.md
+health: 异常
+update_script: data_update.py
+control_open: true
+control_script: start_expand.py
+control_entry: expand_control.md
 ```
 
 | 字段 | 类型 | 规则 |
 |------|------|------|
+| `kind` | string | `expand`，必须与所在目录类型一致 |
 | `name` | string | 非空，建议与目录名一致 |
 | `explain` | string | 非空的一句话职责说明 |
-| `open_input` | bool | 是否允许状态数据进入 Prompt |
-| `input_data` | string | 模块内 `.md` 文件名 |
-| `input_health` | string | 只能是 `正常` 或 `异常` |
-| `start_update` | string | 模块内 `.py` 采集入口 |
-| `open_control` | bool | 是否开放操控能力 |
-| `start_expand` | string | 模块内 `.py` 操控入口 |
-| `start_control` | string | 模块内 `.md` 操作说明 |
-| `recent_update` | string，可选 | 若存在必须为 `YYYY-MM-DD HH:MM:SS`；尚未运行时应省略，不能写空字符串 |
+| `input_open` | bool | 是否允许状态数据进入 Prompt |
+| `input_file` | string | 模块内 `.md` 文件名 |
+| `health` | string | 只能是 `正常` 或 `异常` |
+| `update_script` | string | 模块内 `.py` 采集入口 |
+| `control_open` | bool | 是否开放操控能力 |
+| `control_script` | string | 操控开启时必填，模块内 `.py` 操控入口 |
+| `control_entry` | string | 模块内 `.md` 操作说明 |
+| `recent_update` | string 或 null，可选 | 非空时必须为 `YYYY-MM-DD HH:MM:SS`；尚未运行时可省略或写 null |
 
-清单拒绝未知字段。即使关闭注入或操控，被引用文件仍应存在并保持合法，便于模块恢复启用。
+感知与拓展均由 `run/modules/manifest.py` 校验 `module.yaml`。清单拒绝未知字段和重复键；
+数据或操控开启时，对应文件必须存在，关闭时可以省略。拓展至少开启数据或操控之一。
+清单路径只接受模块直接子级文件名；内部工程仍可以自由分层，由声明入口调用。
+
+校验顺序为：读取 YAML 映射、检查 kind 与目录、检查未知与缺失字段、检查字段类型、
+检查枚举与时间、检查开关组合、检查文件名与后缀、检查路径边界与链接、检查启用文件存在性。
+无效模块在诊断中给出 `reason`、`field` 和原因，不会阻断其他模块。
+
+### 热加载与注入预算
+
+注册根目录后，每次查询都重新发现直接子目录并读取当前清单；新增、修改和删除模块无需重启宿主。
+定时采集下一次扫描使用新入口；操控与手动刷新每次启动独立子进程，并读取最新源码及模块内导入，
+不会复用上一调用的 Python 模块或旧字节码。正在执行的子进程按原有超时、取消和执行锁结束，
+文件更新不主动中断它。
+
+能力摘要在下一次构建系统提示词时刷新；状态数据按注入总开关与实时开关的现有策略读取。
+健康为 `异常` 时保留数据，并在数据前写明警告和最近成功时间，不能将旧观测当作当前事实。
+
+感知数据、拓展数据和能力摘要共用预算收集器：保留块内最少正文，剩余预算按需分配；
+预算不足时从排序末尾丢弃整块。诊断的 `dropped` 标明 `budget_exceeded`，`clipped`
+标明正文截断；警告头同样计入预算，保留块的异常警告完整可见。
+
+本次为破坏性更新：旧 `expand.json` / `sense.json` 不再读取，需按新字段迁为 `module.yaml`。
+`module/panel.json`、`module/status.json` 和 `_runtime.json` 是运行协议或状态，继续使用 JSON。
 
 ### 数据层与操作层
 
-`input_data.md` 保存适合进入 Prompt 的最近状态摘要或资源索引，不是完整数据库。`start_update` 指向的脚本只是框架入口，可以直接实现采集，也可以调用模块内部任何实现；只需确定性更新 Markdown，且不得把 API Key、Token 或密码写入结果。大型内容保存在模块目录内由拓展自行选择的位置，再由 Markdown 写出按需读取路径，不能把文件正文或 Base64 全部塞入 Prompt。`data/`、`artifacts/` 只是常见名称，不是强制目录。
+`input_data.md` 保存适合进入 Prompt 的最近状态摘要或资源索引，不是完整数据库。`update_script` 指向的脚本只是框架入口，可以直接实现采集，也可以调用模块内部任何实现；只需确定性更新 Markdown，且不得把 API Key、Token 或密码写入结果。大型内容保存在模块目录内由拓展自行选择的位置，再由 Markdown 写出按需读取路径，不能把文件正文或 Base64 全部塞入 Prompt。`data/`、`artifacts/` 只是常见名称，不是强制目录。
 
-更新函数可以在成功结果中返回 `resources` 数组，声明模块目录内产生的文件。框架只验证并记录路径、类型、大小和更新时间，不复制资源、不自动读取正文，也不自动注入。新建模块初始为 `input_health=异常` 且没有 `recent_update`；系统刷新器会在首次成功后把健康状态设为 `正常` 并写入真实采集时间，失败时设为 `异常` 并保留上一次成功时间。模板采集器也写回这两个字段，以兼容人工直接运行；框架仍会在隔离执行结束后做最终确认。
+更新函数可以在成功结果中返回 `resources` 数组，声明模块目录内产生的文件。框架只验证并记录路径、类型、大小和更新时间，不复制资源、不自动读取正文，也不自动注入。新建模块初始为 `health=异常` 且没有 `recent_update`；系统刷新器会在首次成功后把健康状态设为 `正常` 并写入真实采集时间，失败时设为 `异常` 并保留上一次成功时间。模板采集器也写回这两个字段，以兼容人工直接运行；框架仍会在隔离执行结束后做最终确认。
 
 调度器优先调用同步、零参数的 `update()`，不存在时回退到同步、零参数的 `main()`。成功可以返回 `None` 或 `{ "ok": true }`；返回 `False`、`{ "ok": false }`、失败状态或抛出异常均视为失败。更新入口必须在超时内自行结束，禁止无限循环、等待交互、常驻线程或自行启动守护进程。
 
@@ -89,7 +112,7 @@ Windows 后台采集和框架发起的 `expand_call` 操作由框架隐藏终端
 
 注入层可以进入主智能体 Prompt，并附真实操作说明路径；操作层不会自动全部注入，应由智能体按需读取。Prompt 管线按总注入闸门与实时开关决定省略、轮内固定或请求级重读 `input_data.md`；cron 只负责刷新文件，不负责模板变量替换或直接注入。重读文件不等于重新采集设备。
 
-主智能体应使用 `expand_call`，明确传入 `scope`、`module`、`command` 和 `params`。框架检查用户白名单、`open_control`、路径和符号链接后，在隔离子进程中加载清单声明的操控入口；结构化参数通过 stdin 传输，不能用 Shell 绕过权限检查。入口可以包装模块内的任意程序或完整工程，但必须向框架提供统一函数：
+主智能体应使用 `expand_call`，明确传入 `scope`、`module`、`command` 和 `params`。框架检查用户白名单、`control_open`、路径和符号链接后，在隔离子进程中加载清单声明的操控入口；结构化参数通过 stdin 传输，不能用 Shell 绕过权限检查。入口可以包装模块内的任意程序或完整工程，但必须向框架提供统一函数：
 
 ```python
 def execute(command: str, params: dict | None = None) -> dict:
@@ -104,7 +127,7 @@ def execute(command: str, params: dict | None = None) -> dict:
 
 ### 运行诊断
 
-框架在模块目录维护 `_runtime.json`，分别记录 `update` 和 `control` 的最近尝试、最近成功、耗时、错误类型以及受限资源数量。该文件不保存完整参数、stdout、采集正文、Base64 或凭据，也不会进入 Prompt。操控失败不会把 `input_health` 改为异常，因为一次命令参数错误不代表采集数据已经失效。
+框架在模块目录维护 `_runtime.json`，分别记录 `update` 和 `control` 的最近尝试、最近成功、耗时、错误类型以及受限资源数量。该文件不保存完整参数、stdout、采集正文、Base64 或凭据，也不会进入 Prompt。操控失败不会把 `health` 改为异常，因为一次命令参数错误不代表采集数据已经失效。
 
 ### 创建流程
 
@@ -137,39 +160,44 @@ def execute(command: str, params: dict | None = None) -> dict:
 
 ### 位置与发现
 
-感知只有全局层。框架把 `sense/<name>/` 这个直接子目录视为一个完整感知模块，只识别 `sense.json` 声明的清单、数据出口和更新入口；这几项是框架合同，不是模块目录的完整结构。
+感知只有全局层。框架把 `sense/<name>/` 这个直接子目录视为一个完整感知模块，只识别 `module.yaml` 声明的清单、数据出口和更新入口；这几项是框架合同，不是模块目录的完整结构。
 
 除清单声明的文件外，模块目录内部可以包含任意数量、任意层级和任意用途的文件或目录，也可以容纳一个完整工程。框架不会注册、注入或自动执行这些内部文件。智能体可以按实际需求自由组织实现，也可以把整个功能写成一个极小入口；不得因为模板只附带少量骨架文件，就把所有客户端、解析、缓存或业务逻辑强行堆进 `data_update.py`。
 
 模块必须是 `sense/` 的直接子目录。名称匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`。根目录 `sense/register.py` 注册整个感知来源，用户配置 `perception.global_whitelist` 决定主智能体可见模块。
 
-RuntimeHost 启用后台调度时，系统任务按 `task_cron_system.sense_update_rate` 扫描所有合法全局感知模块并执行其 `start_update`。每个入口都运行在独立、受超时约束的 Python 子进程中，不会把热插拔代码导入 Web/Runtime 主进程。
+RuntimeHost 启用后台调度时，系统任务按 `task_cron_system.sense_update_rate` 扫描所有合法全局感知模块并执行其 `update_script`。每个入口都运行在独立、受超时约束的 Python 子进程中，不会把热插拔代码导入 Web/Runtime 主进程。
 
-这是所有感知模块共享的框架级频率，不是 `sense.json` 的模块级字段。Web `/api/users/{user}/sense` 接口从同一份全局配置为每个来源返回整数 `update_interval_seconds`，并提供兼容显示字段 `update_interval`；前端依据秒数显示“每 N 秒/分钟/小时”。因此不得在模块清单中重复添加 `update_interval` 或 `interval_seconds`，也不得根据 `recent_update` 时间差猜测频率。用户配置中的同名值不会改变这项全局系统任务。
+这是所有感知模块共享的框架级频率，不是 `module.yaml` 的模块级字段。Web `/api/users/{user}/sense` 接口从同一份全局配置为每个来源返回整数 `update_interval_seconds`，并提供兼容显示字段 `update_interval`；前端依据秒数显示“每 N 秒/分钟/小时”。因此不得在模块清单中重复添加 `update_interval` 或 `interval_seconds`，也不得根据 `recent_update` 时间差猜测频率。用户配置中的同名值不会改变这项全局系统任务。
 
 Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通无交互子进程。感知模块不需要也不应该自行设置 `CREATE_NO_WINDOW`、`CREATE_NEW_CONSOLE`、`pythonw` 或终端窗口参数。用户手动执行 `python data_update.py` 属于前台调试，是否显示当前终端由用户的启动方式决定。
 
-### sense.json
+### module.yaml
 
-清单必须且只能包含以下五个字段：
+感知使用同一个清单合同：
 
-```json
-{
-  "name": "system_health",
-  "data_md": "sense.md",
-  "recent_update": "2026-07-23 13:00:00",
-  "health": "正常",
-  "start_update": "data_update.py"
-}
+```yaml
+kind: sense
+name: system_health
+explain: 当前系统资源状态
+input_open: true
+input_file: sense.md
+health: 异常
+update_script: data_update.py
+control_open: false
 ```
 
 | 字段 | 规则 |
 |------|------|
+| `kind` | 固定为 `sense` |
 | `name` | 非空模块名，建议与目录名一致 |
-| `data_md` | 模块目录内的 `.md` 文件名，文件必须存在 |
-| `recent_update` | 必须为 `YYYY-MM-DD HH:MM:SS`，不能留空 |
+| `explain` | 非空的一句话职责说明 |
+| `input_open` | 布尔值；关闭时不注入数据 |
+| `input_file` | 模块目录内的 `.md` 文件名，注入开启时必填且文件必须存在 |
+| `recent_update` | 可省略或为 null，非空时为 `YYYY-MM-DD HH:MM:SS` 字符串 |
 | `health` | 只能是 `正常` 或 `异常` |
-| `start_update` | 模块目录内的 `.py` 文件名 |
+| `update_script` | 模块目录内的 `.py` 文件名 |
+| `control_open` | 固定为 false；感知不提供操控接口 |
 
 路径不得是绝对路径、不得包含 `..`，模块目录和关键文件不得是符号链接或目录联接。
 
@@ -181,11 +209,11 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 
 ### 更新入口合同
 
-`start_update` 指向的是框架调用入口，不是实现必须集中的文件。入口可以直接完成极小采集，也可以只是适配器，导入或调用模块目录内的任意内部实现乃至完整工程。框架只要求最终入口满足以下合同：
+`update_script` 指向的是框架调用入口，不是实现必须集中的文件。入口可以直接完成极小采集，也可以只是适配器，导入或调用模块目录内的任意内部实现乃至完整工程。框架只要求最终入口满足以下合同：
 
 1. 读取本机或外部只读数据。
 2. 原子或完整地重写 `sense.md`。
-3. 更新 `sense.json` 中的 `recent_update` 与 `health`，或由配套运行逻辑维护等价状态。
+3. 更新 `module.yaml` 中的 `recent_update` 与 `health`，或由配套运行逻辑维护等价状态。
 4. 失败时返回/抛出明确错误，不把旧数据伪装成刚刚更新。
 5. 所有认证信息从环境变量读取，绝不硬编码。
 
@@ -206,7 +234,7 @@ Windows 后台采集由框架使用隐藏窗口模式启动，Linux 使用普通
 
 ### 验收清单
 
-- `sense.json` 恰好五字段且值合法。
+- `module.yaml` 使用统一字段集，`kind: sense` 且通过共享清单校验。
 - 刷新频率只由全局 `task_cron_system.sense_update_rate` 声明，模块清单不重复保存调度频率。
 - `sense.md` 与 `data_update.py` 均存在，路径没有越界。
 - 采集脚本提供零参数同步 `update()` 或 `main()`，可重复运行、可在超时内结束，导入时无副作用。
@@ -495,7 +523,7 @@ kemo-agent、其他 Agent 服务或本地代理程序，同时保留核心现有
 - 外部连接由拓展的 `start_expand.py` 执行，拓展继续运行在现有隔离子进程中。
 - 远程 URL、Token、密码、Cookie 和私钥只从拓展目录自己的 `.env` 或私有配置读取，不写入
   `agent_bridge.json`、Prompt、回复、历史或日志。
-- 外部代理必须显式放在全局、共享或当前用户的拓展目录中，并通过现有拓展白名单和 `open_control`
+- 外部代理必须显式放在全局、共享或当前用户的拓展目录中，并通过现有拓展白名单和 `control_open`
   开关授权。
 - 当前只支持同步调用。外部服务没有接入 kemo-agent 的持久任务状态、取消和恢复合同前，不允许
   使用 `wait=false` 创建无人管理的后台任务。
@@ -510,7 +538,7 @@ expand/share/<module>/agent_bridge.json
 users/<user>/expand/<module>/agent_bridge.json
 ```
 
-拓展本身仍须有有效的 `expand.json`、`start_expand.py` 和 `expand_control.md`，并且
+拓展本身仍须有有效的 `module.yaml`、`start_expand.py` 和 `expand_control.md`，并且
 `open_control=true`。没有 `agent_bridge.json` 的拓展不作为外部智能体发现。
 
 ### `agent_bridge.json`
@@ -634,14 +662,14 @@ external:user:remote_bridge:researcher
 ## 模块用户配置组件面板 2.0
 
 拓展和感知模块可以在自身目录旁挂 `module/panel.json`，由 Web 端生成声明式“用户配置”界面。
-该能力不修改 `expand.json` / `sense.json` 字段集，也不改变 Prompt 来源：面板状态和值文件与
+该能力不修改 `module.yaml` 字段集，也不改变 Prompt 来源：面板状态和值文件与
 `input_data.md` / `sense.md` 是平行链路，**不会自动进入 Prompt、记忆、历史或知识库**。
 
 ### 目录与模板
 
 ```text
 <module>/
-├── expand.json / sense.json
+├── module.yaml
 ├── input_data.md / sense.md
 └── module/
     ├── panel.json

@@ -109,10 +109,11 @@ def exchange(
         stream_usage: Usage | None = None
         try:
             with provider_request_slot(config, cancel_event=cancel_event), closing(provider_events(
-                    provider, request, root=root, user=user, cancel_event=cancel_event,
-                    on_response=captured.append,
-                    defer_tool_validation=True,
-                )) as stream:
+                provider, request, root=root, user=user, cancel_event=cancel_event,
+                on_response=captured.append,
+                defer_tool_validation=True,
+                allow_output_truncated_retry=True,
+            )) as stream:
                 for event in stream:
                     if event.type in {"done", "error"}:
                         terminal = event

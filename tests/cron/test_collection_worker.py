@@ -96,7 +96,11 @@ def make_collection_root(root):
     )
     module = root / "sense/probe"
     module.mkdir(parents=True)
-    (module / "sense.json").write_text(json.dumps({"start_update": "update.py"}), "utf-8")
+    (module / "module.yaml").write_text(json.dumps({
+        "kind": "sense", "name": "probe", "explain": "fixture",
+        "update_script": "update.py", "health": "正常",
+        "input_open": False, "control_open": False,
+    }), "utf-8")
     (module / "update.py").write_text(
         "from pathlib import Path\nimport time\n"
         "def update():\n"
@@ -179,7 +183,12 @@ def test_expand_modules_refresh_in_parallel_without_changing_result_order(tmp_pa
     for name in ("a", "b", "c"):
         directory = tmp_path / "expand" / "global" / name
         directory.mkdir(parents=True)
-        (directory / "expand.json").write_text(json.dumps({"start_update": "update.py"}), "utf-8")
+        (directory / "module.yaml").write_text(json.dumps({
+            "kind": "expand", "name": name, "explain": "fixture",
+            "update_script": "update.py", "health": "正常",
+            "input_open": True, "input_file": "data.md", "control_open": False,
+        }), "utf-8")
+        (directory / "data.md").write_text("snapshot", "utf-8")
         (directory / "update.py").write_text("", "utf-8")
 
     def update(*args, **kwargs):

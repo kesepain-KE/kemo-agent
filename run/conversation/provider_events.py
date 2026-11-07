@@ -81,7 +81,9 @@ def protocol_error(value: Any, *, phase: str = "provider") -> dict[str, Any]:
     }
 
 
-def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
+def response_terminal_error(
+    response: KemoResponse, *, allow_output_truncated_retry: bool = False,
+) -> dict[str, Any]:
     if response.status == ResponseStatus.CANCELLED:
         base_error = (
             protocol_error(response.error)
@@ -134,6 +136,7 @@ def response_terminal_error(response: KemoResponse) -> dict[str, Any]:
                 if base_error.get("status_code") is not None
                 else base_error.get("provider_status")
             ),
+            allow_output_truncated_retry=allow_output_truncated_retry,
         )
         reason = str(retry["reason"])
         error = {
@@ -258,6 +261,7 @@ def events_for_protocol_response(
     user: str = "",
     cancel_event: threading.Event | None = None,
     defer_tool_validation: bool = False,
+    allow_output_truncated_retry: bool = False,
 ) -> Iterator[RunEvent]:
     if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
         raise_if_context_length_exceeded(response.error)
@@ -355,7 +359,10 @@ def events_for_protocol_response(
     else:
         yield RunEvent(
             type="error",
-            error=response_terminal_error(response),
+            error=response_terminal_error(
+                response,
+                allow_output_truncated_retry=allow_output_truncated_retry,
+            ),
             protocol_event_type=f"response.{response.status}",
             metadata={"provider_response": response_payload},
             internal={"provider_response": durable_payload},
@@ -371,6 +378,7 @@ def run_events_for_protocol_event(
     user: str = "",
     cancel_event: threading.Event | None = None,
     defer_tool_validation: bool = False,
+    allow_output_truncated_retry: bool = False,
 ) -> Iterator[RunEvent]:
     common: dict[str, Any] = {
         "event_id": event.event_id,
@@ -482,7 +490,10 @@ def run_events_for_protocol_event(
         else:
             yield RunEvent(
                 type="error",
-                error=response_terminal_error(response),
+                error=response_terminal_error(
+                    response,
+                    allow_output_truncated_retry=allow_output_truncated_retry,
+                ),
                 metadata=terminal_metadata,
                 internal={"provider_response": durable_payload},
                 **common,
@@ -498,6 +509,7 @@ def provider_events(
     cancel_event: threading.Event | None = None,
     on_response: Callable[[KemoResponse], None] | None = None,
     defer_tool_validation: bool = False,
+    allow_output_truncated_retry: bool = False,
 ) -> Iterator[RunEvent]:
     stream: Callable[..., Iterable[ProviderStreamEvent]] | None = getattr(provider, "stream", None)
     create = getattr(provider, "create", None)
@@ -540,6 +552,7 @@ def provider_events(
                     user=user,
                     cancel_event=cancel_event,
                     defer_tool_validation=defer_tool_validation,
+                    allow_output_truncated_retry=allow_output_truncated_retry,
                 )
         finally:
             close = getattr(iterator, "close", None)
@@ -565,4 +578,5 @@ def provider_events(
         user=user,
         cancel_event=cancel_event,
         defer_tool_validation=defer_tool_validation,
+        allow_output_truncated_retry=allow_output_truncated_retry,
     )

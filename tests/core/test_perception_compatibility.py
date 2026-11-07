@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from run.config import PromptSourceRegistry, _read_sense_meta
+from run.config import PromptSourceRegistry
+from run.modules import read_manifest, ModuleSpecError
 
 
 class PerceptionCompatibilityTests(unittest.TestCase):
@@ -22,14 +23,18 @@ class PerceptionCompatibilityTests(unittest.TestCase):
         (module / "sense.md").write_text("SENSOR_DATA", "utf-8")
         if create_start_update:
             (module / "data_update.py").write_text("def main():\n    return None\n", "utf-8")
-        (module / "sense.json").write_text(
+        (module / "module.yaml").write_text(
             json.dumps(
                 {
-                    "name": name,
-                    "data_md": "sense.md",
-                    "recent_update": "2026-08-06 12:00:00",
-                    "health": "正常",
-                    "start_update": "data_update.py",
+                    'name': name,
+                    'input_file': 'sense.md',
+                    'recent_update': '2026-08-06 12:00:00',
+                    'health': '正常',
+                    'update_script': 'data_update.py',
+                    'kind': 'sense',
+                    'explain': 'fixture perception',
+                    'input_open': True,
+                    'control_open': False,
                 },
                 ensure_ascii=False,
             ),
@@ -51,7 +56,7 @@ class PerceptionCompatibilityTests(unittest.TestCase):
             self.assertEqual(selection.text, "")
             diagnostics = registry.selection_diagnostics()["perception"]["global"]
             self.assertEqual(diagnostics["discovered"], [])
-            self.assertEqual(diagnostics["scan_errors"], ["sense: 目录不可读"])
+            self.assertEqual(diagnostics["scan_errors"], ["sense 目录不可读"])
 
     def test_sense_meta_start_update_missing_marks_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -60,27 +65,26 @@ class PerceptionCompatibilityTests(unittest.TestCase):
                 create_start_update=False,
             )
 
-            meta = _read_sense_meta(module)
-
-            self.assertFalse(meta.valid)
-            self.assertIn("start_update 文件不存在", meta.error)
+            with self.assertRaises(ModuleSpecError) as failure:
+                read_manifest(module, kind_hint="sense", scope="global")
+            self.assertEqual(failure.exception.error.reason, "file_missing")
+            self.assertEqual(failure.exception.error.field, "update_script")
 
     def test_sense_meta_data_md_resolve_oserror_marks_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             module = self.make_module(Path(temporary))
 
             with patch.object(Path, "resolve", side_effect=OSError("denied")):
-                meta = _read_sense_meta(module)
-
-            self.assertFalse(meta.valid)
-            self.assertEqual(meta.error, "data_md 路径解析失败")
+                with self.assertRaises(ModuleSpecError) as failure:
+                    read_manifest(module, kind_hint="sense", scope="global")
+            self.assertEqual(failure.exception.error.reason, "path_escape")
 
     def test_normal_sense_module_remains_valid_and_injectable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module = self.make_module(root)
-            meta = _read_sense_meta(module)
-            self.assertTrue(meta.valid)
+            meta = read_manifest(module, kind_hint="sense", scope="global")
+            self.assertEqual(meta.kind, "sense")
 
             registry = PromptSourceRegistry(root, "alice")
             registry.add_perception(root / "sense")

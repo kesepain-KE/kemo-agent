@@ -65,7 +65,7 @@ RUNTIME_EXCLUDES = (
     "expand/global/kemo_app/_last_run.json",
     "expand/global/kemo_app/.runtime.lock",
     "expand/global/kemo_app/logs/",
-    "expand/global/kemo_app/expand.json",
+    "expand/global/kemo_app/module.yaml",
     "expand/global/kemo_app/input_data.md",
     "expand/global/kemo_gateway_status/gateway_config.json",
     "expand/global/kemo_gateway_status/_runtime.json",
@@ -73,7 +73,7 @@ RUNTIME_EXCLUDES = (
     "expand/global/kemo_gateway_status/.runtime.lock",
     "expand/global/kemo_gateway_status/data/",
     "expand/global/kemo_gateway_status/artifacts/",
-    "expand/global/kemo_gateway_status/expand.json",
+    "expand/global/kemo_gateway_status/module.yaml",
     "expand/global/kemo_gateway_status/input_data.md",
     "expand/global/kemo_graph/graph_config.json",
     "expand/global/kemo_graph/_runtime.json",
@@ -81,7 +81,7 @@ RUNTIME_EXCLUDES = (
     "expand/global/kemo_graph/.runtime.lock",
     "expand/global/kemo_graph/data/",
     "expand/global/kemo_graph/artifacts/",
-    "expand/global/kemo_graph/expand.json",
+    "expand/global/kemo_graph/module.yaml",
     "expand/global/kemo_graph/input_data.md",
 )
 

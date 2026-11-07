@@ -459,16 +459,18 @@ def build_prompt_bundle(
     if section:
         sections.append(section)
 
-    capabilities = registered_sources.expand_capabilities(allow={
+    capabilities = registered_sources.expand_capabilities(max_chars=settings.char_limits["expand_data"], allow={
         "global": source_policy.global_expand.selector(),
         "shared": source_policy.shared_expand.selector(),
         "user": None,
     })
-    if capabilities:
-        content, truncated = truncate_chars(capabilities, settings.char_limits["expand_data"])
+    if capabilities.text:
         sections.append(PromptSection(
-            "expansions", content, original_chars=len(capabilities),
-            injected_chars=len(content), truncated=truncated,
+            "expansions", capabilities.text, source_files=capabilities.source_files,
+            original_chars=capabilities.original_chars,
+            injected_chars=capabilities.injected_chars,
+            original_items=capabilities.original_items,
+            injected_items=capabilities.injected_items, truncated=capabilities.truncated,
         ))
 
     tier_specs_all = (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.type_assertions import require_present
 
+import yaml
 import json
 import subprocess
 import sys
@@ -10,7 +11,8 @@ import unittest
 from pathlib import Path
 
 from plugins.expand_creater.tool import run
-from run.config import load_prompt_source_registry, read_expand_meta
+from run.config import load_prompt_source_registry
+from run.modules import read_manifest, ModuleSpecError
 from web.services.module_panels import load_module_panel
 
 
@@ -38,24 +40,24 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertEqual(
                 set(created["files"]),
                 {
-                    "expand.json", "expand_control.md", "start_expand.py", "data_update.py", "input_data.md",
+                    "module.yaml", "expand_control.md", "start_expand.py", "data_update.py", "input_data.md",
                     "module/panel.json", "module/panel.values.json", "module/status.json", "module/README.md",
                 },
             )
 
             module = root / created["path"]
             self.assertTrue(all((module / name).is_file() for name in created["files"]))
-            manifest = json.loads((module / "expand.json").read_text("utf-8"))
+            manifest = yaml.safe_load((module / "module.yaml").read_text("utf-8"))
             self.assertEqual(
                 set(manifest),
                 {
-                    "name", "explain", "open_input", "input_data", "input_health",
-                    "start_update", "open_control", "start_expand", "start_control",
+                    "kind", "name", "explain", "input_open", "input_file", "health",
+                    "update_script", "control_open", "control_script", "control_entry",
                 },
             )
-            self.assertEqual(manifest["input_health"], "异常")
+            self.assertEqual(manifest["health"], "异常")
             self.assertNotIn("recent_update", manifest)
-            self.assertTrue(read_expand_meta(module).valid)
+            self.assertTrue(read_manifest(module, kind_hint="expand", scope="user").kind == "expand")
             validation = run("validate", "user", name="smart_lights", context=context)
             self.assertTrue(validation["valid"], validation["errors"])
             self.assertTrue(validation["panel_enabled"])
@@ -197,17 +199,20 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertEqual(panel_error, "")
             self.assertFalse(any(container["kind"] == "action" for container in require_present(panel)["containers"]))
 
-            manifest_path = module / "expand.json"
-            manifest = json.loads(manifest_path.read_text("utf-8"))
+            manifest_path = module / "module.yaml"
+            manifest = yaml.safe_load(manifest_path.read_text("utf-8"))
             self.assertNotIn("recent_update", manifest)
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), "utf-8")
-            self.assertTrue(read_expand_meta(module).valid)
+            self.assertTrue(read_manifest(module, kind_hint="expand", scope="user").kind == "expand")
             self.assertTrue(run("validate", "shared", name="weather_station", context=context)["valid"])
 
             (module / "input_data.md").unlink()
+            self.assertTrue(run("validate", "shared", name="weather_station", context=context)["valid"])
+            manifest["input_open"] = True
+            manifest_path.write_text(yaml.safe_dump(manifest, allow_unicode=True), "utf-8")
             invalid = run("validate", "shared", name="weather_station", context=context)
             self.assertFalse(invalid["valid"])
-            self.assertTrue(any("input_data" in error and "不存在" in error for error in invalid["errors"]))
+            self.assertTrue(any("file_missing:input_file:" in error for error in invalid["errors"]))
 
     def test_invalid_inputs_do_not_leave_partial_modules_and_list_reports_damage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -285,7 +290,7 @@ class ExpandCreaterPluginTests(unittest.TestCase):
             self.assertEqual(listing["count"], 2)
             broken_result = next(item for item in listing["modules"] if item["name"] == "broken_module")
             self.assertFalse(broken_result["valid"])
-            self.assertIn("expand.json 缺失", broken_result["errors"])
+            self.assertIn("missing_manifest:-:module.yaml 缺失", broken_result["errors"])
 
     def test_runtime_accepts_valid_optional_timestamp_and_rejects_bad_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -301,13 +306,14 @@ class ExpandCreaterPluginTests(unittest.TestCase):
                 operations="无外部副作用的测试操作。",
                 context=context,
             )
-            manifest_path = root / created["path"] / "expand.json"
-            manifest = json.loads(manifest_path.read_text("utf-8"))
+            manifest_path = root / created["path"] / "module.yaml"
+            manifest = yaml.safe_load(manifest_path.read_text("utf-8"))
             manifest["recent_update"] = "not-a-time"
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), "utf-8")
-            meta = read_expand_meta(manifest_path.parent)
-            self.assertFalse(meta.valid)
-            self.assertIn("recent_update", meta.error)
+            with self.assertRaises(ModuleSpecError) as failure:
+                read_manifest(manifest_path.parent, kind_hint="expand", scope="user")
+            self.assertEqual(failure.exception.error.reason, "bad_type")
+            self.assertEqual(failure.exception.error.field, "recent_update")
             validation = run("validate", "user", name="timestamped", context=context)
             self.assertFalse(validation["valid"])
             self.assertTrue(any("recent_update" in error for error in validation["errors"]))

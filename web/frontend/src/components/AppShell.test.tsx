@@ -3193,21 +3193,22 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(getSearch()).toContain('session=dated-session'))
   })
 
-  it('输入框知识库按钮按层级展示卡片并把引用写入草稿', async () => {
+  it('输入框知识库按钮按真实目录展示文件并把引用写入草稿', async () => {
     renderApp('/chat?user=kesepain&session=s1')
     fireEvent.click(await screen.findByRole('button', { name: '打开知识库' }))
 
     const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
-    fireEvent.click(await within(drawer).findByRole('button', { name: '用户' }))
-    expect(await within(drawer).findByText('个人笔记')).toBeInTheDocument()
-    expect(within(drawer).queryByText('共享笔记')).not.toBeInTheDocument()
+    const tree = within(drawer).getByRole('tree', { name: '知识目录' })
+    fireEvent.click(await within(tree).findByRole('treeitem', { name: '用户' }))
+    expect(await within(tree).findByRole('treeitem', { name: 'notes.md' })).toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: '全部' })).not.toBeInTheDocument()
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 个人笔记' }))
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('[知识库引用 user:notes.md] 个人笔记'))
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
   })
 
-  it('聊天知识引用可叠加层级和路径搜索，引用仍写入原始路径标记', async () => {
+  it('聊天知识引用按真实路径搜索并写入原始文件路径标记', async () => {
     const documents = [
       { scope: 'user', relative_path: 'notes.md', title: '个人笔记', size: 120, updated_at: 1, active_for_main_agent: true },
       { scope: 'shared', relative_path: 'team.md', title: '共享规范', size: 90, updated_at: 1, active_for_main_agent: true },
@@ -3223,16 +3224,27 @@ describe('AppShell navigation', () => {
     fireEvent.change(composer, { target: { value: '请参考规范' } })
     fireEvent.click(screen.getByRole('button', { name: '打开知识库' }))
     const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
-    fireEvent.click(within(drawer).getByRole('button', { name: '共享' }))
-    await within(drawer).findByText('共享规范')
-    expect(within(drawer).queryByRole('combobox')).not.toBeInTheDocument()
+    await within(drawer).findByText('3 个可见知识文件')
     fireEvent.change(within(drawer).getByRole('textbox', { name: '搜索知识库' }), { target: { value: 'team.md' } })
-    expect(within(drawer).getByText('匹配 1 / 共 3 个知识文件')).toBeInTheDocument()
-    expect(within(drawer).queryByText('个人笔记')).not.toBeInTheDocument()
-    expect(within(drawer).queryByText('其他资料')).not.toBeInTheDocument()
+    expect(await within(drawer).findByText('匹配 1 / 共 3 个知识文件')).toBeInTheDocument()
+    const tree = within(drawer).getByRole('tree', { name: '知识目录' })
+    expect(within(tree).queryByRole('treeitem', { name: 'notes.md' })).not.toBeInTheDocument()
+    fireEvent.click(within(tree).getByRole('treeitem', { name: '共享' }))
+    expect(await within(tree).findByRole('treeitem', { name: 'team.md' })).toBeInTheDocument()
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 共享规范' }))
     await waitFor(() => expect(composer).toHaveValue('请参考规范\n[知识库引用 shared:team.md] 共享规范'))
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
+  })
+
+  it('聊天知识引用可将层级根路径追加到草稿', async () => {
+    renderApp('/chat?user=kesepain&session=s1')
+    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    fireEvent.click(screen.getByRole('button', { name: '打开知识库' }))
+    const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
+    const tree = within(drawer).getByRole('tree', { name: '知识目录' })
+    fireEvent.contextMenu(await within(tree).findByRole('treeitem', { name: '共享' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '引用文件夹相对路径' }))
+    await waitFor(() => expect(composer).toHaveValue('[知识库目录引用 shared:.] 共享'))
   })
 
   it('输入框能力按钮按类型引用拓展、技能和插件并追加稳定标记', async () => {

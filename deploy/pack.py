@@ -14,6 +14,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 from core.common import DeployError, digest, json_bytes, no_links, read_json, relative, version
 from core.policy import preserved_seed, protected
+from core.yamllite import loads, dumps
 from core.source import parse_archive
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,13 +44,15 @@ def publishable(name: str) -> bool:
 
 def clean_definition(name: str, data: bytes) -> bytes:
     # Tracked module manifests may contain local observations; do not ship these.
-    if name.startswith(('expand/global/', 'expand/share/', 'sense/')) and name.endswith(('/expand.json', '/sense.json')):
-        doc = json.loads(data)
-        for key in ('recent_update', 'input_health'):
-            doc.pop(key, None)
-        if 'open_input' in doc:
-            doc['open_input'] = False
-        return json_bytes(doc)
+    if name.startswith(('expand/global/', 'expand/share/', 'sense/')) and name.endswith('/module.yaml'):
+        import yaml
+
+        doc = yaml.safe_load(data.decode('utf-8-sig'))
+        doc.pop('recent_update', None)
+        doc['health'] = '异常'
+        if doc['kind'] == 'expand':
+            doc['input_open'] = False
+        return dumps(doc).encode('utf-8')
     if name.startswith('cron/task_cron_system/') and name.endswith('.json'):
         doc = json.loads(data)
         for key in ('next_run_at', 'latest_run_at', 'status'):

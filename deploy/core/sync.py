@@ -98,7 +98,7 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
                 data = before if merged == local else json_bytes(merged)
             elif merge_file(name):
                 try:
-                    yaml_config = name == 'config/global_config.yaml'
+                    yaml_config = name.endswith('.yaml')
                     defaults, local = (
                         (loads(data.decode('utf-8-sig')), loads(before.decode('utf-8-sig')))
                         if yaml_config else (json.loads(data), json.loads(before))
@@ -107,7 +107,13 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
                         raise DeployError(f'Expected object in {name}')
                     if defaults.get('schema_version') != local.get('schema_version'):
                         raise DeployError(f'Config schema changed: {name}; manual migration required')
-                    merged = merge_defaults(defaults, local)
+                    if name.endswith('/module.yaml'):
+                        merged = dict(defaults)
+                        for field in ('input_open', 'health', 'recent_update'):
+                            if field in local:
+                                merged[field] = local[field]
+                    else:
+                        merged = merge_defaults(defaults, local)
                     if not isinstance(merged, dict):
                         raise DeployError("Merged configuration must be a mapping")
                     if name == 'config/global_config.yaml':

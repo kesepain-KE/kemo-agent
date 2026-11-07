@@ -421,7 +421,7 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 
 > 两个刷新间隔也影响 `cron.poll_interval` 的最小轮询粒度；单模块超时不改变轮询频率。
 >
-> 感知 Web API 使用与调度器相同的校验逻辑读取全局 `sense_update_rate`，返回 `update_interval_seconds` 和兼容显示文本。频率不写入单个 `sense.json`；用户配置中的同名字段也不作为全局调度或页面展示来源。
+> 感知 Web API 使用与调度器相同的校验逻辑读取全局 `sense_update_rate`，返回 `update_interval_seconds` 和兼容显示文本。频率不写入单个 `module.yaml`；用户配置中的同名字段也不作为全局调度或页面展示来源。
 >
 > 感知默认5秒、拓展默认30秒，由独立采集进程的两条调度分别执行。同根拓展模块最多4个并行，主宿主只读快照；不迁移 WebSocket 服务。两个持久化间隔只减少无变化状态和成功日志的写盘次数，不延迟失败诊断。进程监护与真实退出语义见 `knowledge/global/runtime/task-automation.md`。
 

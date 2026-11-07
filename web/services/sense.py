@@ -11,15 +11,13 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
-import subprocess
-import sys
+import yaml
 from typing import Any
 import uuid
 
 from run.config import load_config, read_yaml_object, system_update_rate
 from run.context import estimate_text_tokens
-from run.extensions import ModuleRuntimeError, module_subprocess_environment
-from run.infra import hidden_subprocess_kwargs
+from run.extensions import module_update_timeout, record_module_health, run_module_updater
 from run.config import INJECTION_MODE, parse_prompt_settings
 from run.config import load_prompt_source_registry
 from run.config import MainAgentSourcePolicy
@@ -68,7 +66,7 @@ class SenseServiceMixin:
             # 片段在真实注入文本中的位置由权威侧（prompt_sources）给出，
             # 预览侧只按 key 取值，不再自己拼片段、不再自己算累加游标。
             injected_markdown = (
-                selection.fragment(item["name"])
+                selection.fragment(f"sense:{item['name']}")
                 if item["active"] and collected_markdown
                 else ""
             )
@@ -91,6 +89,8 @@ class SenseServiceMixin:
                 "health": item["health"],
                 "valid": item["valid"],
                 "error": item["error"],
+                "reason": item.get("reason"),
+                "field": item.get("field"),
                 "start_update": item["start_update"],
                 "files": item["files"],
                 "registered_items": item["files"],
@@ -145,6 +145,8 @@ class SenseServiceMixin:
                 "injected_chars": selection.injected_chars,
                 "estimated_tokens": estimate_text_tokens(selection.text),
                 "truncated": selection.truncated,
+                "dropped": [{"key": key, "reason": reason} for key, reason in selection.dropped],
+                "clipped": list(selection.clipped),
                 "preview": preview,
                 "preview_truncated": len(selection.text) > preview_limit,
                 "content": selection.text,
@@ -197,30 +199,20 @@ class SenseServiceMixin:
             raise NotFoundError(f"感知模块更新入口不存在：{source['start_update']}")
         if updater.is_symlink() or getattr(updater, "is_junction", lambda: False)():
             raise InvalidRequestError("感知模块更新入口不能是符号链接或目录联接")
+        result = run_module_updater(
+            updater, target, timeout=module_update_timeout(load_config(name, self.root)),
+        )
+        healthy = result.get("ok") is True
+        reason = str(result.get("reason") or "未知错误")
         try:
-            completed = subprocess.run(
-                [sys.executable, updater.name],
-                cwd=str(target),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=120,
-                check=False,
-                env=module_subprocess_environment(target),
-                **hidden_subprocess_kwargs(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise WebServiceError(f"感知模块更新超时：{logical_name}") from exc
-        except ModuleRuntimeError as exc:
+            record_module_health(target / "module.yaml", "sense", healthy=healthy)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            detail = "采集成功" if healthy else reason
             raise WebServiceError(
-                f"感知模块环境无效：{logical_name}（{exc}）"
+                f"感知模块{detail}，健康状态写回失败：{logical_name}"
             ) from exc
-        except OSError as exc:
-            raise WebServiceError(f"感知模块更新入口执行失败：{logical_name}") from exc
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "未知错误").strip()[:1000]
-            raise WebServiceError(f"感知模块更新失败：{logical_name}（{detail}）")
+        if not healthy:
+            raise WebServiceError(f"感知模块更新失败：{logical_name}（{reason[-1000:]}）")
         refreshed = self.sense(name)
         refreshed_source = next(
             (item for item in refreshed["sources"] if item["id"] == logical_name),

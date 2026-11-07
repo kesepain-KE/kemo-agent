@@ -30,7 +30,7 @@ from core.locking import Lock
 from core.policy import local_module, protected
 from core.source import Bundle, obtain, parse_archive, release
 from core.yamllite import dumps, loads
-from pack import publishable, write_bundle
+from pack import clean_definition, publishable, write_bundle
 
 
 def fixture(ver='1.3.0', extra=None):
@@ -437,6 +437,36 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
         self.assertTrue(publishable('template/expand/module/panel.values.json'))
         self.assertTrue(publishable('web/frontend/dist/index.html'))
         self.assertTrue(publishable('provider/assets/deepseek_v4_tokenizer.zip'))
+
+    def test_module_yaml_release_merges_local_runtime_with_new_definition(self):
+        name = 'expand/global/demo/module.yaml'
+        definition = {
+            'kind': 'expand', 'name': 'demo', 'explain': 'module definition with a long description ' * 8,
+            'health': '正常', 'recent_update': '2026-11-07 12:00:00',
+            'input_open': True, 'input_file': 'data.md', 'control_open': True,
+            'control_script': 'control.py', 'control_entry': 'control.md',
+            'update_script': 'update.py',
+        }
+        release = clean_definition(name, yaml.safe_dump(definition, allow_unicode=True).encode('utf-8'))
+        packaged = loads(release.decode('utf-8'))
+        self.assertEqual(packaged['explain'], definition['explain'])
+        self.assertNotIn('recent_update', packaged)
+        self.assertEqual(packaged['health'], '异常')
+        self.assertFalse(packaged['input_open'])
+        self.install(self.bundle(extra={name: release}))
+        local = {**packaged, 'input_open': True, 'health': '正常',
+                 'recent_update': '2026-11-07 13:00:00'}
+        (self.root / name).write_text(dumps(local), encoding='utf-8')
+        updated = {**packaged, 'explain': 'updated module',
+                   'update_script': 'new_update.py'}
+        self.install(self.bundle('1.3.1', extra={
+            name: dumps(updated).encode('utf-8'),
+        }))
+        installed = loads((self.root / name).read_text(encoding='utf-8'))
+        self.assertEqual(installed['explain'], 'updated module')
+        self.assertEqual(installed['update_script'], 'new_update.py')
+        for field in ('input_open', 'health', 'recent_update'):
+            self.assertEqual(installed[field], local[field])
 
     def test_shared_skills_use_the_new_runtime_root(self):
         self.assertTrue(local_module('skills/example'))

@@ -268,6 +268,8 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 Current version: `2.0.0` (source finalized on November 5, 2026; remote distribution artifacts are published separately)
 
+The 2.0.0 baseline was frozen again on November 7, 2026, including CardStream, YAML configuration, module hot loading, and path-based knowledge libraries. This is a breaking update.
+
 Confirmed compatible Kemo gateway: `kemo-adapter-api 1.0.0` (Kemo 2.0 wire protocol matched).
 
 ### 2.0.0 release notes (November 5, 2026)

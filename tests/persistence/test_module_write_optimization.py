@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import yaml
 import json
 import os
 from pathlib import Path
@@ -18,14 +19,10 @@ from run.extensions import (
 def test_healthy_module_manifest_is_not_rewritten_before_checkpoint(
     tmp_path: Path,
 ) -> None:
-    manifest = tmp_path / "expand.json"
+    manifest = tmp_path / "module.yaml"
     manifest.write_text(
         json.dumps(
-            {
-                "name": "demo",
-                "input_health": "正常",
-                "recent_update": "2026-08-16 12:00:00",
-            },
+            {'name': 'demo', 'health': '正常', 'recent_update': '2026-08-16 12:00:00', 'kind': 'expand'},
             ensure_ascii=False,
             indent=2,
         )
@@ -49,7 +46,7 @@ def test_healthy_module_manifest_is_not_rewritten_before_checkpoint(
 
 
 def test_module_health_transition_is_persisted_immediately(tmp_path: Path) -> None:
-    manifest = tmp_path / "sense.json"
+    manifest = tmp_path / "module.yaml"
     manifest.write_text(
         json.dumps(
             {"name": "demo", "health": "正常", "recent_update": "2026-08-16 12:00:00"},
@@ -58,7 +55,7 @@ def test_module_health_transition_is_persisted_immediately(tmp_path: Path) -> No
         "utf-8",
     )
     record_module_health(manifest, "sense", healthy=False)
-    assert json.loads(manifest.read_text("utf-8"))["health"] == "异常"
+    assert yaml.safe_load(manifest.read_text("utf-8"))["health"] == "异常"
 
 
 def test_module_environments_are_independent_and_do_not_mutate_parent(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import yaml
 import shutil
 import tempfile
 import unittest
@@ -22,8 +23,8 @@ class StaticModuleTemplateTests(unittest.TestCase):
                 module,
                 timeout=5,
             )
-            manifest_name = "sense.json" if category == "sense" else "expand.json"
-            manifest = json.loads((module / manifest_name).read_text("utf-8"))
+            manifest_name = "module.yaml" if category == "sense" else "module.yaml"
+            manifest = yaml.safe_load((module / manifest_name).read_text("utf-8"))
             return result, manifest
 
     def test_sense_template_has_a_runnable_zero_argument_entry(self) -> None:
@@ -35,7 +36,7 @@ class StaticModuleTemplateTests(unittest.TestCase):
     def test_expand_template_has_a_runnable_zero_argument_entry(self) -> None:
         result, manifest = self._run_template("expand")
         self.assertTrue(result["ok"], result)
-        self.assertEqual(manifest["input_health"], "正常")
+        self.assertEqual(manifest["health"], "正常")
         self.assertTrue(manifest["recent_update"])
 
 

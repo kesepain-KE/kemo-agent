@@ -42,7 +42,7 @@ def protected(name: str, extra=()) -> bool:
         return True
     if any(fnmatch.fnmatch(base, pattern) for pattern in ('*.sqlite3*', '*.db', '*.lock', '*.pid', '*.pyc', '*.log')):
         return True
-    module_files = ()
+    module_files: tuple[str, ...] = ()
     if parts[0] == 'expand' and len(parts) >= 3 and parts[1] in {'global', 'share'}:
         module_files = parts[3:]
     elif parts[0] == 'sense' and len(parts) >= 2:
@@ -65,12 +65,12 @@ def merge_file(name: str) -> bool:
         parts[0] == 'expand'
         and len(parts) >= 4
         and parts[1] in {'global', 'share'}
-        and parts[-1] == 'expand.json'
+        and parts[-1] == 'module.yaml'
     )
     sense_manifest = (
         parts[0] == 'sense'
         and len(parts) >= 3
-        and parts[-1] == 'sense.json'
+        and parts[-1] == 'module.yaml'
     )
     return (expand_manifest or sense_manifest
             or name.startswith('cron/task_cron_system/') and name.endswith('.json'))

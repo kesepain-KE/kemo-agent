@@ -21,6 +21,7 @@ RuntimeHost 会在隔离子进程中调用零参数 update()；Windows 后台调
 """
 
 import json
+import yaml
 import os
 import sys
 import uuid
@@ -31,7 +32,7 @@ from typing import Any
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_MD = BASE_DIR / "input_data.md"
 STATUS_PATH = BASE_DIR / "_last_run.json"
-MANIFEST_PATH = BASE_DIR / "expand.json"
+MANIFEST_PATH = BASE_DIR / "module.yaml"
 PANEL_VALUES_PATH = BASE_DIR / "module" / "panel.values.json"
 PANEL_STATUS_PATH = BASE_DIR / "module" / "status.json"
 HOST_TZ = timezone(timedelta(hours=8))  # 北京时间，按需修改
@@ -117,17 +118,17 @@ def monotonic_timestamp(previous: Any, candidate: str) -> str:
 
 
 def write_manifest_health(*, healthy: bool, update_time: str) -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text("utf-8"))
+    manifest = yaml.safe_load(MANIFEST_PATH.read_text("utf-8"))
     if not isinstance(manifest, dict):
-        raise ValueError("expand.json 顶层必须是 JSON 对象")
-    manifest["input_health"] = "正常" if healthy else "异常"
+        raise ValueError("module.yaml 顶层必须是 YAML 映射")
+    manifest["health"] = "正常" if healthy else "异常"
     if healthy:
         manifest["recent_update"] = monotonic_timestamp(
             manifest.get("recent_update"), update_time
         )
     atomic_write(
         MANIFEST_PATH,
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False),
     )
 
 

@@ -268,7 +268,7 @@ file 动态读取、network get/read、shell status、subagent_dispatch list/sta
 任务/记忆/计划变更和多媒体生成等。维护动作分类表时，应将新增内置工具的每个 action
 明确归入查询或副作用；不得通过相同参数命中旧回执来代替查询。
 
-`expand.json` 不接受 `reuse_policy`；拓展读取与写入均以当前调用为准。
+`module.yaml` 不接受 `reuse_policy`；拓展读取与写入均以当前调用为准。
 重复拦截和真实执行分别记录，不把副作用拦截记为一次执行。连续相同真实调用仍受
 `tools.consecutive_identical_call_limit` 保护（默认 3），副作用则在第二次同签名请求时拦截。
 跨 Provider 尝试恢复只保留副作用签名保护与实际执行历史；提供给模型的恢复回执不含旧工具结果。

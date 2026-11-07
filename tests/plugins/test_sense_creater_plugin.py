@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.type_assertions import require_present
 
+import yaml
 import json
 import os
 import subprocess
@@ -60,21 +61,22 @@ class SenseCreaterPluginTests(unittest.TestCase):
             self.assertEqual(
                 created["files"],
                 [
-                    "sense.json", "sense.md", "data_update.py",
+                    "module.yaml", "sense.md", "data_update.py",
                     "module/panel.json", "module/panel.values.json", "module/status.json", "module/README.md",
                 ],
             )
             module = root / created["path"]
             self.assertTrue(all((module / name).is_file() for name in created["files"]))
-            manifest = json.loads((module / "sense.json").read_text("utf-8"))
+            manifest = yaml.safe_load((module / "module.yaml").read_text("utf-8"))
             self.assertEqual(
                 set(manifest),
-                {"name", "data_md", "recent_update", "health", "start_update"},
+                {"kind", "name", "explain", "input_file", "input_open", "control_open",
+                 "recent_update", "health", "update_script"},
             )
             self.assertEqual(manifest["name"], "system_monitor")
-            self.assertEqual(manifest["data_md"], "sense.md")
-            self.assertEqual(manifest["start_update"], "data_update.py")
-            self.assertNotIn("explain", manifest)
+            self.assertEqual(manifest["input_file"], "sense.md")
+            self.assertEqual(manifest["update_script"], "data_update.py")
+            self.assertEqual(manifest["explain"], "只读采集系统资源并注入提示词。")
             self.assertEqual((module / "sense.md").read_text("utf-8"), sense_content)
 
             validation = run("validate", name="system_monitor", context=context)
@@ -222,15 +224,19 @@ class SenseCreaterPluginTests(unittest.TestCase):
             damaged.mkdir()
             (damaged / "sense.md").write_text("# damaged\n", "utf-8")
             (damaged / "data_update.py").write_text("def broken(:\n", "utf-8")
-            (damaged / "sense.json").write_text(
+            (damaged / "module.yaml").write_text(
                 json.dumps(
                     {
-                        "name": "damaged",
-                        "data_md": "sense.md",
-                        "recent_update": "not-a-time",
-                        "health": "未知",
-                        "start_update": "data_update.py",
-                        "extra": True,
+                        'name': 'damaged',
+                        'input_file': 'sense.md',
+                        'recent_update': 'not-a-time',
+                        'health': '未知',
+                        'update_script': 'data_update.py',
+                        'extra': True,
+                        'kind': 'sense',
+                        'explain': 'fixture perception',
+                        'input_open': True,
+                        'control_open': False,
                     },
                     ensure_ascii=False,
                 ),
@@ -240,14 +246,18 @@ class SenseCreaterPluginTests(unittest.TestCase):
             traversal = base / "traversal"
             traversal.mkdir()
             (traversal / "data_update.py").write_text("pass\n", "utf-8")
-            (traversal / "sense.json").write_text(
+            (traversal / "module.yaml").write_text(
                 json.dumps(
                     {
-                        "name": "traversal",
-                        "data_md": "../outside.md",
-                        "recent_update": "2026-07-21 12:00:00",
-                        "health": "正常",
-                        "start_update": "data_update.py",
+                        'name': 'traversal',
+                        'input_file': '../outside.md',
+                        'recent_update': '2026-07-21 12:00:00',
+                        'health': '正常',
+                        'update_script': 'data_update.py',
+                        'kind': 'sense',
+                        'explain': 'fixture perception',
+                        'input_open': True,
+                        'control_open': False,
                     },
                     ensure_ascii=False,
                 ),
@@ -256,16 +266,30 @@ class SenseCreaterPluginTests(unittest.TestCase):
 
             missing_result = run("validate", name="missing_manifest", context=context)
             self.assertFalse(missing_result["valid"])
-            self.assertIn("sense.json 缺失", missing_result["errors"])
+            self.assertIn("missing_manifest:-:module.yaml 缺失", missing_result["errors"])
             damaged_result = run("validate", name="damaged", context=context)
             self.assertFalse(damaged_result["valid"])
             self.assertTrue(any("未知字段" in error for error in damaged_result["errors"]))
-            self.assertTrue(any("recent_update" in error for error in damaged_result["errors"]))
-            self.assertTrue(any("health" in error for error in damaged_result["errors"]))
-            self.assertTrue(any("Python 代码无效" in error for error in damaged_result["errors"]))
+            manifest_path = damaged / "module.yaml"
+            manifest = yaml.safe_load(manifest_path.read_text("utf-8"))
+            for field, expected in (
+                ("extra", "bad_enum:health"),
+                ("health", "bad_type:recent_update"),
+                ("recent_update", "Python 代码无效"),
+            ):
+                if field == "extra":
+                    del manifest[field]
+                elif field == "health":
+                    manifest[field] = "正常"
+                else:
+                    manifest[field] = "2026-07-21 12:00:00"
+                manifest_path.write_text(yaml.safe_dump(manifest, allow_unicode=True), "utf-8")
+                result = run("validate", name="damaged", context=context)
+                self.assertFalse(result["valid"])
+                self.assertTrue(any(expected in error for error in result["errors"]), result)
             traversal_result = run("validate", name="traversal", context=context)
             self.assertFalse(traversal_result["valid"])
-            self.assertTrue(any("模块目录内" in error for error in traversal_result["errors"]))
+            self.assertTrue(any("path_escape:input_file" in error for error in traversal_result["errors"]))
 
             listing = {item["name"]: item for item in run("list", context=context)["modules"]}
             self.assertEqual(set(listing), {"damaged", "missing_manifest", "traversal"})

@@ -116,6 +116,7 @@ class KnowledgeTransferBody(BaseModel):
     action: Literal["copy", "move"]
     target_scope: Literal["user", "shared", "global"]
     target_path: str
+    auto_rename: StrictBool = False
 
 
 class MemoryWriteBody(BaseModel):

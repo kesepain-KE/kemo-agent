@@ -30,7 +30,7 @@
 
 1. 放在 `user`（`users/<user>/expand/`）还是 `shared`（`expand/share/`）。
 2. 英文目录名，必须匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`。
-3. 一句话功能说明，写入 `expand.json` 的 `explain`。
+3. 一句话功能说明，写入 `module.yaml` 的 `explain`。
 
 不得创建 `global` 拓展；全局层属于管理员维护范围。
 

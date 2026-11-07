@@ -179,11 +179,19 @@ def test_expand_allows_normal_command_but_rejects_declared_agent_bridge(workspac
     root, _ = workspace
     directory = root / "users/alice/expand/demo"
     directory.mkdir()
-    (directory / "expand.json").write_text(json.dumps({
-        "name": "demo", "explain": "demo", "open_input": False,
-        "input_data": "input_data.md", "input_health": "正常", "start_update": "data_update.py",
-        "open_control": True, "start_expand": "start_expand.py", "start_control": "expand_control.md",
+    (directory / "module.yaml").write_text(json.dumps({
+        'name': 'demo',
+        'explain': 'demo',
+        'input_open': False,
+        'input_file': 'input_data.md',
+        'health': '正常',
+        'update_script': 'data_update.py',
+        'control_open': True,
+        'control_script': 'start_expand.py',
+        'control_entry': 'expand_control.md',
+        'kind': 'expand',
     }), "utf-8")
+    (directory / "data_update.py").write_text("def update(): return True\n", "utf-8")
     (directory / "expand_control.md").write_text("normal and agent_call", "utf-8")
     (directory / "start_expand.py").write_text("def execute(command, params): return {}\n", "utf-8")
     path = directory / "agent_bridge.json"

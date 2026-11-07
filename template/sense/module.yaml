@@ -1,0 +1,9 @@
+kind: sense
+name: my_sense
+input_file: sense.md
+recent_update: '2000-01-01 00:00:00'
+health: 异常
+update_script: data_update.py
+explain: 感知模块功能说明
+input_open: true
+control_open: false

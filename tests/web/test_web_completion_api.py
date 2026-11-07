@@ -347,7 +347,7 @@ class WebCompletionApiTests(unittest.TestCase):
         )
         global_expand = root / "expand" / "global" / "weather"
         global_expand.mkdir(parents=True)
-        (global_expand / "expand.json").write_text("{}", "utf-8")
+        (global_expand / "module.yaml").write_text("{}", "utf-8")
         (global_expand / "nested").mkdir()
         (global_expand / "nested" / "data.md").write_text("weather", "utf-8")
         user_expand = root / "users" / "alice" / "expand" / "personal"
