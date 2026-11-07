@@ -218,6 +218,42 @@ return async (
       runId,
       signal: controller.signal,
       onEvent: (event) => {
+        if (event.type === 'context_window') {
+          const value = event.metadata?.context_snapshot
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const snapshot = value as OverviewResponse['context_snapshot']
+            const queryKey = ['overview', user, activeSession]
+            void queryClient.cancelQueries({ queryKey, exact: true }, { revert: false })
+            const updated = queryClient.setQueryData<OverviewResponse>(queryKey, (current) => current ? {
+              ...current,
+              context_snapshot: snapshot,
+              context_window: {
+                ...current.context_window,
+                tokens: {
+                  ...current.context_window.tokens,
+                  system_prompt_tokens: snapshot.system_prompt_tokens,
+                  tool_schema_tokens: snapshot.tool_schema_tokens,
+                  conversation_tokens: snapshot.conversation_tokens,
+                  summary_tokens: snapshot.summary_tokens,
+                  other_tokens: snapshot.other_tokens,
+                  context_tokens: snapshot.total_tokens - snapshot.system_prompt_tokens,
+                  total_tokens: snapshot.total_tokens,
+                  capacity_tokens: snapshot.capacity_tokens,
+                  percent: snapshot.percent,
+                  source: snapshot.source,
+                  measurement: snapshot.measurement,
+                  captured_at: snapshot.captured_at,
+                },
+                conversation: {
+                  ...current.context_window.conversation,
+                  cards_active: snapshot.cards_active,
+                  ...(snapshot.last_seq === undefined ? {} : { last_seq: snapshot.last_seq }),
+                },
+              },
+            } : current)
+            if (!updated) void queryClient.invalidateQueries({ queryKey, exact: true })
+          }
+        }
         if (event.type === 'usage') {
           const rate = event.metadata?.session_cache_hit_rate
           if (rate === null || typeof rate === 'number') {
