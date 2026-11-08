@@ -97,13 +97,15 @@ def test_background_final_is_blocked_then_result_resumes_with_paired_tools(setup
     try:
         eventually(lambda: (root_record(root) or {}).get('status') == 'waiting_children')
         thread.join(1.25)
-        assert thread.is_alive() and len(provider.requests) == 2
+        assert thread.is_alive()
+        # A slow dispatch can publish an in-flight receipt before its queued result.
+        assert 2 <= len(provider.requests) <= 3
         assert not any(e.type == 'done' for e in events)
     finally:
         release.set()
     thread.join(8)
     assert not thread.is_alive() and not errors
-    assert len(provider.requests) == 3
+    assert 3 <= len(provider.requests) <= 4
     serialized = provider.requests[-1].model_dump_json()
     assert 'child-result' in serialized
     calls = [i.call_id for i in provider.requests[-1].input if isinstance(i, ToolCallItem)]
