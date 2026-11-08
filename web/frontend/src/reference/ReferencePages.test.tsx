@@ -529,8 +529,9 @@ describe('样例替换后的生产路由', () => {
     await screen.findByText('（当前没有注入内容）')
     fireEvent.click(screen.getByRole('button', { name: '模块详情' }))
     expect(await screen.findByRole('heading', { name: '运行时采集' })).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: '系统提示词注入片段' })).toHaveTextContent('（该模块当前没有注入内容）')
-    expect(screen.getByRole('region', { name: '系统提示词注入片段' })).not.toHaveTextContent('CPU 使用率')
+    const injectedPreview = screen.getByRole('region', { name: '系统提示词注入片段' })
+    expect(await within(injectedPreview).findByText('（该模块当前没有注入内容）')).toBeInTheDocument()
+    expect(injectedPreview).not.toHaveTextContent('CPU 使用率')
   })
 
   it('一次性分钟时刻只补一次秒数', async () => {
