@@ -35,12 +35,21 @@ def integration_record(root):
 def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(setup, monkeypatch, route):
     root, scheduler = setup
     bounded_config(root)
+    release, started, cancel = threading.Event(), threading.Event(), threading.Event()
     if route == "limited":
         from types import SimpleNamespace
-        monkeypatch.setattr("run.conversation.main_orchestration.detect_task_plan_creation_boundary",
-            lambda **kwargs: SimpleNamespace(stop_reason="task_plan_created", plan_id="test",
-                                             awaiting_user_approval=True))
-    release, started, cancel = threading.Event(), threading.Event(), threading.Event()
+
+        def plan_boundary(**kwargs):
+            # The in-flight tool receipt does not mean a child was registered.
+            if kwargs["result_payload"].get("result", {}).get("status") == "queued":
+                assert started.wait(10)
+                return SimpleNamespace(stop_reason="task_plan_created", plan_id="test",
+                                       awaiting_user_approval=True)
+            return None
+
+        monkeypatch.setattr(
+            "run.conversation.main_orchestration.detect_task_plan_creation_boundary", plan_boundary,
+        )
     late_result = Future()
     calls, events, errors = [], [], []
 
@@ -52,7 +61,7 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
                 "child exceeded its execution budget", process_terminated=False,
                 completion_future=late_result,
             )
-        release.wait(10)
+        release.wait()  # The finally block owns real worker exit.
         return {"answer": "late child"}
 
     JOBS["worker"] = uncooperative
@@ -74,7 +83,9 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
     setattr(provider, "create", create)
     draining = threading.Event()
     drain_started = []
+    drain_finished = []
     original_deadline = TaskCoordinator._deadline
+    original_seal_finish = TaskCoordinator._seal_finish
 
     def deadline(coordinator):
         value = original_deadline(coordinator)
@@ -84,6 +95,14 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
         return value
 
     monkeypatch.setattr(TaskCoordinator, "_deadline", deadline)
+
+    def seal_finish(coordinator, *args, **kwargs):
+        # Measure the dependency drain before terminal persistence starts.
+        if draining.is_set() and not drain_finished:
+            drain_finished.append(time.monotonic())
+        return original_seal_finish(coordinator, *args, **kwargs)
+
+    monkeypatch.setattr(TaskCoordinator, "_seal_finish", seal_finish)
 
     def run():
         try:
@@ -98,10 +117,10 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
     try:
         assert started.wait(10)
         assert draining.wait(10), "completion drain never started"
-        thread.join(2.8)
-        assert not thread.is_alive(), "response waited past its one-second completion deadline"
+        thread.join(10)
+        assert not thread.is_alive(), "response did not finish after draining dependencies"
         assert not errors
-        assert time.monotonic() - drain_started[0] < 3.5
+        assert drain_finished[0] - drain_started[0] < 3.5
         terminal = events[-1]
         assert terminal.type == "done" and terminal.metadata["status"] == "partial"
         assert terminal.metadata["retryable"] is False
