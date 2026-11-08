@@ -19,11 +19,7 @@ input_schema:
       description: call 时使用的公开子代理名称；外部智能体使用 external:<scope>:<拓展名>:<代理名> 句柄
     input:
       type: object
-      description: >-
-        call 时传给目标子代理的输入，字段以该代理的 input_schema 为准，可通过 list 获取。
-        general_worker 只需 task（非空任务描述）；context 为可选背景字符串，
-        constraints、acceptance_criteria 均可选，接受字符串或字符串数组。
-        其他背景、范围和交付要求写入 task/context，不使用 goal、scope、deliverable 等额外字段。
+      description: call 时传给目标子代理的输入，字段以该代理的 input_schema 为准，可通过 list 获取。 general_worker 只需 task（非空任务描述）；context 为可选背景字符串， constraints、acceptance_criteria 均可选，接受字符串或字符串数组。 其他背景、范围和交付要求写入 task/context，不使用 goal、scope、deliverable 等额外字段。
     definition:
       type: object
       description: create 时使用的数据型用户代理定义；建立可继续自由扩展的最小包合同
