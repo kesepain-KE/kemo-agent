@@ -182,23 +182,24 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         app = self.app(Backend(iterator))
         chunks = []
         starts = []
-        heartbeat_times = []
+        blocked_heartbeat_times = []
 
         async def send(message):
             if message["type"] == "http.response.start":
                 starts.append(message)
             chunk = message.get("body", b"")
             chunks.append(chunk)
-            if chunk == HEARTBEAT_FRAME:
-                self.assertFalse(iterator.release.is_set())
+            # Further keepalives are valid while the released read is still
+            # returning from its worker thread to the event loop.
+            if chunk == HEARTBEAT_FRAME and not iterator.release.is_set():
                 self.assertEqual(iterator.calls, 1)
-                heartbeat_times.append(time.monotonic())
-                if len(heartbeat_times) == 2:
+                blocked_heartbeat_times.append(time.monotonic())
+                if len(blocked_heartbeat_times) == 2:
                     iterator.release.set()
 
         await asyncio.wait_for(invoke_chat(app, send), 3)
-        self.assertEqual(len(heartbeat_times), 2)
-        self.assertGreaterEqual(heartbeat_times[1] - heartbeat_times[0], 0.01)
+        self.assertEqual(len(blocked_heartbeat_times), 2)
+        self.assertGreaterEqual(blocked_heartbeat_times[1] - blocked_heartbeat_times[0], 0.01)
         payloads = [
             json.loads(chunk.split(b"\ndata: ", 1)[1])
             for chunk in chunks if chunk.startswith(b"event:")
