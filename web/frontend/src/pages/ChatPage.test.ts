@@ -953,6 +953,43 @@ describe('reduceRunEvent', () => {
     expect(items.at(-1)).toMatchObject({ id: 'history_usage_i_21', round: 21 })
   })
 
+  it.each(['required', 'detached'])('迟到的 %s 回执在分页恢复后仍归原轮次统计', (mode) => {
+    const history = cardHistory({
+      messages: [
+        { role: 'user', content: '启动旧任务' },
+        { role: 'assistant', content: '旧任务交付' },
+        { role: 'user', content: '处理新任务' },
+        { role: 'assistant', content: '新任务交付' },
+      ],
+      integrations: [
+        { integration_number: 1, usage: { input_tokens: 11 } },
+        { integration_number: 2, usage: { input_tokens: 22 } },
+      ],
+    })
+    const late: HistoryResponse['cards'][number] = {
+      card_id: 'late-receipt', integration_id: 'i_1', seq: 5,
+      raw_kind: 'tool_result', created_at: '2026-11-08T13:00:00Z',
+      // Historical detached exits retain their RAW cursor, without a tool projection.
+      ...(mode === 'required' ? { tool: {
+        execution_id: 'late-job', call_id: 'old-call', name: 'shell', seq: 5,
+        status: 'error', elapsed_ms: 0, arguments_text: '{}', arguments_truncated: false,
+        result_text: '{"ok":false}', result_truncated: false,
+      } } : {}),
+    }
+    history.integrations[0] = { ...history.integrations[0], last_seq: 5, initial_card: history.cards[0] }
+    const latest = { ...history, cards: [...history.cards.slice(2), late] }
+    const earlier = { ...history, cards: history.cards.slice(0, 2) }
+
+    for (const page of [latest, mergeHistoryPages([latest, earlier])]) {
+      const replies = groupConversationItems(buildHistoryItems(page))
+        .filter((block) => block.kind === 'assistant')
+      expect(replies.map((block) => partitionAssistantTurnItems(block.items).usageItems.map((item) => item.round)))
+        .toEqual([[1], [2]])
+      expect(replies.map((block) => block.items.filter((item) => item.kind === 'tool').map((item) => item.id)))
+        .toEqual([mode === 'required' ? ['history_tool_late-job'] : [], []])
+    }
+  })
+
   it('长任务只加载末页时仍恢复原始提问，合并包含原始卡片的前页时不重复', () => {
     const initial: HistoryResponse['cards'][number] = {
       card_id: 'long-input', integration_id: 'long', seq: 3, raw_kind: 'user_text', raw_level: 'initial',

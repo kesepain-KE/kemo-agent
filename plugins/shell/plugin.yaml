@@ -1,5 +1,5 @@
 name: shell
-description: 执行本地系统命令。支持同步执行与受管理后台作业；后台作业可按 job_id 查询、取消并配合 wait_for_condition 等待。
+description: 执行本地系统命令。支持同步执行与受管理后台作业；有限后台任务由框架等待结果，常驻服务显式 detached。作业可按 job_id 查询、取消。
 input_schema:
   type: object
   properties:
@@ -28,7 +28,7 @@ input_schema:
       - required
       - detached
       default: required
-      description: 后台有限任务默认 required，所属智能体需处理完成通知后再交付；常驻服务显式 detached，不阻塞交付
+      description: required=有限后台任务，等待并处理完成结果后交付；detached=常驻服务，验证就绪后可交付，退出只通知，不追加工具结果卡。两者均受 timeout 约束
     show_terminal:
       type: boolean
       default: false

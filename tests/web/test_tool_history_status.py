@@ -3,6 +3,7 @@ import pytest
 
 from run.cards import CardStore, IntegrationStore
 from run.history import reserve_session
+from tests.card_history_support import seed_history
 from web.service import WebRunService
 
 
@@ -36,3 +37,33 @@ def test_tool_status_survives_history_service(tmp_path, status, result, executio
                        final_payload={"text": "receipt"})
     tool = WebRunService(tmp_path).history("alice", "s1")["integration_traces"][0]["tools"][0]
     assert tool["status"] == expected
+
+
+def test_legacy_detached_exit_keeps_raw_cursor_without_rendering_a_tool(tmp_path):
+    (tmp_path / "users/alice").mkdir(parents=True)
+    (tmp_path / "users/alice/user_config.yaml").write_text("{}", "utf-8")
+    saved = seed_history(tmp_path, "alice", "web", "s1", [
+        {"role": "user", "content": "start service"},
+        {"role": "assistant", "content": "service ready"},
+        {"role": "user", "content": "next task"},
+        {"role": "assistant", "content": "next result"},
+    ])
+    old_id = saved.integrations[0]["integration_id"]
+    job_id = "job_" + "a" * 32
+    receipt = saved.store.append("web", "s1", old_id, "tool_result", {
+        "execution_id": job_id,
+        "tool_call_id": "service-call",
+        "original_call": {"name": "shell", "arguments": {
+            "command": "dev-server", "background": True, "completion_mode": "detached",
+        }},
+        "execution": {"status": "failed", "execution_live": False},
+        "result": {"ok": False, "job_id": job_id, "completion_mode": "detached"},
+    }, tool_call_id="service-call", event_key=f"shell-result:{job_id}")
+
+    page = WebRunService(tmp_path).history("alice", "s1", limit=1)
+    assert page["pagination"]["last_seq"] == receipt.seq
+    assert page["pagination"]["next_before"] == receipt.seq
+    assert page["cards"][0]["card_id"] == receipt.card_id
+    assert "tool" not in page["cards"][0]
+    assert page["integration_traces"][0]["tools"] == []
+    assert saved.cards[-1].raw_payload["result"]["job_id"] == job_id

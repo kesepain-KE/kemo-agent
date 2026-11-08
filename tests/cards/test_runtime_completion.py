@@ -275,10 +275,10 @@ def shell_job(root, integration, *, mode="required"):
     )[0]
 
 
-def test_late_shell_receipt_is_raw_after_partial_response_and_is_idempotent(root):
+def test_late_required_shell_receipt_is_raw_after_partial_response_and_is_idempotent(root):
     integration = IntegrationStore(CardStore(root, "alice"), "web", "s1", "i-late")
     integration.start()
-    job = shell_job(root, integration, mode="detached")
+    job = shell_job(root, integration)
     integration.finish("partial", metadata={"status": "partial"})
     _finish(root, "alice", job["job_id"], exit_code=0, output_tail=["late-shell"])
     record = read_background_job(root, "alice", job["job_id"])
@@ -288,6 +288,38 @@ def test_late_shell_receipt_is_raw_after_partial_response_and_is_idempotent(root
     assert len(receipts) == 1 and receipts[0].raw_payload["result"]["output_tail"] == ["late-shell"]
     with integration.store.db() as db:
         assert db.execute("SELECT status FROM card_integrations").fetchone()[0] == "partial"
+
+
+@pytest.mark.parametrize("exit_code,error_code", [(0, ""), (1, "background_timeout")])
+def test_detached_shell_exit_notifies_next_turn_without_changing_raw(root, exit_code, error_code):
+    store = CardStore(root, "alice")
+    integration = IntegrationStore(store, "web", "s1", "i-service")
+    integration.start()
+    job = shell_job(root, integration, mode="detached")
+    integration.request_started()
+    integration.request_finished(accepted_seq=store.snapshot("web", "s1").last_seq)
+    integration.finish("completed", final_payload={"text": "service ready"},
+                       metadata={"usage": {"input_tokens": 42}})
+    before = store.snapshot("web", "s1").last_seq
+    with store.db() as db:
+        closed = tuple(db.execute("SELECT status,updated_at,record_json FROM card_integrations").fetchone())
+
+    _finish(root, "alice", job["job_id"], exit_code=exit_code, error_code=error_code,
+            output_tail=["service stopped"], output_tail_complete=True)
+    record = read_background_job(root, "alice", job["job_id"])
+    assert not record.get("card_result_seq")
+    assert store.snapshot("web", "s1").last_seq == before
+    with store.db() as db:
+        assert tuple(db.execute("SELECT status,updated_at,record_json FROM card_integrations").fetchone()) == closed
+
+    inbox = ShellInbox(root, "alice", "web", "s1", root_task_id="next-root-task")
+    notice = inbox.take()
+    assert notice is not None and job["job_id"] in notice["content"]
+    assert inbox.pending() == []
+    inbox.acknowledge()
+    assert read_background_job(root, "alice", job["job_id"])["notification_handled"]
+    assert ShellInbox(root, "alice", "web", "s1", root_task_id="another-root").take() is None
+    assert store.snapshot("web", "s1").last_seq == before
 
 
 def test_required_shell_result_commit_failure_keeps_completion_fenced_until_repaired(root, monkeypatch):

@@ -36,7 +36,14 @@ export function buildHistoryItems(
   for (const card of history?.cards || []) {
     if (!withdrawn.has(card.integration_id)) byCard.set(card.card_id, card)
   }
-  const cards = [...byCard.values()].sort((left, right) => left.seq - right.seq)
+  // Group late receipts with their original reply, preserving order within it.
+  const groupedCards = new Map<string, HistoryResponse['cards']>()
+  for (const card of [...byCard.values()].sort((left, right) => left.seq - right.seq)) {
+    const group = groupedCards.get(card.integration_id)
+    if (group) group.push(card)
+    else groupedCards.set(card.integration_id, [card])
+  }
+  const cards = [...groupedCards.values()].flat()
   const lastInPage = new Map(cards.map((card) => [card.integration_id, card.seq]))
   const toolPositions = new Map<string, number>()
   const renderedArtifacts = new Set<string>()

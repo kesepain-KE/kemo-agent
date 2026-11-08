@@ -432,6 +432,7 @@ def update_background_job(
 
 def publish_background_result(root: Path, user: str, record: dict[str, Any]) -> dict[str, Any]:
     if (record.get("status") not in JOB_TERMINAL_STATUSES
+            or record.get("completion_mode") == "detached"
             or not record.get("cardstream_integration_id")
             or record.get("card_result_seq")):
         return record

@@ -13,7 +13,7 @@ from run.tools.background_jobs import (
 
 
 def persist_shell_result(root: Path, user: str, record: dict[str, Any]) -> int:
-    """Commit one terminal job receipt, including after its response closed."""
+    """Commit one required-job receipt, including after its response closed."""
     from run.cards import CardConflictError, CardMeter, CardStore, session_key
     from run.tools.background_jobs import public_background_job
 
@@ -113,7 +113,8 @@ class ShellInbox:
         owner = str(record.get("owner_task_id") or "")
         if self.owner_task_id:
             return owner == self.owner_task_id
-        if self.root_task_id and not self._belongs_to_root(record):
+        if (self.root_task_id and record.get("completion_mode") != "detached"
+                and not self._belongs_to_root(record)):
             return False
         if not owner:
             return True
@@ -142,7 +143,8 @@ class ShellInbox:
                     and not record.get("notification_handled")
                     and record["job_id"] not in self.delivered and self._recipient(record)):
                 record = publish_background_result(self.root, self.user, record)
-                if not record.get("cardstream_integration_id") or record.get("card_result_seq"):
+                if (record.get("completion_mode") == "detached"
+                        or not record.get("cardstream_integration_id") or record.get("card_result_seq")):
                     ready.append(record)
         return sorted(ready, key=lambda r: (str(r.get("finished_at") or ""), r["job_id"]))
 
@@ -182,7 +184,7 @@ class ShellInbox:
         for record in records:
             self.delivered.append(record["job_id"])
             receipt = {key: record.get(key) for key in (
-                "job_id", "label", "root_task_id", "owner_task_id", "status",
+                "job_id", "label", "completion_mode", "root_task_id", "owner_task_id", "status",
                 "started_at", "finished_at", "exit_code", "stop_reason",
                 "output_tail", "output_tail_complete",
             )}

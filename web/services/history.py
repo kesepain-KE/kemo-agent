@@ -181,6 +181,10 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
         elif row["raw_kind"] in {"tool_call", "tool_result"}:
             original = payload if row["raw_kind"] == "tool_call" else payload["original_call"]
             eid, call_id = payload["execution_id"], row["tool_call_id"]
+            # Older service exits remain RAW for pagination, without a tool card.
+            if (row["event_key"] == f"shell-result:{eid}"
+                    and original.get("arguments", {}).get("completion_mode") == "detached"):
+                continue
             execution = executions.get(eid, {})
             result = payload.get("result")
             # Latest durable execution truth supersedes an older timeout notice.
