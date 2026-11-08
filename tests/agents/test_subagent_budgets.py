@@ -37,9 +37,10 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
     partial = {**OUTPUT, "status": "partial", "summary": "已完成前两项", "remaining": ["继续剩余项"]}
     provider = Provider([[call(value=v, index=i) for i, v in enumerate(["a", "b", "c"])], partial,
                          [call(value=v, index=i) for i, v in enumerate(["c", "d", "e"])], partial, OUTPUT])
-    scheduler, parent, ownership, task_id = start(root, config, provider, limit=2)
+    wait_timeout = 15  # The 10-second execution budget starts after agent setup.
+    scheduler, parent, ownership, task_id = start(root, config, provider, limit=2, timeout=10)
     try:
-        first = scheduler.wait(task_id, 5, source="web", session_id="scope")
+        first = scheduler.wait(task_id, wait_timeout, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["status"] == "tool_limit" and record["resumable"]
         assert first.data["summary"] == partial["summary"]
@@ -55,7 +56,7 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
         assert not provider.requests[1].tools
         parent.ledger.update(parent.id, status=parent_status)
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership, config=config)
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, wait_timeout, source="web", session_id="scope")
         second = parent.ledger.get(task_id, "web", "scope")
         assert second["budget"]["tool_calls_used"] == 2
         assert second["budget"]["total_tool_calls"] == 4
@@ -65,7 +66,7 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
         assert (root / "effects.txt").read_text().splitlines() == ["a", "b", "c", "d"]
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership,
                          max_tool_calls=0, config=config)
-        assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == OUTPUT
+        assert scheduler.wait(task_id, wait_timeout, source="web", session_id="scope").data == OUTPUT
         final = parent.ledger.get(task_id, "web", "scope")
         assert final["run_count"] == 3 and final["budget"]["unlimited"]
         assert final["budget"]["total_tool_calls"] == 4
