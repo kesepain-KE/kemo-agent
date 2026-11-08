@@ -584,6 +584,67 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.data, SUMMARY)
         self.assertEqual(len(provider.requests), 2)
 
+    def test_important_memory_handles_unavailable_response_with_existing_retry_budget(self) -> None:
+        profile = {
+            "content": "# Profile\n\n- Updated preference.",
+            "featured": [],
+            "permanent_reconciliations": [],
+        }
+        path = self.root / "users" / "kesepain" / "memory_temporary_important.md"
+        for failures, retryable, expected_attempts in (
+            (1, True, 2),
+            (6, True, 6),
+            (1, False, 1),
+        ):
+            with self.subTest(failures=failures, retryable=retryable):
+                path.write_text("original profile", "utf-8")
+
+                class UnavailableProvider(MockProvider):
+                    def create(_self, request):
+                        if len(_self.requests) < failures:
+                            _self.requests.append(request)
+                            return KemoResponse(
+                                request_id=request.request_id,
+                                status=ResponseStatus.FAILED,
+                                model=request.model,
+                                error=UnifiedError.model_validate({
+                                    "type": "provider_unavailable",
+                                    "code": "PROVIDER_UNAVAILABLE",
+                                    "message": "Cannot reliably connect to CommandCode.",
+                                    "retryable": retryable,
+                                    "retry_after_ms": 0,
+                                    "details": {"exception_type": "RemoteProtocolError"},
+                                }),
+                            )
+                        return super().create(request)
+
+                provider = UnavailableProvider(text=json.dumps(profile))
+                with (
+                    patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False),
+                    patch("run.agents.runner._agent_retry_delay_seconds", return_value=0.0),
+                ):
+                    if failures == 1 and retryable:
+                        result = self.runner(provider).run(
+                            "memory_temporary_important", {"trigger": "periodic_scan"},
+                        )
+                        self.assertEqual(result.metadata["retry_attempts"], 2)
+                        self.assertEqual(path.read_text("utf-8").strip(), profile["content"])
+                    else:
+                        with self.assertRaises(AgentProviderError) as raised:
+                            self.runner(provider).run(
+                                "memory_temporary_important", {"trigger": "periodic_scan"},
+                            )
+                        self.assertEqual(
+                            getattr(raised.exception, "retry_budget_exhausted", False),
+                            retryable,
+                        )
+                        self.assertEqual(path.read_text("utf-8"), "original profile")
+                self.assertEqual(len(provider.requests), expected_attempts)
+                self.assertEqual(
+                    len({request.request_id for request in provider.requests}),
+                    expected_attempts,
+                )
+
     def test_runner_bounds_output_truncation_retries(self) -> None:
         class TruncatedProvider(MockProvider):
             def create(_self, request):

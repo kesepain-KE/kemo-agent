@@ -503,6 +503,56 @@ def test_transient_terminal_failure_starts_a_new_request_and_records_its_usage(r
     assert retry.metadata["partial_response"] is False
 
 
+@pytest.mark.parametrize("failures,retryable,expected_attempts", [
+    (1, True, 2),
+    (6, True, 6),
+    (1, False, 1),
+])
+def test_provider_unavailable_terminal_uses_existing_retry_budget(
+    root, monkeypatch, failures, retryable, expected_attempts,
+):
+    config = root / "config" / "global_config.yaml"
+    config.write_text(json.dumps({"provider_runtime": {"max_retries": 5}}), encoding="utf-8")
+    monkeypatch.setattr("provider.retry.RetryManager.delay", lambda *args, **kwargs: 0)
+    requests = []
+
+    class Provider:
+        def create(self, request):
+            requests.append(request)
+            if len(requests) <= failures:
+                return KemoResponse(
+                    request_id=request.request_id, model=request.model, status=ResponseStatus.FAILED,
+                    error=UnifiedError.model_validate({
+                        "type": "provider_unavailable",
+                        "code": "PROVIDER_UNAVAILABLE",
+                        "message": "Cannot reliably connect to CommandCode.",
+                        "retryable": retryable,
+                        "retry_scope": "same_sequence",
+                        "details": {"exception_type": "RemoteProtocolError"},
+                    }),
+                )
+            return response(request, text="recovered")
+
+    events = list(run(root, Provider()))
+    assert len(requests) == expected_attempts
+    assert len({request.request_id for request in requests}) == expected_attempts
+    assert all(request.parent_request_id == previous.request_id
+               for previous, request in zip(requests, requests[1:]))
+    assert all(request.input == requests[0].input for request in requests[1:])
+    assert len([event for event in events if event.type == "retrying"]) == expected_attempts - 1
+    if failures == 1 and retryable:
+        assert events[-1].type == "done"
+        assert events[-1].metadata["text"] == "recovered"
+    else:
+        assert events[-1].type == "error"
+        error = events[-1].error
+        assert error is not None
+        assert error["category"] == "provider_unavailable"
+        assert error["attempt_count"] == expected_attempts
+        assert error["retry_budget_exhausted"] is retryable
+        assert events[-1].metadata["committed"] is True
+
+
 def test_terminal_failure_retains_provider_details_in_history(root):
     class Provider:
         def create(self, request):

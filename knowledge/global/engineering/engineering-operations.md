@@ -304,7 +304,7 @@ Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑�
 
 <!-- rule:provider-retries -->
 [机制] 主模型单次逻辑请求额外重试基线为 5 次（`provider_runtime.max_retries`）；上限 5 次，子代理单次运行累计额外重试上限为 5 次（`run/retry/policy.py` 的 `MAX_RETRIES`）。
-接受完整响应不恢复单次运行的累计重试额度。Kemo 单次传输独立最多6次尝试，复用同一请求正文与ID；传输预算耗尽不被外层重新放大。主请求的瞬时失败可在同一整合内恢复：中断正文与思考先保存不完整快照，完整失败终态或已有片段时使用新request_id，已执行工具不重跑；已输出媒体不自动重放。auth、内部异常及确定性4xx（408/429除外）立即失败，服务端retryable只能缩小范围；保留Retry-After并受有界退避约束。SystemExit/KeyboardInterrupt/GeneratorExit/MemoryError原样传播。普通 HTTP 400 和413不触发旧轮次恢复；容量在主请求屏障检查，失败不裁掉RAW。实现见 `provider/retry.py` 与 `run/conversation/provider_exchange.py`。
+接受完整响应不恢复单次运行的累计重试额度。Kemo 单次传输独立最多6次尝试，复用同一请求正文与ID；传输预算耗尽不被外层重新放大。主请求的瞬时失败可在同一整合内恢复：中断正文与思考先保存不完整快照，完整失败终态或已有片段时使用新request_id，已执行工具不重跑；已输出媒体不自动重放。Kemo 失败终态中的 `provider_unavailable` 属于可重试的临时故障，即使没有 HTTP 状态码，主请求与子代理也会按现有策略重试；显式 `retryable=false`、取消和已耗尽预算仍阻止重试。auth、内部异常及确定性4xx（408/429除外）立即失败，服务端retryable只能缩小范围；保留Retry-After并受有界退避约束。SystemExit/KeyboardInterrupt/GeneratorExit/MemoryError原样传播。普通 HTTP 400 和413不触发旧轮次恢复；容量在主请求屏障检查，失败不裁掉RAW。实现见 `run/retry/policy.py`、`provider/retry.py` 与 `run/conversation/provider_exchange.py`。
 仅思考或commentary不作为最终正文。必要依赖尚未结束时可作为阶段响应等待；没有必要依赖却缺少最终交付时，按上述有界额度恢复，耗尽后明确失败。已处理回执不清除最终正文候选；仅真实新引导、未处理结果或后续工具调用使候选转为interim，完成屏障满足后只提交一次final。
 工具调用是当前整合中的中间步骤；运行时执行并回送工具结果，模型据此继续处理。不要等待固定时长，也不要调用或臆造 `submit_final_answer` 一类提交工具。阶段正文与最终正文由 Provider 响应 phase 区分，宿主还会检查必要工具、后台任务和新引导是否收敛；普通回答正文无需另行提交。最终正文直接说明实际结果、核验依据与未完成项；文件证据检查路径及文件状态，测试证据核对 Shell 退出状态。无法完成时如实说明已完成部分和阻塞，不把推断写成执行事实。
 <!-- /rule -->
