@@ -38,7 +38,8 @@ def setup(tmp_path, monkeypatch):
                     'action': {'type': 'string'}, 'agent': {'type': 'string'}, 'wait': {'type': 'boolean'}},
                     'required': ['action', 'agent'], 'additionalProperties': False},
                 'entrypoint': 'tool.py:run', 'version': '1.0.0', 'enabled': True, 'execution_mode': 'thread'}
-    (directory / 'SKILL.md').write_text('# subagent_dispatch\nTest\n\n## Tool\n```json\n' + json.dumps(manifest) + '\n```', 'utf-8')
+    (directory / 'SKILL.md').write_text('# subagent_dispatch\nTest\n\n', 'utf-8')
+    (directory / 'plugin.yaml').write_text(json.dumps(manifest), 'utf-8')
     (directory / 'tool.py').write_text('''from tests.core.test_agent_task_lifecycle import SCHEDULERS, JOBS
 
 def run(action, agent, wait=False, *, context):

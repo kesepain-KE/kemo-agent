@@ -52,6 +52,7 @@ def test_default_five_calls_register_before_first_finishes_and_share_pool(worksp
     plugin.mkdir()
     repository = Path(__file__).resolve().parents[2]
     shutil.copyfile(repository / "plugins/subagent_dispatch/SKILL.md", plugin / "SKILL.md")
+    shutil.copyfile(repository / "plugins/subagent_dispatch/plugin.yaml", plugin / "plugin.yaml")
     (plugin / "tool.py").write_text("from plugins.subagent_dispatch.tool import run\n", "utf-8")
     monkeypatch.setattr(factory, "_provider_semaphore", None)
     monkeypatch.setattr(factory, "_provider_semaphore_limit", 0)

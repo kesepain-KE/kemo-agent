@@ -351,7 +351,7 @@ def compare_versions(left: str, right: str) -> int:
     return (left_parts > right_parts) - (left_parts < right_parts)
 
 
-def tree_digest(path: Path) -> str:
+def tree_digest(path: Path, *, excludes: Iterable[str] = ()) -> str:
     if not path.exists():
         return ""
     if path.is_file():
@@ -359,8 +359,11 @@ def tree_digest(path: Path) -> str:
         digest.update(path.read_bytes())
         return digest.hexdigest()
     digest = hashlib.sha256()
+    directories, files = _parse_excludes(excludes)
     for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
         relative = item.relative_to(path).as_posix()
+        if _is_excluded(relative, directories, files):
+            continue
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(item.read_bytes())
@@ -368,8 +371,8 @@ def tree_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def paths_differ(left: Path, right: Path) -> bool:
-    return tree_digest(left) != tree_digest(right)
+def paths_differ(left: Path, right: Path, *, excludes: Iterable[str] = ()) -> bool:
+    return tree_digest(left, excludes=excludes) != tree_digest(right, excludes=excludes)
 
 
 def _parse_excludes(excludes: Iterable[str]) -> tuple[set[str], set[str]]:

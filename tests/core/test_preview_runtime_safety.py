@@ -37,7 +37,8 @@ def tool(root, name):
     manifest = {"name": name, "description": "offline-only", "version": "1",
                 "enabled": True, "entrypoint": "tool.py:run", "execution_mode": "thread",
                 "input_schema": {"type": "object", "additionalProperties": True}}
-    (path / "SKILL.md").write_text(f"# {name}\n## Tool\n```json\n" + json.dumps(manifest) + "\n```\n", "utf-8")
+    (path / 'SKILL.md').write_text(f'# {name}\n', 'utf-8')
+    (path / 'plugin.yaml').write_text(json.dumps(manifest), 'utf-8')
     (path / "tool.py").write_text("def run(**kwargs): return {}\n", "utf-8")
 
 

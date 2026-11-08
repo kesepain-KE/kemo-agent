@@ -202,11 +202,8 @@ class PromptPipelineTests(unittest.TestCase):
             "enabled": True,
             "entrypoint": "tool.py:run",
         }
-        (directory / "SKILL.md").write_text(
-            f"# {name}\n{name} trigger description\n\n## Tool\n\n```json\n"
-            f"{json.dumps(tool)}\n```\n",
-            "utf-8",
-        )
+        (directory / 'SKILL.md').write_text(f'# {name}\n{name} trigger description\n\n', 'utf-8')
+        (directory / 'plugin.yaml').write_text(json.dumps(tool), 'utf-8')
         (directory / "tool.py").write_text(
             "def run():\n    return {'ok': True}\n", "utf-8"
         )

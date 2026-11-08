@@ -158,10 +158,8 @@ class SubAgentHotPlugTests(unittest.TestCase):
             "entrypoint": "tool.py:run",
             "permission": permission,
         }
-        (plugin / "SKILL.md").write_text(
-            f"# {name}\n{name}\n\n## Tool\n```json\n" + json.dumps(tool) + "\n```\n",
-            "utf-8",
-        )
+        (plugin / 'SKILL.md').write_text(f'# {name}\n{name}\n\n', 'utf-8')
+        (plugin / 'plugin.yaml').write_text(json.dumps(tool), 'utf-8')
         (plugin / "tool.py").write_text(
             "def run(value, *, context):\n    return {'ok': True, 'value': value, 'user': context['user']}\n",
             "utf-8",

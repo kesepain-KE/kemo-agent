@@ -316,7 +316,7 @@ def _definition(manifest: PluginManifest) -> ToolDefinition:
 
 
 def discover_tools(root: Path, user: str) -> ToolRegistry:
-    """Discover executable tools exclusively from plugins/*/SKILL.md."""
+    """Discover executable tools from paired SKILL.md and plugin.yaml files."""
 
     del user  # The executable-tool surface is intentionally user-independent.
     try:

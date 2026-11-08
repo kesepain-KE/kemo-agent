@@ -212,11 +212,8 @@ class RuntimeFeatureTests(unittest.TestCase):
             "execution_mode": "thread",
             "permission": permission,
         }
-        (directory / "SKILL.md").write_text(
-            f"# {name}\n{source_value}\n\n## Tool\n\n```json\n"
-            f"{json.dumps(manifest, ensure_ascii=False)}\n```\n",
-            "utf-8",
-        )
+        (directory / 'SKILL.md').write_text(f'# {name}\n{source_value}\n\n', 'utf-8')
+        (directory / 'plugin.yaml').write_text(json.dumps(manifest, ensure_ascii=False), 'utf-8')
         prefix = "async " if async_tool else ""
         await_line = "    await __import__('asyncio').sleep(0)\n" if async_tool else ""
         (directory / "tool.py").write_text(
@@ -2582,7 +2579,7 @@ def run(*, context):
 
             def stream(_self, request):
                 _self.requests.append(request)
-                if len(_self.requests) == 1:
+                if len(_self.requests) <= 2:
                     response = KemoResponse(
                         request_id=request.request_id,
                         status=ResponseStatus.INCOMPLETE,
@@ -2598,10 +2595,8 @@ def run(*, context):
                         incomplete_details=IncompleteDetails.model_validate({
                             "reason": "output_truncated",
                             "details": {
-                                "finish_reason": "max_tokens",
-                                "category": "upstream_error",
-                                "status_code": 503,
-                                "retryable": True,
+                                "upstream_finish_reason": "length",
+                                **({"category": "output_truncated"} if len(_self.requests) == 2 else {}),
                             },
                         }),
                     )
@@ -2649,13 +2644,15 @@ def run(*, context):
             )
 
         retries = [event for event in events if event.type == "retrying"]
-        self.assertEqual(len(retries), 1)
+        self.assertEqual(len(retries), 2)
         self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         self.assertEqual(events[-1].metadata["text"], "截断后已恢复")
-        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(len(provider.requests), 3)
         self.assertNotEqual(provider.requests[0].request_id, provider.requests[1].request_id)
         self.assertEqual(provider.requests[1].parent_request_id, provider.requests[0].request_id)
         self.assertEqual(provider.requests[1].attempt, 2)
+        self.assertEqual(provider.requests[2].parent_request_id, provider.requests[1].request_id)
+        self.assertEqual(provider.requests[2].attempt, 3)
         self.assertEqual([event.type for event in events].count("tool_call_start"), 0)
         execute_tool.assert_not_called()
 

@@ -29,7 +29,9 @@ from run.cards import (
     json_text,
 )
 from run.config import build_prompt_bundle, load_config, read_dynamic_tail, refresh_memory_prompt_bundle
-from run.extensions import MediaInputHost, context_input_budget, resolve_reasoning_selection
+from run.extensions import (
+    MediaInputHost, context_input_budget, model_output_token_limit, resolve_reasoning_selection,
+)
 from run.infra import EngineError, new_usage_total, record_provider_request, usage_from_dict
 from run.memory import MemoryStore, memory_extraction_mode
 from run.retry import (
@@ -120,15 +122,16 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
         argument_repairs = tool_settings.get("invalid_tool_arguments_retries", 2)
         if type(argument_repairs) is not int or not 0 <= argument_repairs <= 5:
             raise EngineError("tools.invalid_tool_arguments_retries 必须为 0..5 的整数")
-        # An output reservation is always present, even if the upstream default
-        # is unknown. Shared context limits subtract it exactly once.
-        output_reserve = _positive(settings, "output_reserve", 8192)
-        if runtime.get("max_tokens") is not None:
-            output_reserve = min(output_reserve, _positive(runtime, "max_tokens", output_reserve))
+        output_reserve = _positive(settings, "output_reserve", 10000)
         reasoning = resolve_reasoning_selection(config, runtime, provider, cancel_event=cancel_event)
+        max_output_tokens = model_output_token_limit(
+            reasoning.capabilities,
+            configured=(_positive(runtime, "max_tokens", output_reserve)
+                        if runtime.get("max_tokens") is not None else None),
+        )
         capacity = context_input_budget(
             _positive(settings, "token_limit", 1000000), reasoning.capabilities,
-            output_reserve=output_reserve,
+            output_reserve=min(output_reserve, max_output_tokens) if max_output_tokens else output_reserve,
         )
         input_limit = capacity["effective_token_limit"]
         output_reserve = capacity["output_reserve"]
@@ -498,7 +501,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             media.validate_items(items, request_system_prompt, native_tools)
             native_request = build_conversation_request(
                 runtime=runtime, system_prompt=request_system_prompt, items=items, tools=request_tools,
-                output_reserve=output_reserve, stream=bool(request.get("stream", runtime.get("stream", False))),
+                max_output_tokens=max_output_tokens,
+                stream=bool(request.get("stream", runtime.get("stream", False))),
                 reasoning_enabled=reasoning.enabled, reasoning_effort=reasoning.effort,
                 user=user, source=source, session_id=session_id, run_id=run_id,
                 integration_id=integration_id, snapshot_id=barrier.snapshot.snapshot_id, iteration=iteration)

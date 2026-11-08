@@ -1,0 +1,55 @@
+name: expand_creater
+description: 列出、创建或校验用户拓展与共享拓展；创建前必须完成必要性判断、scope/名称确认、注入层/操作层确认和冲突检查四步流程。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - list
+      - create
+      - validate
+      description: list=列出模块，create=创建模块，validate=校验模块
+    scope:
+      type: string
+      enum:
+      - user
+      - shared
+      description: user=当前用户拓展，shared=共享拓展
+    name:
+      type: string
+      pattern: ^[A-Za-z][A-Za-z0-9_-]{0,63}$
+      description: create/validate 使用的模块目录名
+    explain:
+      type: string
+      maxLength: 2000
+      description: create 使用的一句话功能说明
+    injection:
+      type: string
+      maxLength: 100000
+      description: create 使用的注入层正文
+    operations:
+      type: string
+      maxLength: 100000
+      description: create 使用的操作层正文
+    open_input:
+      type: boolean
+      default: true
+      description: 是否开启健康数据注入
+    start_expand:
+      type: string
+      maxLength: 500000
+      description: 可选自定义 start_expand.py；不传则使用安全模板
+    data_update:
+      type: string
+      maxLength: 500000
+      description: 可选自定义 data_update.py；不传则使用安全模板
+  required:
+  - action
+  - scope
+  additionalProperties: false
+version: 1.2.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

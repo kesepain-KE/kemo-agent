@@ -1,0 +1,54 @@
+name: skill_creater
+description: 列出、读取、校验、创建、更新或删除用户技能及共享技能。支持全文 content 或 title+description+instruction/tool_schema 结构化写入；创建前必须执行四步确认流程。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - list
+      - get
+      - validate
+      - create
+      - update
+      - delete
+      description: 要执行的技能管理操作
+    scope:
+      type: string
+      enum:
+      - agent_create
+      - user_create
+      - shared
+      description: 技能作用域
+    name:
+      type: string
+      description: 技能目录名；list 以外的操作需要
+    content:
+      type: string
+      description: create/update 全文模式的完整 SKILL.md
+    title:
+      type: string
+      description: create/update 结构化模式的标题
+    description:
+      type: string
+      description: create/update 结构化模式的描述
+    instruction:
+      type: string
+      description: 结构化模式的指令正文，与 tool_schema 二选一
+    tool_schema:
+      type: object
+      description: 结构化模式的文档化 Tool JSON，与 instruction 二选一
+    source_memories:
+      type: array
+      items:
+        type: string
+      description: 自动生成 agent_create 技能必填：1–20 个现存来源记忆引用或文件名，用于溯源与失效核对
+  required:
+  - action
+  - scope
+  additionalProperties: false
+version: 1.2.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

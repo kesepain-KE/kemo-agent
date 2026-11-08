@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     badge_version = version.replace("-", "--")
     if f"img.shields.io/badge/version-{badge_version}-" not in readme:
         errors.append(f"README 版本徽章未指向 {version}")
-    if f"当前版本：`{version}`" not in readme:
+    if not re.search(rf"^当前版本[：:\s]+`{re.escape(version)}`", readme, re.MULTILINE):
         errors.append(f"README 当前版本文本未指向 {version}")
 
     readme_en = (ROOT / "README_EN.md").read_text(encoding="utf-8")

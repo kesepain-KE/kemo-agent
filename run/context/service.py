@@ -11,7 +11,7 @@ from run.config import (
 )
 from run.conversation import required_text
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
-from run.extensions import cached_model_capabilities, context_input_budget
+from run.extensions import cached_model_capabilities, context_input_budget, model_output_token_limit
 
 
 def context_status(request: dict[str, Any], *, root: Path | None = None,
@@ -30,16 +30,20 @@ def context_status(request: dict[str, Any], *, root: Path | None = None,
     snapshot = store.snapshot(source, session_id) if state else None
     dynamic = read_dynamic_tail(base, user, config, source=source, session_id=session_id)
     tail_items = DynamicTail(json_text(dynamic)).items()
-    output_reserve = int(agents.get("output_reserve", 8192))
+    output_reserve = int(agents.get("output_reserve", 10000))
     provider = config.get("provider") or {}
-    if provider.get("max_tokens") is not None:
-        output_reserve = min(output_reserve, int(provider["max_tokens"]))
     configured = int(agents.get("token_limit", 1000000))
     try:
         capabilities = cached_model_capabilities(provider_runtime_config(config))
     except ConfigError:
         capabilities = None  # Status remains readable before API credentials exist.
-    capacity = context_input_budget(configured, capabilities, output_reserve=output_reserve)
+    max_output_tokens = model_output_token_limit(
+        capabilities, configured=provider.get("max_tokens"),
+    )
+    capacity = context_input_budget(
+        configured, capabilities,
+        output_reserve=min(output_reserve, max_output_tokens) if max_output_tokens else output_reserve,
+    )
     limit = capacity["effective_token_limit"]
     tools = [tool.model_dump(mode="json", exclude_none=True) for tool in registry.protocol_tools()]
     occupancy = RequestOccupancy(

@@ -32,7 +32,8 @@ def workspace(root: Path, model: str, stream: bool = False) -> dict[str, Any]:
     manifest = {"name": "echo", "description": "Return the supplied value", "version": "1.0.0",
                 "enabled": True, "entrypoint": "tool.py:run", "input_schema": {
                     "type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}
-    (tool / "SKILL.md").write_text(f"# echo\n\n## Tool\n```json\n{json.dumps(manifest)}\n```\n", encoding="utf-8")
+    (tool / 'SKILL.md').write_text(f'# echo\n\n', encoding='utf-8')
+    (tool / 'plugin.yaml').write_text(json.dumps(manifest), encoding='utf-8')
     (tool / "tool.py").write_text("def run(value, *, context):\n    return {'ok': True, 'value': value}\n", encoding="utf-8")
     return cfg
 

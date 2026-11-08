@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
 from jsonschema import Draft202012Validator
 
 from plugins.file.tool import _ACTIONS as FILE_ACTIONS
@@ -201,21 +202,23 @@ class PluginManifestTests(unittest.TestCase):
         self.assertIn("expected_old_text", file_schema["properties"])
         self.assertIn("expected_hash", file_schema["properties"])
 
-    def test_more_than_one_tool_block_is_rejected(self) -> None:
+    def test_discovery_requires_both_metadata_and_method_document(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            plugin = root / "plugins" / "duplicate"
-            plugin.mkdir(parents=True)
-            block = (
+            document_only = root / "plugins" / "document_only"
+            metadata_only = root / "plugins" / "metadata_only"
+            document_only.mkdir(parents=True)
+            metadata_only.mkdir()
+            # The retired embedded contract does not register a plugin.
+            (document_only / "SKILL.md").write_text(
+                "# document_only\ndescription\n\n"
                 "## Tool\n```json\n"
-                '{"name":"duplicate","description":"x","input_schema":{"type":"object"},'
-                '"version":"1","enabled":true,"entrypoint":"tool.py:run"}\n```'
+                '{"name":"document_only","description":"x","input_schema":{"type":"object"},'
+                '"version":"1","enabled":true,"entrypoint":"tool.py:run"}\n```\n',
+                "utf-8",
             )
-            (plugin / "SKILL.md").write_text(
-                f"# duplicate\ndescription\n\n{block}\n\n{block}\n", "utf-8"
-            )
-            with self.assertRaisesRegex(PluginManifestError, "只能声明一个"):
-                discover_plugin_manifests(root)
+            (metadata_only / "plugin.yaml").write_text("name: metadata_only\n", "utf-8")
+            self.assertEqual(discover_plugin_manifests(root), ())
 
     def test_headings_inside_code_fences_do_not_change_plugin_structure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -234,66 +237,61 @@ class PluginManifestTests(unittest.TestCase):
             (plugin / "SKILL.md").write_text(
                 "<!--\n# stale title\n## Tool\n-->\n"
                 "# fenced\ndescription\n\n```python\n# fake title\n## Tool\n```\n\n"
-                "## Tool\n```json\n"
-                + json.dumps(tool)
-                + "\n```\n",
+                "## Usage\nRun the tool.\n",
                 "utf-8",
             )
+            (plugin / "plugin.yaml").write_text(json.dumps(tool), "utf-8")
 
             manifests = discover_plugin_manifests(root)
             self.assertEqual(len(manifests), 1)
             self.assertEqual(manifests[0].tool, tool)
 
-    def test_unlabelled_tool_fence_is_reported_as_missing_json(self) -> None:
+    def test_invalid_plugin_metadata_is_rejected(self) -> None:
+        tool = {
+            "name": "sample", "description": "x", "input_schema": {"type": "object"},
+            "version": "1", "enabled": True, "entrypoint": "tool.py:run",
+        }
+        cases = (
+            ("name: [broken\n", "无法读取插件元数据"),
+            ("[]\n", "必须是映射"),
+            (json.dumps({**tool, "origin": "unknown"}), "origin 必须"),
+            (json.dumps({**tool, "origin": None}), "origin 必须"),
+            (json.dumps({**tool, "name": "other"}), "必须一致"),
+            (json.dumps({**tool, "entrypoint": "../outside.py:run"}), "不得跳出"),
+            (json.dumps({**tool, "strict": "false"}), "strict 必须是布尔值"),
+            (json.dumps({**tool, "timeout_grace_seconds": 31}), "timeout_grace_seconds 必须是 0..30"),
+            (yaml.safe_dump({**tool, "input_schema": {
+                "type": "object", "properties": {"value": {"type": ["string", None]}}
+            }}), "null 类型需写成字符串"),
+        )
+        for metadata, error in cases:
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plugin = root / "plugins" / "sample"
+                plugin.mkdir(parents=True)
+                (plugin / "SKILL.md").write_text("# sample\ndescription\n", "utf-8")
+                (plugin / "plugin.yaml").write_text(metadata, "utf-8")
+                with self.assertRaisesRegex(PluginManifestError, error):
+                    discover_plugin_manifests(root)
+
+    def test_yaml_nullable_contract_preserves_explicit_clear_operation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            plugin = root / "plugins" / "unlabelled"
+            plugin = root / "plugins" / "sample"
             plugin.mkdir(parents=True)
-            (plugin / "SKILL.md").write_text(
-                "# unlabelled\ndescription\n\n## Tool\n```\n{}\n```\n",
-                "utf-8",
-            )
-
-            with self.assertRaisesRegex(PluginManifestError, "缺少 JSON"):
-                discover_plugin_manifests(root)
-
-    def test_plugin_strict_flag_must_be_boolean(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            plugin = root / "plugins" / "invalid_strict"
-            plugin.mkdir(parents=True)
-            (plugin / "tool.py").write_text("def run():\n    return {}\n", "utf-8")
-            (plugin / "SKILL.md").write_text(
-                "# invalid_strict\ndescription\n\n## Tool\n```json\n"
-                '{"name":"invalid_strict","description":"x",'
-                '"input_schema":{"type":"object"},"version":"1",'
-                '"enabled":true,"strict":"false","entrypoint":"tool.py:run"}'
-                "\n```\n",
-                "utf-8",
-            )
-            with self.assertRaisesRegex(PluginManifestError, "strict 必须是布尔值"):
-                discover_plugin_manifests(root)
-
-    def test_plugin_timeout_grace_must_be_bounded(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            plugin = root / "plugins" / "invalid_grace"
-            plugin.mkdir(parents=True)
-            (plugin / "tool.py").write_text("def run():\n    return {}\n", "utf-8")
-            (plugin / "SKILL.md").write_text(
-                "# invalid_grace\ndescription\n\n## Tool\n```json\n"
-                '{"name":"invalid_grace","description":"x",'
-                '"input_schema":{"type":"object"},"version":"1",'
-                '"enabled":true,"entrypoint":"tool.py:run",'
-                '"timeout_grace_seconds":31}'
-                "\n```\n",
-                "utf-8",
-            )
-            with self.assertRaisesRegex(
-                PluginManifestError,
-                "timeout_grace_seconds 必须是 0..30",
-            ):
-                discover_plugin_manifests(root)
+            (plugin / "SKILL.md").write_text("# sample\ndescription\n", "utf-8")
+            tool = {
+                "name": "sample", "description": "x", "version": "1", "enabled": True,
+                "entrypoint": "tool.py:run", "origin": "user",
+                "input_schema": {"type": "object", "properties": {
+                    "tool_name": {"type": ["string", "null"]}
+                }},
+            }
+            (plugin / "plugin.yaml").write_text(yaml.safe_dump(tool), "utf-8")
+            definition = discover_tools(root, "alice").get("sample")
+            validate_arguments(definition.input_schema, {"tool_name": None})
+            validate_arguments(definition.input_schema, {})
+            self.assertEqual(discover_plugin_manifests(root)[0].tool, tool)
 
 
 class FilePluginTests(unittest.TestCase):

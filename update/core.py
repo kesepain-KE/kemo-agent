@@ -49,10 +49,6 @@ RUNTIME_PRESERVING_DIRECTORIES = {
         "classify.sqlite3",
         "classify.sql",
     ),
-    "knowledge/share": (
-        "classify.sqlite3",
-        "classify.sql",
-    ),
 }
 
 FILES = (

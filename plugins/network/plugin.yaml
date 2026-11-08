@@ -1,0 +1,63 @@
+name: network
+description: HTTP 网络请求与网页正文读取。get/post/put/delete/patch 收发 REST 请求，read 通过 direct 本地解析或 jina/markdown_new/defuddle reader 提取正文。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - get
+      - post
+      - put
+      - delete
+      - patch
+      - read
+      description: 操作：get=GET、post=POST、put=PUT 全量更新、delete=DELETE、patch=PATCH 局部更新、read=网页正文提取
+    url:
+      type: string
+      description: 请求 URL，仅支持 http/https
+    body:
+      type: string
+      description: POST/PUT/PATCH 请求体
+    headers:
+      type: object
+      description: 请求头对象，键和值均为字符串
+    timeout:
+      type: integer
+      minimum: 1
+      maximum: 3600
+      description: 请求超时秒数；默认来自 global_config.yaml → tools.timeout
+    strategy:
+      type: string
+      enum:
+      - auto
+      - direct
+      - reader
+      description: read 策略：auto=先 direct 后 reader、direct=仅本地解析、reader=仅第三方服务
+    reader_service:
+      type: string
+      enum:
+      - auto
+      - jina
+      - markdown_new
+      - defuddle
+      description: read reader：auto=jina、jina=稳定通用、markdown_new=干净 Markdown、defuddle=去广告
+    max_chars:
+      type: integer
+      minimum: 1000
+      maximum: 100000
+      description: read 返回正文最大字符数，默认 20000
+    max_bytes:
+      type: integer
+      minimum: 1000
+      maximum: 10000000
+      description: get/post/put/delete/patch 响应最大字节数，默认 2000000（2MB）
+  required:
+  - action
+  - url
+  additionalProperties: false
+version: 1.1.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

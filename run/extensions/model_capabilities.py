@@ -84,6 +84,23 @@ def declared_input_token_limit(
     return min(candidates) if candidates else None
 
 
+def model_output_token_limit(
+    capabilities: ModelCapabilities | None, *, configured: int | None = None,
+) -> int | None:
+    """Use an explicit request limit or the model maximum; unknown stays unset."""
+    if configured is not None and (type(configured) is not int or configured < 1):
+        raise ValueError("Configured output capacity must be a positive integer")
+    limits = getattr(capabilities, "limits", None)
+    extension_limits = getattr(capabilities, "extensions", {}).get("limits", {})
+    if not isinstance(extension_limits, dict):
+        extension_limits = {}
+    candidates = [value for value in (
+        configured, getattr(limits, "max_output_tokens", None),
+        extension_limits.get("max_output_tokens"),
+    ) if type(value) is int and value > 0]
+    return min(candidates) if candidates else None
+
+
 def context_input_budget(
     configured_limit: int, capabilities: ModelCapabilities | None,
     *, output_reserve: int = 0,
@@ -97,11 +114,8 @@ def context_input_budget(
     extension_limits = getattr(capabilities, "extensions", {}).get("limits", {})
     if not isinstance(extension_limits, dict):
         extension_limits = {}
-    output_limits = [value for value in (
-        getattr(limits, "max_output_tokens", None), extension_limits.get("max_output_tokens"),
-    ) if type(value) is int and value > 0]
-    if output_reserve and output_limits:
-        output_reserve = min(output_reserve, *output_limits)
+    if output_reserve:
+        output_reserve = model_output_token_limit(capabilities, configured=output_reserve) or output_reserve
     candidates = []
     for value in (getattr(limits, "max_input_tokens", None),
                   extension_limits.get("max_input_tokens")):

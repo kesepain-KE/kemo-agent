@@ -1,0 +1,109 @@
+name: history_search
+description: 查询当前用户历史归档：dates 查看日期目录，list 列出归档，read 通过 archive_id/next_cursor 分页读取正文，search（默认）按关键词搜索；相关正文优先显式选 match_mode=fulltext，使用 simple 中文分词和 BM25。只含用户、引导和智能体正文，不含工具、参数、回执或思考。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - search
+      - dates
+      - list
+      - read
+      default: search
+      description: 省略时兼容旧关键词搜索；dates/list 无需 query
+    date:
+      type: string
+      pattern: ^\d{4}-\d{2}-\d{2}$
+      description: 仅用于 list；按归档最后更新时间的上海自然日筛选
+    archive_id:
+      type: string
+      maxLength: 4096
+      description: read 必填；原样使用 list 返回的归档标识，不是文件路径
+    cursor:
+      type: string
+      maxLength: 8192
+      description: read 续页时原样使用 next_cursor；需保持相同 archive_id/role
+    query:
+      type: string
+      description: 仅用于 search 的关键词；regex=true 时为正则表达式；空白返回空匹配
+    limit:
+      type: integer
+      description: 本页匹配数/日期数/归档数/消息片段数上限
+      minimum: 1
+      maximum: 100
+      default: 10
+    since:
+      type: string
+      pattern: ^\d{4}-\d{2}-\d{2}$
+      description: 包含当天；search 按创建日期，dates/list 按最后更新日期（上海自然日）
+    until:
+      type: string
+      pattern: ^\d{4}-\d{2}-\d{2}$
+      description: 包含当天；search 按创建日期，dates/list 按最后更新日期（上海自然日）
+    role:
+      type: string
+      enum:
+      - any
+      - user
+      - assistant
+      default: any
+      description: 正文角色过滤；user 包含引导，assistant 包含阶段与最终正文，any 包含全部正文
+    match_mode:
+      type: string
+      enum:
+      - substring
+      - word
+      - exact
+      - fulltext
+      default: substring
+      description: 建议相关正文查询显式选 fulltext（中文分词+BM25）；substring/word/exact 保留原义；regex=true 时忽略
+    regex:
+      type: boolean
+      default: false
+      description: 是否将 query 作为正则表达式
+    max_snippet:
+      type: integer
+      minimum: 1
+      maximum: 5000
+      default: 500
+      description: 每条匹配片段的最大字符数，包含省略号
+    context_messages:
+      type: integer
+      minimum: 0
+      maximum: 20
+      default: 0
+      description: 匹配正文前后各取 N 条正文上下文，跳过工具卡片
+    max_context_chars:
+      type: integer
+      minimum: 50
+      maximum: 5000
+      default: 1000
+      description: 每条正文上下文的最大字符数，超出时截断
+    offset:
+      type: integer
+      minimum: 0
+      maximum: 1000000
+      default: 0
+      description: search/dates/list 分页偏移，续页使用 next_offset；read 请用 cursor
+    page_char_limit:
+      type: integer
+      minimum: 1000
+      maximum: 90000
+      default: 80000
+      description: 本页结果项紧凑 JSON 字符预算（不含外层元数据）；read 长消息自动分片可续读
+    source:
+      type: string
+      maxLength: 200
+      description: 精确过滤对话来源
+    session_id:
+      type: string
+      maxLength: 200
+      description: 精确过滤逻辑会话 ID
+  required: []
+  additionalProperties: false
+version: 1.3.0
+enabled: true
+entrypoint: tool.py:run
+permission: read
+origin: builtin

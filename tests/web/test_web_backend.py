@@ -1550,12 +1550,8 @@ class WebBackendTests(unittest.TestCase):
             "enabled": True,
             "entrypoint": "tool.py:run",
         }
-        (plugin / "SKILL.md").write_text(
-            "# clock\n\n读取当前时间。\n\n## Tool\n\n```json\n"
-            + json.dumps(manifest, ensure_ascii=False)
-            + "\n```\n",
-            "utf-8",
-        )
+        (plugin / 'SKILL.md').write_text('# clock\n\n读取当前时间。\n\n', 'utf-8')
+        (plugin / 'plugin.yaml').write_text(json.dumps(manifest, ensure_ascii=False), 'utf-8')
         (plugin / "tool.py").write_text(
             "def run(*, context):\n    return {'ok': True}\n", "utf-8"
         )
@@ -5286,12 +5282,8 @@ class WebBackendTests(unittest.TestCase):
             "enabled": True,
             "entrypoint": "tool.py:run",
         }
-        (plugin / "SKILL.md").write_text(
-            "# clock\nread time\n\n## Tool\n\n```json\n"
-            + json.dumps(clock_manifest)
-            + "\n```\n",
-            "utf-8",
-        )
+        (plugin / 'SKILL.md').write_text('# clock\nread time\n\n', 'utf-8')
+        (plugin / 'plugin.yaml').write_text(json.dumps(clock_manifest), 'utf-8')
         PlanStore(root, "alice").create(
             normalize_plan(
                 title="Observer plan",
@@ -5381,7 +5373,7 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             context_window["tokens"]["capacity_tokens"],
-            overview.json()["context"]["limit"] - 8192,
+            overview.json()["context"]["limit"] - 10000,
         )
         self.assertEqual(context_window["conversation"]["cards_active"], 2)
         self.assertEqual(context_window["conversation"]["last_seq"], 2)

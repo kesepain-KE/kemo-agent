@@ -1,0 +1,61 @@
+name: wait_for_condition
+description: 等待明确的外部进程、路径、TCP 或受管理作业条件。普通工具与框架跟踪的后台任务会自动等待和交付，不要用固定时长空转。条件满足立即返回；超时返回正常状态；支持紧急停止。
+input_schema:
+  type: object
+  properties:
+    condition:
+      type: string
+      enum:
+      - job_exit
+      - process_exit
+      - path_exists
+      - path_missing
+      - path_changed
+      - tcp_open
+      - tcp_closed
+      description: 等待条件类型
+    timeout:
+      type: number
+      minimum: 1
+      maximum: 7200
+      description: 最长等待秒数；显式值同时用于插件期限和框架外层看门狗
+    check_interval:
+      type: number
+      minimum: 0.1
+      maximum: 60
+      default: 5
+      description: 轮询间隔秒数
+    pid:
+      type: integer
+      minimum: 1
+      description: process_exit 使用的进程 PID
+    process_started_at:
+      type: string
+      description: process_exit 的强身份字段；应使用进程观测返回的创建时间原字符串
+    process_name:
+      type: string
+      description: process_exit 的可选弱身份辅助字段；不能代替创建时间
+    job_id:
+      type: string
+      description: job_exit 使用的 Shell 受管理后台作业 ID
+    path:
+      type: string
+      description: path_exists/path_missing/path_changed 使用的相对项目根目录或绝对路径
+    host:
+      type: string
+      description: tcp_open/tcp_closed 使用的主机名或 IP
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      description: tcp_open/tcp_closed 使用的端口
+  required:
+  - condition
+  - timeout
+  additionalProperties: false
+version: 1.2.0
+enabled: true
+entrypoint: tool.py:run
+timeout_grace_seconds: 2
+permission: read
+origin: builtin

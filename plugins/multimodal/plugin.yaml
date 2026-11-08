@@ -1,0 +1,75 @@
+name: multimodal
+description: 使用主 Run 明确授权的资产调用专用多模态模型，支持图片理解/生成/编辑、音频转写/生成/转换以及视频理解/生成。Chat 模式只支持图片理解，完整能力要求 Kemo 模式。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - analyze_image
+      - generate_image
+      - edit_image
+      - transcribe_audio
+      - generate_speech
+      - convert_speech
+      - analyze_video
+      - generate_video
+    asset_ids:
+      type: array
+      items:
+        type: string
+        pattern: ^asset_[A-Za-z0-9_.:-]+$
+      maxItems: 8
+      description: 当前 Run 附件说明中出现的本地稳定资产标识；纯生成动作可省略
+    paths:
+      type: array
+      items:
+        type: string
+        minLength: 1
+      maxItems: 8
+      description: 明确的本地媒体路径；支持绝对路径或相对项目根目录路径，与 asset_ids 合计最多 8 项
+    instruction:
+      type: string
+      minLength: 1
+      maxLength: 8000
+      description: 分析、生成、编辑、转写或转换指令
+    detail:
+      type: string
+      enum:
+      - auto
+      - low
+      - high
+    output_format:
+      type: string
+      maxLength: 20
+    voice:
+      type: string
+      maxLength: 100
+    size:
+      type: string
+      maxLength: 40
+    duration_seconds:
+      type: number
+      exclusiveMinimum: 0
+      maximum: 3600
+    asset_roles:
+      type: array
+      items:
+        type: string
+        enum:
+        - source
+        - mask
+        - reference
+        - style
+        - first_frame
+        - last_frame
+      maxItems: 8
+  required:
+  - action
+  - instruction
+  additionalProperties: false
+version: 2.2.0
+enabled: true
+entrypoint: tool.py:run
+permission: external
+origin: builtin

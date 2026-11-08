@@ -163,7 +163,7 @@ kemo-agent/
 | Provider、token、媒体、重试与上下文超限恢复 | `provider/retry.py`、`run/conversation/provider_exchange.py` |
 | 任务计划、定时任务、执行记录清理与后台维护 | `run/tasks/lifecycle.md`、`cron/` |
 | 持续执行、异步结果计数、完成屏障与停止 | `run/conversation/main_orchestration.py`、`run/scheduler/runtime_host.py` |
-| 子智能体协作、状态与续跑 | `run/agents/task_ledger.py` |
+| 子智能体协作、输入约定、状态与续跑 | `plugins/subagent_dispatch/SKILL.md`、`run/agents/task_ledger.py` |
 | 技能、拓展、感知与子智能体开发 | `knowledge/global/modules/module-development.md` |
 | 工具插件、执行合同与媒体处理 | `knowledge/global/modules/plugin-development.md` |
 | 内置 App、网关与图谱集成 | `knowledge/global/modules/builtin-expansions.md` |
@@ -182,6 +182,7 @@ kemo-agent/
 当前会话历史库为 `users/<name>/history/cards.sqlite3`；路径迁移与备份见存储专题。
 用户明确删除历史时清理后端正文及数据库检索记录，置顶/收藏不豁免；删除与数据库索引维护见存储专题，界面行为见前端专题。
 新用户骨架为 `template/user/`；技能在 `skills/`，插件在 `plugins/`，内置子智能体在 `agents/`。
+插件方法与机器契约分别保存在同目录的 SKILL.md 和 plugin.yaml；用户自建插件声明 `origin: user`，归属规则见插件开发专题。
 这些是定位方式，不表示可以读取无关用户的数据。
 
 ## 6. 维护约定

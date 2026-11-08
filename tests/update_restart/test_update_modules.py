@@ -34,6 +34,19 @@ def write_json(path: Path, value: dict) -> None:
     write(path, json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def write_plugin(root: Path, name: str, content: str, *, origin: str | None = "builtin") -> None:
+    directory = root / "plugins" / name
+    write(directory / "SKILL.md", f"# {name}\nPlugin methods.\n")
+    metadata = {
+        "name": name, "description": name, "input_schema": {"type": "object"},
+        "version": "1", "enabled": True, "entrypoint": "tool.py:run",
+    }
+    if origin is not None:
+        metadata["origin"] = origin
+    write_json(directory / "plugin.yaml", metadata)
+    write(directory / "tool.py", content)
+
+
 class UpdateModuleTests(unittest.TestCase):
     @staticmethod
     def load_dispatcher(name: str):
@@ -240,6 +253,38 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertFalse((root / "expand" / "share" / "new_module").exists())
             self.assertEqual((root / "operator-note.txt").read_text("utf-8"), "keep")
 
+    def test_backup_and_legacy_rollback_preserve_shared_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / "knowledge" / "share"
+            write(shared / "custom" / "doc.md", "before snapshot")
+            write(root / "run" / "main.py", "old code")
+
+            backup = backup_update.make_backup(root=root)
+            assert backup is not None
+            self.assertFalse((backup / "knowledge" / "share").exists())
+
+            # Older source snapshots included shared data. Restoring those
+            # snapshots must still leave current operator documents untouched.
+            write(backup / "knowledge" / "share" / "custom" / "doc.md", "stale copy")
+            write(backup / "knowledge" / "share" / "deleted.md", "old deleted document")
+            write(shared / "custom" / "doc.md", "operator revision")
+            write(shared / "new" / "doc.md", "new operator document")
+            write(root / "run" / "main.py", "failed update")
+
+            backup_update.restore_backup(backup_dir=backup, root=root)
+
+            self.assertEqual(
+                (shared / "custom" / "doc.md").read_text("utf-8"),
+                "operator revision",
+            )
+            self.assertEqual(
+                (shared / "new" / "doc.md").read_text("utf-8"),
+                "new operator document",
+            )
+            self.assertFalse((shared / "deleted.md").exists())
+            self.assertEqual((root / "run" / "main.py").read_text("utf-8"), "old code")
+
     def test_rollback_restores_skills_registry_and_preserves_runtime_skills(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -411,6 +456,7 @@ class UpdateModuleTests(unittest.TestCase):
             source = root / "source"
             target = root / "target"
             write(source / "knowledge" / "global" / "current.md", "new knowledge")
+            write(target / "knowledge" / "global" / "current.md", "old knowledge")
             write(target / "knowledge" / "global" / "obsolete.md", "remove me")
             write(
                 target / "knowledge" / "global" / "kemo-graph-storage" / "sources.db",
@@ -442,6 +488,47 @@ class UpdateModuleTests(unittest.TestCase):
                 ).read_text("utf-8"),
                 "runtime index",
             )
+
+    def test_core_leaves_shared_knowledge_untouched(self) -> None:
+        for source_has_shared in (False, True):
+            with (
+                self.subTest(source_has_shared=source_has_shared),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = root / "source"
+                target = root / "target"
+                source.mkdir()
+                shared = target / "knowledge" / "share"
+                documents = {
+                    "custom/doc.md": "operator knowledge",
+                    "same-name.md": "operator version",
+                    "classify.sqlite3": "local classification data",
+                }
+                for name, content in documents.items():
+                    write(shared / name, content)
+                (shared / "empty").mkdir()
+                if source_has_shared:
+                    write(source / "knowledge" / "share" / "same-name.md", "release version")
+                    write(source / "knowledge" / "share" / "source-only.md", "release data")
+
+                result = core_update.update(source, target, assume_yes=True)
+
+                self.assertEqual(
+                    {
+                        path.relative_to(shared).as_posix(): path.read_text("utf-8")
+                        for path in shared.rglob("*")
+                        if path.is_file()
+                    },
+                    documents,
+                )
+                self.assertTrue((shared / "empty").is_dir())
+                self.assertFalse(
+                    any(
+                        "knowledge/share" in item
+                        for item in result["details"] + result["warnings"]
+                    )
+                )
 
     def test_core_contains_runtime_entrypoints_but_does_not_commit_version(self) -> None:
         expected = {
@@ -742,20 +829,112 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertTrue((target / "agents" / "custom" / "agent.json").is_file())
             self.assertTrue(any("1.0.0 -> 2.0.0" in detail for detail in result["details"]))
 
-    def test_plugins_are_replaced_exactly(self) -> None:
+    def test_plugins_update_framework_and_preserve_user_ownership_and_private_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
             target = root / "target"
-            write(source / "plugins" / "file" / "tool.py", "new")
-            write(target / "plugins" / "file" / "tool.py", "old")
-            write(target / "plugins" / "local-extra" / "tool.py", "delete")
+            write_plugin(source, "file", "new")
+            write_plugin(source, "override", "release")
+            write_plugin(target, "file", "old")
+            write_plugin(target, "override", "user override", origin="user")
+            write_plugin(target, "custom", "user plugin", origin="user")
+            write_plugin(target, "retired", "remove", origin=None)
+            write_plugin(target, "retired_with_data", "remove")
+            write(target / "plugins/retired_with_data/data/state.txt", "keep")
+            write(target / "plugins/unknown/tool.py", "unknown ownership")
+            for name in ("manifest.py", "_creator_security.py", "__init__.py", "kemo_graph/tool.py"):
+                write(source / "plugins" / name, f"new {name}")
+                write(target / "plugins" / name, f"old {name}")
+            private = (
+                "config.json", "module/config.yaml", "config.yml", "panel.values.json",
+                ".env", ".env.local", "data/state.json", "artifacts/result.txt",
+                "logs/entry.txt", "cache.sqlite3-wal", "module/data/state.txt",
+                "module/.env.private/secret.txt",
+            )
+            for name in private:
+                write(source / "plugins/file" / name, "release private")
+                write(target / "plugins/file" / name, "local private")
+            write(target / "plugins/file/obsolete.py", "remove")
+            before = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+
+            plugins_update.update(source, target, dry_run=True)
+
+            self.assertEqual(
+                {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()},
+                before,
+            )
 
             result = plugins_update.update(source, target)
 
             self.assertEqual(result["status"], "ok")
             self.assertEqual((target / "plugins" / "file" / "tool.py").read_text(encoding="utf-8"), "new")
-            self.assertFalse((target / "plugins" / "local-extra").exists())
+            self.assertFalse((target / "plugins/file/obsolete.py").exists())
+            self.assertEqual((target / "plugins/override/tool.py").read_text("utf-8"), "user override")
+            self.assertEqual((target / "plugins/custom/tool.py").read_text("utf-8"), "user plugin")
+            self.assertEqual((target / "plugins/unknown/tool.py").read_text("utf-8"), "unknown ownership")
+            self.assertFalse((target / "plugins/retired").exists())
+            self.assertEqual((target / "plugins/retired_with_data/data/state.txt").read_text("utf-8"), "keep")
+            self.assertFalse((target / "plugins/retired_with_data/plugin.yaml").exists())
+            for name in ("manifest.py", "_creator_security.py", "__init__.py", "kemo_graph/tool.py"):
+                self.assertEqual((target / "plugins" / name).read_text("utf-8"), f"new {name}")
+            for name in private:
+                self.assertEqual((target / "plugins/file" / name).read_text("utf-8"), "local private")
+            self.assertEqual(plugins_update.update(source, target)["status"], "skipped")
+
+    def test_invalid_plugin_ownership_fails_before_update_writes(self) -> None:
+        for metadata in ("origin: [broken", "origin: unknown\n", "[]\n"):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, target = root / "source", root / "target"
+                write_plugin(source, "file", "new")
+                write_plugin(target, "file", "old")
+                write(target / "plugins/custom/plugin.yaml", metadata)
+                write(target / "plugins/custom/tool.py", "user code")
+                with self.assertRaises(UpdateError):
+                    plugins_update.update(source, target)
+                self.assertEqual((target / "plugins/file/tool.py").read_text("utf-8"), "old")
+                self.assertEqual((target / "plugins/custom/tool.py").read_text("utf-8"), "user code")
+
+    def test_plugin_rollback_restores_builtins_and_preserves_current_user_modules_and_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            source = Path(temporary) / "release"
+            write_plugin(root, "file", "old")
+            write_plugin(root, "retired", "old retired")
+            write_plugin(root, "override", "old builtin")
+            write_plugin(root, "custom", "old user", origin="user")
+            write(root / "plugins/file/module/config.yaml", "original config")
+            write(root / "plugins/file/module/data/state.txt", "original nested state")
+            write(root / "plugins/retired/data/state.txt", "original state")
+            backup = backup_update.make_backup(root=root)
+            assert backup is not None
+            self.assertFalse((backup / "plugins/custom").exists())
+            self.assertFalse((backup / "plugins/file/module/config.yaml").exists())
+            self.assertFalse((backup / "plugins/file/module/data").exists())
+
+            write_plugin(root, "override", "new user override", origin="user")
+            write_plugin(root, "custom", "updated user", origin="user")
+            write_plugin(root, "added", "new user", origin="user")
+            write_plugin(source, "file", "new")
+            plugins_update.update(source, root)
+            write(root / "plugins/file/new.py", "failed update")
+            write(root / "plugins/file/module/config.yaml", "current config")
+            write(root / "plugins/file/module/data/state.txt", "current nested state")
+            write(root / "plugins/retired/data/state.txt", "current state")
+
+            backup_update.restore_backup(backup_dir=backup, root=root)
+
+            self.assertEqual((root / "plugins/file/tool.py").read_text("utf-8"), "old")
+            self.assertFalse((root / "plugins/file/new.py").exists())
+            self.assertEqual((root / "plugins/retired/tool.py").read_text("utf-8"), "old retired")
+            self.assertTrue((root / "plugins/retired/plugin.yaml").is_file())
+            self.assertEqual((root / "plugins/file/module/config.yaml").read_text("utf-8"), "current config")
+            self.assertEqual((root / "plugins/file/module/data/state.txt").read_text("utf-8"), "current nested state")
+            self.assertEqual((root / "plugins/retired/data/state.txt").read_text("utf-8"), "current state")
+            self.assertEqual((root / "plugins/override/tool.py").read_text("utf-8"), "new user override")
+            self.assertEqual((root / "plugins/custom/tool.py").read_text("utf-8"), "updated user")
+            self.assertEqual((root / "plugins/added/tool.py").read_text("utf-8"), "new user")
 
     def test_web_preserves_dependency_and_dist_directories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

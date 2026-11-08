@@ -7,7 +7,11 @@
 本次重点回归包括空间公平调度/共享 API 池、子代理完成屏障与超时续跑、Chat 自动兼容、
 原生媒体装载、历史归档与标记、迁移备份及网页工作面板；测试中的旧版升级输入不是待替换的当前版本。
 `contracts/test_release_versions.py` 用隔离副本验证版本门禁能拒绝遗漏的版本入口；
-`deploy/test_documentation.py` 继续保证中英文安装命令、最新更新说明及发布前提一致。
+`deploy/test_documentation.py` 验证中英文 README 的快速开始及完整安装文档入口；
+完整四渠道命令、发布前提和最新更新说明由对应专题承担，不要求 README 重复工程细节。
+插件的 `plugin.yaml` 发现与 Schema、`origin: user` 更新/回滚保护、共享知识层保留，
+分别由 `plugins/test_extended_plugins.py`、`update_restart/test_update_modules.py` 和
+`deploy/test_deploy.py` 覆盖；部署器还对照全部内置插件验证独立 YAML 解析结果。
 
 ## 目录职责
 
@@ -80,18 +84,24 @@ Shell 接管与跨 root 的 required 屏障继续在 `tests/core/test_shell_comp
 ## 运行
 
 ```powershell
-python -m pytest tests -q
+python -m pytest tests -q --ignore=tests/contracts/kemo_v1
 python -m pytest tests/deploy -q
 python -m pytest tests/contracts/test_release_versions.py -q
-python -m tests.contracts.kemo_v2 -q
+python -m pytest tests/contracts/kemo_v2 -q
 python -m pytest tests/template_tests -q
 npm --prefix web/frontend test -- --maxWorkers=2
 ```
 
 发布前还应运行项目的完整 `开发临时目录/release_check.py`；该脚本只负责编排，不承载业务断言。
-1.5.2 定档使用 `--timeout 3600 --report tmp/release-check-1.5.2.json`；
+当前定档使用 `--timeout 3600 --report tmp/release-check-2.0.0.json`；
 报告属于本机源码验收，不表示部署预览版、远程渠道或真实厂商模型已经升级。
 开发期分发验收会进一步检查 Release 内由前端入口引用的 CSS，确认滚动修复实际进入发布包。
+
+CI 与本机编排分别执行普通后端、Kemo 2.0 协议和模板用例，避免重复收集；
+已归档的 `kemo_v1` 不进入这些门禁，也不将整组跳过报告为协议验证。
+CI 的 Stability contracts 执行固定 Pyright 1.1.414 与 Python 编译，业务回归由后端矩阵执行；
+前端测试与生产构建通过后实际运行 `deploy/pack.py`。真实工作树的隔离安装与安装后插件
+发现仍由本机分发验收负责；远程绿灯不等于完成这些本机及外部渠道验收。
 
 ## Kemo 2.0 固定协议制品
 
@@ -99,6 +109,8 @@ npm --prefix web/frontend test -- --maxWorkers=2
 不复制一套 Python 模型，而是加载 Agent 构建的 `vendor/kemo_protocol-2.0.zip`，通过其
 `tests/contracts/kemo_v2/test_artifact_contract.py` 校验 lock、Schema 和 Fixture 摘要。
 当前只支持精确 `protocol_version="2.0"`，不提供 1.x shim。
+Schema 生成只写入测试临时目录，再逐文件比对仓库冻结的 Schema、模型索引与摘要清单；
+测试不得自动刷新冻结文件来掩盖漂移。协议制品和 Fixture 使用 LF，避免 Windows 检出改变字节摘要。
 
 Agent：
 

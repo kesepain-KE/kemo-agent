@@ -1,0 +1,33 @@
+name: attach_media
+description: 将已取得的媒体装载到当前 Run，供下一次主模型请求原生接收；不调用专用模型。优先 asset_ids，也可用明确获准的本地 paths。
+input_schema:
+  type: object
+  properties:
+    asset_ids:
+      type: array
+      items:
+        type: string
+        pattern: ^asset_[A-Za-z0-9_.:-]+$
+      maxItems: 8
+    paths:
+      type: array
+      items:
+        type: string
+        minLength: 1
+        maxLength: 4096
+      maxItems: 8
+    note:
+      type: string
+      maxLength: 4000
+    detail:
+      type: string
+      enum:
+      - auto
+      - low
+      - high
+  additionalProperties: false
+version: 1.0.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

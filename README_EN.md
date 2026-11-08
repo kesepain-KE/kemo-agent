@@ -23,6 +23,8 @@
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
 
+> Want to get it running? [Jump to quick start](#quick-start)
+
 ---
 
 ## What if every conversation did not have to start over?
@@ -133,117 +135,21 @@ The project does not claim that every model service is inherently private. What 
 
 ---
 
-## Get started
-
-> 📖 For complete installation, configuration, usage, and extension-development guidance, visit the **[kemo-agent online documentation](https://kesepain-ke.github.io/kemo-agent-doc/)**. The documentation site is currently available in Chinese.
-
-### Choose an installation method
-
-Windows, Linux, npm, and Docker share the framework version. The current source version is **2.0.0**; the compatible gateway baseline is **1.0.0**. Remote distribution artifacts are published separately.
-
-> **Publication prerequisite:** The remote commands below work only after the installer scripts and the corresponding distribution artifacts are published. Native installation needs `kemo-agent-release-<version>.zip` and its `.zip.sha256` in a Release; npm needs a published distribution package; Docker needs a published image tag. Pushing code alone does not publish these artifacts. This guide does not claim they are already available online. The Release ZIP is not GitHub's automatically generated source archive.
-
-| Method | Host requirements |
-|---|---|
-| Windows / Linux one-command deployment | Python 3.10+; working `venv` / `ensurepip` on Linux; network access to install application dependencies |
-| npm | Node.js 18+, npm, Python 3.10+, and a working Python virtual environment |
-| Docker | Docker Engine and Docker Compose; no host Python / Node.js required |
-| Source development | Python 3.10+, Git, Node.js and npm for frontend builds |
-
-The Release includes a prebuilt frontend, so native Windows / Linux clients do not need Git or Node.js. Remote installers execute code; download and review them first if preferred.
-
-### Windows: install, start, and update
-
-Install in PowerShell:
+## Quick start
 
 ```powershell
+# Windows (requires Python 3.10+)
 irm https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/windows/install.ps1 | iex
+& "$env:USERPROFILE\.kemo-agent\deploy\deploy.cmd" start
 ```
 
-The installer installs files and dependencies but does not start a persistent service. The default directory is `%USERPROFILE%\.kemo-agent`. For everyday use:
+Open http://127.0.0.1:1357. On first launch, you will be guided through model-service and user configuration.
 
-```powershell
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
-# Check only; this does not install updates
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" check
-# Stop the running application before updating and restarting
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" update --yes
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
-```
-
-If only the `py` launcher is available, replace `python` with `py -3`. First startup initializes configuration and the user. The installer does not install system Python, change PATH, or create a system service.
-
-### Linux: install, start, and update
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/linux/install.sh | sh
-python3 "$HOME/.kemo-agent/deploy/deploy.py" start
-```
-
-For routine checks and updates:
-
-```sh
-python3 "$HOME/.kemo-agent/deploy/deploy.py" check
-# Stop the running application first
-python3 "$HOME/.kemo-agent/deploy/deploy.py" update --yes
-python3 "$HOME/.kemo-agent/deploy/deploy.py" start
-```
-
-The default directory is `~/.kemo-agent`. macOS can reuse the Unix entry point, but on-device validation has not been completed.
-
-### npm: installation and everyday use
-
-```sh
-npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
-kemo
-```
-
-There is no `postinstall`; the first `kemo` invocation deploys and starts the application. To upgrade, stop the application first, then run:
-
-```sh
-npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
-kemo
-```
-
-`kemo check` / `kemo update` compare against the framework bundled in the locally installed npm package, not the latest GitHub Release. The default root is `~/.kemo-agent` (the user home directory on Windows). Use `KEMO_INSTALL_ROOT` for a separate directory; npm cannot take over an existing native-channel installation.
-
-### Docker: one-command startup and updates
-
-Run in a dedicated Compose project directory that you will keep using; do not overwrite an existing `docker-compose.yml`:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/docker/docker-compose.yml -o docker-compose.yml && docker compose up -d
-```
-
-The default image is `ghcr.io/kesepain-ke/kemo-agent:latest`; the publisher must supply that tag. Alternatively, set `KEMO_VERSION` to a published framework version. For everyday use, stay in the same directory:
-
-```sh
-docker compose logs -f
-# Update: stop, pull, and start the new image
-docker compose stop
-docker compose pull
-docker compose up -d
-```
-
-A named volume mounted at `/data` stores persistent data. New images synchronize managed application files on startup while preserving user data. **Do not update using `docker compose down -v`.** Keep the Compose project name and directory unchanged to avoid accidentally selecting a new, empty volume. The default binding is local-only at `127.0.0.1:1357`; public access is not configured automatically.
-
-### Source installation (developers)
-
-```bash
-git clone https://github.com/kesepain-KE/kemo-agent.git
-cd kemo-agent
-python setup.py
-# Use python setup.py --yes to accept initialization defaults
-python start_web.py
-```
-
-`setup.py` guides dependency installation, environment configuration, frontend builds, and user creation. Source installations can also use `python cli.py` for the CLI; stop the application before updating with `python update.py`.
-
-**Do not alternate between `update.py` and `deploy/deploy.py` for the same installation.** Deployment refuses nonempty unmanaged directories and installations owned by another channel. Choose custom paths at first installation; do not target your development checkout.
-
-The default web address is `http://127.0.0.1:1357`. Start with the web interface and configure model services, the user, and access credentials.
-
-See the [deployment guide](deploy/README.md) for options, custom paths, offline archives, recovery, and publication, and the [deployment knowledge reference](knowledge/global/release/deployment-and-release.md) for the agent-facing contract. Both detailed guides are currently in Chinese.
+Other methods: [Linux](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#linux) ·
+[npm](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#npm) ·
+[Docker](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#docker) ·
+[Source](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#源码安装) ·
+[Full installation guide](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation) (in Chinese).
 
 ---
 
@@ -266,58 +172,11 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `2.0.0` (source finalized on November 5, 2026; remote distribution artifacts are published separately)
+Current version: `2.0.0`, compatible with Kemo gateway `1.0.0`.
 
-The 2.0.0 baseline was frozen again on November 7, 2026, including CardStream, YAML configuration, module hot loading, and path-based knowledge libraries. This is a breaking update.
-
-Confirmed compatible Kemo gateway: `kemo-adapter-api 1.0.0` (Kemo 2.0 wire protocol matched).
-
-### 2.0.0 release notes (November 5, 2026)
-
-- Plugins now have locally enforced permission categories configurable per user; permission metadata is not sent to the Provider.
-- `file.search` now uses only `name` and `content`; `web_search.search` uses semantic `answer` and `raw_content` enums.
-- The graph guide is split into `kemo_graph_read` and `kemo_graph_write`; read permission no longer exposes write operations.
-- Duplicate parameter tables were removed from plugin guides. Old tool names and parameter semantics are intentionally incompatible.
-
-The current `kemo-preview` branch builds on this baseline with the CardStream refactor: complete immutable RAW
-history and a rolling VIEW summary. Each main request freezes history and the dynamic tail, compacting above
-80% of effective input capacity toward a fraction of historical tokens. Validated candidates replace the prefix
-atomically; failures preserve the existing view. This work has not been published as a new remote release.
-
-### Available today
-
-- a complete web conversation interface with streaming interaction and multimodal mid-run guidance;
-- a per-user `cards.sqlite3` history store with RAW/VIEW, transactional commits, original-content search, and RAW-sequence cursor pagination;
-- a per-user SQLite Tidal Engram store that transactionally keeps content, lifecycle state, daily weight evidence, and hot-view sources; archived user evidence now finds existing fragments through confidence-gated keyword coverage before applying at most one weight increase per day, reducing duplicate-fragment growth;
-- temporary important memory maintained as a rebuildable hot view, derived one-way from the three temporary tiers without feeding weight back into its source memories; both the Prompt injection budget and the independent runaway-output guard are currently 20,000 characters;
-- personal, shared, and global knowledge layers grounded in real source material;
-- task plans that move from creation and approval to step-by-step execution, with pause, resume, audit support, and scrollable guidance and plan details; successful creation terminates only the current conversation run rather than letting it bypass the plan state machine or pausing another session;
-- long tasks run by default in one Run without a total tool-call or model-request count ceiling, while preserving cancellation and completion checks for required background work;
-- continuous-prefix card compaction covering user text, guidance, assistant text, and tool events; background memory analysis reads complete RAW history and advances its independent cursor only after all candidates are processed, with zero new fragments allowed when no durable facts exist;
-- one-time and recurring scheduled tasks that wake automatically at the agreed time;
-- background collection for extension and perception data, with every logical Provider request reloading the latest published snapshots without adding collection latency to model calls;
-- subagent collaboration for memory organization, planning, summarization, and scheduling;
-- multiple built-in tools and skills with room for further extension, including `wait_for_condition` for bounded two-hour waits that wake early on process, path, or port conditions;
-- dynamic reasoning-effort choices derived from gateway model capabilities when using the Kemo protocol, while other Provider protocols retain their existing configuration flow;
-- non-strict parameter mode for ordinary plugin tools with open objects or optional fields, while structured-output tools retain strict validation;
-- pre-execution tool-argument integrity checks for both Kemo and Chat providers; truncated, content-filtered, or malformed Chat tool calls terminate explicitly as incomplete instead of executing partial arguments;
-- separate contract-test baselines for skills, extensions, perception modules, external message routes, subagents, and user templates, covering their basic framework inputs and outputs;
-- ZIP upload for user-created skills, with recursive `SKILL.md` discovery and transactional installation;
-- shared identity and memory across the web interface, Android App, CLI, and messaging platforms, with conversation histories isolated by their real `source` and non-Web histories available as read-only Web archives;
-- isolated workspaces and configuration for multiple users;
-- separate management of uploaded files and agent-generated content, with bounded image, audio, and video previews;
-- explainable scored memory search across all four lifecycle tiers, with batch queries loading each tier once and returning matched fields, terms, coverage, and scores; plus a ten-item moving conversation navigator that centers the active round at 180° and can continue loading earlier history;
-- a layered Web backend organized around routes, domain services, and shared contracts while retaining compatibility entry points;
-- runtime status and maintenance interfaces with background tasks operating automatically.
-
-### Areas still being refined
-
-- a more intuitive and less error-prone experience for creating custom extensions;
-- stability and resource behavior during long-running operation;
-- smoother installation, update, and migration workflows;
-- continued refinement for more real-world scenarios.
-
-If you are trying an early release, reports about problems, usability feedback, and the work you genuinely want an agent to take on are all welcome.
+2.0.0 is a breaking update: CardStream, YAML configuration and module hot loading, and path-based knowledge libraries.
+See [Releases](https://github.com/kesepain-KE/kemo-agent/releases)
+and the [documentation site](https://kesepain-ke.github.io/kemo-agent-doc/) for the full changes and feature list.
 
 ---
 
@@ -353,6 +212,8 @@ kemo-agent is not an island. Around it, several independently maintained project
 ## Contributing
 
 kemo-agent is still at a very early stage. Bug reports, usability feedback, documentation improvements, and code contributions are all welcome.
+
+If you are trying an early release, reports about problems, usability feedback, and the work you genuinely want an agent to take on are all welcome.
 
 Recommended workflow:
 

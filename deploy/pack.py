@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 from core.common import DeployError, digest, json_bytes, no_links, read_json, relative, version
-from core.policy import preserved_seed, protected
+from core.policy import preserved_seed, protected, user_plugin_directories
 from core.yamllite import loads, dumps
 from core.source import parse_archive
 
@@ -22,16 +22,16 @@ DIRECTORIES = {'run', 'provider', 'plugins', 'agents', 'config', 'cron', 'messag
 ROOT_FILES = {'version.json', 'cli.py', 'events.py', 'setup.py', 'update.py', 'requirements.txt', 'requirements-dev.txt', 'agents.md', 'kemo.yaml.example', 'LICENSE', 'kemo-agent.ico', 'kemo-agent.jpg', 'kemo-web-UI.png', 'readme.md', 'README.md', 'README_EN.md', 'restart.py', 'start_web.py', 'user_create.py'}
 
 
-def publishable(name: str) -> bool:
+def publishable(name: str, *, user_plugins: tuple[str, ...] = ()) -> bool:
     if name.endswith(('/classify.sql', '/classify.sqlite3')):
-        # 分类元数据已退役；旧发布包仍可安装，新包不再携带。
+        # 分类元数据已退役，不再携带。
         return False
     if preserved_seed(name):
         return True
     parts = Path(name).parts
     if parts[0] not in DIRECTORIES and name not in ROOT_FILES:
         return False
-    if protected(name):
+    if protected(name, user_plugins):
         return False
     if name.startswith(('deploy/artifacts/', 'deploy/out/', 'deploy/.test-work/')) or name == 'deploy/.baseline.json':
         return False
@@ -102,9 +102,10 @@ def main(argv=None):
         if not (dist / 'index.html').is_file():
             raise DeployError('Build Web first: npm ci && npm run build in web/frontend')
         names.update(p.relative_to(root).as_posix() for p in dist.rglob('*') if p.is_file())
+        user_plugins = user_plugin_directories(root)
         files = {}
         for name in sorted(names):
-            if not publishable(name):
+            if not publishable(name, user_plugins=user_plugins):
                 continue
             path = root / name
             no_links(path)

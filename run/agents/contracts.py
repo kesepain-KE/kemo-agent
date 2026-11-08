@@ -212,7 +212,7 @@ def bounded_schema_hint(value: dict[str, Any], *, limit: int = 600) -> dict[str,
                 isinstance(field, str)
                 and _safe_identifier(field)
                 and isinstance(expected, str)
-                and expected in _SAFE_SCHEMA_TYPES
+                and all(part in _SAFE_SCHEMA_TYPES for part in expected.split("|"))
             ):
                 safe_mismatch.append({"field": field, "expected": expected})
             else:

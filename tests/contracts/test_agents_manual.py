@@ -39,6 +39,7 @@ def isolated_repository(tmp_path: Path) -> Path:
             sources.add(str(path.relative_to(ROOT)))
             if group["kind"] == "plugin":
                 sources.update(str(entry.relative_to(ROOT)) for entry in path.parent.glob("*.py"))
+                sources.add(str(path.with_name("plugin.yaml").relative_to(ROOT)))
             if group["kind"] == "agent":
                 raw = json.loads(path.read_text("utf-8"))
                 sources.update(str((path.parent / name).relative_to(ROOT)) for name in ("AGENT.md", "agent-config.json", raw["trigger"]))
@@ -99,7 +100,7 @@ def test_personal_manual_is_light_and_engineering_reference_is_separate() -> Non
         ("users/<name>/file_upload/", "users/<name>/upload/", "runtime path not classified", True),
         ("`web_search`", "搜索工具", "coverage plugin", True),
         ("查询工具对相同参数也重新执行", "静态查询", "claim tool-dedup", True),
-        ("agents.output_reserve=8192", "agents.output_reserve=4096", "claim context-budget", True),
+        ("agents.output_reserve=10000", "agents.output_reserve=4096", "claim context-budget", True),
     ],
 )
 def test_manual_drift_is_rejected(
@@ -156,20 +157,21 @@ def test_unbounded_progress_retries_are_rejected(isolated_repository: Path) -> N
 def test_new_plugin_requires_reachable_entry(isolated_repository: Path) -> None:
     path = isolated_repository / "plugins/new_capability/SKILL.md"
     path.parent.mkdir()
-    path.write_text('# new_capability\n\nDiscover me.\n\n## Tool\n\n```json\n'
+    path.write_text('# new_capability\n\nDiscover me.\n', "utf-8")
+    path.with_name("plugin.yaml").write_text(
                     '{"name":"new_capability","enabled":true,"description":"test",'
                     '"version":"1.0.0","entrypoint":"tool.py:run",'
-                    '"input_schema":{"type":"object"}}\n```\n', "utf-8")
+                    '"input_schema":{"type":"object"}}\n', "utf-8")
     (path.parent / "tool.py").write_text("def run(): pass\n", "utf-8")
     result = checker.check(isolated_repository)
     assert any("coverage plugin: no explicit capability/entry for new_capability" in item for item in result["errors"])
 
 
 def test_bad_manifest_does_not_count_as_directory_coverage(isolated_repository: Path) -> None:
-    path = isolated_repository / "plugins/web_search/SKILL.md"
-    path.write_text("# web_search\n\nA directory is not a valid registration.\n", "utf-8")
+    path = isolated_repository / "plugins/web_search/plugin.yaml"
+    path.write_text("[]\n", "utf-8")
     result = checker.check(isolated_repository)
-    assert any("one ## Tool required" in item for item in result["errors"])
+    assert any("plugin.yaml must be a mapping" in item for item in result["errors"])
 
 
 def test_runtime_templates_do_not_require_users_or_external_repository(isolated_repository: Path) -> None:

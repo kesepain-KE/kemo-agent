@@ -468,7 +468,7 @@ completed_after_timeout；后者仅适用于已有不支持恢复的执行器合
 |------|------|--------|------|
 | `token_limit` | int | `1000000` | 配置总容量；扣除实际输出预留后，输入还受 Provider 声明限制约束 |
 | `token_compression_ratio` | float | `0.3` | 有效历史 Token 的软目标比例；必须实际缩减并装入请求容量，但不因略超比例丢弃有用检查点 |
-| `output_reserve` | int | `8192` | 主模型输出预留；先取 provider.max_tokens 与模型 max_output_tokens 的较小有效上限，再计算输入容量 |
+| `output_reserve` | int | `10000` | 上下文计算的输出余量；与模型请求的生成上限分开，只有实际生成上限更小时才减少预留 |
 | `compression_timeout_seconds` | number | `180` | 一次完整 CardStream 压缩的总时长上限（秒），所有片段与重试共享，不逐请求重置 |
 | `important_memory_review_hours` | int | `3` | 宿主级临时重要记忆巡检间隔（小时）。Cron 据此创建唯一系统 recurring 任务，到期后按用户分别执行；不支持用户级时间表 |
 | `daily_memory_review_time` | str | `"02:00"` | 宿主级每日记忆整理时间（北京时间 HH:MM）。Cron 据此创建唯一系统 daily 任务，到期后按用户分别执行；不支持用户级时间表 |
@@ -477,6 +477,10 @@ CardStream 将所有历史事件保存在 `users/<user>/history/cards.sqlite3`�
 
 输入容量取 `token_limit - 实际输出预留`、声明的 `max_input_tokens`、声明的
 `context_window - 实际输出预留` 三者中已知项的最小值；独立输入上限不再扣输出。
+主模型与子智能体的生成上限优先使用显式 `max_tokens`，否则使用当前模型声明的
+`max_output_tokens`；两者均存在时受模型上限约束，均未知时省略生成上限，由上游决定。
+`output_reserve` 只参与上下文计算，不再把模型生成限制在预留量内。例如总容量
+1000000、预留10000、模型输出上限384000时，输入预算仍为990000，生成上限为384000。
 摘要请求使用自身输出额度重新计算容量，同一模型的输出上限仍生效。历史目标为有效历史
 Token × 压缩比例，并受固定段、动态尾部和 Schema 占用后剩余容量约束；这些固定内容不参与比例基数。
 摘要 Token 包含其历史消息标签及 JSON 字符串转义；摘要消息封装和保留后缀投影另行核对，
@@ -847,7 +851,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 |------|------|-----------|------|
 | `token_limit` | int | 1000000 | 配置总容量，按实际输出预留计算有效输入预算 |
 | `token_compression_ratio` | float | 0.3 | 有效历史卡片压缩软目标；最终按实际缩减及完整请求容量验收 |
-| `output_reserve` | int | 8192 | 主模型输出预留 |
+| `output_reserve` | int | 10000 | 上下文计算的输出余量，不是模型生成上限 |
 | `compression_timeout_seconds` | number | 180 | 一次完整压缩的总时长上限（秒），分片和重试不重置 |
 
 旧的 `max_rounds`、`conserved_rounds`、`rounds_after_compression`、

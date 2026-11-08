@@ -10,13 +10,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GUIDES = (
-    "readme.md",
-    "README_EN.md",
+READMES = ("readme.md", "README_EN.md")
+DEPLOYMENT_GUIDES = (
     "knowledge/global/overview/project-introduction.md",
     "knowledge/global/release/deployment-and-release.md",
     "deploy/README.md",
 )
+GUIDES = (*READMES, *DEPLOYMENT_GUIDES)
 
 
 def read(relative: str) -> str:
@@ -40,7 +40,7 @@ class DeploymentDocumentationTests(unittest.TestCase):
         )
         # npm 渠道走 Release 资产直装，不经过 npm registry（该 registry 即使包为 public 也强制要 token）
         self.assertTrue(package_name.startswith("@kesepain"))
-        for guide in GUIDES:
+        for guide in DEPLOYMENT_GUIDES:
             with self.subTest(guide=guide):
                 text = read(guide)
                 for command in commands:
@@ -48,24 +48,42 @@ class DeploymentDocumentationTests(unittest.TestCase):
         for relative in ("windows/install.ps1", "linux/install.sh", "docker/docker-compose.yml"):
             self.assertTrue((ROOT / "deploy" / relative).is_file())
 
-    def test_daily_commands_match_between_languages(self) -> None:
+    def test_readme_quick_starts_match_and_link_to_full_installation(self) -> None:
         def code_blocks(document: str) -> list[str]:
-            quick_start = document.split("### 1.3.", 1)[0]
+            quick_start = re.search(
+                r"^## (?:快速开始|Quick start)\s*\n(.*?)(?=^## |\Z)",
+                document, re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(quick_start)
             return [
                 line.strip()
-                for block in re.findall(r"```[^\n]*\n(.*?)```", quick_start, re.DOTALL)
+                for block in re.findall(
+                    r"```[^\n]*\n(.*?)```", require_present(quick_start).group(1), re.DOTALL,
+                )
                 for line in block.splitlines()
                 if line.strip() and not line.lstrip().startswith("#")
             ]
 
-        self.assertEqual(code_blocks(read("readme.md")), code_blocks(read("README_EN.md")))
+        commands = code_blocks(read("readme.md"))
+        self.assertEqual(commands, code_blocks(read("README_EN.md")))
+        self.assertEqual(len(commands), 2)
+        self.assertIn("/deploy/windows/install.ps1 | iex", commands[0])
+        self.assertEqual(commands[1], '& "$env:USERPROFILE\\.kemo-agent\\deploy\\deploy.cmd" start')
+        for guide in READMES:
+            with self.subTest(guide=guide):
+                text = read(guide)
+                for anchor in ("linux", "npm", "docker", "源码安装"):
+                    self.assertIn(
+                        f"https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#{anchor}",
+                        text,
+                    )
 
     def test_knowledge_is_discoverable_from_manual(self) -> None:
         self.assertIn("knowledge/global/release/deployment-and-release.md", read("agents.md"))
         self.assertTrue(
             (ROOT / "knowledge/global/release/deployment-and-release.md").is_file()
         )
-        for guide in GUIDES:
+        for guide in DEPLOYMENT_GUIDES:
             text = read(guide)
             self.assertIn("kemo-agent-release-<version>.zip", text)
             self.assertIn("down -v", text)
@@ -77,24 +95,28 @@ class DeploymentDocumentationTests(unittest.TestCase):
                 text = read(guide)
                 self.assertIn(version, text)
                 self.assertIn("Release", text)
-                self.assertIn(
-                    "Publication prerequisite" if guide == "README_EN.md" else "发布",
-                    text,
-                )
+        for guide in DEPLOYMENT_GUIDES:
+            with self.subTest(guide=guide):
+                self.assertIn("发布", read(guide))
         package = json.loads(read("deploy/npm/package.json"))
         self.assertNotIn("version", package)
         self.assertTrue(package["private"])
 
     def test_project_introductions_keep_only_the_latest_release_notes(self) -> None:
         version = json.loads(read("version.json"))["version"]
-        for guide in ("readme.md", "README_EN.md", "knowledge/global/overview/project-introduction.md"):
+        release_headings = re.findall(
+            r"^### (\d+\.\d+\.\d+)(?=[\s（(])",
+            read("knowledge/global/overview/project-introduction.md"), re.MULTILINE,
+        )
+        self.assertEqual(release_headings, [version])
+        for guide in READMES:
             with self.subTest(guide=guide):
-                release_headings = re.findall(
-                    r"^### (\d+\.\d+\.\d+)(?=[\s（(])", read(guide), re.MULTILINE,
+                self.assertIn(
+                    "https://github.com/kesepain-KE/kemo-agent/releases",
+                    read(guide),
                 )
-                self.assertEqual(release_headings, [version])
 
-    def test_chat_scroll_contract_and_release_notes_are_discoverable(self) -> None:
+    def test_chat_scroll_contract_is_discoverable_from_manual(self) -> None:
         self.assertIn(
             "knowledge/global/web/frontend-conventions.md",
             read("agents.md"),
@@ -102,10 +124,7 @@ class DeploymentDocumentationTests(unittest.TestCase):
         topic = read("knowledge/global/web/frontend-conventions.md")
         self.assertIn("composer-auxiliary", topic)
         self.assertIn("内部滚动", topic)
-        for guide in ("readme.md", "README_EN.md", "knowledge/global/overview/project-introduction.md"):
-            with self.subTest(guide=guide):
-                text = read(guide)
-                self.assertIn("scrollable" if guide == "README_EN.md" else "内部滚动", text)
+        self.assertIn("内部滚动", read("knowledge/global/overview/project-introduction.md"))
 
 
 if __name__ == "__main__":

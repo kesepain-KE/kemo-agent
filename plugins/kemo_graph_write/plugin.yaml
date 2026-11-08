@@ -1,0 +1,130 @@
+name: kemo_graph_write
+description: Kemo Graph 写入工具：生成 global:kemo_graph 的受限操作参数。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - operation_guide
+      description: 生成 global:kemo_graph 的受限操作参数
+    operation:
+      type: string
+      enum:
+      - activate
+      - initialize
+      - sync
+      - ingest
+      - upload
+      - import_file
+      - documents
+      - entities
+      - cache
+      - maintenance
+      - projects
+      - deactivate
+      description: 仅允许该工具权限等级对应的操作
+    library_ids:
+      type: array
+      items:
+        type: string
+      maxItems: 100
+    paths:
+      type: array
+      items:
+        type: string
+        minLength: 1
+        maxLength: 4096
+      minItems: 1
+      maxItems: 1000
+      description: 仅用于 ingest：精确整理或重试的 Markdown 路径；省略时处理普通待处理项
+    filename:
+      type: string
+    content:
+      type: string
+    path:
+      type: string
+    ingest_after_import:
+      type: boolean
+    document_action:
+      type: string
+      enum:
+      - update
+      - delete
+      - move
+    source_id:
+      type: string
+    source_ids:
+      type: array
+      items:
+        type: string
+        minLength: 1
+      minItems: 1
+      maxItems: 1000
+    expected_content_hash:
+      type: string
+    expected_relative_path:
+      type: string
+    confirm_deletions:
+      type: boolean
+    entity_kind:
+      type: string
+      enum:
+      - node
+      - relation
+    entity_action:
+      type: string
+      enum:
+      - delete
+    cache_action:
+      type: string
+      enum:
+      - clear
+    maintenance_action:
+      type: string
+      enum:
+      - summarize
+      - organize_graph
+      - organize-graph
+      - cleanup_recycle
+      - cleanup-recycle
+    cache_key:
+      type: string
+    stale_only:
+      type: boolean
+    page:
+      type: integer
+      minimum: 1
+    page_size:
+      type: integer
+      minimum: 1
+      maximum: 10000
+    expected_revision:
+      type: string
+      minLength: 64
+      maxLength: 64
+    use_llm:
+      type: boolean
+    summarize:
+      type: boolean
+    force:
+      type: boolean
+    project:
+      type: string
+      maxLength: 160
+    project_action:
+      type: string
+      enum:
+      - create
+    name:
+      type: string
+      minLength: 1
+      maxLength: 160
+  required:
+  - action
+  additionalProperties: false
+version: 1.0.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

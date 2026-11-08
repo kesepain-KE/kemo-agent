@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import fnmatch
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+
+from .common import DeployError, target
+from .yamllite import loads
 
 PROTECTED = (
     'users/', 'runtime/', 'tmp/', 'kemo.yaml', '.git/', '.venv/', 'venv/',
     '.kemo-deploy/', '.kemo-install.json', '.update.lock', '.update.maintenance',
     '.backups/', 'message/out/', 'knowledge/global/kemo-graph-storage/',
+    'knowledge/share/',
     'config/message_config.json',
 )
 LOCAL_NAMES = {
@@ -17,11 +21,35 @@ LOCAL_NAMES = {
 }
 # 发布包携带的默认数据文件：缺失时补入，已存在时一律保留本机内容。
 # 逐条精确列出，避免把运行期数据库整体放进发布包。
-# 接受旧发布包中的分类默认数据；新打包器已停止分发，已有本机文件仍不覆盖。
 RELEASE_DATA_FILES = frozenset({
-    'knowledge/global/classify.sqlite3',
-    'knowledge/share/classify.sqlite3',
+    'knowledge/share/.gitkeep',
 })
+
+
+def plugin_origin(data: bytes, name: str) -> str:
+    """Read ownership without importing the application or plugin code."""
+    try:
+        origin = loads(data.decode('utf-8-sig')).get('origin', 'builtin')
+    except (UnicodeError, DeployError) as exc:
+        raise DeployError(f'Invalid plugin metadata: {name}: {exc}') from exc
+    if origin not in ('builtin', 'user'):
+        raise DeployError(f'Plugin origin must be builtin or user: {name}')
+    return origin
+
+
+def user_plugin_directories(root: Path) -> tuple[str, ...]:
+    base = target(root, 'plugins')
+    if not base.is_dir():
+        return ()
+    result = []
+    for directory in sorted(base.iterdir()):
+        if not directory.is_dir() or directory.name == '__pycache__':
+            continue
+        name = directory.relative_to(root).as_posix() + '/plugin.yaml'
+        metadata = target(root, name)
+        if metadata.is_file() and plugin_origin(metadata.read_bytes(), name) == 'user':
+            result.append(directory.relative_to(root).as_posix() + '/')
+    return tuple(result)
 
 
 def preserved_seed(name: str) -> bool:
@@ -36,6 +64,7 @@ def protected(name: str, extra=()) -> bool:
             return True
     parts: tuple[str, ...] = PurePosixPath(name).parts
     base = parts[-1]
+    is_plugin = parts[0] == 'plugins'
     if any(p in {'__pycache__', 'node_modules', '.pytest_cache', '.kemo-deploy'} for p in parts):
         return True
     if base.startswith('.env') and base != '.env.example':
@@ -49,8 +78,12 @@ def protected(name: str, extra=()) -> bool:
         module_files = parts[2:]
     elif len(parts) >= 2 and parts[0] == 'skills':
         module_files = parts[1:]
+    elif len(parts) >= 3 and is_plugin:
+        module_files = parts[2:]
     if module_files:
-        if base in LOCAL_NAMES or base.startswith('_') and base not in {'__init__.py', '__main__.py'}:
+        if (base in LOCAL_NAMES
+                or is_plugin and base in {'config.yaml', 'config.yml'}
+                or not is_plugin and base.startswith('_') and base not in {'__init__.py', '__main__.py'}):
             return True
         if any(p in {'data', 'artifacts', 'logs'} for p in module_files):
             return True
@@ -81,4 +114,5 @@ def local_module(name: str) -> bool:
     return (
         len(parts) >= 3 and parts[0] == 'expand' and parts[1] in {'global', 'share'}
         or parts[:1] in {('sense',), ('skills',)}
+        or len(parts) >= 3 and parts[0] == 'plugins'
     )

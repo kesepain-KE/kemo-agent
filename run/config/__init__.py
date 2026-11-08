@@ -384,7 +384,7 @@ def validate_cardstream_settings(config: dict[str, Any]) -> None:
     agents = config.get("agents") or {}
     if not isinstance(agents, dict):
         raise ValueError("agents 必须是对象")
-    for key, default in (("token_limit", 1000000), ("output_reserve", 8192)):
+    for key, default in (("token_limit", 1000000), ("output_reserve", 10000)):
         if type(agents.get(key, default)) is not int or agents.get(key, default) < 1:
             raise ValueError(f"agents.{key} 必须是正整数")
     ratio = agents.get("token_compression_ratio", .3)

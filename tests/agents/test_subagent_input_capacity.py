@@ -11,16 +11,17 @@ from tests.agents.test_general_worker import OUTPUT, plugin, workspace
 
 
 class Provider:
-    def __init__(self, *, invalid_first=False):
+    def __init__(self, *, invalid_first=False, output_limit=512):
         self.requests = []
         self.invalid_first = invalid_first
+        self.output_limit = output_limit
 
     def capabilities(self, model, **kwargs):
         return ModelCapabilities.model_validate({
             "protocol_version": "2.0", "model": model, "provider_id": "capacity-test",
             "provider_model": model, "input_modalities": ["text"],
-            "limits": {"max_input_tokens": 20000, "context_window": 20512,
-                       "max_output_tokens": 512},
+            "limits": {"max_input_tokens": 20000, "context_window": 20000 + (self.output_limit or 0),
+                       "max_output_tokens": self.output_limit},
         })
 
     def create(self, request):
@@ -42,14 +43,17 @@ def isolated_capability_evidence(monkeypatch):
     monkeypatch.setattr("run.extensions.model_capabilities._capability_cache", {})
 
 
-def test_subagent_uses_its_models_actual_output_cap(workspace):
+@pytest.mark.parametrize(("model_limit", "max_tokens", "expected"), [
+    (512, None, 512), (65536, None, 65536), (65536, 16384, 16384), (None, None, None),
+])
+def test_subagent_uses_its_models_actual_output_cap(workspace, model_limit, max_tokens, expected):
     root, config = workspace
-    config["agents"] = {"token_limit": 30000, "output_reserve": 8192}
-    provider = Provider()
+    config["agents"] = {"token_limit": 1000000, "output_reserve": 10000}
+    provider = Provider(output_limit=model_limit)
     runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
-    assert runner.run("general_worker", {"task": "check"}).data == OUTPUT
+    assert runner.run("general_worker", {"task": "check"}, max_tokens=max_tokens).data == OUTPUT
     request = provider.requests[0]
-    assert request.generation.max_output_tokens == 512
+    assert request.generation.max_output_tokens == expected
     assert estimate_request_tokens(request.system_prompt, request.input, request.tools) <= 20000
 
 

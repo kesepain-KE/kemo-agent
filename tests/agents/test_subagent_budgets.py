@@ -461,6 +461,8 @@ def test_main_model_receives_budget_conclusion_and_resumes_without_replaying(wor
     directory.mkdir()
     shutil.copyfile(Path(__file__).resolve().parents[2] / "plugins/subagent_dispatch/SKILL.md",
                     directory / "SKILL.md")
+    shutil.copyfile(Path(__file__).resolve().parents[2] / "plugins/subagent_dispatch/plugin.yaml",
+                    directory / "plugin.yaml")
     (directory / "tool.py").write_text("from plugins.subagent_dispatch.tool import run\n", "utf-8")
     partial = {**OUTPUT, "status": "partial", "summary": "first 已确认，剩余 second"}
     child = Provider([[call(), call(value="second", index=2)], partial,
@@ -514,6 +516,8 @@ def test_main_model_can_guide_its_running_subagent(workspace, monkeypatch):
     directory.mkdir()
     shutil.copyfile(Path(__file__).resolve().parents[2] / "plugins/subagent_dispatch/SKILL.md",
                     directory / "SKILL.md")
+    shutil.copyfile(Path(__file__).resolve().parents[2] / "plugins/subagent_dispatch/plugin.yaml",
+                    directory / "plugin.yaml")
     (directory / "tool.py").write_text("from plugins.subagent_dispatch.tool import run\n", "utf-8")
 
     provider_entered = threading.Event()

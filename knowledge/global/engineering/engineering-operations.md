@@ -21,6 +21,9 @@
 
 安装、升级、恢复先读 `knowledge/global/release/deployment-and-release.md`，识别源码/Windows/Linux/npm/Docker 渠道和安装根；不混用旧更新器与独立部署器。更新前停止写进程；源码更新器在源码写入前及 core 迁移前检测活跃写者，存在或无法核实则拒绝并提示先停服务，不自动停进程；文件句柄查询在15秒有界子进程执行，崩溃/超时仍拒绝写入。整个更新期间仍须保持服务停止，`check`/`dry-run` 不扫描写者。源码定档、推送、远程 Release/npm/GHCR 产物是不同事实，不宣称未经核验的远程产物可用。
 
+插件机器契约使用 plugin.yaml，方法说明保留在 SKILL.md；用户插件声明 `origin: user`，
+更新、回滚和发布打包按归属保护，细节见 `knowledge/global/modules/plugin-development.md`。
+
 ### 删除类操作红线（所有 delete / Remove-Item / rm / clean 类操作）
 
 **成因**：曾把「清理本次会话产生的 13 个备份」擅自扩大为「tmp 下所有历史 .bak」，用
@@ -163,6 +166,7 @@ A 类按「同一主体、同一属性轴」合并，允许写到几百字；B �
 ### 子代理、任务计划与定时任务
 
 [入口 / L1] `subagent_dispatch` 适合边界清晰、可独立交付的并行工作；给足目标、输入、限制与验收，不假设它有主历史。`general_worker` 承接通用执行，插件/技能/知识取当前用户授权交集；拓展/感知不自动注入但可按需使用。子代理不得再次委派，不能借 file/shell 绕过。
+`general_worker` 的约束和验收可传文字或字符串数组；准确字段见 `plugins/subagent_dispatch/SKILL.md`，输入错误展示见前端专题。
 
 [机制 / L1] 普通公开本地非串行 LLM 子代理的 call/resume 省略 wait 默认后台提交；显式 wait=true 仍同步，特殊同步规划、串行维护与外部代理默认同步。后台提交不解除主任务完成屏障；主任务仍须收齐必要依赖结果。list 的 default_wait 披露实际缺省策略，前端“等待提交”不代表已入队。call 的 invalid_input 返回有界字段提示，不入队或创建任务；取不到schema时交原执行链，详见协作专题。
 
@@ -308,9 +312,9 @@ Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑�
 ### 上下文与注入
 
 <!-- rule:context-budget -->
-[机制] CardStream 配置基线：`agents.token_limit=1000000`、`agents.output_reserve=8192`、`agents.token_compression_ratio=0.3`；主请求前占用超过有效输入上限的80%时自动压缩。比例是软目标，实际容量/缩减与原子提交是硬门槛；明确超限才原整合压缩恢复，不重跑工具。预防压缩失败而请求仍可用时保留原 VIEW 继续，详见架构专题。
+[机制] CardStream 配置基线：`agents.token_limit=1000000`、`agents.output_reserve=10000`、`agents.token_compression_ratio=0.3`；主请求前占用超过有效输入上限的80%时自动压缩。比例是软目标，实际容量/缩减与原子提交是硬门槛；明确超限才原整合压缩恢复，不重跑工具。预防压缩失败而请求仍可用时保留原 VIEW 继续，详见架构专题。
 来源：`config/global_config.yaml`，用户覆盖后以有效配置为准。对话历史由每用户 `cards.sqlite3` 管理，RAW 追加后不可变；VIEW 可压缩。目标是有效历史Token乘比例，固定上下文、动态尾部与工具Schema另行计量；所有历史卡片均可压缩，候选验证后原子提交，失败不改变已提交VIEW。上游上下文超限恢复只在请求实际缩小后播报重试，容量不可缩小时保留原超限诊断结束，见 `provider/retry.py` 与 `run/conversation/provider_exchange.py`。旧window、轮数配置与context_manage退出运行，不读取、迁移或删除旧历史文件。
-主请求与摘要请求按各自实际输出额度计算输入预算，输出先受模型上限约束；历史目标还受剩余容量限制。
+主请求与子智能体的上下文预留独立于模型生成上限：缺省预留10000，生成上限取显式配置或模型声明；上限未知时省略，不按预留量强制截断正文、思考或工具参数。实际生成上限低于预留量时才减少预留；摘要请求仍按自身输出额度计算容量。历史目标还受剩余容量限制。
 过大的前缀先按完整卡片分片；单张超大卡片仅拆只读摘要输入并保留来源偏移，RAW 不截断，临时摘要不提前提交，全部片段共用压缩时限与额外重试额度；
 提交前检查完整请求容量，失败保留原VIEW及独立新到卡片。原生媒体载荷不按文字Token计量，用量统计仍以实际回执为准。
 <!-- /rule -->

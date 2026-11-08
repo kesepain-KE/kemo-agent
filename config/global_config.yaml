@@ -98,7 +98,7 @@ web:
   sse_heartbeat_seconds: 15
 agents:
   compression_timeout_seconds: 180
-  output_reserve: 8192
+  output_reserve: 10000
   token_limit: 1000000
   token_compression_ratio: 0.3
   important_memory_review_hours: 3

@@ -16,6 +16,7 @@ from .constants import (
     ROLLBACK_MANAGED_PATHS,
     ROOT,
 )
+from .plugins import runtime_excludes
 
 
 def make_backup(*, root: Path = ROOT, dry_run: bool = False) -> Path | None:
@@ -24,9 +25,10 @@ def make_backup(*, root: Path = ROOT, dry_run: bool = False) -> Path | None:
     if dry_run:
         print(f"[dry-run] 将创建备份: {backup_dir}")
         return None
+    excludes = (*BACKUP_EXCLUDES, *runtime_excludes(root))
     backup_dir.mkdir(parents=True, exist_ok=False)
     try:
-        sync_directory(root, backup_dir, delete=False, excludes=BACKUP_EXCLUDES)
+        sync_directory(root, backup_dir, delete=False, excludes=excludes)
         for relative in BACKUP_INCLUDED_FILES:
             source = root / relative
             if source.is_file():
@@ -68,6 +70,11 @@ def restore_backup(*, backup_dir: Path, root: Path = ROOT) -> None:
 
     if not backup_dir.is_dir():
         raise FileNotFoundError(f"备份不存在: {backup_dir}")
+    excludes = (
+        *BACKUP_EXCLUDES,
+        *runtime_excludes(root, snapshot=backup_dir),
+        *runtime_excludes(backup_dir),
+    )
     # First restore every file present in the snapshot.  Deletion is restricted
     # to known release-managed directories so an unrelated local root path can
     # never be removed merely because backups intentionally exclude it.
@@ -75,7 +82,7 @@ def restore_backup(*, backup_dir: Path, root: Path = ROOT) -> None:
         backup_dir,
         root,
         delete=False,
-        excludes=BACKUP_EXCLUDES,
+        excludes=excludes,
     )
     for relative in BACKUP_INCLUDED_FILES:
         source = backup_dir / relative
@@ -94,13 +101,23 @@ def restore_backup(*, backup_dir: Path, root: Path = ROOT) -> None:
             continue
         target.unlink()
     for relative in ROLLBACK_MANAGED_PATHS:
+        if relative + "/" in excludes:
+            continue
         source = backup_dir / relative
         target = root / relative
         if not source.is_dir() or not target.is_dir():
             continue
+        # The deletion pass runs from this subdirectory, so root-relative
+        # exclusions must be rebased; basename rules still apply everywhere.
+        prefix = relative + "/"
+        nested_excludes = tuple(
+            item[len(prefix):] if item.startswith(prefix) else item
+            for item in excludes
+            if item.startswith(prefix) or "/" not in item.rstrip("/")
+        )
         sync_directory(
             source,
             target,
             delete=True,
-            excludes=BACKUP_EXCLUDES,
+            excludes=nested_excludes,
         )

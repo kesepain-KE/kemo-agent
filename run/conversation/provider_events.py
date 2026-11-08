@@ -150,6 +150,7 @@ def response_terminal_error(
             ),
             "phase": "provider",
             "status": str(response.status),
+            "category": str(retry.get("category") or "provider_incomplete"),
             "stop_reason": reason,
             "incomplete_details": details,
             "retryable": retry["retryable"],

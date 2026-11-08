@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import shlex
 import unittest
 from pathlib import Path
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -38,6 +41,24 @@ class TestSuiteBoundaryTests(unittest.TestCase):
         wrapper = compatibility.read_text("utf-8")
         self.assertIn("tests.deploy.test_deploy", wrapper)
         self.assertNotIn("class DeploymentTests", wrapper)
+
+    def test_ci_requires_current_protocol_and_pinned_type_checks(self) -> None:
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text("utf-8"))
+        commands = [
+            (job, step)
+            for job in workflow["jobs"].values()
+            for step in job["steps"]
+            if "run" in step
+        ]
+        for marker in ("tests/contracts/kemo_v2", "pyright@1.1.414"):
+            gates = [(job, step) for job, step in commands if marker in shlex.split(step["run"])]
+            self.assertEqual(len(gates), 1, marker)
+            job, step = gates[0]
+            self.assertFalse(job.get("continue-on-error", False))
+            self.assertFalse(step.get("continue-on-error", False))
+        self.assertFalse(any(
+            "tests.contracts.kemo_v1" in step["run"] for _, step in commands
+        ))
 
     def test_builtin_expand_private_dotenv_rules_follow_source_exceptions(
         self,

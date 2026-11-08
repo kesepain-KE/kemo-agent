@@ -11,34 +11,3 @@
 5. 操控结果属于当前轮；长期状态由后续采集刷新到 `input_data.md`。不要手工把工具结果写进采集文件。
 6. 同一操作失败后先分析错误；不能用 Shell 绕过白名单、路径校验或 `open_control`。
 7. 隔离子进程不是权限沙箱；只能调用已获准的受信任拓展，不能把未知代码当作安全插件执行。
-
-## Tool
-
-```json
-{
-  "name": "expand_call",
-  "description": "在隔离子进程中调用当前用户获准使用的拓展操作。参数通过 stdin 传递，支持结构化数据和文件产物；不可逆外部操作须先确认。",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "scope": {"type": "string", "enum": ["global", "shared", "user"], "description": "拓展所在作用域"},
-      "module": {"type": "string", "description": "拓展模块目录名"},
-      "command": {"type": "string", "description": "操作层声明的命令名"},
-      "params": {"type": "object", "description": "命令结构化参数"},
-      "timeout": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 3600,
-        "description": "可选超时秒数；默认使用 global_config.yaml → tools.timeout"
-      }
-    },
-    "required": ["scope", "module", "command"],
-    "additionalProperties": false
-  },
-  "version": "1.0.0",
-  "enabled": true,
-  "strict": false,
-  "entrypoint": "tool.py:run",
-  "permission": "write"
-}
-```

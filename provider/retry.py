@@ -36,7 +36,7 @@ def transient(error: Exception) -> bool:
             return error.status_code in {408, 429} or 500 <= error.status_code < 600
         return error.category in {
             "timeout", "transport_error", "connection_error", "upstream_error",
-            "gateway_error", "network_error", "provider_incomplete",
+            "gateway_error", "network_error", "provider_incomplete", "output_truncated",
         }
     return isinstance(error, (TimeoutError, ConnectionError))
 

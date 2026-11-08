@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import provider.protocol.spec.generate as spec_generator
 from provider.protocol.models import (
     AudioContent,
     EmbeddingRequest,
@@ -18,7 +19,7 @@ from provider.protocol.models import (
     RerankRequest,
     UnifiedError,
 )
-from provider.protocol.spec.generate import ROOT, generate
+from provider.protocol.spec.generate import ROOT
 
 
 MODELS = {
@@ -81,18 +82,22 @@ def test_negative_fixtures_fail_the_named_model(name: str) -> None:
         MODELS[fixture["model"]].model_validate(fixture["payload"])
 
 
-def test_schema_generation_is_deterministic() -> None:
-    first = generate()
-    first_bytes = (ROOT / "schema.json").read_bytes()
-    second = generate()
-    second_bytes = (ROOT / "schema.json").read_bytes()
+def test_schema_generation_matches_frozen_contract_without_rewriting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(spec_generator, "ROOT", tmp_path)
+    filenames = ("schema.json", "model-index.json", "fixture-manifest.json", "freeze.json")
+    first = spec_generator.generate()
+    first_files = {name: (tmp_path / name).read_bytes() for name in filenames}
+    second = spec_generator.generate()
     assert first == second
-    assert first_bytes == second_bytes
-    assert first["schema_sha256"] == hashlib.sha256(first_bytes).hexdigest()
+    for name, data in first_files.items():
+        assert data == (tmp_path / name).read_bytes()
+        assert data == (ROOT / name).read_bytes(), f"Frozen protocol drift: {name}"
+    assert first["schema_sha256"] == hashlib.sha256(first_files["schema.json"]).hexdigest()
 
 
 def test_model_index_covers_every_root_contract_and_nested_symbol() -> None:
-    generate()
     index = json.loads((ROOT / "model-index.json").read_text(encoding="utf-8"))
     symbols = {entry["symbol"] for entry in index}
     required_roots = {

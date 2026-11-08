@@ -91,8 +91,8 @@ def write_plugin(root):
         "input_schema": {"type": "object", "properties": {"value": {"type": "string"}},
                          "required": ["value"], "additionalProperties": False},
     }
-    (directory / "SKILL.md").write_text(
-        "# write\nTest\n## Tool\n```json\n" + json.dumps(manifest) + "\n```\n", "utf-8")
+    (directory / 'SKILL.md').write_text('# write\nTest\n', 'utf-8')
+    (directory / 'plugin.yaml').write_text(json.dumps(manifest), 'utf-8')
     (directory / "tool.py").write_text(
         "from pathlib import Path\nimport time\n"
         "def run(value, *, context):\n"
@@ -530,6 +530,7 @@ def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(w
     dispatch_dir = root / "plugins/subagent_dispatch"
     dispatch_dir.mkdir()
     shutil.copyfile(repository / "plugins/subagent_dispatch/SKILL.md", dispatch_dir / "SKILL.md")
+    shutil.copyfile(repository / "plugins/subagent_dispatch/plugin.yaml", dispatch_dir / "plugin.yaml")
     (dispatch_dir / "tool.py").write_text("from plugins.subagent_dispatch.tool import run\n", "utf-8")
     config["agent_runtime"] = {"default_timeout": 1, "timeout_survival_seconds": .6}
     (root / "config/global_config.yaml").write_text(json.dumps(config), "utf-8")

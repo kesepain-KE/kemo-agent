@@ -44,8 +44,8 @@ def encoded(value):
     ({"task": ""}, [], [], None),
     ({"task": "   "}, [], [], None),
     ({"task": 9}, [], [], {"field": "task", "expected": "string"}),
-    ({"task": "work", "constraints": "not-a-list"}, [], [],
-     {"field": "constraints", "expected": "array"}),
+    ({"task": "work", "constraints": 9}, [], [],
+     {"field": "constraints", "expected": "string|array"}),
 ])
 def test_invalid_input_never_gets_scheduler_or_task_record(
     tmp_path, monkeypatch, data, missing, unknown, type_mismatch

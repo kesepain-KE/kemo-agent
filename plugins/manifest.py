@@ -1,20 +1,22 @@
-"""Parse built-in plugin SKILL.md files and Provider tool definitions."""
+"""Load plugin methods from SKILL.md and machine contracts from plugin.yaml."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import yaml
+from jsonschema import Draft202012Validator, SchemaError
 
 from run.config import (
     PromptRegistrationError,
     SkillDescriptor,
     natural_path_key,
     parse_skill_descriptor,
-    read_required_text,
-    scan_markdown_structure,
 )
+
+PLUGIN_META_FILENAME = "plugin.yaml"
 
 
 class PluginManifestError(RuntimeError):
@@ -31,45 +33,13 @@ class PluginManifest:
         return bool(self.tool["enabled"])
 
 
-def _tool_block(text: str, path: Path) -> dict[str, Any]:
-    lines = text.splitlines()
-    structure = scan_markdown_structure(text)
-    headings = [
-        heading.line
-        for heading in structure.headings
-        if heading.level == 2 and heading.text.casefold() == "tool"
-    ]
-    if not headings:
-        raise PluginManifestError(f"插件 SKILL.md 缺少 ## Tool：{path}")
-    if len(headings) != 1:
-        raise PluginManifestError(f"每个插件只能声明一个 ## Tool：{path}")
-    start = headings[0] + 1
-    end = min(
-        (
-            heading.line
-            for heading in structure.headings
-            if heading.line >= start and heading.level == 2
-        ),
-        default=len(lines),
-    )
-    matches = [
-        fence
-        for fence in structure.fences
-        if start <= fence.start_line < end
-        and fence.info.casefold().split(maxsplit=1)[:1] == ["json"]
-    ]
-    if not matches:
-        raise PluginManifestError(f"插件 ## Tool 缺少 JSON 代码块：{path}")
-    if len(matches) != 1:
-        raise PluginManifestError(f"插件 ## Tool 只能包含一个 JSON 代码块：{path}")
-    if not matches[0].closed:
-        raise PluginManifestError(f"插件 ## Tool 的 JSON 代码块未闭合：{path}")
+def _load_plugin_yaml(path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(matches[0].content)
-    except json.JSONDecodeError as exc:
-        raise PluginManifestError(f"插件工具 JSON 无效：{path}（{exc}）") from exc
+        raw = yaml.safe_load(path.read_text("utf-8-sig"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise PluginManifestError(f"无法读取插件元数据：{path}（{exc}）") from exc
     if not isinstance(raw, dict):
-        raise PluginManifestError(f"插件工具定义必须是对象：{path}")
+        raise PluginManifestError(f"插件元数据必须是映射：{path}")
     return raw
 
 
@@ -86,6 +56,14 @@ def _validate_plugin_tool(raw: dict[str, Any], path: Path, title: str) -> None:
     schema = raw["input_schema"]
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise PluginManifestError(f"插件 input_schema 必须是 object JSON Schema：{path}")
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        raise PluginManifestError(
+            f"插件 input_schema 无效；null 类型需写成字符串 'null'：{path}（{exc.message}）"
+        ) from exc
+    if raw.get("origin", "builtin") not in ("builtin", "user"):
+        raise PluginManifestError(f"插件 origin 必须是 builtin 或 user：{path}")
     if not isinstance(raw["version"], str) or not raw["version"].strip():
         raise PluginManifestError(f"插件 version 必须是非空字符串：{path}")
     if not isinstance(raw["enabled"], bool):
@@ -139,13 +117,13 @@ def _validate_plugin_tool(raw: dict[str, Any], path: Path, title: str) -> None:
 
 
 def parse_plugin_manifest(path: Path, *, root: Path) -> PluginManifest:
-    text = read_required_text(path)
     try:
         descriptor = parse_skill_descriptor(path, scope="plugins", root=root)
     except PromptRegistrationError as exc:
         raise PluginManifestError(str(exc)) from exc
-    tool = _tool_block(text, path)
-    _validate_plugin_tool(tool, path, descriptor.title)
+    meta_path = path.parent / PLUGIN_META_FILENAME
+    tool = _load_plugin_yaml(meta_path)
+    _validate_plugin_tool(tool, meta_path, descriptor.title)
     return PluginManifest(descriptor, tool)
 
 
@@ -153,6 +131,11 @@ def discover_plugin_manifests(root: Path) -> tuple[PluginManifest, ...]:
     base = root / "plugins"
     if not base.is_dir():
         return ()
-    paths = [path / "SKILL.md" for path in base.iterdir() if path.is_dir() and (path / "SKILL.md").is_file()]
+    paths = [
+        path / "SKILL.md" for path in base.iterdir()
+        if path.is_dir()
+        and (path / "SKILL.md").is_file()
+        and (path / PLUGIN_META_FILENAME).is_file()
+    ]
     paths.sort(key=lambda item: natural_path_key(item.relative_to(base)))
     return tuple(parse_plugin_manifest(path, root=root) for path in paths)

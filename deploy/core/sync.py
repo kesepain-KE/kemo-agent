@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .common import DeployError, atomic, digest, json_bytes, read_json, target, version_key
 from .config import merge_defaults
-from .policy import local_module, merge_file, preserved_seed, protected
+from .policy import local_module, merge_file, preserved_seed, protected, user_plugin_directories
 from .source import Bundle
 from .yamllite import dumps, loads
 
@@ -68,7 +68,7 @@ def plan(root: Path, bundle: Bundle, config: dict, old: dict, overwrite=False) -
     changes = []
     managed = {}
     previous = old.get('files', {})
-    extras = config['mapping'].get('preserve', [])
+    extras = (*config['mapping'].get('preserve', []), *user_plugin_directories(root))
     for required in ('version.json', 'requirements.txt', 'start_web.py', 'setup.py', 'deploy/deploy.py', 'deploy/core/cli.py', 'web/frontend/dist/index.html'):
         if protected(required, extras):
             raise DeployError(f'preserve cannot disable release-critical file: {required}')

@@ -621,11 +621,25 @@ def test_single_oversized_card_splits_only_readonly_input_and_preserves_raw(stor
     assert store.raw_page("web", "s1")[0].raw_payload_json == before.cards[0].raw_payload_json
 
 
-def test_main_runtime_uses_the_effective_output_reservation(root, monkeypatch):
+@pytest.mark.parametrize(("limits", "extension_limits", "max_tokens", "expected_output", "expected_input"), [
+    ({"max_input_tokens": 7000, "context_window": 6000, "max_output_tokens": 512},
+     {}, None, 512, 5488),
+    ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, None, 384000, 990000),
+    ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, 16384, 16384, 990000),
+    ({}, {}, None, None, 990000),
+])
+def test_main_runtime_uses_the_effective_output_reservation(
+    root, monkeypatch, limits, extension_limits, max_tokens, expected_output, expected_input,
+):
     path = root / "config/global_config.yaml"
     config = json.loads(path.read_text("utf-8"))
-    config["agents"].update(token_limit=10000, output_reserve=8192)
+    config["agents"].update(token_limit=1000000, output_reserve=10000)
     path.write_text(json.dumps(config), "utf-8")
+    if max_tokens is not None:
+        user_path = root / "users/alice/user_config.yaml"
+        user_config = json.loads(user_path.read_text("utf-8"))
+        user_config["provider"]["max_tokens"] = max_tokens
+        user_path.write_text(json.dumps(user_config), "utf-8")
     requests = []
 
     class Provider:
@@ -633,8 +647,7 @@ def test_main_runtime_uses_the_effective_output_reservation(root, monkeypatch):
             return ModelCapabilities.model_validate({
                 "protocol_version": "2.0", "model": model, "provider_id": "fake",
                 "provider_model": model, "input_modalities": ["text"],
-                "limits": {"max_input_tokens": 7000, "context_window": 6000,
-                           "max_output_tokens": 512},
+                "limits": limits, "extensions": {"limits": extension_limits},
             })
 
         def create(self, request):
@@ -646,18 +659,19 @@ def test_main_runtime_uses_the_effective_output_reservation(root, monkeypatch):
         root=root, provider_factory=lambda _: Provider(),
     ))
     assert events[-1].type == "done", events[-1].error
-    assert len(requests) == 1 and requests[0].generation.max_output_tokens == 512
-    assert estimate_request_tokens(requests[0].system_prompt, requests[0].input, requests[0].tools) <= 5488
+    assert len(requests) == 1 and requests[0].generation.max_output_tokens == expected_output
+    assert estimate_request_tokens(requests[0].system_prompt, requests[0].input, requests[0].tools) <= expected_input
     from run.context.service import context_status
     status = context_status(
         {"user": "alice", "source": "web", "session_id": "capacity"}, root=root)
-    assert status["context"]["effective_token_limit"] == 5488
-    assert status["context"]["capability_unknown"] is False
+    assert status["context"]["effective_token_limit"] == expected_input
+    assert status["policy"]["output_reserve"] == min(expected_output or 10000, 10000)
+    assert status["context"]["capability_unknown"] is (not limits and not extension_limits)
     monkeypatch.setenv("KEMO_API_KEY", "different-fake-identity")
     isolated = context_status(
         {"user": "alice", "source": "web", "session_id": "capacity"}, root=root)
     assert isolated["context"]["capability_unknown"] is True
-    assert isolated["context"]["effective_token_limit"] == 1808
+    assert isolated["context"]["effective_token_limit"] == 1000000 - min(max_tokens or 10000, 10000)
     assert len(requests) == 1, "reading diagnostics must not make model requests"
 
 

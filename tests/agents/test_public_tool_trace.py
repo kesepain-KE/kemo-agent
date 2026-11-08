@@ -52,9 +52,8 @@ def test_model_loop_emits_linked_redacted_arguments_and_result(workspace):
         "entrypoint": "tool.py:run",
         "input_schema": {"type": "object", "additionalProperties": True},
     }
-    (directory / "SKILL.md").write_text(
-        "# inspect\nTest\n\n## Tool\n```json\n" + json.dumps(manifest) + "\n```\n", "utf-8",
-    )
+    (directory / 'SKILL.md').write_text('# inspect\nTest\n\n', 'utf-8')
+    (directory / 'plugin.yaml').write_text(json.dumps(manifest), 'utf-8')
     (directory / "tool.py").write_text(
         "def run(query, api_key, *, context):\n"
         "    return {'answer': query, 'access_token': 'hidden-result'}\n", "utf-8",

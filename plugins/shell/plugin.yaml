@@ -1,0 +1,88 @@
+name: shell
+description: 执行本地系统命令。支持同步执行与受管理后台作业；后台作业可按 job_id 查询、取消并配合 wait_for_condition 等待。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - run
+      - status
+      - cancel
+      default: run
+      description: run=执行命令，status=查询后台作业，cancel=取消后台作业
+    command:
+      type: string
+      description: 要执行的命令，支持 &&、||、; 命令链
+    background:
+      type: boolean
+      default: false
+      description: action=run 时是否创建受管理后台作业；后台模式不支持 stdin
+    label:
+      type: string
+      maxLength: 160
+      description: 后台任务简短标题，不填敏感信息
+    completion_mode:
+      type: string
+      enum:
+      - required
+      - detached
+      default: required
+      description: 后台有限任务默认 required，所属智能体需处理完成通知后再交付；常驻服务显式 detached，不阻塞交付
+    show_terminal:
+      type: boolean
+      default: false
+      description: 仅本次 Windows 命令是否创建可见终端；默认 false，其他平台忽略
+    job_id:
+      type: string
+      description: action=status/cancel 使用的后台作业 ID
+    working_dir:
+      type: string
+      description: 工作目录，默认继承会话 cwd 或项目根
+    timeout:
+      type: integer
+      minimum: 1
+      maximum: 3600
+      description: 超时秒数，默认来自 global_config.yaml → tools.timeout
+    stdin:
+      type: string
+      description: 标准输入文本
+    env:
+      type: object
+      description: 附加环境变量
+    session_id:
+      type: string
+      description: 会话标识；相同 session_id 共享 cwd/env/history
+    reset_session:
+      type: boolean
+      description: 是否重置指定 session_id 的状态
+    shell_type:
+      type: string
+      enum:
+      - auto
+      - cmd
+      - powershell
+      - pwsh
+      - sh
+      - bash
+      - bash_login
+      - zsh
+      - zsh_login
+      - fish
+      - fish_login
+      default: auto
+      description: 命令解释器：auto=按平台与命令语法安全选择；cmd / powershell / pwsh / sh / bash / zsh / fish 为隔离的非登录模式；*_login 仅在明确需要登录配置时使用
+    chain_timeout_mode:
+      type: string
+      enum:
+      - total
+      - per_command
+      default: total
+      description: 框架内置命令链超时策略：total=全链共享 timeout，per_command=每段独立使用 timeout；外部脚本始终整体计时
+  required: []
+  additionalProperties: false
+version: 1.5.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

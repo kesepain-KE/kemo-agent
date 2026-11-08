@@ -1,0 +1,118 @@
+name: memory_manage
+description: 按当前用户和层级列出、获取、搜索、增删改记忆。相关记忆可显式选 match_mode=fulltext，使用 simple 中文分词和 BM25；默认 keywords 保留覆盖率评分，也支持子串、整词、精确和正则。search_many 批量检索四层，关闭自动注入后仍可按需使用。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - list
+      - get
+      - search_by_title
+      - search_by_content
+      - search_many
+      - add
+      - edit
+      - delete
+      description: 记忆操作
+    tier:
+      type: string
+      enum:
+      - seven_days
+      - one_month
+      - half_year
+      - permanent
+      - important
+      - all
+      description: 记忆层级；all 用于 list 和搜索，统一读取 seven_days、one_month、half_year、permanent 四层，不含 important
+    query:
+      type: string
+      minLength: 1
+      description: search_* 使用的非空关键词；多词查询建议传 2～4 个空格分隔的核心词，列出全部请使用 list
+    queries:
+      type: array
+      minItems: 1
+      maxItems: 20
+      items:
+        type: object
+        properties:
+          title:
+            type: string
+          content:
+            type: string
+        additionalProperties: false
+      description: search_many 的批量标题和正文查询；keywords 模式建议传核心词，其他模式按完整查询匹配
+    filename:
+      type: string
+      description: get/add/edit/delete 使用的记忆文件名
+    content:
+      type: string
+      description: add/edit 使用的 Markdown 正文
+    new_filename:
+      type: string
+      description: edit 使用的重命名目标
+    memory_type:
+      type: string
+      enum:
+      - A
+      - B
+      description: add/edit 的主题记忆类型；A 为连贯画像或主题，超过 150 字需显式声明 A，硬上限 1000 字
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 500
+      default: 50
+      description: list/search 最大返回条数
+    offset:
+      type: integer
+      minimum: 0
+      maximum: 1000000
+      default: 0
+      description: list 分页起点；使用上一页 next_offset 继续
+    compact:
+      type: boolean
+      default: false
+      description: list 是否省略时间与到期元数据
+    include_content:
+      type: boolean
+      default: false
+      description: list/search_many 是否为返回条目附带完整正文
+    page_char_limit:
+      type: integer
+      minimum: 1000
+      maximum: 90000
+      default: 80000
+      description: list(include_content=true) 的单页序列化条目字符预算
+    context_chars:
+      type: integer
+      minimum: 60
+      maximum: 2000
+      default: 240
+      description: search_by_content 的 snippet 最大字符数，包含省略号
+    match_mode:
+      type: string
+      enum:
+      - keywords
+      - substring
+      - word
+      - exact
+      - fulltext
+      default: keywords
+      description: 相关记忆可显式选 fulltext（中文分词+BM25，仅四个碎片层）；keywords 保留覆盖率评分，其他模式与 history_search 共用文本匹配
+    regex:
+      type: boolean
+      default: false
+      description: search_* 是否使用正则；为 true 时优先于 match_mode
+    case_sensitive:
+      type: boolean
+      default: false
+      description: search_* 是否区分大小写
+  required:
+  - action
+  - tier
+  additionalProperties: false
+version: 1.9.0
+enabled: true
+entrypoint: tool.py:run
+permission: delete
+origin: builtin

@@ -30,6 +30,41 @@ function dispatchArguments(item: Extract<ChatItem, { kind: 'tool' }>): Record<st
   } catch { return undefined }
 }
 
+function dispatchError(value: unknown, depth = 0): Record<string, unknown> | undefined {
+  if (depth > 4) return undefined
+  if (typeof value === 'string') {
+    if (value.length > 200000) return undefined
+    try { return dispatchError(JSON.parse(value), depth + 1) } catch { return undefined }
+  }
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  const nested = dispatchError(record.result, depth + 1)
+  if (nested) return nested
+  return record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+    ? record.error as Record<string, unknown> : undefined
+}
+
+function dispatchErrorMessage(error: Record<string, unknown>): string {
+  const details: string[] = []
+  for (const [key, label] of [['missing', '缺少字段：{fields}'], ['unknown', '未声明的字段：{fields}']]) {
+    const value = error[key]
+    if (Array.isArray(value)) {
+      const fields = value.filter(field => typeof field === 'string')
+      if (fields.length) details.push(t(label, { fields: fields.join(', ') }))
+    }
+  }
+  if (Array.isArray(error.type_mismatch)) {
+    for (const value of error.type_mismatch) {
+      if (!value || typeof value !== 'object') continue
+      const mismatch = value as Record<string, unknown>
+      if (typeof mismatch.field === 'string' && typeof mismatch.expected === 'string') {
+        details.push(t('字段 {field} 类型应为 {expected}', { field: mismatch.field, expected: mismatch.expected }))
+      }
+    }
+  }
+  return details.join(' · ') || (typeof error.message === 'string' ? error.message : '')
+}
+
 /** A simple dispatch link replaces the previous floating progress stack. */
 export const SubagentToolCard = memo(function SubagentToolCard({ item, user = '', sessionId = '' }: {
   item: Extract<ChatItem, { kind: 'tool' }>; user?: string; sessionId?: string
@@ -62,9 +97,11 @@ function DispatchCard({ item, args, user, sessionId }: {
       || (query.state.data?.task.finished_at && !query.state.data?.task.execution_live) ? false : 1500,
   })
   const task = detail.data?.task || registered
+  const error = !taskId && item.status === 'error' ? dispatchError(item.result) || dispatchError(item.resultText) : undefined
+  const errorMessage = error ? dispatchErrorMessage(error) : ''
   const agent = String(args?.agent || task?.agent || t('子智能体'))
   const status = detail.isError ? t('执行状态不可用') : task ? agentStatus(task.status)
-    : item.status === 'error' ? t('分派失败')
+    : item.status === 'error' ? error?.code === 'invalid_agent_input' ? t('输入格式错误') : t('分派失败')
       : list.isError ? t('提交状态不可用')
         : item.status === 'running' ? t('等待提交') : t('已提交，等待执行状态')
   const input = args?.input
@@ -76,6 +113,7 @@ function DispatchCard({ item, args, user, sessionId }: {
         ? openWorkspaceAgentTask(user, { id: taskId, agent, source: 'web', session_id: sessionId })
         : openWorkspaceAgents(user)}>{t('查看执行')}<ChevronRight size={14} /></button>
     </div>
+    {errorMessage && <p className={styles.hint} role="alert">{errorMessage}</p>}
     {summary && <p className={styles.hint}>{summary.slice(0, 300)}</p>}
   </article>
 }

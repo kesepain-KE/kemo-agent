@@ -1,0 +1,41 @@
+name: external_message
+description: 向已配置且绑定当前用户的外部消息平台主动发送文本或文件。创建平台模块时请遵循 SKILL.md 的四步指令流程。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - send_message
+      - send_file
+      description: send_message=发送文本，send_file=发送文件
+    platform:
+      type: string
+      description: 目标平台名
+    target:
+      type: string
+      description: 目标用户、群聊或会话 ID
+    chat_type:
+      type: string
+      enum:
+      - private
+      - group
+      description: private=私聊，group=群聊
+    message:
+      type: string
+      description: send_message 要发送的非空文本
+    file_path:
+      type: string
+      description: 当前用户 download/file_upload 或项目 tmp 内普通文件的绝对路径，禁止链接和目录联接
+  required:
+  - action
+  - platform
+  - target
+  - chat_type
+  additionalProperties: false
+version: 1.0.0
+enabled: true
+entrypoint: tool.py:run
+execution_mode: process
+permission: external
+origin: builtin

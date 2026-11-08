@@ -1,0 +1,98 @@
+name: task_time
+description: 管理北京时间 cron 定时任务，支持创建、列出、查询、修改和删除。用户自然语言定时需求必须先经过 time_plan 子代理解析，禁止主智能体直接猜测调度参数。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - list
+      - get
+      - history
+      - create
+      - update
+      - delete
+      description: list=列出，get=查询单个，history=执行历史，create=创建，update=修改，delete=删除
+    task_id:
+      type: string
+      description: 任务 ID，get/update/delete 使用
+    title:
+      type: string
+      description: 任务标题，create/update 使用
+    prompt:
+      type: string
+      description: 自包含执行提示词，create/update 使用；用户自然语言需求应使用 time_plan 输出
+    type:
+      type: string
+      enum:
+      - daily
+      - weekly
+      - monthly
+      - once
+      - recurring
+      description: 任务类型，用户自然语言需求应使用 time_plan 输出
+    time:
+      type: string
+      description: daily 的北京时间 HH:MM
+    times:
+      type: array
+      items:
+        type: string
+      maxItems: 24
+      description: daily/weekly/monthly 的多个北京时间 HH:MM
+    weekdays:
+      type: array
+      items:
+        type: integer
+        minimum: 1
+        maximum: 7
+      description: weekly 的 ISO 星期，1=周一、7=周日
+    month_days:
+      type: array
+      items:
+        type: integer
+        minimum: 1
+        maximum: 31
+      description: monthly 的日期；不存在的日期跳过
+    interval_seconds:
+      type: integer
+      minimum: 60
+      description: recurring 间隔秒数
+    next_run_at:
+      type: string
+      description: once 的北京时间 ISO 8601
+    start_date:
+      type: string
+      description: 生效开始日期 YYYY-MM-DD
+    end_date:
+      type: string
+      description: 生效结束日期 YYYY-MM-DD，首尾包含
+    max_runs:
+      type: integer
+      minimum: 1
+      description: 最大成功执行次数
+    clear_max_runs:
+      type: boolean
+      description: update 时清除最大成功次数限制
+    status:
+      type: string
+      enum:
+      - enabled
+      - paused
+      description: update 可设置的任务状态
+    query:
+      type: string
+      description: list 按标题子串过滤，大小写不敏感
+    history_limit:
+      type: integer
+      minimum: 0
+      maximum: 50
+      description: get/history 返回的最近执行记录数量
+  required:
+  - action
+  additionalProperties: false
+version: 2.2.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

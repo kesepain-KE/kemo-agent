@@ -67,9 +67,8 @@ def plugin(root, name, *, enabled=True):
         "enabled": enabled, "entrypoint": "tool.py:run",
         "input_schema": {"type": "object", "additionalProperties": False},
     }
-    (directory / "SKILL.md").write_text(
-        f"# {name}\n{name}\n\n## Tool\n```json\n{json.dumps(tool)}\n```\n", "utf-8"
-    )
+    (directory / 'SKILL.md').write_text(f'# {name}\n{name}\n\n', 'utf-8')
+    (directory / 'plugin.yaml').write_text(json.dumps(tool), 'utf-8')
     (directory / "tool.py").write_text("def run(*, context): return {'ok': True}\n", "utf-8")
 
 
@@ -246,22 +245,28 @@ def test_real_file_tool_roundtrip_and_no_history_inheritance(workspace):
     assert "explicit-only" in provider.requests[0].messages[-1]["content"]
 
 
-def test_background_dispatch_accepts_sync_worker_and_returns_result(workspace, monkeypatch):
+@pytest.mark.parametrize("details", [
+    {"constraints": "只读检查", "acceptance_criteria": "给出结论和代码位置"},
+    {"constraints": ["只读检查"], "acceptance_criteria": ["给出结论", "附代码位置"]},
+])
+def test_background_dispatch_accepts_sync_worker_and_returns_result(workspace, monkeypatch, details):
     root, config = workspace
     provider = ScriptedProvider([ChatResponse(text=json.dumps(OUTPUT), model="mock")])
     runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
     scheduler = AgentScheduler(runner)
     monkeypatch.setattr("plugins.subagent_dispatch.tool.get_agent_scheduler", lambda *a, **kw: scheduler)
     context = {"root": str(root), "user": "alice", "source": "web", "session_id": "test"}
+    payload = {"task": "check", **details}
     try:
         response = dispatch(
-            "call", agent="general_worker", wait=False, input={"task": "check"}, context=context,
+            "call", agent="general_worker", wait=False, input=payload, context=context,
         )
         assert response["status"] == "queued"
         result = scheduler.wait(response["task_id"], timeout=5, source="web", session_id="test")
         assert result.data == OUTPUT
         snapshot = scheduler.get(response["task_id"], source="web", session_id="test")
         assert snapshot["status"] == "completed"
+        assert json.loads(provider.requests[0].messages[-1]["content"]) == payload
     finally:
         scheduler.close()
 

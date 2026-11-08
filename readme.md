@@ -23,6 +23,8 @@
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
 
+> 只想先跑起来？[跳到快速开始](#快速开始)
+
 ---
 
 ## 如果每次对话都不必重新认识
@@ -133,117 +135,21 @@ kemo-agent 坚持本地优先。
 
 ---
 
-## 开始体验
-
-> 📖 完整的安装、配置、功能使用和扩展开发说明，请访问 **[kemo-agent 在线文档](https://kesepain-ke.github.io/kemo-agent-doc/)**。
-
-### 选择安装方式
-
-Windows、Linux、npm 和 Docker 共用主框架版本。当前源码版本为 **2.0.0**，网关兼容基线为 **1.0.0**。远程分发产物需另行发布。
-
-> **发布前提：** 以下远程命令仅在安装脚本已推送、对应渠道发布产物就绪后可用。原生安装需要 Release 中的 `kemo-agent-release-<version>.zip` 与 `.zip.sha256`，npm 需要已发布的分发包，Docker 需要已发布的镜像标签。仅推送代码不会自动发布这些产物；本文不代表线上已经可安装。Release ZIP 不是 GitHub 自动生成的源码 ZIP。
-
-| 方式 | 本机要求 |
-|---|---|
-| Windows / Linux 一键部署 | Python 3.10+；Linux 需可用的 `venv` / `ensurepip`；安装应用依赖需要网络 |
-| npm | Node.js 18+、npm、Python 3.10+ 及可用的 Python 虚拟环境 |
-| Docker | Docker Engine 与 Docker Compose；无需宿主 Python / Node.js |
-| 源码开发 | Python 3.10+、Git、Node.js 与 npm（用于构建前端） |
-
-Release 已包含构建好的前端，Windows / Linux 客户端不要求 Git 或 Node.js。远程脚本会执行代码，可以先下载审阅再运行。
-
-### Windows：安装、启动与更新
-
-在 PowerShell 中首装：
+## 快速开始
 
 ```powershell
+# Windows（需 Python 3.10+）
 irm https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/windows/install.ps1 | iex
+& "$env:USERPROFILE\.kemo-agent\deploy\deploy.cmd" start
 ```
 
-安装脚本只安装，不自动常驻启动。默认目录为 `%USERPROFILE%\.kemo-agent`，日常使用：
+打开 http://127.0.0.1:1357 ，首次进入会引导配置模型服务与用户。
 
-```powershell
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
-# 只检查是否有更新
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" check
-# 先停止正在运行的应用，再更新和启动
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" update --yes
-python "$env:USERPROFILE\.kemo-agent\deploy\deploy.py" start
-```
-
-如果本机只有 `py` 命令，将上述 `python` 替换为 `py -3`。首次启动会进入配置与用户初始化；安装脚本不自动安装系统 Python、不修改 PATH、不创建系统服务。
-
-### Linux：安装、启动与更新
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/linux/install.sh | sh
-python3 "$HOME/.kemo-agent/deploy/deploy.py" start
-```
-
-日常检查和更新：
-
-```sh
-python3 "$HOME/.kemo-agent/deploy/deploy.py" check
-# 先停止正在运行的应用
-python3 "$HOME/.kemo-agent/deploy/deploy.py" update --yes
-python3 "$HOME/.kemo-agent/deploy/deploy.py" start
-```
-
-默认安装到 `~/.kemo-agent`。macOS 可复用 Unix 入口，但尚未完成目标系统实机验收。
-
-### npm：安装与日常使用
-
-```sh
-npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
-kemo
-```
-
-没有 `postinstall`，首次运行 `kemo` 才部署并启动。升级时先停止应用，再执行：
-
-```sh
-npm install -g https://github.com/kesepain-KE/kemo-agent/releases/latest/download/kemo-agent-npm.tgz
-kemo
-```
-
-`kemo check` / `kemo update` 只对比本机 npm 包附带的框架版本，不直接跟随 GitHub 最新 Release。默认目录为 `~/.kemo-agent`（Windows 对应用户主目录），可用 `KEMO_INSTALL_ROOT` 指定独立目录；不能接管原生渠道已有安装。
-
-### Docker：一键启动与更新
-
-在一个专用、后续保持不变的 Compose 项目目录中执行（不要覆盖已有的 `docker-compose.yml`）：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/kesepain-KE/kemo-agent/main/deploy/docker/docker-compose.yml -o docker-compose.yml && docker compose up -d
-```
-
-默认使用 `ghcr.io/kesepain-ke/kemo-agent:latest`；发布者必须提供该标签，也可通过 `KEMO_VERSION` 指定已发布的主框架版本。日常在同一目录执行：
-
-```sh
-docker compose logs -f
-# 更新：先停止，再拉取并启动新镜像
-docker compose stop
-docker compose pull
-docker compose up -d
-```
-
-数据保存在挂载到 `/data` 的命名卷中，新镜像启动时会同步受管应用文件并保留用户数据；**不要用 `docker compose down -v` 更新**。保持 Compose 项目名和目录不变，避免切换到新的空卷。默认仅映射本机 `127.0.0.1:1357`，不自动开放公网。
-
-### 源码部署（开发者）
-
-```bash
-git clone https://github.com/kesepain-KE/kemo-agent.git
-cd kemo-agent
-python setup.py
-# 接受默认初始化选项可使用 python setup.py --yes
-python start_web.py
-```
-
-`setup.py` 引导依赖安装、环境配置、前端构建和用户创建。源码方式也可用 `python cli.py` 进入命令行；停止应用后用 `python update.py` 更新。
-
-**不要交替用 `update.py` 和 `deploy/deploy.py` 管理同一安装目录。** 一键部署拒绝接管非空的未受管目录或其他渠道安装；自定义路径须首装时指定，不能把开发仓库当作目标。
-
-默认网页地址：`http://127.0.0.1:1357`。初次使用建议从网页端开始，完成模型服务、用户与访问凭据配置。
-
-完整参数、自定义路径、离线包、恢复和发布步骤见 [部署说明](deploy/README.md)；智能体使用的统一合同见 [部署与发布知识专题](knowledge/global/release/deployment-and-release.md)。
+其他方式：[Linux](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#linux) ·
+[npm](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#npm) ·
+[Docker](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#docker) ·
+[源码](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation#源码安装) ·
+[完整安装文档](https://kesepain-ke.github.io/kemo-agent-doc/guide/installation)
 
 ---
 
@@ -266,57 +172,11 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本：`2.0.0`（2026-11-05 源码定档；远程分发产物需另行发布）
+当前版本 `2.0.0`，兼容 Kemo 网关 `1.0.0`。
 
-本次于 2026-11-07 再次固化 2.0.0，包含 CardStream、YAML 配置与模块热加载、真实路径知识库；这是破坏性更新。
-
-已确认兼容的 Kemo 网关：`kemo-adapter-api 1.0.0`（Kemo 2.0 线路协议匹配）。
-
-### 2.0.0 更新说明（2026-11-05）
-
-- 插件工具新增本地权限分类和用户可配置的权限级别过滤；权限元数据不发送给 Provider。
-- `file.search` 收敛为 `name` / `content` 两种模式；`web_search.search` 改用 `answer` / `raw_content` 语义枚举。
-- 图谱引导工具拆分为 `kemo_graph_read` 与 `kemo_graph_write`，读权限不再提供写入操作。
-- 插件说明删除与工具 schema 重复的参数表；旧工具名和旧参数语义不兼容。
-
-当前 `kemo-preview` 分支在上述版本基线继续执行 CardStream 重构：RAW 完整保存、VIEW 滚动摘要；
-每次主请求前冻结历史与动态尾部，超过有效输入容量 80% 时按历史 Token 比例压缩。
-候选校验后原子替换，失败保留原视图；这项工作尚未作为新的远程版本发布。
-
-### 目前可以体验的内容
-
-- 完整的网页对话界面，支持流式交互与运行中追加多模态引导；
-- 每用户独立的 `cards.sqlite3` 历史库，支持 RAW/VIEW、事务提交、原文检索和 seq 游标分页；
-- 每用户独立的 SQLite 潮汐记忆库，正文、生命周期、每日加权证据和热画像来源统一事务化；历史整理使用带覆盖率门槛的关键词搜索定位已有碎片，确认同一事实后按日加权，避免长期运行中重复碎片持续膨胀；
-- 临时重要记忆作为可重建热画像独立维护，只由临时三层单向提炼，不会反向加权源记忆；Prompt 注入预算与模型输出防失控上限当前均为 20000 字符，但两者保持独立语义；
-- 个人、共享与全局三层知识库，让回答贴近真实资料；
-- 任务计划从创建、审批到逐步执行，可暂停、可继续、可回溯；引导和计划详情在各自内容区内部滚动。创建成功会在当前会话边界立即收束，不会越过计划状态机继续自由执行，也不会暂停同一用户的其他对话；
-- 主智能体默认支持长任务，从用户输入到最终回复不设工具调用总数或模型请求轮数上限；同一 Run 持续处理工具、引导与必要后台结果，保留取消及真实完成屏障；
-- 上下文按卡片连续前缀压缩，用户正文、引导、助手正文及工具事件均可吸收；压缩后记忆后台仍读取完整 RAW，全部候选处理完成才推进独立游标，没有长期价值候选时允许零新增；
-- 一次性和周期性定时任务，在约定时间自动醒来完成；
-- 拓展与感知由后台按配置频率采集，每次逻辑 Provider 请求只重读最新已发布快照，不把采集耗时叠加到模型请求；
-- 子代理协作：整理记忆、规划步骤、生成摘要、定时调度各有专人；
-- 多个内置工具与技能，可按需扩展；后台任务可用 `wait_for_condition` 在最长两小时内等待进程、路径或端口条件，满足时立即返回；
-- Kemo 协议下根据网关模型能力动态展示思考档位，其他 Provider 协议继续使用原有配置方式；
-- 普通插件工具使用非严格参数模式，兼容开放对象与可选字段，同时保留结构化输出工具的严格校验；
-- Kemo 与 Chat 两条 Provider 链路都会在执行前校验工具参数完整性；Chat 输出截断、内容过滤或残缺 JSON 会明确结束为不完整响应，不会误执行半个工具调用；
-- 技能、拓展、感知、外部消息路由、子代理和用户模板配有独立合同测试基准，便于验证创建结果的基础入口与出口协议；
-- 用户技能支持从 Web 上传 ZIP，递归发现 `SKILL.md` 并以事务方式安全安装；
-- 网页端、Android App、命令行、消息平台多入口，同一身份同一记忆；各入口的会话历史按真实 `source` 隔离，非 Web 历史可在网页中只读查看；
-- 多用户独立工作空间，彼此隔离，各自配置；
-- 上传文件空间与智能体生成内容分开管理，并支持受限的图片、音频和视频预览；
-- 记忆工具支持一次跨四个生命周期层级进行可解释的评分检索，返回匹配字段、命中词、覆盖率和分数；批量搜索只读取一次目标层。长对话导航使用 10 项动态窗口，当前轮次固定旋转到 180°中心位，并可继续加载更早历史；
-- Web 后端按路由、领域服务和公共契约分层，保留原有兼容入口；
-- 运行状态与日常维护入口，后台任务自动运转。
-
-### 仍在持续打磨的方向
-
-- 用户自定义扩展的创建体验——让它更直观、更少出错；
-- 长时间连续运行下的稳定性与资源表现；
-- 安装、更新和迁移流程的顺畅度；
-- 面向更多真实场景的细节打磨。
-
-如果你正在试用早期版本，欢迎提交遇到的问题、使用感受，以及你真正希望智能体替你承担的事情。
+2.0.0 是破坏性更新：CardStream、YAML 配置与模块热加载、真实路径知识库。
+完整变更与功能清单见 [Releases](https://github.com/kesepain-KE/kemo-agent/releases)
+与[文档站](https://kesepain-ke.github.io/kemo-agent-doc/)。
 
 ---
 
@@ -352,6 +212,8 @@ kemo-agent 不是一座孤岛。围绕它，还有几个独立维护、通过稳
 ## 参与贡献
 
 kemo-agent 仍处在非常早期的阶段。无论是问题报告、体验建议、文档改进还是功能贡献，都很欢迎。
+
+如果你正在试用早期版本，欢迎提交遇到的问题、使用感受，以及你真正希望智能体替你承担的事情。
 
 推荐流程：
 

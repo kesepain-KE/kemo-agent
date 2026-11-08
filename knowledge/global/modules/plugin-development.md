@@ -12,7 +12,7 @@ list.default_wait 披露缺省策略；后台提交仍受必要依赖完成屏�
 外部代理、自定义执行器与串行维护不支持此恢复合同，详见 `knowledge/global/runtime/agent-task-coordination.md`。
 
 本文面向需要创建、修改或排查 `plugins/` 工具插件的开发者。它说明插件如何被发现、
-`SKILL.md` 如何同时承担操作说明和工具清单、Provider 工具循环如何执行，以及插件应如何
+`SKILL.md` 与 `plugin.yaml` 如何分别提供操作说明和机器契约、Provider 工具循环如何执行，以及插件应如何
 处理超时、取消、结果大小和权限边界。
 
 Provider 返回工具调用是否完整、Chat/Kemo 两条协议怎样判断可执行终态，另见
@@ -30,6 +30,7 @@ Bearer 和 URL 口令；`path` / `url` 诊断字段先移除 query，再脱敏�
 plugins/
 └── <tool_name>/
     ├── SKILL.md
+    ├── plugin.yaml
     └── tool.py
 ```
 
@@ -38,53 +39,54 @@ plugins/
 - `plugins/manifest.py::discover_plugin_manifests()`；
 - `run/tools/__init__.py::discover_tools()`。
 
-运行时只扫描 `plugins/*/SKILL.md`。共享技能、用户技能、拓展、感知和子代理即使包含
+运行时只发现同时有 `SKILL.md` 和 `plugin.yaml` 的插件目录；缺任一文件不注册，成对文件中
+有无效契约则明确报错。不读取旧的 Markdown 内嵌工具 JSON。共享技能、用户技能、拓展、感知和子代理即使包含
 Python 文件，也不能借此注册 Provider function call。
 
 插件的三项名称必须一致：
 
 1. `SKILL.md` 一级标题；
 2. 插件目录名；
-3. Tool JSON 中的 `name`。
+3. `plugin.yaml` 中的 `name`。
 
 例如目录为 `plugins/example_tool/` 时，标题和工具名都必须是 `example_tool`。任一不一致，
 插件发现阶段就会失败，而不是等到调用时再猜测。
 
-`SKILL.md` 必须只包含一个 `## Tool` 标题，并在该标题下提供 JSON 代码块。`entrypoint`
+机器字段统一放在 `plugin.yaml`，`SKILL.md` 只保留说明。`entrypoint`
 必须使用 `file.py:function` 形式，文件位于插件目录内，不得使用绝对路径或 `..` 跳出目录。
 
-## SKILL.md 的双重职责
+## 操作说明与机器契约
 
-`SKILL.md` 包含两个不同层面：
+两个文件分别维护：
 
-- 一级标题后、首个真实二级标题或 `---` 前的发现摘要：进入主智能体插件说明，并附作用域和来源路径；其余正文按需读取，不是 `## Tool` 之前的全文自动注入；
-- `## Tool` 中的 JSON：解析为 Provider 工具 Schema 和本地执行入口。
+- `SKILL.md` 一级标题后、首个真实二级标题或 `---` 前的发现摘要进入主智能体插件说明，并附作用域和来源路径；其余正文按需读取；
+- `plugin.yaml` 提供 Provider 工具 Schema、本地执行入口和插件归属；元数据不作为说明正文注入 Prompt。
 
-说明文本不是可执行代码。Tool JSON 也不会替代操作手册。开发插件时应同时维护两者：
+说明文本不是可执行代码。机器契约也不会替代操作手册。开发插件时应同时维护两者：
 Schema 负责机器可验证的输入边界，说明文本负责使用顺序、授权条件、失败处理和风险提示。
 
 摘要应包含触发场景与关键限制；正文说明前置条件、参数关系、成功证据、副作用和重试边界。匹配任务后先读取来源 `SKILL.md`，不得根据摘要猜测完整操作。统一编写规范和其他模块的职责划分见 `knowledge/global/engineering/prompt-authoring-standard.md`。
 
-## Tool JSON 合同
+## plugin.yaml 合同
 
-最小 Tool 定义包含：
+最小内置插件定义：
 
-```json
-{
-  "name": "example_tool",
-  "description": "执行一个受限示例操作。",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "text": {"type": "string"}
-    },
-    "required": ["text"],
-    "additionalProperties": false
-  },
-  "version": "1.0.0",
-  "enabled": true,
-  "entrypoint": "tool.py:run"
-}
+```yaml
+name: example_tool
+description: 执行一个受限示例操作。
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+  required:
+    - text
+  additionalProperties: false
+version: "1.0.0"
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin
 ```
 
 字段含义：
@@ -97,10 +99,28 @@ Schema 负责机器可验证的输入边界，说明文本负责使用顺序、�
 | `version` | 是 | 插件自身版本字符串 |
 | `enabled` | 是 | `false` 时保留清单但不进入可执行工具集合 |
 | `entrypoint` | 是 | 插件目录内的 `file.py:function` |
+| `permission` | 否 | `read` / `write` / `delete` / `external`，默认 `write` |
+| `origin` | 否 | `builtin`（默认）或 `user`；更新、回滚和打包归属，不发给 Provider |
 | `strict` | 否 | Provider 结构化参数严格模式，默认 `false` |
 | `timeout_policy` | 否 | `argument_or_default` 或 `agent_runtime` |
 | `timeout_grace_seconds` | 否 | 显式 `timeout` 的外层看门狗清理宽限，默认 0、范围 0～30 秒；只用于整理正常结果，不得增加业务等待时长 |
 | `execution_mode` | 否 | `process`（默认）在独立子进程执行并可在超时后终止；只有必须访问进程内对象的插件才声明 `thread` |
+
+使用现有 PyYAML 安全加载，不定制 YAML 隐式类型。Schema 中的空值类型写成字符串，
+例如 `type: [string, "null"]`；裸 `null` 会成为空值并被 JSON Schema 校验拒绝。
+可选字段与显式空值语义不同：`task_plan` 的 `tool_name: null` 用于清除既有工具绑定，不能改成仅支持字符串。
+
+### 插件归属与更新
+
+发布包只携带内置插件。用户自建插件在 `plugin.yaml` 声明 `origin: user`；
+即使名称与发布插件相同，源码更新、回滚和独立部署也保留整个本机插件目录。
+内置插件逐目录比较并更新，退役时删除框架文件，保留配置、凭据和运行数据。
+归属损坏时在写入前失败，不将读取错误当作删除许可；没有元数据的本地独有目录也保留。
+`plugins/` 根 Python 框架文件和仍被图谱读写工具引用的 `plugins/kemo_graph/` 共用实现随版本更新。
+
+插件内 `config.json`、`config.yaml`、`config.yml`、`.env*`（`.env.example` 除外）、
+状态、凭据、数据库、运行锁及 `data/`、`artifacts/`、`logs/` 属于本机数据，不随框架覆盖或回滚，
+也不进入发布包。用户插件不进入源码备份；内置插件的程序仍可从备份恢复。
 
 `process` 模式只向子进程传递可序列化的运行上下文，并重新加载清单声明的入口；超时或用户取消会终止整个隔离进程树。普通插件若依赖进程内连接池等不可序列化对象，可显式声明 `thread` 并实现协作取消。`file` 写操作、`shell` 和 `external_message` 的清单入口强制进程隔离，不接受清单线程降级；框架直接注入的内存 callable 仍保留现有执行边界。外部消息由主宿主验证存活注册、用户归属及能力，再将目录 Transport 的发送出口快照交给子进程；只加载 output，不启动 input/轮询/WebSocket，不传整个注册表。没有可隔离出口的自定义内存 Transport 明确拒绝，不能偷偷线程发送。
 
@@ -187,7 +207,7 @@ UTF-8/宿主编码解码与显示范围见 `knowledge/global/web/frontend-conven
 
 ## Python 入口
 
-与上面的 Tool JSON 对应，最小入口可以写成：
+与上面的 YAML 契约对应，最小入口可以写成：
 
 ```python
 from __future__ import annotations
@@ -202,7 +222,7 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
     }
 ```
 
-运行时按函数签名决定是否注入 `context`。插件无需自行解析 Tool JSON，也不能信任模型已经
+运行时按函数签名决定是否注入 `context`。插件无需自行解析元数据，也不能信任模型已经
 正确校验参数；`run/tools/__init__.py` 会先检查必填字段、顶层额外字段、基础类型和数值上下限，入口
 仍应校验业务关系、路径、安全确认和外部资源状态。
 
@@ -474,8 +494,8 @@ Kemo 使用现有 Asset 上传／就绪接口，并发送图片、音频、视�
 推荐流程：
 
 1. 确定插件是否真的需要可执行 Provider 工具；纯操作说明应使用技能。
-2. 建立 `plugins/<name>/SKILL.md` 和薄入口文件。
-3. 让标题、目录名和 Tool `name` 保持一致。
+2. 建立 `plugins/<name>/SKILL.md`、`plugin.yaml` 和薄入口文件；用户插件声明 `origin: user`。
+3. 让标题、目录名和元数据 `name` 保持一致。
 4. 用最小、封闭的 Schema 表达输入，不把权限判断交给自然语言。
 5. 在入口内实现业务校验、取消响应和安全返回。
 6. 使用 `plugins/manifest.py` 和 `run/tools/__init__.py` 完成发现测试。

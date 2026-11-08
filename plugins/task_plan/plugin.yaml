@@ -1,0 +1,89 @@
+name: task_plan
+description: 管理任务计划运行状态：查看或列出计划、修正计划、重试或重置失败步骤、标记步骤完成或失败，以及批准、暂停、恢复和中止。主智能体执行计划步骤后必须调用 step_done 或 step_fail。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - view
+      - list
+      - edit
+      - revise_remaining
+      - retry_step
+      - reset_step
+      - skip_step
+      - step_done
+      - step_fail
+      - abort
+      - approve
+      - pause
+      - resume
+      description: 任务计划运行态操作
+    plan_id:
+      type: string
+      description: 计划 ID；view 和 abort 可省略并自动选择非终态计划
+    step_id:
+      type: string
+      description: 步骤 ID；retry_step、reset_step、skip_step、step_done 和 step_fail 必需
+    revision:
+      type: integer
+      minimum: 1
+      description: edit/revise_remaining/retry_step/reset_step/skip_step 的乐观并发版本
+    title:
+      type: string
+      minLength: 1
+      description: edit 可选的新计划标题
+    description:
+      type: string
+      minLength: 1
+      description: edit 可选的新计划描述
+    steps:
+      type: array
+      description: edit 的步骤补丁，或 revise_remaining 的剩余步骤重排/插入/删除列表
+      items:
+        type: object
+        properties:
+          step_id:
+            type: string
+          position:
+            type: integer
+            minimum: 1
+          title:
+            type: string
+            minLength: 1
+          description:
+            type: string
+            minLength: 1
+          tool_name:
+            type:
+            - string
+            - 'null'
+          tool_arguments:
+            type: object
+          depends_on:
+            type: array
+            items:
+              type: string
+          critical:
+            type: boolean
+        required:
+        - step_id
+        additionalProperties: false
+    result:
+      type: string
+      description: step_done 的执行结果摘要
+    error:
+      type: string
+      description: step_fail 的错误描述
+    retry_failed:
+      type: boolean
+      description: revise_remaining 是否把 failed 步骤重置为 pending，默认 false
+  required:
+  - action
+  additionalProperties: false
+version: 1.2.0
+enabled: true
+entrypoint: tool.py:run
+permission: write
+origin: builtin

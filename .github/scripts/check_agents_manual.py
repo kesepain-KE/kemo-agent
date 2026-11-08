@@ -141,23 +141,21 @@ def render_claim(root: Path, rule: dict[str, Any]) -> str:
 
 
 def plugin_name(root: Path, path: Path) -> str:
-    text = path.read_text("utf-8-sig")
-    marks = headings(text)
-    starts = [(line, level) for line, level, title in marks if level == 2 and title.casefold() == "tool"]
-    if len(starts) != 1:
-        raise ValueError(f"one ## Tool required: {path.relative_to(root)}")
-    start = starts[0][0]
-    end = next((line for line, level, _ in marks if line > start and level <= 2), len(text.splitlines()) + 1)
-    section = "\n".join(text.splitlines()[start:end - 1])
-    blocks = re.findall(r"^\s*```json\s*\n(.*?)^\s*```\s*$", section, re.M | re.S)
-    if len(blocks) != 1:
-        raise ValueError(f"one JSON tool block required: {path.relative_to(root)}")
-    raw = json.loads(blocks[0])
+    metadata = path.with_name("plugin.yaml")
+    try:
+        raw = yaml.safe_load(metadata.read_text("utf-8-sig"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid plugin.yaml: {metadata.relative_to(root)}") from exc
     if not isinstance(raw, dict):
-        raise ValueError(f"tool must be a JSON object: {path.relative_to(root)}")
+        raise ValueError(f"plugin.yaml must be a mapping: {metadata.relative_to(root)}")
     name = raw["name"]
-    if not isinstance(name, str) or name != path.parent.name or not isinstance(raw.get("enabled"), bool):
+    method = re.sub(r"<!--.*?-->", "", path.read_text("utf-8-sig"), flags=re.S)
+    titles = [title for _, level, title in headings(method) if level == 1]
+    if (not isinstance(name, str) or name != path.parent.name
+            or titles != [name] or not isinstance(raw.get("enabled"), bool)):
         raise ValueError(f"invalid tool identity: {path.relative_to(root)}")
+    if raw.get("origin", "builtin") not in ("builtin", "user"):
+        raise ValueError(f"invalid plugin origin: {metadata.relative_to(root)}")
     for field in ("description", "version", "entrypoint"):
         if not isinstance(raw.get(field), str) or not raw[field].strip():
             raise ValueError(f"tool {name}: missing {field}")

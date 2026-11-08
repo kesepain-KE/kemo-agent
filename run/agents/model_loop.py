@@ -16,7 +16,9 @@ from provider.protocol.models import (
     ReasoningItem, ToolCallItem, ToolDefinition, ToolResultItem, text_from_content,
 )
 from agents._runtime.resources import effective_knowledge_scopes
-from run.extensions import MediaInputHost, context_input_budget, resolve_reasoning_selection
+from run.extensions import (
+    MediaInputHost, context_input_budget, model_output_token_limit, resolve_reasoning_selection,
+)
 from run.agents.contracts import (
     AgentCancelledError, AgentInputError, AgentOutputError, AgentProviderError,
     AgentRunError, AgentRunResult, AgentToolRetryError,
@@ -223,11 +225,15 @@ def run_model(
             )
         tool_definitions, request_max_tokens = wrap_request(context, items, tool_definitions)
         configured_limit = int((agent_runner.config.get("agents") or {}).get("token_limit", 1000000))
-        reservation = request_max_tokens or runtime.get("max_tokens") or int(
-            (agent_runner.config.get("agents") or {}).get("output_reserve", 8192))
+        request_max_tokens = model_output_token_limit(
+            reasoning_selection.capabilities,
+            configured=request_max_tokens if request_max_tokens is not None else runtime.get("max_tokens"),
+        )
+        reservation = int((agent_runner.config.get("agents") or {}).get("output_reserve", 10000))
+        if request_max_tokens is not None:
+            reservation = min(reservation, request_max_tokens)
         capacity = context_input_budget(
             configured_limit, reasoning_selection.capabilities, output_reserve=reservation)
-        request_max_tokens = capacity["output_reserve"]
         request_input_limit = min(capacity["effective_token_limit"],
                                   context.input_token_limit or capacity["effective_token_limit"])
         media_inputs.input_limit = request_input_limit

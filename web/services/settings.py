@@ -566,7 +566,7 @@ class SettingsServiceMixin:
             },
             "limits": {
                 "context_engine": "cardstream",
-                "output_reserve": int(agents.get("output_reserve") or 8192),
+                "output_reserve": int(agents.get("output_reserve") or 10000),
                 "context_tokens": int(agents.get("token_limit") or 120000),
                 "compression_ratio": float(
                     agents.get("token_compression_ratio") or 0.6

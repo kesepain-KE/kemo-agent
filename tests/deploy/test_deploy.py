@@ -27,7 +27,7 @@ sys.path.insert(0, str(DEPLOY))
 from core import cli, config, runtime, sync
 from core.common import DeployError, digest, json_bytes, target, version_key
 from core.locking import Lock
-from core.policy import local_module, protected
+from core.policy import local_module, protected, user_plugin_directories
 from core.source import Bundle, obtain, parse_archive, release
 from core.yamllite import dumps, loads
 from pack import clean_definition, publishable, write_bundle
@@ -98,10 +98,13 @@ class DeploymentTests(unittest.TestCase):
     def test_yaml_quotes_comments_and_booleans(self):
         self.assertEqual(loads('a: "value # literal" # comment\nb:\n  - false\n  - 0\n'), {'a': 'value # literal', 'b': [False, 0]})
 
-    def test_repository_global_yaml_matches_deployer_parser_and_round_trips(self):
+    def test_repository_yaml_matches_deployer_parser_and_round_trips(self):
         path = ROOT / "config" / "global_config.yaml"
         original = yaml.safe_load(path.read_text(encoding="utf-8"))
-        self.assertEqual(loads(path.read_text(encoding="utf-8")), original)
+        for manifest in (path, *sorted((ROOT / "plugins").glob("*/plugin.yaml"))):
+            with self.subTest(manifest=manifest.relative_to(ROOT)):
+                text = manifest.read_text(encoding="utf-8")
+                self.assertEqual(loads(text), yaml.safe_load(text))
         merged = {
             **original,
             "yaml_roundtrip_probe": {
@@ -189,8 +192,9 @@ class DeploymentTests(unittest.TestCase):
             parse_archive(stream.getvalue())
 
     def test_private_data_cannot_be_shipped(self):
-        with self.assertRaises(DeployError):
-            self.archive(extra={'kemo.yaml': b'SECRET=not-real'})
+        for name in ('kemo.yaml', 'knowledge/share/custom/doc.md'):
+            with self.subTest(name=name), self.assertRaises(DeployError):
+                self.archive(extra={name: b'private data'})
 
     def test_local_checksum_mismatch_rejected(self):
         with self.assertRaises(DeployError):
@@ -246,6 +250,30 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(yaml.safe_load((self.root / 'config/global_config.yaml').read_bytes()), {'schema_version': 1, 'local_value': False, 'new': 4})
         for name, data in secrets.items():
             self.assertEqual((self.root / name).read_bytes(), data)
+
+    def test_upgrade_releases_previously_managed_shared_knowledge(self):
+        old = self.install()
+        shared = {
+            'knowledge/share/custom/doc.md': b'operator knowledge',
+            'knowledge/share/removed-from-release.md': b'keep this document',
+        }
+        for name, data in shared.items():
+            path = target(self.root, name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            old['files'][name] = digest(data)
+        (self.root / '.kemo-install.json').write_bytes(json_bytes(old))
+
+        incoming = {
+            'knowledge/share/custom/doc.md': b'release replacement',
+            'knowledge/share/source-only.md': b'not framework content',
+        }
+        record = self.install(self.bundle('1.3.1', incoming))
+
+        for name, data in shared.items():
+            self.assertEqual((self.root / name).read_bytes(), data)
+        self.assertFalse((self.root / 'knowledge/share/source-only.md').exists())
+        self.assertFalse(any(name.startswith('knowledge/share/') for name in record['files']))
 
     def test_upgrade_migrates_only_the_legacy_session_idle_default(self):
         for local_value, expected in ((86400, 5400), (7200, 7200)):
@@ -497,19 +525,96 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
                      'runtime/logs.sqlite3', 'knowledge/share/other.sqlite3'):
             self.assertFalse(publishable(name), name)
 
-    def test_legacy_classification_seed_is_accepted_without_overwriting_or_removing_local_data(self):
-        seed = {'knowledge/global/classify.sqlite3': b'SQLite format 3\x00seed'}
-        # Older supported releases still contain these files, even though new packs omit them.
+    def test_shared_knowledge_is_not_publishable(self):
+        for name in ('knowledge/share/README.md', 'knowledge/share/custom/doc.md'):
+            with self.subTest(name=name):
+                self.assertFalse(publishable(name), name)
+        self.assertTrue(publishable('knowledge/global/engineering/knowledge-and-user-data.md'))
+
+    def test_shared_directory_seed_is_created_preserved_and_recreated_when_missing(self):
+        name = 'knowledge/share/.gitkeep'
+        seed = {name: b''}
+        self.assertTrue(publishable(name))
         bundle = parse_archive(self.archive(extra=seed).read_bytes(), '1.3.0')
-        self.assertIn('knowledge/global/classify.sqlite3', bundle.files)
+        self.assertIn(name, bundle.files)
         self.install(self.bundle(extra=seed))
-        legacy = self.root / 'knowledge/global/classify.sqlite3'
-        legacy.write_bytes(b'SQLite format 3\x00local')
+        self.assertTrue((self.root / name).is_file())
+        self.assertNotIn(name, sync.installed(self.root)['files'])
+        (self.root / name).write_bytes(b'local marker')
+        (self.root / 'knowledge/share/notes.md').write_bytes(b'local document')
         for extra in (seed, {}):
             changes, files = sync.plan(self.root, self.bundle('1.3.1', extra=extra), self.doc, sync.installed(self.root))
-            self.assertEqual([c for c in changes if 'classify.sqlite3' in c.name], [])
-            self.assertNotIn('knowledge/global/classify.sqlite3', files)
-            self.assertEqual(legacy.read_bytes(), b'SQLite format 3\x00local')
+            self.assertFalse(any(c.name.startswith('knowledge/share/') for c in changes))
+            self.assertNotIn(name, files)
+            self.assertEqual((self.root / name).read_bytes(), b'local marker')
+        (self.root / name).unlink()
+        changes, _ = sync.plan(self.root, self.bundle('1.3.1', extra=seed), self.doc, sync.installed(self.root))
+        self.assertEqual(next(c.content for c in changes if c.name == name), b'')
+        self.assertEqual((self.root / 'knowledge/share/notes.md').read_bytes(), b'local document')
+
+    def test_retired_classification_seeds_and_user_plugins_are_rejected_in_releases(self):
+        for name, data in (
+            ('knowledge/global/classify.sqlite3', b'SQLite format 3\x00seed'),
+            ('knowledge/share/classify.sqlite3', b'SQLite format 3\x00seed'),
+            ('plugins/custom/plugin.yaml', b'origin: user\n'),
+        ):
+            with self.subTest(name=name), self.assertRaises(DeployError):
+                self.archive(extra={name: data})
+
+    def test_plugin_private_files_are_protected_but_framework_and_helpers_are_publishable(self):
+        for name in (
+            'config.json', 'config.yaml', 'module/config.yml', '.env.local',
+            'module/panel.values.json', 'data/state.json', 'artifacts/result.txt',
+        ):
+            path = 'plugins/example/' + name
+            self.assertTrue(protected(path), path)
+            self.assertFalse(publishable(path), path)
+        for path in (
+            'plugins/manifest.py', 'plugins/_creator_security.py', 'plugins/__init__.py',
+            'plugins/kemo_graph/tool.py', 'plugins/example/_helper.py',
+            'plugins/example/.env.example', 'plugins/example/plugin.yaml',
+        ):
+            self.assertTrue(publishable(path), path)
+
+    def test_user_plugin_ownership_protects_updates_deletions_and_packaging(self):
+        original = {
+            'plugins/example/plugin.yaml': b'origin: builtin\n',
+            'plugins/example/tool.py': b'VALUE = 1\n',
+            'plugins/removed/plugin.yaml': b'origin: builtin\n',
+            'plugins/removed/tool.py': b'VALUE = 1\n',
+        }
+        old = self.install(self.bundle(extra=original))
+        for module in ('example', 'removed', 'custom'):
+            directory = self.root / 'plugins' / module
+            directory.mkdir(exist_ok=True)
+            (directory / 'plugin.yaml').write_bytes(b'origin: user\n')
+            (directory / 'tool.py').write_bytes(b'VALUE = "user"\n')
+        users = user_plugin_directories(self.root)
+        for name in original:
+            self.assertFalse(publishable(name, user_plugins=users), name)
+        self.assertTrue(publishable('plugins/file/tool.py', user_plugins=users))
+        incoming = {
+            'plugins/example/plugin.yaml': b'origin: builtin\n',
+            'plugins/example/tool.py': b'VALUE = 2\n',
+            'plugins/file/plugin.yaml': b'origin: builtin\n',
+            'plugins/file/tool.py': b'VALUE = 2\n',
+        }
+        changes, managed = sync.plan(self.root, self.bundle('1.3.1', extra=incoming), self.doc, old, overwrite=True)
+        for module in ('example', 'removed', 'custom'):
+            prefix = f'plugins/{module}/'
+            self.assertFalse(any(c.name.startswith(prefix) for c in changes))
+            self.assertFalse(any(name.startswith(prefix) for name in managed))
+        self.assertTrue(any(c.name == 'plugins/file/tool.py' for c in changes))
+
+    def test_invalid_plugin_origin_stops_planning_before_changes(self):
+        old = self.install()
+        directory = self.root / 'plugins/custom'
+        directory.mkdir(parents=True)
+        for metadata in (b'origin: [broken', b'origin: unknown\n'):
+            (directory / 'plugin.yaml').write_bytes(metadata)
+            with self.subTest(metadata=metadata), self.assertRaises(DeployError):
+                sync.plan(self.root, self.bundle('1.3.1'), self.doc, old, overwrite=True)
+            self.assertEqual(read_version(self.root), '1.3.0')
 
 
 def read_version(root):

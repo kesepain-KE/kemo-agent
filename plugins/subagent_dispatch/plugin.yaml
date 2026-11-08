@@ -1,0 +1,139 @@
+name: subagent_dispatch
+description: 发现和调度当前用户可用的公开子代理。普通本地 LLM 非串行业务代理 call/resume 省略 wait 默认后台提交并行执行，共用 Provider API 请求池；仍是主任务必要依赖，框架按稳定提交序号交付同批结果，无需反复查询状态。output_truncated 按累计 Provider 额度有界重试，耗尽后可显式 resume 有有效安全点的失败任务。显式 wait=true 同步等待；特殊规划、串行维护和外部代理默认同步。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - list
+      - create
+      - call
+      - resume
+      - guide
+      - split
+      - status
+      - cancel
+    agent:
+      type: string
+      description: call 时使用的公开子代理名称；外部智能体使用 external:<scope>:<拓展名>:<代理名> 句柄
+    input:
+      type: object
+      description: >-
+        call 时传给目标子代理的输入，字段以该代理的 input_schema 为准，可通过 list 获取。
+        general_worker 只需 task（非空任务描述）；context 为可选背景字符串，
+        constraints、acceptance_criteria 均可选，接受字符串或字符串数组。
+        其他背景、范围和交付要求写入 task/context，不使用 goal、scope、deliverable 等额外字段。
+    definition:
+      type: object
+      description: create 时使用的数据型用户代理定义；建立可继续自由扩展的最小包合同
+      properties:
+        name:
+          type: string
+          pattern: ^[A-Za-z][A-Za-z0-9_-]{0,63}$
+        description:
+          type: string
+        instruction:
+          type: string
+          description: 写入 AGENT.md 的完整代理指令
+        trigger_condition:
+          type: string
+          description: 写入 trigger.md 注册信息的触发条件
+        version:
+          type: string
+          default: 1.0.0
+        input_schema:
+          type: object
+          description: 可选，仅作为 trigger.md 中的输入参考
+        output_schema:
+          type: object
+          description: 可选，仅作为 trigger.md 中的输出参考
+        agent_config:
+          type: object
+          description: 可选运行时授权；未提供时创建可由 main_agent 调用、无工具和知识权限的代理
+          properties:
+            schema_version:
+              type: integer
+              enum:
+              - 1
+            internal_mode:
+              type: boolean
+            allowed_callers:
+              type: array
+              items:
+                type: string
+            tools:
+              type: object
+              properties:
+                plugins:
+                  type: object
+                  properties:
+                    allow:
+                      type: array
+                      items:
+                        type: string
+                shared_skills:
+                  type: object
+                  properties:
+                    allow:
+                      type: array
+                      items:
+                        type: string
+                max_iterations:
+                  type: integer
+                  minimum: 1
+            global_knowledge:
+              type: boolean
+            shared_knowledge:
+              type: boolean
+            inherit_main_history:
+              type: boolean
+          required:
+          - schema_version
+          - internal_mode
+          - allowed_callers
+          - tools
+          - global_knowledge
+          - shared_knowledge
+          - inherit_main_history
+          additionalProperties: false
+      required:
+      - name
+      - description
+      - instruction
+      additionalProperties: false
+    wait:
+      type: boolean
+      description: call/resume 是否同步等待。普通本地 LLM 非串行业务代理省略默认 false；特殊规划、串行维护和外部代理默认 true。显式 true 保留同步等待，显式 false 仅用于支持后台的代理
+    timeout:
+      type: number
+      description: call/resume 时可选；本轮子代理运行预算秒数，必须为正数；省略时使用代理默认预算
+    guidance:
+      type: string
+      maxLength: 8000
+      description: resume 时可选，guide 时必填；指导剩余工作，不新增权限，guide 在下一请求安全点交付。output_truncated 续跑时可提示从已有进度继续
+    max_tool_calls:
+      type: integer
+      minimum: 0
+      description: call/resume/split 的每段工具调用额度；正整数覆盖默认，0 显式不限工具次数（仍受 timeout/取消/失败保护约束）。resume 省略沿用上一段有效额度。仅公开本地 LLM 非串行业务代理可覆盖
+    tasks:
+      type: array
+      minItems: 1
+      maxItems: 8
+      items:
+        type: object
+      description: split 时由主智能体明确给出的 1..8 个完整 input；原任务须已停止或失败且实际退出。只拆剩余工作，不重做已完成副作用
+    task_id:
+      type: string
+      description: resume/status/cancel 时使用的原任务 ID
+  required:
+  - action
+  additionalProperties: false
+version: 1.0.0
+enabled: true
+entrypoint: tool.py:run
+timeout_policy: agent_runtime
+timeout_grace_seconds: 5
+execution_mode: thread
+permission: external
+origin: builtin

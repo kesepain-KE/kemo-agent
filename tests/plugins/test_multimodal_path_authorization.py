@@ -111,11 +111,11 @@ def test_real_tool_context_uses_only_current_run_authorization(tmp_path, monkeyp
     config, _, dedicated, factory = setup_media(tmp_path, monkeypatch)
     # Thread mode lets this offline test use the in-memory dedicated provider.
     shutil.copytree(PROJECT / "plugins/multimodal", tmp_path / "plugins/multimodal")
-    manifest_path = tmp_path / "plugins/multimodal/SKILL.md"
-    manifest = manifest_path.read_text(encoding="utf-8")
-    manifest_path.write_text(manifest.replace(
-        '"entrypoint": "tool.py:run"', '"entrypoint": "tool.py:run", "execution_mode": "thread"'
-    ), encoding="utf-8")
+    manifest_path = tmp_path / "plugins/multimodal/plugin.yaml"
+    import yaml
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["execution_mode"] = "thread"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     from run.tools import discover_tools
     registry = discover_tools(tmp_path, "alice")
     registry.tools["multimodal"]._callable = tool.run

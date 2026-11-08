@@ -1,0 +1,23 @@
+name: get_current_time
+description: 获取当前时间，默认返回北京时间。支持查询任意 IANA 时区以及 ISO、Unix、日期和时刻格式；涉及当前时间判断时应先调用本工具。
+input_schema:
+  type: object
+  properties:
+    target_timezone:
+      type: string
+      description: 额外查询的 IANA 时区名，如 Asia/Tokyo、America/New_York；空值表示仅返回 UTC 和北京时间
+    format:
+      type: string
+      enum:
+      - iso
+      - unix
+      - date
+      - time
+      default: iso
+      description: 输出格式：iso=ISO 8601、unix=秒级时间戳、date=当地日期 YYYY-MM-DD、time=当地时刻 HH:MM:SS
+  additionalProperties: false
+version: 1.1.0
+enabled: true
+entrypoint: tool.py:run
+permission: read
+origin: builtin

@@ -98,7 +98,7 @@ def record_provider_request_diagnostic(
     request.metadata["prompt_hash"] = diagnostic["system_prompt_sha256"]
 
 
-def build_conversation_request(*, runtime, system_prompt, items, tools, output_reserve,
+def build_conversation_request(*, runtime, system_prompt, items, tools, max_output_tokens,
                                stream, reasoning_enabled, reasoning_effort,
                                user, source, session_id, run_id, integration_id, snapshot_id,
                                iteration):
@@ -106,7 +106,7 @@ def build_conversation_request(*, runtime, system_prompt, items, tools, output_r
     return KemoRequest.create(
         model=runtime["model"], system_prompt=system_prompt, input=items, tools=tools,
         stream=stream,
-        generation={"max_output_tokens": output_reserve},
+        generation={"max_output_tokens": max_output_tokens},
         reasoning=({"enabled": True, "effort": reasoning_effort, "return": "auto"}
                    if reasoning_enabled else {"enabled": False}),
         metadata={"capability": "conversation", "user": user, "source": source,

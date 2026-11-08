@@ -4,8 +4,8 @@
     "properties": {
       "task": {"type": "string", "minLength": 1, "pattern": "\\S"},
       "context": {"type": "string"},
-      "constraints": {"type": "array", "items": {"type": "string"}},
-      "acceptance_criteria": {"type": "array", "items": {"type": "string"}}
+      "constraints": {"type": ["string", "array"], "items": {"type": "string"}},
+      "acceptance_criteria": {"type": ["string", "array"], "items": {"type": "string"}}
     },
     "required": ["task"],
     "additionalProperties": false

@@ -38,8 +38,8 @@ def plugin(root):
         "enabled": True, "entrypoint": "tool.py:run", "execution_mode": "thread",
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     }
-    (directory / "SKILL.md").write_text(
-        "# shell\nTest\n\n## Tool\n```json\n" + json.dumps(manifest) + "\n```\n", "utf-8")
+    (directory / 'SKILL.md').write_text('# shell\nTest\n\n', 'utf-8')
+    (directory / 'plugin.yaml').write_text(json.dumps(manifest), 'utf-8')
     (directory / "tool.py").write_text(
         "from tests.core.test_shell_model_handoff import spawn\n"
         "def run(*, context): return spawn(context)\n", "utf-8")

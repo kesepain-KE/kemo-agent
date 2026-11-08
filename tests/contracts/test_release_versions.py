@@ -55,6 +55,7 @@ def test_old_release_tag_cannot_validate_new_source(version_guard, capsys):
     ("web/frontend/package-lock.json", '"version": "{version}"'),
     ("cli.py", 'VERSION = "{version}"'),
     ("readme.md", "version-{version}-blue"),
+    ("readme.md", "当前版本 `{version}`"),
     ("README_EN.md", "Current version: `{version}`"),
     ("agents.md", "当前稳定版本：`kemo-agent {version}`"),
     ("config/global_soul.md", "kemo-agent {version}"),

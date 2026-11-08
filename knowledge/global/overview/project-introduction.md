@@ -79,8 +79,8 @@ Kemo Graph 是可选的侧载超级文档站，只有用户明确要求时才查
 
 ### 工具与技能
 
-`plugins/` 是唯一能注册 Provider function call 的目录。每个插件使用 `SKILL.md` 描述操作规则
-和 Tool Schema，并由本地 Python 入口执行。
+`plugins/` 是唯一能注册 Provider function call 的目录。每个插件使用 `SKILL.md` 描述操作规则，
+由 `plugin.yaml` 声明 Tool Schema 和归属，并由本地 Python 入口执行。
 
 长时间后台任务应由专门工具先启动，再使用 `wait_for_condition` 等待可靠的 PID、路径或端口
 条件；最长等待 7200 秒，条件满足立即返回。等待超时只代表条件尚未满足，不等同于后台任务

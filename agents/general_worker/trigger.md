@@ -13,7 +13,7 @@
 
 使用 subagent_dispatch，action=call、agent=general_worker。
 input.task 必填且非空，明确任务目标；context 可选，传入必要事实摘要；
-constraints、acceptance_criteria 为可选字符串数组。
+constraints、acceptance_criteria 可选，支持一段文字或字符串数组，按原文交付给子智能体。
 不传工具授权、知识权限或是否允许委派等字段，权限由可信运行时决定。
 
 ```json

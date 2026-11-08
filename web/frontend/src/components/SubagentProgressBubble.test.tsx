@@ -53,6 +53,42 @@ describe('dispatch card replaces floating subagent progress', () => {
     expect(await screen.findByText('提交状态不可用')).toBeInTheDocument()
     expect(screen.queryByText('执行中')).not.toBeInTheDocument()
   })
+  it('shows missing and unknown input fields before a task is created', () => {
+    const failure = { ok: false, status: 'invalid_input', error: {
+      code: 'invalid_agent_input', message: 'input 不符合契约',
+      missing: ['task'], unknown: ['goal', 'deliverable'],
+    } }
+    view(<SubagentToolCard item={{ ...item, status: 'error', arguments: {
+      action: 'call', agent: 'general_worker', input: { goal: 'inspect files' },
+    }, result: { ok: false, error: { message: 'generic envelope' }, result: failure } }}
+      user="alice" sessionId="s1" />)
+    expect(screen.getByText('输入格式错误')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('缺少字段：task')
+    expect(screen.getByRole('alert')).toHaveTextContent('未声明的字段：goal, deliverable')
+    expect(screen.queryByText('分派失败')).not.toBeInTheDocument()
+    expect(screen.queryByText('generic envelope')).not.toBeInTheDocument()
+    expect(getAgentTasks).not.toHaveBeenCalled()
+    expect(getAgentTask).not.toHaveBeenCalled()
+  })
+  it('restores input type errors from historical result text', () => {
+    view(<SubagentToolCard item={{ ...item, status: 'error', result: undefined,
+      arguments: undefined, argumentsText: JSON.stringify(item.arguments),
+      resultText: JSON.stringify({ ok: false, result: { ok: false, status: 'invalid_input',
+        error: { code: 'invalid_agent_input', message: 'input 不符合契约', missing: [], unknown: [],
+          type_mismatch: [{ field: 'acceptance_criteria', expected: 'array' }] } } }),
+    }} user="alice" sessionId="s1" />)
+    expect(screen.getByText('输入格式错误')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('字段 acceptance_criteria 类型应为 array')
+    expect(getAgentTask).not.toHaveBeenCalled()
+  })
+  it('shows the returned reason for other submission failures', () => {
+    view(<SubagentToolCard item={{ ...item, status: 'error',
+      result: { ok: false, error: { message: '子代理未公开或不存在：worker' } },
+    }} user="alice" sessionId="s1" />)
+    expect(screen.getByText('分派失败')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('子代理未公开或不存在：worker')
+    expect(screen.queryByText('输入格式错误')).not.toBeInTheDocument()
+  })
   it('never displays a side bubble or reports queued as completed; opens only on click', async () => {
     openWorkspacePath('alice', 'download', 'a.md', 'a.md')
     view(<SubagentToolCard item={item} user="alice" sessionId="s1" />)
