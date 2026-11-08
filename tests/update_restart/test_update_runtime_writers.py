@@ -188,7 +188,7 @@ def test_native_probe_failure_prevents_all_update_writes(tmp_path, monkeypatch, 
         method.assert_not_called()
 
 
-def test_real_isolated_python_writer_is_identified_without_a_pid_file(tmp_path, offline_cli, capsys):
+def test_real_isolated_python_writer_is_identified_without_a_pid_file(tmp_path, offline_cli, capsys, monkeypatch):
     # This is an inert test child in a temporary installation, not a real Web,
     # cron or message service. The checker must identify its actual live PID.
     process = subprocess.Popen(
@@ -200,6 +200,12 @@ def test_real_isolated_python_writer_is_identified_without_a_pid_file(tmp_path, 
     assert stdout is not None
     try:
         assert stdout.readline().strip() == "ready"
+        # Keep real OS inspection of our child independent of unrelated,
+        # potentially uninspectable Python/Node processes on the test host.
+        process_iter = psutil.process_iter
+        monkeypatch.setattr(psutil, "process_iter", lambda attrs: (
+            candidate for candidate in process_iter(attrs) if candidate.pid == process.pid
+        ))
         assert cli.main(["--module", "core", "--yes"], root=tmp_path) == 1
         assert f"PID={process.pid}" in capsys.readouterr().err
         offline_cli["run_modules"].assert_not_called()

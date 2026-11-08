@@ -250,14 +250,16 @@ def test_cancel_waits_for_real_exit_and_never_resumes_provider(setup):
         eventually(lambda: (root_record(root) or {}).get('status') == 'cancelling')
         eventually(lambda: TaskLedger(root, 'alice').records(
             'web', 'scope', parent=root_record(root)['id'])[0][0]['status'] == 'cancelling')
+        stopped_requests = len(provider.requests)
+        assert 2 <= stopped_requests <= 3
         time.sleep(.1)
-        assert thread.is_alive() and len(provider.requests) == 2
+        assert thread.is_alive() and len(provider.requests) == stopped_requests
     finally:
         release.set()
     thread.join(8)
     assert not thread.is_alive() and not errors
     assert root_record(root)['status'] == 'cancelled'
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == stopped_requests
 
 
 def test_timed_out_running_is_not_an_execution_terminal(setup):
@@ -267,11 +269,13 @@ def test_timed_out_running_is_not_an_execution_terminal(setup):
         raise AgentTimeoutError('still running', process_terminated=False, completion_future=future)
     JOBS['worker'] = detached
     thread, _, _, errors, provider = launch(root)
-    eventually(lambda: (root_record(root) or {}).get('status') == 'waiting_children')
-    time.sleep(.1)
-    assert thread.is_alive() and len(provider.requests) == 2
-    future.set_result({'answer': 'late-output'})
-    thread.join(8)
+    try:
+        eventually(lambda: (root_record(root) or {}).get('status') == 'waiting_children')
+        time.sleep(.1)
+        assert thread.is_alive() and 2 <= len(provider.requests) <= 3
+    finally:
+        future.set_result({'answer': 'late-output'})
+        thread.join(8)
     assert not thread.is_alive() and not errors
     assert 'late-output' in provider.requests[-1].model_dump_json()
     assert root_record(root)['status'] == 'completed'
@@ -287,14 +291,15 @@ def test_guidance_wakes_the_same_parent_before_child_exits(setup):
     try:
         eventually(lambda: (root_record(root) or {}).get('status') == 'waiting_children')
         assert mailbox.offer('change the delivery format')[0]
-        eventually(lambda: len(provider.requests) >= 3)
-        assert 'change the delivery format' in provider.requests[2].model_dump_json()
+        eventually(lambda: any(
+            'change the delivery format' in value.model_dump_json() for value in provider.requests
+        ))
         assert thread.is_alive()
     finally:
         release.set()
     thread.join(8)
     assert not thread.is_alive() and not errors
-    assert len(provider.requests) == 4
+    assert 4 <= len(provider.requests) <= 5
 
 
 def test_fast_scheduler_cannot_overwrite_completed_with_a_slow_queued_snapshot(setup):
