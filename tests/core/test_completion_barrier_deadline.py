@@ -176,28 +176,32 @@ def test_repeated_finish_uses_one_deadline_and_does_not_fake_child_exit(setup):
 
     def uncooperative(_):
         started.set()
-        release.wait(8)
+        release.wait()
         return {"answer": "late"}
 
     child = scheduler.submit_callable("worker", {}, uncooperative, source="web", session_id="direct",
                                       ownership=coordinator.ownership("call"))
-    assert started.wait(2)
     thread = threading.Thread(target=lambda: coordinator.finish("failed"), daemon=True)
-    thread.start()
     try:
-        thread.join(2)
+        assert started.wait(10)
+        thread.start()
+        # The response deadline excludes terminal ledger persistence.
+        thread.join(10)
         assert not thread.is_alive(), "finish keeps resetting the expired deadline"
         first = coordinator.ledger.get(coordinator.id, "web", "direct")
         assert first["status"] == "partial" and first["unfinished_tasks"][0]["id"] == child
+        deadline = coordinator._completion_deadline
         began = time.monotonic()
         coordinator.finish("interrupted")
         assert time.monotonic() - began < .2
+        assert coordinator._completion_deadline == deadline
         again = coordinator.ledger.get(coordinator.id, "web", "direct")
         assert again["finished_at"] == first["finished_at"]
         assert coordinator.ledger.get(child, "web", "direct")["execution_live"] is True
     finally:
         release.set()
-        thread.join(5)
+        if thread.is_alive():
+            thread.join(5)
 
 
 def test_user_stop_keeps_children_running_unless_cascade_was_explicit(setup):
@@ -242,7 +246,13 @@ def test_generator_close_keeps_partial_archive_and_fence_until_real_exit(setup):
     root, scheduler = setup
     bounded_config(root)
     release, started, closed = threading.Event(), threading.Event(), threading.Event()
-    JOBS["worker"] = lambda cancel: started.set() or release.wait(10) or {"answer": "late"}
+
+    def uncooperative(_):
+        started.set()
+        release.wait()
+        return {"answer": "late"}
+
+    JOBS["worker"] = uncooperative
     errors = []
 
     def consume_and_close():
@@ -250,7 +260,7 @@ def test_generator_close_keeps_partial_archive_and_fence_until_real_exit(setup):
         try:
             for event in iterator:
                 if event.type == "tool_call_result":
-                    assert started.wait(2)
+                    assert started.wait(10)
                     break
             iterator.close()
             closed.set()
@@ -260,7 +270,7 @@ def test_generator_close_keeps_partial_archive_and_fence_until_real_exit(setup):
     thread = threading.Thread(target=consume_and_close, daemon=True)
     thread.start()
     try:
-        assert closed.wait(3) and not errors
+        assert closed.wait(15) and not errors
         record = root_record(root)
         assert record["status"] == "partial" and record["execution_live"]
         integration, saved = integration_record(root)

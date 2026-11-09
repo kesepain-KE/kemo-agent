@@ -308,7 +308,8 @@ def test_fast_scheduler_cannot_overwrite_completed_with_a_slow_queued_snapshot(s
     for index in range(24):
         task_id = scheduler.submit_callable('worker', {}, lambda cancel: {'answer': 'ok'},
             source='web', session_id='fast', ownership=coordinator.ownership(str(index)))
-        scheduler.wait(task_id, timeout=2, source='web', session_id='fast')
+        # Completion includes durable ledger writes on hosted Windows runners.
+        scheduler.wait(task_id, timeout=15, source='web', session_id='fast')
         record = coordinator.ledger.get(task_id, 'web', 'fast')
         assert record['status'] == 'completed' and not record['execution_live']
         coordinator.acknowledge_sync(task_id)
@@ -322,7 +323,7 @@ def test_sync_delivery_waits_for_provider_acceptance_and_retries_without_reexecu
     executions = []
     task_id = scheduler.submit_callable('worker', {}, lambda cancel: executions.append(1) or {'answer': 'ok'},
         source='web', session_id='sync', ownership=coordinator.ownership('sync-call'))
-    scheduler.wait(task_id, timeout=2, source='web', session_id='sync')
+    scheduler.wait(task_id, timeout=15, source='web', session_id='sync')
     coordinator.acknowledge_sync(task_id)
     assert coordinator.ledger.get(task_id, 'web', 'sync')['handled'] is False
     assert coordinator.notifications() is None  # Already present in the paired tool message.
