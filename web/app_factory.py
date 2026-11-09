@@ -14,6 +14,7 @@ from web.operation_contracts import AuthStatusResponse, AuthLogoutResponse
 from web.service import WebRunService
 from web.routes.workspace import register_workspace_routes
 from web.routes.module_workspaces import register_module_workspace_routes
+from web.routes.decisions import register_decision_routes
 from web.streaming import (
     ClosingStreamingResponse,
     DEFAULT_SSE_HEARTBEAT_SECONDS,
@@ -187,6 +188,21 @@ def create_app(
         if callable(getattr(backend, 'cleanup_empty_web_sessions', None)):
             worker = threading.Thread(target=sweep, name='web-empty-session-cleanup', daemon=True)
             worker.start()
+        decision_worker = None
+        recover_decisions = getattr(backend, "recover_decision_runs", None)
+        if callable(recover_decisions):
+            def recover_questions():
+                import logging
+                while not stop.is_set():
+                    try:
+                        recover_decisions()
+                    except Exception:
+                        logging.getLogger(__name__).exception("交互式决策恢复扫描失败")
+                    stop.wait(2)
+            decision_worker = threading.Thread(
+                target=recover_questions, name="decision-recovery", daemon=True,
+            )
+            decision_worker.start()
         try:
             yield
         finally:
@@ -194,6 +210,8 @@ def create_app(
             await stream_cleanup.drain()
             if worker is not None:
                 await asyncio.to_thread(worker.join, 5)
+            if decision_worker is not None:
+                await asyncio.to_thread(decision_worker.join, 5)
 
     app = FastAPI(title="kemo-agent Web API", version="2", lifespan=lifespan)
     app.state.web_service = backend
@@ -351,6 +369,7 @@ def create_app(
     register_module_routes(app, backend)
     register_module_workspace_routes(app, cast(WebRunService, backend))
     register_session_routes(app, backend)
+    register_decision_routes(app, cast(WebRunService, backend))
     register_task_routes(app, backend)
     register_setting_routes(app, backend, configured_auth)
     register_workspace_routes(app, backend)

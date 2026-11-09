@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kemo App 桥接控制台</title>  <script type="module" crossorigin src="./assets/index-CTr4bXXs.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-C-pkXxX4.css">
+</head>
+<body>
+<header><div><small>KEMO APP</small><h1>桥接控制台</h1><p><span id="state">正在读取状态</span> · <span id="endpoint">—</span></p></div><button id="reload" type="button">刷新状态</button></header>
+<p id="message" role="status" aria-live="polite"></p>
+<nav aria-label="控制台功能">
+  <button type="button" data-view="overview" aria-pressed="true">运行与设备</button>
+  <button type="button" data-view="settings" aria-pressed="false">连接配置</button>
+  <button type="button" data-view="users" aria-pressed="false">用户绑定</button>
+</nav>
+<main>
+<article id="setup"><h2>初始化与配置</h2><p id="setup-state">正在读取本地配置。</p><button type="button" data-action="initialize">初始化本地配置</button><p>初始化会生成本机会话密钥，不会启动桥接。设备 Token 在“连接配置”中写入；App 账户使用模块的 manage_user.py 创建，再到“用户绑定”中关联智能体用户。</p></article>
+<section data-section="overview">
+  <div class="metrics">
+    <article><span>桥接进程</span><strong id="running">—</strong></article>
+    <article><span>在线设备</span><strong id="devices-count">—</strong></article>
+    <article><span>WebSocket 连接</span><strong id="connections">—</strong></article>
+    <article><span>已绑定用户</span><strong id="users-count">—</strong></article>
+  </div>
+  <article><h2>服务控制</h2><div class="actions"><button type="button" data-action="start">启动桥接</button><button type="button" data-action="stop">停止桥接</button><button type="button" data-action="restart">重启桥接</button><button type="button" data-action="refresh">刷新采集</button></div><p id="activation"></p></article>
+  <article><h2>在线设备</h2><div class="table-wrap"><table><thead><tr><th>智能体用户</th><th>设备 ID</th><th>连接数</th><th>连接时间</th></tr></thead><tbody id="device-rows"></tbody></table></div><p id="devices-empty" hidden>当前没有在线设备。</p></article>
+</section>
+<section data-section="settings" hidden>
+  <article><h2>对外端口</h2><p>运行中保存端口会按现有机制重启桥接服务。</p><form id="port-form"><label>端口<input name="port" type="number" required min="1" max="65535" value="8742"></label><button type="button" id="save-port">保存端口</button></form></article>
+  <article><h2>设备 Token</h2><p>配置状态：<span id="token-status">—</span> · 核对指纹：<span id="fingerprint">—</span></p><form id="token-form"><label>新设备 Token<input name="token" type="password" required minlength="32" maxlength="4096" autocomplete="new-password"></label><button type="button" id="save-token">写入新 Token</button></form><p>密钥仅写入后端，不回显。运行中替换 Token 会重启桥接服务。</p></article>
+</section>
+<section data-section="users" hidden>
+  <article><h2>当前绑定</h2><div class="table-wrap"><table><thead><tr><th>App 用户</th><th>智能体用户</th><th>操作</th></tr></thead><tbody id="binding-rows"></tbody></table></div><p id="bindings-empty" hidden>尚未配置 App 用户绑定。</p></article>
+  <article><h2>绑定已有 App 用户</h2><p>App 账户须先通过现有账户管理入口创建。</p><form id="binding-form"><label>App 用户<input name="app_username" required maxlength="128" autocomplete="off"></label><label>智能体用户<input name="agent_username" required maxlength="128" autocomplete="off"></label><button type="button" id="save-binding">保存用户绑定</button></form></article>
+</section>
+</main>
+</body></html>

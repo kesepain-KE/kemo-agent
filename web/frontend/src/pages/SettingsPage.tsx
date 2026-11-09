@@ -502,7 +502,7 @@ export function SettingsPage() {
     if (!validation && (!Number.isInteger(globalDraft.cron.session_idle_close_seconds) || globalDraft.cron.session_idle_close_seconds < 3600)) validation = '闲置会话兜底阈值必须是至少 3600 秒的整数。'
     submit({
       label: '保存运行限制',
-      userChanges: { task_plan: userDraft.task_plan },
+      userChanges: { task_plan: userDraft.task_plan, interactive_decisions: userDraft.interactive_decisions },
       globalChanges: {
         tools: globalDraft.tools,
         history: globalDraft.history,
@@ -828,6 +828,7 @@ export function SettingsPage() {
           <article className="setting-section">
             <div className="setting-section-head"><strong>{tr("任务计划")}</strong><span>控制计划是否需要批准，以及单个计划的最大步骤数。</span></div>
             <SettingRow title="自动接受任务计划" description="开启后跳过人工批准；只影响当前用户" source="user" control={<Toggle checked={userDraft.task_plan.auto_accept} label="自动接受任务计划" onChange={(value) => setUserDraft({ ...userDraft, task_plan: { auto_accept: value } })} />} />
+            <SettingRow title="交互式决策" description="允许智能体在运行中提问，支持选项和自定义回复；30 分钟未回答时自主继续" source="user" control={<Toggle checked={userDraft.interactive_decisions.enabled} label="交互式决策" onChange={(value) => setUserDraft({ ...userDraft, interactive_decisions: { enabled: value } })} />} />
             <SettingRow title="任务计划最大步骤" description="单个计划允许生成的最大步骤数" source="global" control={<NumberInput label="任务计划最大步骤" value={globalDraft.task_plan.max_steps} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, task_plan: { max_steps: value } })} />} />
           </article>
           <article className="setting-section">

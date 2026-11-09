@@ -300,6 +300,9 @@ details[open] > .stepTitle > svg { transform: rotate(180deg); }
 
 /* ---------------------------- 左侧计划悬浮层 ---------------------------- */
 .sideDock {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   position: absolute;
   z-index: 20;
   top: var(--s-6);
@@ -323,6 +326,7 @@ details[open] > .stepTitle > svg { transform: rotate(180deg); }
 }
 
 .taskPlanBubble.sideCard {
+  flex-shrink: 0;
   width: 100%;
   max-width: none;
   padding: 14px;

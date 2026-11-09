@@ -67,7 +67,7 @@ function Workbench({ user, kind }: { user: string; kind: ModuleKind }) {
   const scoped = useMemo(() => rows.filter(item => scope === 'all' || item.scope === scope), [rows, scope])
   const filtered = useMemo(() => rows.filter(item => (
     (scope === 'all' || item.scope === scope)
-    && `${item.title} ${item.module} ${item.description}`.toLowerCase().includes(search.toLowerCase())
+    && `${item.title} ${item.module}`.toLowerCase().includes(search.trim().toLowerCase())
   )), [rows, scope, search])
   const item = scoped.find(row => row.key === selected) || scoped[0]
   const page = item?.pages.find(entry => entry.id === pageId) || item?.pages.find(entry => entry.id === item.default_page) || item?.pages[0]
@@ -166,8 +166,8 @@ function Workbench({ user, kind }: { user: string; kind: ModuleKind }) {
     {feedback ? <div className={styles.notice} role="status">{feedback}</div> : null}
     {showImport ? <section className={styles.importArea}>
       <div><h2>{t('导入本地模块')}</h2><p>{t('安装包包含可执行后端代码，请审查来源、入口与权限。更新保留配置和运行数据。')}</p></div>
-      <div className={styles.headerActions}>
-        {kind === 'expand' ? <select aria-label={t('安装作用域')} value={installScope} disabled={busy || !!preview} onChange={event => setInstallScope(event.target.value as Scope)}>{scopes.map(value => <option key={value} value={value}>{t(scopeLabels[value])}</option>)}</select> : <span>{t('全局感知')}</span>}
+      <div className={styles.importActions}>
+        {kind === 'expand' ? <label className={styles.importScope}><span>{t('安装作用域')}</span><select aria-label={t('安装作用域')} value={installScope} disabled={busy || !!preview} onChange={event => setInstallScope(event.target.value as Scope)}>{scopes.map(value => <option key={value} value={value}>{t(scopeLabels[value])}</option>)}</select></label> : <span>{t('全局感知')}</span>}
         <input ref={fileInput} type="file" accept=".zip" hidden onChange={event => { const file = event.target.files?.[0]; if (file) void upload(file); event.target.value = '' }} />
         <button type="button" disabled={busy} onClick={() => fileInput.current?.click()}>{t('选择 ZIP')}</button>
         <button type="button" disabled={busy} onClick={() => { setShowImport(false); setPreview(null) }}>{t('关闭')}</button>
@@ -205,8 +205,10 @@ function Workbench({ user, kind }: { user: string; kind: ModuleKind }) {
             type="button" key={row.key} className={`${styles.moduleButton} ${item?.key === row.key ? styles.selected : ''}`} aria-pressed={item?.key === row.key}
             onClick={() => navigate(() => select(scope, row))}>
             <span className={styles.moduleTitle}><Boxes size={17} /><strong>{row.title}</strong><span className={row.valid && row.health === '正常' ? styles.dot : styles.badDot} /></span>
-            <small>{t(scopeLabels[row.scope])} · {row.module}</small><span className={styles.moduleDescription}>{row.description}</span>
-            <span className={styles.tags}><span>{row.enabled ? t('已启用') : t('未启用')}</span><span>{row.injected_tokens || 0} tok</span>{row.ui_error ? <span>{t('UI 异常')}</span> : null}</span>
+            <span className={styles.moduleMeta}><small title={`${t(scopeLabels[row.scope])} · ${row.module}`}>{t(scopeLabels[row.scope])} · {row.module}</small>
+              <span className={styles.tags}><span>{row.enabled ? t('已启用') : t('未启用')}</span><span>{row.injected_tokens || 0} tok</span></span>
+            </span>
+            {row.ui_error ? <span className={styles.tags}><span>{t('UI 异常')}</span></span> : null}
           </button>)}
         </div>
       </aside>

@@ -206,6 +206,8 @@ UTF-8/宿主编码解码与显示范围见 `knowledge/global/web/frontend-conven
 - `memory_manage`：`list/get/search/upsert/...`；
 - `subagent_dispatch`：`list/create/call/status/cancel`；
 - `task_plan`：计划及步骤状态操作；
+- `user_decision`：`ask/get/close`，入口 `plugins/user_decision/tool.py:run` 执行提问、查询和关闭，
+  主智能体运行时负责持久化、超时和等待调度；方法见 `plugins/user_decision/SKILL.md`；
 - `network`、`multimodal`：按能力声明选择网络或媒体动作。
 
 采用 action 时，应把允许值写入 enum，并在说明文本中列出每个 action 的必填字段、是否写入

@@ -92,6 +92,7 @@ from web.services.sessions import SessionServiceMixin
 from web.services.settings import SettingsServiceMixin, _fetch_remote_version_manifest
 from web.services.skills import SkillServiceMixin
 from web.services.tasks import TaskServiceMixin
+from web.services.decisions import DecisionServiceMixin
 
 
 __all__ = [
@@ -118,6 +119,7 @@ __all__ = [
 
 
 class WebRunService(
+    DecisionServiceMixin,
     BackgroundServiceMixin,
     RunControlServiceMixin,
     FileServiceMixin,

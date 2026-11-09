@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "default_page": "dashboard",
+  "pages": [
+    {"id": "dashboard", "label": "桥接控制台", "type": "web", "entry": "ui/dist/index.html", "permissions": ["module.status.read", "module.action.invoke"]},
+    {"id": "panel", "label": "通用配置", "type": "panel"}
+  ],
+  "actions": [
+    {"id": "initialize", "label": "初始化桥接配置", "handler": "initialize"},
+    {"id": "dashboard_data", "label": "读取桥接与设备状态", "handler": "dashboard_data"},
+    {"id": "refresh", "label": "刷新采集", "handler": "refresh"},
+    {"id": "start", "label": "启动桥接", "handler": "start"},
+    {"id": "stop", "label": "停止桥接", "handler": "stop"},
+    {"id": "restart", "label": "重启桥接", "handler": "restart"},
+    {"id": "set_port", "label": "设置对外端口", "handler": "panel_set_port", "input_schema": {
+      "type": "object", "required": ["port"], "properties": {"port": {"type": "integer", "minimum": 1, "maximum": 65535}}
+    }},
+    {"id": "set_token", "label": "写入设备 Token", "handler": "panel_set_token", "input_schema": {
+      "type": "object", "required": ["token"], "properties": {"token": {"type": "string", "minLength": 32, "maxLength": 4096}}
+    }},
+    {"id": "bind_user", "label": "绑定用户", "handler": "panel_bind_user", "input_schema": {
+      "type": "object", "required": ["app_username", "agent_username"], "properties": {
+        "app_username": {"type": "string", "minLength": 1, "maxLength": 128},
+        "agent_username": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    }},
+    {"id": "unbind_user", "label": "解除用户绑定", "handler": "panel_unbind_user", "input_schema": {
+      "type": "object", "required": ["app_username"], "properties": {"app_username": {"type": "string", "minLength": 1, "maxLength": 128}}
+    }}
+  ]
+}

@@ -34,6 +34,12 @@ kemo-agent 与 Android App 之间的常驻 FastAPI 桥接服务。监听配置�
 
 # 可用命令
 
+## `initialize`
+
+初始化本地 `config.json`、随机会话密钥和空账户文件；重复执行保留现有配置与账户，
+不激活或启动桥接。返回 `initialized`、`configured` 和 `missing`，不返回会话密钥。
+专属控制台直接使用此入口；也可在模块目录执行 `python initialize_config.py`。
+
 Web“用户配置”组件只声明以下四个面板命令，不代表开放其他本地配置：
 
 - `panel_set_port`：修改对外监听端口；受管实例运行中会先停止、写入再重启。

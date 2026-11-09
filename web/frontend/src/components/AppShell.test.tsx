@@ -2441,6 +2441,107 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(screen.queryByLabelText('待发送附件：voice.mp3')).not.toBeInTheDocument())
   })
 
+  it.each(['paused', 'pending'])('从 %s 计划卡片启动且没有用户正文时，历史刷新不重复实时工具和思考', async (status) => {
+    const plan = {
+      plan_id: 'plan_12345678', title: '无正文续跑验收', description: '验证实时与历史交接',
+      status, auto_accept: false, reminder: '', source: 'web', session_id: 's1',
+      current_step: 'step_1', revision: 2, created_at: '', updated_at: '',
+      progress: { completed: 0, total: 1, percent: 0 },
+      steps: [{ step_id: 'step_1', title: '核对执行结果', description: '', status: 'pending',
+        depends_on: [], critical: true, tool_name: '', started_at: '', finished_at: '' }],
+    }
+    const tools = [
+      { call_id: 'plan-time', name: 'get_current_time', arguments: { format: 'iso' } },
+      { call_id: 'plan-step', name: 'task_plan',
+        arguments: { action: 'step_done', plan_id: plan.plan_id, step_id: 'step_1' } },
+    ]
+    const requests: Array<{ prompt: string; plan_id: string }> = []
+    let started = false
+    let closed = false
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder()
+    server.use(
+      http.get('/api/users/kesepain/tasks', () => HttpResponse.json({
+        user: 'kesepain', summary: { active_plans: 1, waiting_plans: 0, enabled_crons: 0, completed_plans: 0 },
+        plans: [{ ...plan, status: started ? closed ? 'completed' : 'running' : status }],
+        cron_tasks: [], executions: [],
+      })),
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json(cardHistory({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [
+          { role: 'user', content: '创建验收计划' },
+          { role: 'assistant', content: '计划已经创建' },
+          ...(started ? [
+            { role: 'user' as const, content: `【任务计划连续执行】\n计划 ID：${plan.plan_id}` },
+            { role: 'assistant' as const, content: closed ? '续跑已完成' : '', level: closed ? 'final' as const : 'interim' as const },
+          ] : []),
+        ],
+        integrations: [
+          { integration_number: 1 },
+          ...(started ? [{ integration_number: 2, response_closed: closed, tool_calls: 2,
+            usage: { input_tokens: 20, output_tokens: 10, provider_request_count: 3 } }] : []),
+        ],
+        integration_traces: started ? [{ integration_number: 2, reasoning: '续跑思考',
+          tools: tools.map(tool => ({ ...tool, status: 'completed',
+            arguments_text: JSON.stringify(tool.arguments), result_text: '{"ok":true}' })) }] : [],
+        pagination: { integration_count: started ? 2 : 1 },
+      }))),
+    )
+    const interceptedFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
+      requests.push(JSON.parse(String(init?.body)))
+      started = true
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { streamController = controller },
+      }), { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('计划已经创建')
+    expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('')
+    fireEvent.click(await screen.findByRole('button', { name: status === 'paused' ? '继续执行' : '批准执行' }))
+    await waitFor(() => expect(requests).toHaveLength(1))
+    try {
+      expect(requests[0]).toMatchObject({ prompt: '', plan_id: plan.plan_id })
+      const events = [
+        { type: 'reasoning_delta', content: '续跑思考' },
+        ...tools.flatMap(tool => [
+          { type: 'tool_call_start', tool_call_id: tool.call_id, tool_name: tool.name, arguments: tool.arguments },
+          { type: 'tool_call_result', tool_call_id: tool.call_id, tool_name: tool.name,
+            result: { ok: true }, metadata: { status: 'completed' } },
+        ]),
+      ]
+      streamController.enqueue(encoder.encode(events.map(event =>
+        `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')))
+      await screen.findByRole('button', { name: '停止生成' })
+      await act(async () => {
+        await app.client.invalidateQueries({ queryKey: ['tasks', 'kesepain'] })
+        await app.client.invalidateQueries({ queryKey: ['history', 'kesepain', 's1'] })
+      })
+      await waitFor(() => expect(app.client.getQueryData<{ pages: Array<{ pagination: { integration_count: number } }> }>(
+        ['history', 'kesepain', 's1'],
+      )?.pages[0].pagination.integration_count).toBe(2))
+      expect(screen.getAllByText('get_current_time', { exact: true })).toHaveLength(1)
+      expect(screen.getAllByText('task_plan', { exact: true })).toHaveLength(1)
+      await waitFor(() => expect(screen.getAllByText('续跑思考', { exact: true })).toHaveLength(1))
+      expect(screen.queryByText(/【任务计划连续执行】/)).not.toBeInTheDocument()
+    } finally {
+      closed = true
+      streamController.enqueue(encoder.encode(
+        'event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed","text":"续跑已完成"}}\n\n',
+      ))
+      streamController.close()
+    }
+    expect(await screen.findByText('续跑已完成')).toBeInTheDocument()
+    await screen.findByRole('button', { name: '发送' })
+    expect(screen.getAllByText('get_current_time', { exact: true })).toHaveLength(1)
+    expect(screen.getAllByText('task_plan', { exact: true })).toHaveLength(1)
+    expect(screen.getAllByRole('group', { name: '第 2 轮运行统计' })).toHaveLength(1)
+    expect(requests).toHaveLength(1)
+  })
+
   it('任务计划和引导归档到折叠过程，Token 统计保留在正文下方', async () => {
     const pendingPlan = {
       plan_id: 'plan_12345678', title: '终态归档验收', description: '验证计划卡片位置', status: 'pending', auto_accept: false,

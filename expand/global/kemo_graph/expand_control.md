@@ -84,6 +84,9 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 
 ### 显式写操作
 
+- `initialize_config`：初始化本地配置，首次以调用用户作为管理员，仅注册该用户可访问的
+  内置文档库；可传 `base_url`、`allow_remote`。已有配置仅允许原管理员调用并完整保留，
+  不联网、不创建 Store、不同步或构建。首次调用必须带框架用户上下文。
 - `activate`：保存完整 schema v2 注册表并激活拓展；不初始化、同步或构建。
 - `initialize`：幂等初始化选定 portable Store；内置库由 kemo-graph 自身管理。
 - `sync`：幂等初始化后，仅导入已注册 `source_roots` 中哈希发生变化的文档。默认

@@ -34,6 +34,7 @@ USER_ONLY_SECTIONS = frozenset(
         "perception",
         "plugins",
         "web_ui",
+        "interactive_decisions",
     }
 )
 MULTIMODAL_CAPABILITIES = frozenset(
@@ -381,6 +382,7 @@ def merge_user_config(
 
 def validate_cardstream_settings(config: dict[str, Any]) -> None:
     import math
+    interactive_decisions_enabled(config)
     agents = config.get("agents") or {}
     if not isinstance(agents, dict):
         raise ValueError("agents 必须是对象")
@@ -397,6 +399,13 @@ def validate_cardstream_settings(config: dict[str, Any]) -> None:
     retries = runtime.get("max_retries", 5) if isinstance(runtime, dict) else None
     if type(retries) is not int or not 0 <= retries <= 5:
         raise ValueError("provider_runtime.max_retries 必须是 0..5 的整数")
+
+
+def interactive_decisions_enabled(config: dict[str, Any]) -> bool:
+    section = config.get("interactive_decisions", {})
+    if not isinstance(section, dict) or type(section.get("enabled", False)) is not bool:
+        raise ConfigError("interactive_decisions.enabled 必须是布尔值")
+    return section.get("enabled", False)
 
 
 def load_config(user: str, root: Path | None = None) -> dict[str, Any]:

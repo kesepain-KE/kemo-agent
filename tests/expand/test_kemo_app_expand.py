@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from tests.type_assertions import require_present
+from deploy.core.policy import protected as protected_release_file
 
 import asyncio
 import hashlib
@@ -90,6 +91,25 @@ from web.services.module_panels import load_module_panel  # noqa: E402
 
 
 class KemoAppExpandTests(unittest.TestCase):
+    def test_dashboard_reports_devices_without_returning_private_connection_fields(self) -> None:
+        runtime = {"running": True, "active": True, "activated": True, "pid": 123}
+        with (
+            mock.patch.object(bridge_start, "status", return_value=runtime),
+            mock.patch.object(bridge_start, "_read_connections", return_value={
+                "websocket_connections": 2,
+                "devices": [{"user": "alice", "device_id": "phone-1", "connections": 2,
+                             "connected_at": 123, "token": "private-device-token"}],
+            }),
+        ):
+            result = bridge_start.execute("dashboard_data")
+            self.assertEqual(result["devices"], [{
+                "user": "alice", "device_id": "phone-1", "connections": 2, "connected_at": 123,
+            }])
+            self.assertEqual(result["websocket_connections"], 2)
+            self.assertNotIn("private-device-token", json.dumps(result))
+            runtime["running"] = False
+            self.assertEqual(bridge_start.execute("dashboard_data")["devices"], [])
+
     def test_user_panel_declares_only_port_token_and_user_binding_controls(self) -> None:
         panel, error = load_module_panel(MODULE_ROOT, "expand")
         self.assertEqual(error, "")
@@ -694,7 +714,7 @@ class KemoAppExpandTests(unittest.TestCase):
 
     def test_published_tree_has_no_runtime_identity_or_active_status(self) -> None:
         for name in ("config.json", "users.json", "credential_registry.json", "_server.pid"):
-            self.assertFalse((MODULE_ROOT / name).exists(), name)
+            self.assertTrue(protected_release_file(f"expand/global/kemo_app/{name}"), name)
         initial = (MODULE_ROOT / "input_data.md").read_text(encoding="utf-8")
         self.assertIn("未激活", initial)
         self.assertIn("未完成", initial)

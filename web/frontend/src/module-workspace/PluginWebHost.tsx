@@ -60,6 +60,7 @@ export function PluginWebHost({ user, item, page, onDirtyChange, onExpand }: {
       if (event.source !== iframe.current?.contentWindow || !message || message.protocol !== protocol) return
       if (message.kind === 'ready') {
         clearTimeout(startup)
+        setError('')
         setReady(true)
         initializeRef.current()
         return

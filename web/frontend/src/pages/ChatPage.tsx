@@ -313,7 +313,8 @@ export function ChatPage() {
   const handoffReady = liveRun?.phase === 'awaiting_history' && persistedUserMessages > liveRun.historyUserMessages
   const visibleLiveItems = handoffReady ? EMPTY_CHAT_ITEMS : liveItems
   const liveIntegrationNumbers = useMemo(() => new Set(visibleLiveItems.flatMap((item) => (
-    item.kind === 'message' && item.role === 'user' && item.integrationNumber !== undefined
+    (item.kind === 'execution_marker' || item.kind === 'message' && item.role === 'user')
+      && item.integrationNumber !== undefined
       ? [item.integrationNumber] : []
   ))), [visibleLiveItems])
   const historyItems = useMemo<ChatItem[]>(

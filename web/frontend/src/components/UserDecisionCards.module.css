@@ -1,0 +1,26 @@
+.card { flex: 0 0 auto; }
+.heading { display: flex; align-items: center; gap: 7px; color: var(--brand); font-size: 13px; }
+.heading strong { flex: 1; min-width: 0; }
+.heading button { flex-shrink: 0; }
+.mode { color: var(--muted); font-size: 11px; }
+.title { margin: 9px 0 0; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.question { margin: 10px 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.options { display: flex; flex-direction: column; gap: 8px; padding: 0; margin: 0; border: 0; min-width: 0; }
+.option { display: flex; align-items: flex-start; gap: 9px; min-height: 42px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; font-size: 13px; line-height: 1.5; }
+.option:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
+.option input { flex: 0 0 auto; margin: 3px 0 0; accent-color: var(--brand); }
+.option > span { min-width: 0; overflow-wrap: anywhere; }
+.description { display: block; color: var(--muted); margin-top: 4px; font-size: 12px; }
+.recommended { margin-left: 6px; color: var(--brand); font-size: 11px; }
+.options textarea { box-sizing: border-box; width: 100%; min-height: 76px; resize: vertical; padding: 10px; font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.options textarea:focus-visible, .submit:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.submit { width: 100%; min-height: 36px; margin-top: 10px; border: 1px solid var(--brand); border-radius: 10px; background: var(--brand); color: var(--accent-contrast, #fff); font: inherit; font-size: 13px; cursor: pointer; }
+.submit:disabled { opacity: .5; cursor: default; }
+.timeout { display: flex; align-items: center; gap: 5px; margin-top: 10px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.error { color: var(--red); font-size: 12px; overflow-wrap: anywhere; }
+.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@container task-plan-side (max-width: 220px) {
+  .heading { flex-wrap: wrap; }
+  .mode { order: 1; width: 100%; }
+  .option { padding: 7px; gap: 6px; }
+}

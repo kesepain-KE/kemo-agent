@@ -104,7 +104,10 @@ def build_agent_tool_registry(
 ) -> ToolRegistry:
     discovered = discover_tools(root, user)
     allowed = set(definition.capabilities.plugin_tools)
-    forbidden = {"subagent_dispatch"}
+    # Interactive questions belong to the main conversation's execution
+    # barrier. Workers report questions to their caller rather than opening
+    # unowned cards from their independent model loop.
+    forbidden = {"subagent_dispatch", "user_decision"}
     unknown = sorted((allowed - forbidden - {"*"}) - set(discovered.tools))
     if unknown:
         raise AgentCapabilityError(

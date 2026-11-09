@@ -15,11 +15,12 @@ import { interfaceMessages } from './interface'
 import { pageMessages } from './pages'
 import { settingsMessages } from './settings'
 import { moduleWorkbenchMessages } from './moduleWorkbench'
+import { decisionMessages } from './decisions'
 import { languages, normalizeLanguage, type Language } from './locales'
 
 export { languages, normalizeLanguage, type Language } from './locales'
 
-export const catalogs = [coreMessages, appearanceMessages, workspaceMessages, backgroundMessages, workbenchMessages, agentDetailMessages, conversationRecordMessages, historyMarkMessages, scratchMessages, agentBudgetMessages, presenceDispatchMessages, interfaceMessages, pageMessages, settingsMessages, moduleWorkbenchMessages]
+export const catalogs = [coreMessages, appearanceMessages, workspaceMessages, backgroundMessages, workbenchMessages, agentDetailMessages, conversationRecordMessages, historyMarkMessages, scratchMessages, agentBudgetMessages, presenceDispatchMessages, interfaceMessages, pageMessages, settingsMessages, moduleWorkbenchMessages, decisionMessages]
 
 export const messages = new Map(
   catalogs.flatMap((group) => group.trim().split('\n').map((row) => {

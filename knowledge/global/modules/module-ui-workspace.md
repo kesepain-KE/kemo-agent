@@ -6,6 +6,8 @@ shared、user；Sense 当前只有 global，不新增用户感知模型。
 
 模块可以同时提供 `module/panel.json` 通用组件和任意 HTML/CSS/JavaScript 网页。
 网页可以自行选择前端框架、布局、图表与内部页面；宿主负责静态资源、隔离、授权和通信。
+中栏模块卡片只显示名称和健康指示，第二行左侧显示作用域与模块目录名，右侧显示启用状态和
+注入 Tokens；说明保留在详情中。搜索仅匹配显示名称与模块目录名，不匹配模块说明。
 
 ## 声明与目录
 
@@ -61,8 +63,11 @@ Expand 网页动作复用 `control_script`，不声明 `action_entry`。UI 文�
 }
 ```
 
-页面支持 `web`、`panel`、`markdown`，以及 `builtin` 的 `overview`、`data`、`docs`、`logs`。
-总览、采集与注入、通用配置、文档和运行记录按实际模块能力自动补充，不要求每个模块都有相同入口。
+页面支持 `web`、`panel`、`markdown`，以及 `builtin` 的 `overview`、`collection`、`injection`、`docs`、`logs`。
+总览、采集数据、注入数据、通用配置、文档和运行记录按实际模块能力自动补充，不要求每个模块都有相同入口。
+采集数据与注入数据使用两个独立的功能标签：`collection` 展示 `collected_markdown` 原文，
+`injection` 展示遵循当前数据空间白名单与上下文预算的 `injected_markdown`。
+当前没有注入内容时显示未注入状态，不用采集原文填充。
 声明已有同名 ID 时使用声明项。无 `ui` 的模块继续正常显示通用面板与已有能力。
 UI 声明错误只在该模块显示诊断，保留其原有运行能力与可用面板。
 
@@ -88,8 +93,15 @@ kemo.onEvent((event, value) => {
 })
 ```
 
-`npm --prefix web/frontend run build:module-uis` 构建两个随仓库交付的真实示例：
-`expand/global/kemo_gateway_status/ui` 和 `template/sense-web/ui`。完整宿主构建也运行此步骤。
+`npm --prefix web/frontend run build:module-uis` 构建三个内置拓展的专属控制台：
+`expand/global/kemo_app/ui`（桥接生命周期、在线设备、端口、Token 和用户绑定）、
+`expand/global/kemo_gateway_status/ui`（网关快照、模型、调用记录与地址）、
+`expand/global/kemo_graph/ui`（文档库、实时状态、检索与连接），以及 `template/sense-web/ui` 示例。
+控制台通过声明的 Bridge 动作复用各自的现有后端入口，通用配置面板同时保留。
+三个内置控制台提供本地初始化与待配置提示；App、网关使用 `initialize`，
+Graph 使用 `initialize_config`，初始化保留已有配置，不自动启动服务或联网。
+网关连接设置还可提交独立 `STATUS_TOKEN` 验证并激活，后端不向网页返回 Token。
+完整宿主构建也运行此步骤。
 自建模块自行构建 `ui/dist` 后随模块分发，部署机无需 Node.js。
 
 在按钮的 `click` 事件中调用 SDK。使用表单排版时把操作按钮设为 `type="button"`，需要时调用
@@ -132,6 +144,7 @@ RPC 有并发、频率和消息大小限制。静态资源能力 URL 只可读�
 
 工作台每 5 秒重新读取真实库存。模块增删、UI 声明或资源变化无需重启；
 健康、采集时间和配置值变化不会重建网页。
+库存和网页实例校验不递归读取模块内部的文件清单；独立文件管理接口继续提供完整清单。
 放大、恢复和原生全屏保持同一 iframe 与组件实例，保留内部导航和未保存输入。
 切模块、功能或路由前，声明了 dirty 的页面会提示放弃修改；浏览器关闭使用原生离开提示。
 

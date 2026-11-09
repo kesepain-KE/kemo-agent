@@ -101,7 +101,7 @@ message/out/*
 *.bak.*
 
 # Local dev tooling (graph builder etc.) — local only, never published
-tools/
+/tools/
 # Instance-admin approval of module UI capabilities is deployment-local.
 config/module_ui_grants.json
 
@@ -110,3 +110,7 @@ config/module_ui_grants.json
 !template/sense-web/ui/dist/**
 !expand/global/kemo_gateway_status/ui/dist/
 !expand/global/kemo_gateway_status/ui/dist/**
+!expand/global/kemo_app/ui/dist/
+!expand/global/kemo_app/ui/dist/**
+!expand/global/kemo_graph/ui/dist/
+!expand/global/kemo_graph/ui/dist/**

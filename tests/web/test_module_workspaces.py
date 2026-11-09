@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import shutil
 import stat
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,7 @@ import yaml
 
 from run.modules import read_manifest
 from web.app import create_app
-from web.errors import ConflictError, InvalidRequestError
+from web.errors import ConflictError, InvalidRequestError, WebServiceError
 from web.service import WebRunService
 from web.services.module_import import install_import, preview_import
 from web.services.module_panels import module_panel_response, save_module_panel_values
@@ -110,6 +111,28 @@ def grant(service: ModuleWorkspaceService, kind: str = "expand", module: str = "
 
 
 @pytest.mark.parametrize("kind", ["expand", "sense"])
+@pytest.mark.parametrize("web", [False, True])
+def test_collection_and_injection_have_separate_pages(service: ModuleWorkspaceService, kind: str, web: bool):
+    target = make_module(service.root, kind=kind, web=web)
+    data_pages = [
+        {"id": "collection", "label": "采集数据", "type": "builtin", "view": "collection"},
+        {"id": "injection", "label": "注入数据", "type": "builtin", "view": "injection"},
+    ]
+    if web:
+        path = target / "module/workspace.json"
+        declaration = json.loads(path.read_text("utf-8"))
+        declaration["pages"].extend(data_pages)
+        path.write_text(json.dumps(declaration), "utf-8")
+    item = service.inventory("alice", kind)["items"][0]
+    assert not item["ui_error"]
+    assert [page for page in item["pages"] if page.get("view") in {"collection", "injection"}] == data_pages
+    assert all(page.get("view") != "data" for page in item["pages"])
+    assert item["collected_markdown"] == "真实采集数据"
+    assert item["collected_markdown"] in item["injected_markdown"]
+    assert item["injected_markdown"] != item["collected_markdown"]
+
+
+@pytest.mark.parametrize("kind", ["expand", "sense"])
 def test_panel_only_and_bad_workspace_keep_real_module_available(service: ModuleWorkspaceService, kind: str):
     target = make_module(service.root, kind=kind, web=False)
     runtime = {"schema_version": 1, "update": {"status": "failed", "error": {"message": "采集连接失败"}}}
@@ -172,6 +195,110 @@ def test_health_updates_keep_ui_but_asset_change_and_revoke_invalidate(service: 
     service.set_permissions("alice", "expand", "global", "demo", {"permissions": [], "authorization_revision": item["authorization_revision"]})
     with pytest.raises(Exception, match="关闭|过期"):
         invoke_bridge(service, token, {"method": "module.status.get"})
+
+
+def test_workspace_reads_do_not_walk_unrelated_module_files(service: ModuleWorkspaceService, monkeypatch: pytest.MonkeyPatch):
+    make_module(service.root)
+
+    def unexpected_walk(*args, **kwargs):
+        pytest.fail("工作台不应递归读取模块内部的文件清单")
+
+    monkeypatch.setattr("web.services.modules._flat_files", unexpected_walk)
+    item = service.inventory("alice", "expand")["items"][0]
+    assert item["module"] == "demo" and item["valid"]
+    token = grant(service)["nonce"]
+    assert static_asset(service, token, "index.html")[0]
+    assert invoke_bridge(service, token, {"method": "module.status.get"})["result"]["module"]["module"] == "demo"
+
+
+def test_builtin_app_console_binds_real_instance_users_and_reports_errors(service: ModuleWorkspaceService):
+    source = Path(__file__).resolve().parents[2] / "expand/global/kemo_app"
+    target = service.root / "expand/global/kemo_app"
+    (target / "module").mkdir(parents=True)
+    for path in source.glob("*.py"):
+        shutil.copy2(path, target / path.name)
+    for relative in ("module.yaml", "expand_control.md", "input_data.md", "module/panel.json", "module/workspace.json"):
+        shutil.copy2(source / relative, target / relative)
+    shutil.copytree(source / "ui/dist", target / "ui/dist")
+    (target / "config.json").write_text('{"users_path":"users.json"}', "utf-8")
+    (target / "users.json").write_text('{"mobile":{"enabled":true,"salt":"salt","hash":"hash"}}', "utf-8")
+    item, _ = service.describe("alice", "expand", "global", "kemo_app")
+    service.set_permissions("alice", "expand", "global", "kemo_app", {
+        "authorization_revision": item["authorization_revision"], "permissions": item["requested_permissions"],
+    })
+    token = open_instance(service, "alice", "expand", "global", "kemo_app", "dashboard")["nonce"]
+    response = invoke_bridge(service, token, {"method": "module.action.invoke", "params": {
+        "action": "bind_user", "params": {"app_username": "mobile", "agent_username": "bob"},
+    }})
+    assert response["result"]["result"]["agent_user"] == "bob"
+    persisted = json.loads((target / "users.json").read_text("utf-8"))
+    assert persisted["mobile"]["agent_user"] == "bob"
+    with pytest.raises(WebServiceError, match="智能体用户不存在"):
+        invoke_bridge(service, token, {"method": "module.action.invoke", "params": {
+            "action": "bind_user", "params": {"app_username": "mobile", "agent_username": "missing"},
+        }})
+
+
+@pytest.mark.parametrize("module,action", [
+    ("kemo_app", "initialize"),
+    ("kemo_gateway_status", "initialize"),
+    ("kemo_graph", "initialize_config"),
+])
+def test_builtin_consoles_initialize_local_config_and_preserve_existing_values(
+    service: ModuleWorkspaceService, module: str, action: str,
+):
+    source = Path(__file__).resolve().parents[2] / "expand/global" / module
+    target = service.root / "expand/global" / module
+    (target / "module").mkdir(parents=True)
+    for path in source.glob("*.py"):
+        shutil.copy2(path, target / path.name)
+    for relative in ("module.yaml", "expand_control.md", "input_data.md", "module/panel.json", "module/workspace.json"):
+        shutil.copy2(source / relative, target / relative)
+    if (source / "config.example.json").is_file():
+        shutil.copy2(source / "config.example.json", target / "config.example.json")
+    shutil.copytree(source / "ui/dist", target / "ui/dist")
+    item, _ = service.describe("alice", "expand", "global", module)
+    assert not item["ui_error"]
+    service.set_permissions("alice", "expand", "global", module, {
+        "authorization_revision": item["authorization_revision"], "permissions": item["requested_permissions"],
+    })
+    token = open_instance(service, "alice", "expand", "global", module, "dashboard")["nonce"]
+
+    def initialize():
+        return invoke_bridge(service, token, {
+            "method": "module.action.invoke", "params": {"action": action, "params": {}},
+        })["result"]["result"]
+
+    result = initialize()
+    assert result["ok"] and result["initialized"]
+    if module == "kemo_app":
+        config_path = target / "config.json"
+        config = json.loads(config_path.read_text("utf-8"))
+        assert len(config["session_secret"]) >= 32
+        assert not config["token_sha256"] and not result["configured"]
+        assert config["session_secret"] not in json.dumps(result)
+        assert not (target / "_activated.json").exists()
+    elif module == "kemo_gateway_status":
+        assert not result["active"] and not (target / "gateway_config.json").exists()
+        assert json.loads((target / "module/status.json").read_text("utf-8"))["last_checked"] == ""
+        config_path = target / "gateway_config.json"
+        config = {"base_url": "http://127.0.0.1:54831", "status_token": "private-independent-status-token"}
+    else:
+        config_path = target / "graph_config.json"
+        config = json.loads(config_path.read_text("utf-8"))
+        assert result["created"] and config["admin_users"] == ["alice"]
+        assert config["libraries"][0]["allowed_users"] == ["alice"]
+        config["base_url"] = "http://127.0.0.1:54832/api/v1"
+        with pytest.raises(WebServiceError, match="admin_users"):
+            service.action("bob", "expand", "global", module, action, {})
+    config_path.write_text(json.dumps(config), "utf-8")
+    preserved = config_path.read_bytes()
+    again = initialize()
+    assert again["ok"] and json.loads(config_path.read_text("utf-8")) == config
+    if module != "kemo_app":
+        assert config_path.read_bytes() == preserved
+    if module == "kemo_gateway_status":
+        assert config["status_token"] not in json.dumps(again)
 
 
 def test_concurrent_panel_writes_compare_revision_under_lock(service: ModuleWorkspaceService):

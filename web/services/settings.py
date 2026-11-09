@@ -95,6 +95,7 @@ _CONFIG_SOURCE_PATHS = (
     "memory.temporary_injection_limits.seven_days",
     "memory.important_memory_max_chars",
     "task_plan.auto_accept",
+    "interactive_decisions.enabled",
     "task_plan.max_steps",
     "cron.enabled",
     "cron.history_retention_days",
@@ -238,8 +239,8 @@ class SettingsServiceMixin:
             patch = changes.get(section)
             if isinstance(patch, dict) and keys.intersection(patch):
                 raise InvalidRequestError("CardStream 已移除旧轮级上下文配置；请使用卡片/Token 设置")
-        if user is None and "web_ui" in changes:
-            raise InvalidRequestError("web_ui 仅支持用户配置")
+        if user is None and {"web_ui", "interactive_decisions"}.intersection(changes):
+            raise InvalidRequestError("web_ui 和 interactive_decisions 仅支持用户配置")
         current = read_yaml_object(path, allow_empty=user is not None)
         updated = _merge_patch(current, changes)
         if user is not None:
@@ -251,7 +252,7 @@ class SettingsServiceMixin:
         try:
             validate_cardstream_settings(updated)
             RetryManager(max_retries=(updated.get("provider_runtime") or {}).get("max_retries", 3))
-        except ValueError as exc:
+        except (ValueError, ConfigError) as exc:
             raise InvalidRequestError(str(exc)) from None
         if user is not None and isinstance(changes.get("memory"), dict) and "prompt_injection" in changes["memory"]:
             raise InvalidRequestError("记忆注入开关仅支持全局配置")

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "default_page": "dashboard",
+  "pages": [
+    {"id": "dashboard", "label": "图谱控制台", "type": "web", "entry": "ui/dist/index.html", "permissions": ["module.status.read", "module.action.invoke"]},
+    {"id": "panel", "label": "通用配置", "type": "panel"}
+  ],
+  "actions": [
+    {"id": "initialize_config", "label": "初始化图谱本地配置", "handler": "initialize_config", "input_schema": {
+      "type": "object", "properties": {
+        "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "allow_remote": {"type": "boolean"}
+      }
+    }},
+    {"id": "libraries", "label": "读取文档库注册信息", "handler": "configuration_status"},
+    {"id": "refresh", "label": "刷新采集", "handler": "refresh"},
+    {"id": "check_backend", "label": "检测图谱后端", "handler": "panel_check_backend"},
+    {"id": "status", "label": "查询文档库实时状态", "handler": "status", "input_schema": {
+      "type": "object", "properties": {"library_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1}}
+    }},
+    {"id": "query", "label": "检索文档库", "handler": "query", "input_schema": {
+      "type": "object", "required": ["query"], "properties": {
+        "query": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "library_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      }
+    }},
+    {"id": "configure_endpoint", "label": "配置图谱地址", "handler": "panel_configure_endpoint", "input_schema": {
+      "type": "object", "required": ["scheme", "graph_ip", "graph_port", "allow_remote"], "properties": {
+        "scheme": {"type": "string", "enum": ["http", "https"]},
+        "graph_ip": {"type": "string", "minLength": 1, "maxLength": 253},
+        "graph_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "allow_remote": {"type": "boolean"}
+      }
+    }}
+  ]
+}

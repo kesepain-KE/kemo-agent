@@ -2,7 +2,8 @@ import { kemo } from '/__kemo_bridge__'
 import './style.css'
 
 const $ = selector => document.querySelector(selector)
-const state = { snapshot: null, status: null, view: 'overview' }
+const state = { snapshot: null, status: null, configuration: null, view: 'overview' }
+let busy = false
 const count = value => Number(value || 0).toLocaleString()
 const text = (id, value) => { $(id).textContent = value ?? '—' }
 function applyTheme(theme) {
@@ -33,11 +34,16 @@ function render() {
   $('#empty').hidden = Boolean(snapshot)
   $('#metrics').hidden = !snapshot
   const status = Object.assign({}, ...(state.status?.status || []).map(c => c.data || {}))
+  const config = state.configuration
+  $('#setup').hidden = Boolean(config?.active)
+  text('#setup-state', config?.base_url ? '网关地址已保存，待配置独立 STATUS_TOKEN。' : '尚未配置网关地址和独立 STATUS_TOKEN。')
+  text('#token-status', config?.status_token_configured ? '已配置' : '未配置')
   text('#connection', status.backend_status || status.configuration || '尚未采集')
   text('#updated', status.last_checked || snapshot?.generated_at)
-  text('#endpoint', status.base_url)
+  text('#endpoint', config?.base_url || '尚未配置')
   if (!$('#endpoint-form').matches(':focus-within') && !$('#endpoint-form').dataset.dirty) {
-    $('#scheme').value = status.scheme || 'http'; $('#host').value = status.gateway_ip || ''; $('#port').value = status.gateway_port || 7531
+    const url = config?.base_url ? new URL(config.base_url) : null
+    $('#scheme').value = url?.protocol.slice(0, -1) || 'http'; $('#host').value = url?.hostname || ''; $('#port').value = url?.port || (url?.protocol === 'https:' ? 443 : 7531)
   }
   if (!snapshot) return
   const summary = snapshot.statistics?.summary || {}
@@ -63,13 +69,19 @@ function render() {
 }
 async function load() {
   const [status, data] = await Promise.all([kemo.request('module.status.get'), action('dashboard_data')])
-  state.status = status; state.snapshot = data.snapshot; render()
+  state.status = status; state.snapshot = data.snapshot; state.configuration = data.configuration; render()
 }
-async function run(button, callback) {
-  button.disabled = true; text('#message', '')
+async function run(callback) {
+  if (busy) return
+  busy = true
+  document.querySelectorAll('button').forEach(button => { button.disabled = true })
+  text('#message', '')
   try { await callback(); await load() }
   catch (error) { text('#message', error.message) }
-  finally { button.disabled = false }
+  finally {
+    busy = false
+    document.querySelectorAll('button').forEach(button => { button.disabled = false })
+  }
 }
 async function renderLogs() {
   const { renderRequestLogs } = await import('./requestLogs.js')
@@ -82,14 +94,31 @@ document.querySelectorAll('[data-view]').forEach(button => button.addEventListen
   location.hash = state.view
   if (state.view === 'logs') void renderLogs().catch(error => text('#message', error.message))
 }))
-$('#reload').addEventListener('click', event => run(event.currentTarget, load))
-$('#collect').addEventListener('click', event => run(event.currentTarget, () => action('refresh')))
-$('#endpoint-form').addEventListener('input', () => { $('#endpoint-form').dataset.dirty = 'yes'; void kemo.setDirty(true) })
+$('#reload').addEventListener('click', () => run(async () => {}))
+$('#collect').addEventListener('click', () => run(() => action('refresh')))
+$('#initialize').addEventListener('click', () => run(async () => {
+  const result = await action('initialize'); text('#message', result.message)
+}))
+document.querySelectorAll('form').forEach(form => form.addEventListener('input', () => { form.dataset.dirty = 'yes'; void kemo.setDirty(true) }))
 $('#save-endpoint').addEventListener('click', () => {
   if (!$('#endpoint-form').reportValidity()) return
-  void run($('#save-endpoint'), async () => {
+  void run(async () => {
     await action('configure_endpoint', { scheme: $('#scheme').value, gateway_ip: $('#host').value.trim(), gateway_port: Number($('#port').value) })
-    delete $('#endpoint-form').dataset.dirty; await kemo.setDirty(false); text('#message', '地址已保存')
+    delete $('#endpoint-form').dataset.dirty; await kemo.setDirty(Boolean(document.querySelector('form[data-dirty]'))); text('#message', '地址已保存')
+  })
+})
+$('#activate').addEventListener('click', () => {
+  if (!$('#endpoint-form').reportValidity() || !$('#activate-form').reportValidity()) return
+  void run(async () => {
+    const config = state.configuration
+    await action('activate', {
+      base_url: `${$('#scheme').value}://${$('#host').value.trim()}:${Number($('#port').value)}`,
+      status_token: $('#status-token').value,
+      timeout_seconds: config.timeout_seconds, ranking_limit: config.ranking_limit, log_limit: config.log_limit,
+    })
+    $('#activate-form').reset()
+    delete $('#activate-form').dataset.dirty; delete $('#endpoint-form').dataset.dirty
+    await kemo.setDirty(false); text('#message', '网关连接已验证并激活')
   })
 })
 const context = await kemo.ready
@@ -99,5 +128,5 @@ kemo.onEvent((event, data) => {
   if (event === 'module.status.changed') { state.status = data; render() }
   if (event === 'module.error') text('#message', data.message)
 })
-await kemo.request('module.events.subscribe')
-await run($('#reload'), load)
+if (location.hash) document.querySelector(`[data-view="${CSS.escape(location.hash.slice(1))}"]`)?.click()
+await Promise.all([kemo.request('module.events.subscribe'), run(async () => {})])

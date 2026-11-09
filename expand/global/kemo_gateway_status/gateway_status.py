@@ -232,6 +232,18 @@ def configuration_status() -> dict[str, Any]:
     }
 
 
+def initialize() -> dict[str, Any]:
+    configuration = configuration_status()
+    if not configuration["active"]:
+        _write_panel_status()
+    return {
+        **configuration,
+        "initialized": True,
+        "message": "本地状态已初始化；填写网关地址和独立 STATUS_TOKEN 后验证并激活。"
+        if not configuration["active"] else "现有网关配置已保留。",
+    }
+
+
 def _pending_endpoint() -> str:
     try:
         value = json.loads(PANEL_VALUES_PATH.read_text("utf-8"))
@@ -270,7 +282,7 @@ def _write_panel_status(result: dict[str, Any] | None = None) -> dict[str, Any]:
         "base_url": base_url or "—",
         "token_status": "已配置" if config else "未配置",
         "backend_status": "在线" if online else "离线" if outcome.get("ok") is False else "未检测",
-        "last_checked": str(outcome.get("time") or datetime.now().astimezone().isoformat(timespec="seconds")),
+        "last_checked": str(outcome.get("time") or datetime.now().astimezone().isoformat(timespec="seconds")) if outcome.get("status") in {"active", "failed"} else "",
         "last_error": str(outcome.get("error") or config_error or ""),
     }
     _atomic_json(PANEL_STATUS_PATH, payload)

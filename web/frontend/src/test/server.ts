@@ -50,6 +50,10 @@ function pagedFiles(request: Request, entries: typeof userFileEntries, summary: 
 }
 
 export const handlers = [
+  http.get('/api/users/:user/sessions/:sessionId/decisions', ({ params }) => HttpResponse.json({
+    user: params.user, source: 'web', session_id: params.sessionId,
+    enabled: false, revision: 0, decisions: [],
+  })),
   http.get('/api/users/:user/background/status', ({ params }) => HttpResponse.json({
     user: params.user, available: false, filename: '', media_kind: '', mime_type: '', size: 0, revision: '', error: '',
     settings: { enabled: false, overlay_opacity: 0.65, blur: 0 },

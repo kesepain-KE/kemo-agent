@@ -39,6 +39,8 @@ multimodal_routing:
   vision: auto
 task_plan:
   auto_accept: false
+interactive_decisions:
+  enabled: false
 skills:
   shared_whitelist: []
 expand:

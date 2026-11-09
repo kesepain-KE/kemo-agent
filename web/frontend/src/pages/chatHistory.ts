@@ -78,7 +78,8 @@ export function buildHistoryItems(
       })
     } else if (message?.role === 'user') {
       if (message.content.startsWith(PLAN_EXECUTION_PROMPT_PREFIX)) {
-        result.push({ id: `history_execution_${round}`, kind: 'execution_marker', planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
+        result.push({ id: `history_execution_${round}`, kind: 'execution_marker', integrationNumber: round,
+          planId: message.content.split('\n')[1]?.replace('计划 ID：', '').trim() || '' })
       } else {
         result.push({ id: `history_${card.card_id}_user`, kind: 'message', role: 'user',
           integrationNumber: round, content: message.content, attachments: message.attachments })

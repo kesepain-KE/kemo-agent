@@ -6,7 +6,7 @@ export interface WorkspacePage {
   id: string
   label: string
   type: 'builtin' | 'panel' | 'markdown' | 'web'
-  view?: 'overview' | 'data' | 'docs' | 'logs'
+  view?: 'overview' | 'collection' | 'injection' | 'docs' | 'logs'
   source?: string
   entry?: string
   permissions?: string[]

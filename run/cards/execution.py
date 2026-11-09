@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,70 @@ class IntegrationStore:
         self.store, self.source, self.session_id = store, source, session_id
         self.id, self.key = integration_id, session_key(source, session_id)
         self.generation = ""
+
+    @staticmethod
+    def _owner_lost(row) -> bool:
+        from run.infra import process_identity_matches, process_snapshot
+        if row["owner_pid"] == os.getpid() and row["owner_token"] == _OWNER:
+            return False
+        expected = json.loads(row["record_json"]).get("owner_identity") or {}
+        return process_identity_matches(
+            process_snapshot(row["owner_pid"]),
+            process_started_at=expected.get("process_started_at", ""),
+            process_name=expected.get("process_name", ""),
+        ) is False
+
+    @staticmethod
+    def _decision_resumable(db, row) -> bool:
+        executions = db.execute(
+            "SELECT original_call,execution_live,last_result_seq FROM card_tool_executions "
+            "WHERE integration_id=?", (row["integration_id"],),
+        ).fetchall()
+        question = False
+        for execution in executions:
+            call = json.loads(execution["original_call"])
+            native = call["name"] == "user_decision" and call["arguments"].get("action") == "ask"
+            if execution["execution_live"] and not native:
+                return False  # Unknown external effects keep their existing fence.
+            if native and (execution["execution_live"] or (
+                execution["last_result_seq"] or 0
+            ) > row["acknowledged_seq"]):
+                question = True
+        return question and not row["response_closed"] and bool(
+            json.loads(row["record_json"]).get("decision_checkpoint"))
+
+    def checkpoint_decisions(self, request: dict) -> None:
+        with self.store.db(write=True) as db:
+            row = self._row(db)
+            record = json.loads(row["record_json"])
+            record["decision_checkpoint"] = {
+                key: request[key] for key in (
+                    "run_id", "_agent_root_task_id", "_task_plan_id",
+                    "_task_plan_step_id", "_task_plan_mode",
+                ) if request.get(key)
+            }
+            # Even callers without a run_id need an explicit checkpoint marker.
+            record["decision_checkpoint"]["stream"] = bool(request.get("stream"))
+            db.execute("UPDATE card_integrations SET record_json=? WHERE integration_id=?",
+                       (json_text(record), self.id))
+
+    def resume_decisions(self) -> dict[str, Any]:
+        """Claim a lost native wait without replaying any tool invocation."""
+        from run.infra import process_snapshot
+        with self.store.db(write=True) as db:
+            row = self._row(db)
+            if not self._owner_lost(row) or not self._decision_resumable(db, row):
+                raise CardConflictError("该整合仍有宿主或未确认的工具执行，不能自动恢复")
+            record = json.loads(row["record_json"])
+            record["owner_identity"] = process_snapshot(os.getpid())
+            db.execute(
+                "UPDATE card_integrations SET owner_pid=?,owner_token=?,status='resuming',"
+                "model_request_inflight=0,continuation_required=1,record_json=?,updated_at=? "
+                "WHERE integration_id=?",
+                (os.getpid(), _OWNER, json_text(record), utc_now(), self.id),
+            )
+            self.generation = row["generation"]
+            return record
 
     def start(self) -> dict[str, Any]:
         state = self.store.ensure_session(self.source, self.session_id)
@@ -70,6 +135,10 @@ class IntegrationStore:
                     process_started_at=expected.get("process_started_at", ""),
                     process_name=expected.get("process_name", ""))
                 if matches is not False:
+                    continue
+                if self._decision_resumable(db, row):
+                    # A user question has no orphan process or unknown external
+                    # effect. The recovery worker claims this same integration.
                     continue
                 executions = db.execute("SELECT * FROM card_tool_executions WHERE integration_id=? "
                                          "AND execution_live=1 AND status!='interrupted_unknown'",
@@ -183,9 +252,9 @@ class IntegrationStore:
 
     def tool_result(
         self, execution_id: str, result: Any, *, status: str, duration_ms: int,
-        execution_live: bool = False,
+        execution_live: bool = False, transaction=None,
     ):
-        with self.store.db(write=True) as db:
+        with (nullcontext(transaction) if transaction is not None else self.store.db(write=True)) as db:
             row = self._row(db)
             execution = db.execute(
                 "SELECT * FROM card_tool_executions WHERE execution_id=? AND integration_id=?",
@@ -219,7 +288,8 @@ class IntegrationStore:
                         None if execution_live else utc_now(), execution_id))
             return card
 
-    def publish_running_notice(self, execution_id: str, *, status: str = "running"):
+    def publish_running_notice(self, execution_id: str, *, status: str = "running",
+                               result: dict[str, Any] | None = None):
         """Durably hand a still-running tool to the next model request."""
         if not status or status in {"completed", "failed", "cancelled"}:
             raise ValueError("Running notices require a non-terminal status")
@@ -245,7 +315,7 @@ class IntegrationStore:
                 "tool_call_id": execution["tool_call_id"], "execution_id": execution_id,
                 "original_call": original,
                 "execution": {"status": status, "execution_live": True},
-                "result": {"ok": True, "accepted": True},
+                "result": result if result is not None else {"ok": True, "accepted": True},
             }
             card = self.store.append(
                 self.source, self.session_id, self.id, "tool_result", payload,

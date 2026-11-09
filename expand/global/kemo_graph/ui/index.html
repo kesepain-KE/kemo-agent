@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kemo Graph 图谱控制台</title></head>
+<body>
+<header><div><small>KEMO GRAPH</small><h1>图谱控制台</h1><p><span id="connection">正在读取配置</span> · <span id="endpoint">—</span></p></div><button id="reload" type="button">刷新状态</button></header>
+<p id="message" role="status" aria-live="polite"></p>
+<nav aria-label="控制台功能"><button type="button" data-view="libraries" aria-pressed="true">文档库</button><button type="button" data-view="query" aria-pressed="false">文档检索</button><button type="button" data-view="settings" aria-pressed="false">连接设置</button></nav>
+<main>
+<article id="setup" hidden><h2>初始化本地配置</h2><p>请先在“连接设置”中填写图谱地址并初始化。首次初始化只注册内置文档库，当前用户成为此模块的管理员；不会联网、创建 Store 或导入文档。</p></article>
+<section data-section="libraries">
+  <div class="metrics"><article><span>可访问文档库</span><strong id="library-count">—</strong></article><article><span>已启用</span><strong id="enabled-count">—</strong></article><article><span>最近检测</span><strong id="checked">—</strong></article></div>
+  <article><h2>文档库注册与状态</h2><div class="actions"><button id="check-backend" type="button" data-admin data-configured>检测后端</button><button id="library-status" type="button" data-configured>查询实时状态</button><button id="collect" type="button">刷新采集</button></div><p>文档库列表来自当前注册表；实时状态按需向图谱后端查询。</p><div class="table-wrap"><table><thead><tr><th>文档库</th><th>类型</th><th>启用状态</th><th>运行状态</th><th>待处理图谱 / 索引</th></tr></thead><tbody id="library-rows"></tbody></table></div><p id="empty" hidden>当前没有可访问的文档库，请先配置并激活图谱模块。</p></article>
+  <details id="result-details" hidden><summary>最近一次操作结果</summary><pre id="result"></pre></details>
+</section>
+<section data-section="query" hidden>
+  <article><h2>检索文档库</h2><form id="query-form"><label>文档库<select name="library"><option value="">全部可访问文档库</option></select></label><label>检索内容<textarea name="query" required maxlength="20000" rows="5"></textarea></label><button type="button" id="query-submit" data-configured>开始检索</button></form></article>
+  <article><h2>检索结果</h2><pre id="query-result">尚未执行检索。</pre></article>
+</section>
+<section data-section="settings" hidden>
+  <article><h2>图谱连接</h2><p>连接修改沿用图谱模块的管理员权限与远程地址校验。</p><form id="endpoint-form">
+    <label>协议<select name="scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
+    <label>主机<input name="host" required maxlength="253" value="127.0.0.1"></label>
+    <label>端口<input name="port" type="number" required min="1" max="65535" value="8000"></label>
+    <label class="check"><input name="remote" type="checkbox">允许远程地址</label>
+    <button type="button" id="save-endpoint" data-admin>保存连接地址</button>
+  </form><p id="admin-note"></p></article>
+</section>
+</main>
+<script type="module" src="./src/main.js"></script>
+</body></html>

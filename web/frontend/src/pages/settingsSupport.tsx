@@ -31,6 +31,7 @@ export interface UserConfigDraft {
   perception: { global_whitelist: string[]; prompt_injection: boolean }
   plugins: { whitelist: string[]; permissions: string[] }
   task_plan: { auto_accept: boolean }
+  interactive_decisions: { enabled: boolean }
 }
 
 export interface GlobalConfigDraft {
@@ -206,6 +207,7 @@ export function buildUserDraft(config: Record<string, unknown>): UserConfigDraft
         : ['read', 'write', 'delete', 'external'],
     },
     task_plan: { auto_accept: booleanValue(taskPlan.auto_accept, false) },
+    interactive_decisions: { enabled: booleanValue(record(config.interactive_decisions).enabled, false) },
   }
 }
 

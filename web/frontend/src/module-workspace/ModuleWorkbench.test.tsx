@@ -16,8 +16,11 @@ const item: WorkspaceItem = {
   error: '', ui_error: '', ui_revision: 'ui-1', authorization_revision: 'auth-1', permission_revision: 'grant-1',
   requested_permissions: ['module.status.read'], granted_permissions: ['module.status.read'],
   default_page: 'overview', actions: [],
+  collected_markdown: '原始采集完整正文', injected_markdown: '实际注入片段',
   pages: [{ id: 'overview', label: '总览', type: 'builtin', view: 'overview' }, { id: 'panel', label: '通用配置', type: 'panel' },
-    { id: 'console', label: '专属控制台', type: 'web', entry: 'ui/dist/index.html', permissions: ['module.status.read'] }],
+    { id: 'console', label: '专属控制台', type: 'web', entry: 'ui/dist/index.html', permissions: ['module.status.read'] },
+    { id: 'collection', label: '采集数据', type: 'builtin', view: 'collection' },
+    { id: 'injection', label: '注入数据', type: 'builtin', view: 'injection' }],
 }
 const panel: ModulePanelResponse = {
   user: 'alice', scope: 'global', module: 'sample', panel_error: '', config_revision: 'config-1',
@@ -28,25 +31,75 @@ const panel: ModulePanelResponse = {
 }
 afterEach(() => { vi.restoreAllMocks(); localStorage.clear() })
 
-function handlers() {
+function handlers(kind: 'expand' | 'sense' = 'expand', overrides: Partial<WorkspaceItem> = {}) {
   server.use(
-    http.get('/api/users/alice/module-workspaces/expand', () => HttpResponse.json({
-      user: 'alice', kind: 'expand', items: [item],
+    http.get(`/api/users/alice/module-workspaces/${kind}`, () => HttpResponse.json({
+      user: 'alice', kind, items: [{ ...item, ...overrides, kind, key: kind === 'sense' ? 'sense:sample' : item.key }],
       summary: { total: 1, enabled: 1, invalid: 0, injected_tokens: 0 }, registry_revision: 'registry-1',
     })),
     http.get('/api/users/alice/module-workspaces/expand/global/sample/panel', () => HttpResponse.json(panel)),
   )
 }
-function renderWorkbench() {
+function renderWorkbench(kind: 'expand' | 'sense' = 'expand') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const router = createMemoryRouter([{ path: '/', element: <Outlet context={{ user: 'alice' }} />, children: [
-    { path: 'expand', element: <ModuleWorkbench /> }, { path: 'other', element: <p>other</p> },
-  ] }], { initialEntries: ['/expand?user=alice'] })
+    { path: 'expand', element: <ModuleWorkbench /> }, { path: 'sense', element: <ModuleWorkbench /> }, { path: 'other', element: <p>other</p> },
+  ] }], { initialEntries: [`/${kind}?user=alice`] })
   const view = render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>)
   return { ...view, router, client }
 }
 
 describe('module workbench', () => {
+  it.each(['expand', 'sense'] as const)('separates %s collection and injection tabs and their content', async kind => {
+    handlers(kind)
+    const view = renderWorkbench(kind)
+    try {
+      await screen.findByRole('button', { name: /真实接口测试模块/ })
+      const features = within(screen.getByRole('navigation', { name: '模块功能' }))
+      expect(features.queryByRole('button', { name: '采集与注入' })).toBeNull()
+      fireEvent.click(features.getByRole('button', { name: '采集数据' }))
+      expect(await screen.findByText(item.collected_markdown!)).toBeVisible()
+      expect(screen.queryByText(item.injected_markdown!)).toBeNull()
+      expect(new URLSearchParams(view.router.state.location.search).get('page')).toBe('collection')
+      fireEvent.click(features.getByRole('button', { name: '注入数据' }))
+      expect(await screen.findByText(item.injected_markdown!)).toBeVisible()
+      expect(screen.queryByText(item.collected_markdown!)).toBeNull()
+      expect(screen.getByText('注入内容遵循当前数据空间的白名单与上下文预算。')).toBeVisible()
+      expect(new URLSearchParams(view.router.state.location.search).get('page')).toBe('injection')
+      fireEvent.click(features.getByRole('button', { name: '采集数据' }))
+      expect(await screen.findByText(item.collected_markdown!)).toBeVisible()
+      expect(screen.queryByText(item.injected_markdown!)).toBeNull()
+    } finally { view.unmount(); view.router.dispose(); view.client.clear() }
+  })
+  it.each(['expand', 'sense'] as const)('shows the %s injection empty state without substituting collected content', async kind => {
+    handlers(kind, { injected_markdown: '' })
+    const view = renderWorkbench(kind)
+    try {
+      await screen.findByRole('button', { name: /真实接口测试模块/ })
+      fireEvent.click(within(screen.getByRole('navigation', { name: '模块功能' })).getByRole('button', { name: '注入数据' }))
+      expect(await screen.findByText('当前未注入')).toBeVisible()
+      expect(screen.queryByText(item.collected_markdown!)).toBeNull()
+    } finally { view.unmount(); view.router.dispose(); view.client.clear() }
+  })
+  it.each(['expand', 'sense'] as const)('keeps %s rows compact and searches names without matching descriptions', async kind => {
+    handlers(kind)
+    const view = renderWorkbench(kind)
+    try {
+      const list = screen.getByRole('complementary', { name: '模块列表' })
+      const row = await within(list).findByRole('button', { name: /真实接口测试模块/ })
+      expect(row).not.toHaveTextContent(item.description)
+      const metadata = within(row).getByText('全局 · sample').parentElement!
+      expect(metadata).toHaveTextContent('已启用')
+      expect(metadata).toHaveTextContent('0 tok')
+      const search = screen.getByRole('textbox', { name: '搜索模块' })
+      fireEvent.change(search, { target: { value: item.description } })
+      expect(within(list).queryByRole('button')).toBeNull()
+      fireEvent.change(search, { target: { value: '  SAMPLE  ' } })
+      expect(within(list).getByRole('button', { name: /真实接口测试模块/ })).toBeVisible()
+      fireEvent.change(search, { target: { value: '真实接口' } })
+      expect(within(list).getByRole('button', { name: /真实接口测试模块/ })).toBeVisible()
+    } finally { view.unmount(); view.router.dispose(); view.client.clear() }
+  })
   it('separates scopes, modules and detail tabs, and keeps form state when expanded', async () => {
     handlers()
     const view = renderWorkbench()

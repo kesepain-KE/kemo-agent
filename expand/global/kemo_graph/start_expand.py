@@ -78,6 +78,7 @@ def write_panel_status(
     checked_at: str = "",
 ) -> dict[str, Any]:
     config = load_config()
+    status_path = CONFIG_PATH.parent / "module" / "status.json"
     if config is None:
         payload = {
             "configuration": "未配置",
@@ -103,7 +104,12 @@ def write_panel_status(
             "last_checked": checked_at,
             "last_error": error,
         }
-    atomic_json(CONFIG_PATH.parent / "module" / "status.json", payload)
+        if online is None and not checked_at and not error and status_path.is_file():
+            previous = json.loads(status_path.read_text("utf-8"))
+            if previous.get("base_url") == config.base_url and previous.get("allow_remote") == config.allow_remote:
+                for field in ("backend_status", "last_checked", "last_error"):
+                    payload[field] = previous[field]
+    atomic_json(status_path, payload)
     return payload
 
 
@@ -156,6 +162,37 @@ def _configure_panel_endpoint(arguments: dict[str, Any], caller_user: str | None
     }
 
 
+def _initialize_config(arguments: dict[str, Any], caller_user: str | None) -> dict[str, Any]:
+    current = load_config()
+    created = current is None
+    if current is not None:
+        _require_admin(current, caller_user, "initialize_config")
+    else:
+        if not caller_user:
+            raise GraphExpandError("首次初始化需要指定调用用户")
+        current = config_from_mapping({
+            "schema_version": 2,
+            "base_url": arguments.get("base_url", "http://127.0.0.1:8000/api/v1"),
+            "allow_remote": arguments.get("allow_remote", False),
+            "admin_users": [caller_user],
+            "libraries": [{
+                "id": "kemo_graph_builtin", "kind": "service_default",
+                "display_name": "Kemo Graph 内置文档库", "enabled": True,
+                "allowed_users": [caller_user],
+            }],
+        })
+        save_config(current)
+    catalog = refresh_catalog()
+    if created:
+        write_panel_status()
+    return {
+        **configuration_status(caller_user), "initialized": True, "created": created,
+        "catalog_updated": bool(catalog.get("ok")),
+        "message": "本地注册表已初始化；尚未连接后端、初始化 Store 或导入文档。"
+        if created else "现有注册表和文档库权限已保留。",
+    }
+
+
 def execute(
     command: str,
     params: dict[str, Any] | None = None,
@@ -165,7 +202,9 @@ def execute(
     arguments = dict(params or {})
     normalized = str(command or "").strip().casefold()
     caller_user = _caller_user(context)
-    if normalized == "activate":
+    if normalized == "initialize_config":
+        result = _initialize_config(arguments, caller_user)
+    elif normalized == "activate":
         try:
             current = load_config()
         except GraphExpandError:

@@ -18,6 +18,7 @@ import { statusLabel } from '../components/ModuleUi'
 import type { ScheduledTaskItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
+import { UserDecisionCards } from '../components/UserDecisionCards'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
 import type { ChatItem, PlanSummary } from '../types/api'
 import type { PendingUploadedFile } from '../store/chatDrafts'
@@ -396,16 +397,15 @@ export function ChatPageView(props: ChatPageViewProps) {
 return (
   <div className={`chat-layout${showWelcome ? ' welcome-mode' : ''}`}>
     <div className="chat-scroll-stage">
-      {dockedPlan ? (
-        <div className={taskPlanStyles.sideDock} ref={taskPlanDockRef}>
-          <TaskPlanBubble
+      <div className={taskPlanStyles.sideDock} ref={taskPlanDockRef}>
+          {dockedPlan && <TaskPlanBubble
             className={taskPlanStyles.sideCard}
             {...taskPlanFromSummary(dockedPlan)}
             collapsed={collapsedPlans.has(dockedPlan.plan_id)}
             {...planActions(dockedPlan)}
-          />
-        </div>
-      ) : null}
+          />}
+          <UserDecisionCards key={`${user}:${sessionId}`} user={user} sessionId={sessionId || ''} running={running} />
+      </div>
       <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll} onClickCapture={handleChatContentClick}>
       {showWelcome && (!sessionId || !historyQuery.isLoading) && (
         <section className="welcome"><div className="welcome-inner">

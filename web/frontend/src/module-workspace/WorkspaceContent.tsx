@@ -48,8 +48,10 @@ export function WorkspaceContent({ user, item, page, refresh, onDirtyChange, onE
     {document.isLoading ? <p>{t('正在加载文档…')}</p> : document.error ? <div className={styles.error} role="alert">{document.error.message}</div>
       : <DocumentMarkdown content={document.data?.content || ''} />}
   </div>
-  if (page.view === 'data') return <div className={styles.scrollContent}>
+  if (page.view === 'collection') return <div className={styles.scrollContent}>
     <h3>{t('采集原文')}</h3><DocumentMarkdown content={item.collected_markdown || t('暂无采集数据')} />
+  </div>
+  if (page.view === 'injection') return <div className={styles.scrollContent}>
     <h3>{t('实际注入内容')}</h3><p className={styles.muted}>{t('注入内容遵循当前数据空间的白名单与上下文预算。')}</p>
     <DocumentMarkdown content={item.injected_markdown || t('当前未注入')} />
   </div>

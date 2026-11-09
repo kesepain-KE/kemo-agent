@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 import hashlib
+import json
 import logging
 from pathlib import Path
 import threading
@@ -66,7 +67,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                      cancel_event: threading.Event):
     user, source, session_id = (request[key].strip() for key in ("user", "source", "session_id"))
     run_id = str(request.get("run_id") or "run_" + uuid4().hex)
-    integration_id = "integration_" + uuid4().hex
+    resume_id = str(request.get("_resume_decision_integration") or "")
+    integration_id = resume_id or "integration_" + uuid4().hex
     channel = request.get("_guidance_queue")
     integration = tool_runtime = coordinator = shell = media = None
     finished = False
@@ -93,7 +95,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
     try:
         compress_only = bool(request.get("compress_only"))
         content_blocks = [] if compress_only else request_content_blocks(request)
-        if not compress_only and not content_blocks and not request.get("uploaded_files"):
+        if not resume_id and not compress_only and not content_blocks and not request.get("uploaded_files"):
             raise EngineError("请求必须包含非空 prompt、content[] 或 uploaded_files")
         config = load_config(user, root)
         configured_provider = config.get("provider") or {}
@@ -103,7 +105,12 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
         if state["meter_key"] != store.meter.key:
             store.remeter(source, session_id)
         candidate_integration = IntegrationStore(store, source, session_id, integration_id)
-        candidate_integration.start()
+        resumed_record = candidate_integration.resume_decisions() if resume_id else None
+        if resumed_record is None:
+            candidate_integration.start()
+        else:
+            request.update(resumed_record["decision_checkpoint"])
+            usage_total.update(resumed_record.get("usage") or {})
         integration = candidate_integration
         prepared = prepare_provider_request(
             request, base=root, user=user, source=source, session_id=session_id,
@@ -150,12 +157,35 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             _positive(tool_settings, "consecutive_identical_call_limit", 3))
         seen = AttemptToolDedup()
         call_iterations, live_signatures = {}, {}
+        prior = []
+        if resume_id:
+            # Restore duplicate protection from execution facts, including
+            # known completed side effects preceding the question. No tool is
+            # invoked again to rebuild its result.
+            with store.db() as db:
+                prior = db.execute(
+                    "SELECT t.*,c.raw_payload FROM card_tool_executions t "
+                    "LEFT JOIN context_cards c ON c.session_key=? AND c.seq=t.last_result_seq "
+                    "WHERE t.integration_id=?", (integration.key, integration.id),
+                ).fetchall()
+            for execution in prior:
+                original = json.loads(execution["original_call"])
+                name, arguments = original["name"], original["arguments"]
+                seen.check(name, arguments, identical)
+                if execution["execution_live"]:
+                    live_signatures[tool_call_signature(name, arguments)] = execution["execution_id"]
+                elif execution["raw_payload"]:
+                    payload = json.loads(execution["raw_payload"])["result"]
+                    seen.remember(name, arguments, payload, 0,
+                                  retain_failure_for_retry=execution["status"] == "failed")
         memory = MemoryStore(root, user, config)
         bundle = build_prompt_bundle(root, user, config, plugin_manifests=registry.plugin_manifests,
                                      memory_store=memory, source=source, session_id=session_id)
         memory_revision = (memory.prompt_revision()
                            if bundle.diagnostics["memory_prompt_injection"] else None)
         tool_runtime = ToolRuntime(integration, cancel_event=cancel_event)
+        if resume_id:
+            tool_runtime.restore_decisions()
         request["_cardstream_integration_id"] = integration_id
         request["_cardstream_generation"] = integration.generation
         request["_cardstream_meter_key"] = store.meter.key
@@ -177,7 +207,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             virtual_media[-1] = virtual_media[-1].model_copy(update={
                 "content": [*virtual_media[-1].content, *prepared.provider_media],
             })
-        if not compress_only:
+        if not compress_only and not resume_id:
             store.append(source, session_id, integration_id, "user_text", {
                 "text": prompt, "content": [block.model_dump(mode="json", exclude_none=True)
                                               for block in prepared.durable_user_content_blocks],
@@ -273,6 +303,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
 
         def close_limited(stop_reason, **extra):
             nonlocal finished
+            tool_runtime.poll_decisions(cancel=True)
             consumed_guidance.extend(guidance_failure_details(
                 [item for _, item in pending_guidance] + preparing_guidance
                 + persist_guidance(_close(channel)),
@@ -300,11 +331,14 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             return outcome
 
         iteration, dispatched, invalid_batches, argument_corrections = 0, 0, 0, 0
+        if resume_id:
+            dispatched = len(prior)
         repair_pending, repair_tool_name = False, ""
         continuation = True
         while True:
             if cancel_event.is_set():
                 raise RetryCancelled("用户停止了当前整合")
+            tool_runtime.poll_decisions()
             result_events = tool_runtime.events()
             plan_boundary = None
             for event in result_events:
@@ -394,6 +428,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             needs_request = needs_request or (
                 final_payload is None and not dependencies_pending
             )
+            if tool_runtime.waiting_for_decision():
+                needs_request = False
             if not needs_request:
                 if dependencies_pending:
                     integration.phase("waiting")
@@ -406,7 +442,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                         })
                     def wake():
                         size = getattr(channel, "qsize", None)
-                        return (tool_runtime.changed.is_set()
+                        return (tool_runtime.poll_decisions()
+                                or tool_runtime.changed.is_set()
                                 or bool(size() if callable(size) else False)
                                 or bool(shell.ready()))
                     if not coordinator.wait(
@@ -678,6 +715,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 }
                 if call.name == "external_message":
                     context["transport_registry"] = request.get("_transport_registry")
+                if call.name == "user_decision":
+                    integration.checkpoint_decisions(request)
                 if call.name == "shell":
                     coordinator.ensure_started()
                 if call.name == "multimodal":
@@ -727,6 +766,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 cleanup_errors.append({"exception_type": type(cleanup_error).__name__})
                 return None
         if integration is not None and not finished:
+            if tool_runtime is not None:
+                cleanup(lambda: tool_runtime.poll_decisions(cancel=True))
             if request_inflight:
                 cleanup(lambda: integration.request_finished())
             final_guidance = cleanup(lambda: _close(channel)) or []
@@ -793,6 +834,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             # Generator close is not permission to orphan live execution truth.
             cancel_event.set()
             try:
+                if tool_runtime is not None:
+                    tool_runtime.poll_decisions(cancel=True)
                 if request_inflight:
                     integration.request_finished()
                 receipt = coordinator.finish("cancelled", defer_terminal=True) if coordinator is not None else None

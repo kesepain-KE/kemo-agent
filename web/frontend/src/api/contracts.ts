@@ -1,5 +1,23 @@
 import { z } from 'zod'
 
+export const userDecisionSchema = z.object({
+  decision_id: z.string(), integration_id: z.string(),
+  title: z.string(), question: z.string(),
+  options: z.array(z.object({
+    id: z.string(), label: z.string(), description: z.string().optional(),
+    recommended: z.boolean().optional(),
+  })),
+  mode: z.enum(['wait', 'async']),
+  status: z.enum(['pending', 'answered', 'expired', 'resolved_by_agent', 'cancelled']),
+  created_at: z.number().finite(), expires_at: z.number().finite(),
+  answer: z.object({ option_id: z.string(), text: z.string(), custom: z.boolean() }).nullable(),
+  resolution: z.string(),
+})
+export const decisionsSchema = z.object({
+  user: z.string(), source: z.string(), session_id: z.string(),
+  enabled: z.boolean(), revision: z.number().int().nonnegative(), decisions: z.array(userDecisionSchema),
+})
+
 const object = z.object({}).passthrough()
 const number = z.number().finite()
 const counts = z.record(z.string(), number)
@@ -55,6 +73,8 @@ export function validateApiResponse(path: string, value: unknown): unknown {
     : /\/users\/[^/]+\/tasks$/.test(pathname) ? tasksSchema
     : /\/users\/[^/]+\/knowledge$/.test(pathname) ? knowledgeSchema
     : pathname.endsWith('/memory/summary') ? memorySchema
+    : /\/sessions\/[^/]+\/decisions$/.test(pathname) ? decisionsSchema
+    : /\/decisions\/[^/]+\/answer$/.test(pathname) ? z.object({ decision: userDecisionSchema })
     : undefined
   if (!schema) return value
   const parsed = schema.safeParse(value)

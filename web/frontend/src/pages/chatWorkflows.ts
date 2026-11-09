@@ -523,7 +523,8 @@ const executePlan = async (plan: PlanSummary) => {
   setRunErrorNoticeFor(targetUser, activeSession, null)
   updateChatRunItems(targetUser, activeSession, (current: any) => [
     ...current,
-    { id: eventId('plan_execution'), kind: 'execution_marker', planId: plan.plan_id },
+    { id: eventId('plan_execution'), kind: 'execution_marker', planId: plan.plan_id,
+      integrationNumber: historyUserMessages + 1 },
   ])
   setPlanOverrides((current: any) => ({
     ...current,

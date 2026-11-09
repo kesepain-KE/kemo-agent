@@ -10,3 +10,5 @@ control_open: true
 control_script: start_expand.py
 control_entry: expand_control.md
 recent_update: '2026-11-07 16:58:33'
+ui:
+  workspace: module/workspace.json

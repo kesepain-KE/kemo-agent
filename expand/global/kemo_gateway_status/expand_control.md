@@ -12,6 +12,12 @@
 
 # 可用命令
 
+## `initialize`
+
+初始化本地控制台状态，保留现有网关地址、独立 Token 和采集参数。
+未配置 Token 时保持未激活，不联网，也不生成含空 Token 的 `gateway_config.json`。
+专属控制台的连接设置可提交独立 `STATUS_TOKEN` 调用下方 `activate`，验证成功才保存。
+
 ## `panel_configure_endpoint`
 
 Web“用户配置”组件专用命令，只设置 `scheme`、`gateway_ip` 和 `gateway_port`。未配置独立

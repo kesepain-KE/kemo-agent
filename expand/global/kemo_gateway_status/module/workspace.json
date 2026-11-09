@@ -10,10 +10,21 @@
       "permissions": ["module.status.read", "module.action.invoke"]
     },
     {"id": "panel", "label": "通用配置", "type": "panel"},
-    {"id": "data", "label": "采集与注入", "type": "builtin", "view": "data"},
+    {"id": "collection", "label": "采集数据", "type": "builtin", "view": "collection"},
+    {"id": "injection", "label": "注入数据", "type": "builtin", "view": "injection"},
     {"id": "docs", "label": "文档", "type": "builtin", "view": "docs"}
   ],
   "actions": [
+    {"id": "initialize", "label": "初始化网关状态", "handler": "initialize"},
+    {"id": "activate", "label": "验证并激活网关连接", "handler": "activate", "input_schema": {
+      "type": "object", "required": ["status_token"], "properties": {
+        "base_url": {"type": "string", "maxLength": 2048},
+        "status_token": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "timeout_seconds": {"type": "integer", "minimum": 2, "maximum": 60},
+        "ranking_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "log_limit": {"type": "integer", "minimum": 1, "maximum": 100}
+      }
+    }},
     {"id": "dashboard_data", "label": "读取网关快照", "handler": "dashboard_data", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},
     {"id": "refresh", "label": "刷新采集", "handler": "refresh", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},
     {

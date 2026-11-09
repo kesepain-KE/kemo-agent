@@ -1,52 +1,52 @@
-.panel { position: relative; min-width: 0; display: grid; gap: .7rem; container-type: inline-size; }
-.panelHeader { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.panel { position: relative; min-width: 0; display: grid; gap: 1rem; container-type: inline-size; }
+.panelHeader { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
 .panelHeader > span { min-width: 0; display: flex; align-items: center; gap: .55rem; color: var(--brand); }
 .panelHeader > span > span { min-width: 0; display: grid; gap: .1rem; }
-.panelHeader strong { color: var(--text); font-size: .78rem; }
-.panelHeader small { color: var(--muted); font-size: .63rem; }
-.saveButton { min-height: 34px; padding: .4rem .65rem; display: inline-flex; align-items: center; gap: .35rem; border: 1px solid var(--brand); border-radius: 9px; background: var(--brand); color: var(--accent-contrast, #fff); font: inherit; font-size: .68rem; font-weight: 750; cursor: pointer; }
+.panelHeader strong { color: var(--text); font-size: .9rem; }
+.panelHeader small { color: var(--muted); font-size: .75rem; }
+.saveButton { min-height: 40px; padding: .5rem .75rem; display: inline-flex; align-items: center; gap: .35rem; border: 1px solid var(--brand); border-radius: 9px; background: var(--brand); color: var(--accent-contrast, #fff); font: inherit; font-size: .8rem; font-weight: 750; cursor: pointer; }
 .saveButton:disabled { opacity: .55; cursor: wait; }
-.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: .65rem; }
-.card { min-width: 0; height: var(--module-panel-card-height, auto); max-height: var(--module-panel-card-max-height, none); overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem; }
+.card { min-width: 0; min-height: var(--module-panel-card-min-height, 0); height: var(--module-panel-card-height, auto); max-height: var(--module-panel-card-max-height, none); overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
 .card:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .card > section { height: 100%; min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
 .quarter { grid-column: span 3; }
 .third { grid-column: span 4; }
 .half { grid-column: span 6; }
 .full { grid-column: span 12; }
-.h1 { --module-panel-card-height: var(--module-panel-h1-height, auto); --module-panel-card-max-height: var(--module-panel-h1-height, 6.5rem); }
-.h2 { --module-panel-card-height: var(--module-panel-h2-height, auto); --module-panel-card-max-height: var(--module-panel-h2-height, 13rem); }
+.h1 { --module-panel-card-height: var(--module-panel-h1-height, auto); --module-panel-card-min-height: 10rem; --module-panel-card-max-height: var(--module-panel-h1-height, none); }
+.h2 { --module-panel-card-height: var(--module-panel-h2-height, auto); --module-panel-card-min-height: 18rem; --module-panel-card-max-height: var(--module-panel-h2-height, none); }
 .actionCard { height: var(--module-panel-action-height, var(--module-panel-card-height)); max-height: var(--module-panel-action-max-height, var(--module-panel-card-max-height)); }
 .actionCard .cardBody { height: var(--module-panel-action-body-height, auto); }
-.cardHeader { min-height: 34px; padding: .45rem .6rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-elevated) 82%, var(--brand-soft)); }
-.cardHeader strong { color: var(--text); font-size: .7rem; }
-.cardHeader span { padding: .1rem .35rem; border-radius: 999px; background: var(--surface-3); color: var(--muted); font-size: .58rem; }
-.cardBody { min-height: 0; padding: .55rem .6rem; overflow: auto; scrollbar-width: thin; }
-.statusFields, .configBody, .actions { display: grid; gap: .45rem; }
+.cardHeader { min-height: 44px; padding: .7rem .9rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-elevated) 82%, var(--brand-soft)); }
+.cardHeader strong { color: var(--text); font-size: .85rem; }
+.cardHeader span { padding: .15rem .45rem; border-radius: 999px; background: var(--surface-3); color: var(--muted); font-size: .7rem; }
+.cardBody { min-height: 0; padding: .9rem; overflow: auto; scrollbar-width: thin; }
+.statusFields, .configBody, .actions { display: grid; gap: .8rem; }
 .statusRow { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: .65rem; }
-.statusRow > span { color: var(--muted); font-size: .64rem; }
-.statusRow > strong { min-width: 0; color: var(--text-2); font-size: .67rem; overflow-wrap: anywhere; text-align: right; }
-.badge { padding: .16rem .42rem; border-radius: 999px; font-size: .6rem; }
+.statusRow > span { color: var(--muted); font-size: .8rem; }
+.statusRow > strong { min-width: 0; color: var(--text-2); font-size: .8rem; overflow-wrap: anywhere; text-align: right; }
+.badge { padding: .2rem .5rem; border-radius: 999px; font-size: .75rem; }
 .neutral { background: var(--surface-3); color: var(--muted); }
 .success { background: var(--green-soft); color: var(--green); }
 .warning { background: var(--amber-soft); color: var(--amber); }
 .danger { background: var(--red-soft); color: var(--red); }
 .markdownField, .keyValueField { display: grid; gap: .3rem; }
-.markdownField > strong, .keyValueField > strong { color: var(--muted); font-size: .63rem; }
+.markdownField > strong, .keyValueField > strong { color: var(--muted); font-size: .8rem; }
 .keyValueField dl { margin: 0; display: grid; gap: .25rem; }
 .keyValueField dl > div { display: grid; grid-template-columns: minmax(4rem,.7fr) minmax(0,1.3fr); gap: .5rem; }
-.keyValueField dt { color: var(--muted); font-size: .62rem; }
-.keyValueField dd { margin: 0; color: var(--text-2); font-size: .64rem; overflow-wrap: anywhere; }
+.keyValueField dt { color: var(--muted); font-size: .8rem; }
+.keyValueField dd { margin: 0; color: var(--text-2); font-size: .8rem; overflow-wrap: anywhere; }
 .presets { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; }
-.presets > span { color: var(--muted); font-size: .61rem; }
-.presets button, .actionControl > button { min-height: 30px; padding: .3rem .5rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-elevated); color: var(--text-2); font: inherit; font-size: .62rem; cursor: pointer; }
+.presets > span { color: var(--muted); font-size: .75rem; }
+.presets button, .actionControl > button { min-height: 40px; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-elevated); color: var(--text-2); font: inherit; font-size: .8rem; cursor: pointer; }
 .presets button:hover, .actionControl > button:hover { border-color: var(--brand); color: var(--brand); }
-.configFields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr)); gap: .5rem; }
-.configField { min-width: 0; display: grid; align-content: start; gap: .25rem; }
+.configFields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr)); gap: .85rem; }
+.configField { min-width: 0; display: grid; align-content: start; gap: .4rem; }
 .configField > span:first-child { display: grid; gap: .1rem; }
-.configField > span strong { color: var(--text-2); font-size: .63rem; }
-.configField > span small { color: var(--muted); font-size: .58rem; }
-.configField input, .configField select, .configField textarea { width: 100%; min-height: 34px; padding: .4rem .5rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-elevated); color: var(--text); font: inherit; font-size: .65rem; }
+.configField > span strong { color: var(--text-2); font-size: .8rem; }
+.configField > span small { color: var(--muted); font-size: .75rem; }
+.configField input, .configField select, .configField textarea { width: 100%; min-height: 42px; padding: .6rem .7rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-elevated); color: var(--text); font: inherit; font-size: .85rem; }
 .configField textarea { min-height: 68px; resize: vertical; }
 .configField input:focus, .configField select:focus, .configField textarea:focus { border-color: var(--brand); outline: 2px solid var(--brand-soft); }
 .booleanField { grid-template-columns: minmax(0,1fr) auto; align-items: center; }
@@ -55,11 +55,11 @@
 .switch.checked { border-color: var(--green); background: var(--green-soft); }
 .switch.checked span { background: var(--green); transform: translateX(16px); }
 .inputWrap { min-width: 0; position: relative; display: block !important; }
-.inputWrap input { padding-right: 4.4rem; }
-.inputAction { width: 28px; height: 28px; padding: 0; position: absolute; right: 3px; top: 3px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
-.clearAction { right: 32px; }
+.inputWrap input { padding-right: 5rem; }
+.inputAction { width: 34px; height: 34px; padding: 0; position: absolute; right: 4px; top: 4px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.clearAction { right: 40px; }
 .inputAction:hover { background: var(--surface-hover); color: var(--brand); }
-.actionControl { display: grid; gap: .45rem; }
+.actionControl { display: grid; gap: .8rem; }
 .actionControl > button { justify-self: start; display: inline-flex; align-items: center; gap: .3rem; color: var(--brand); border-color: color-mix(in srgb, var(--brand) 36%, var(--line)); }
 .feedback { padding: .45rem .6rem; border-radius: 8px; font-size: .64rem; }
 .saved { background: var(--green-soft); color: var(--green); }

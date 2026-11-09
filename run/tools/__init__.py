@@ -347,6 +347,9 @@ def apply_runtime_tool_policy(
         names &= set(source_policy.plugins.names)
     if not history_read_enabled:
         names.discard("history_search")
+    from run.config import interactive_decisions_enabled
+    if not interactive_decisions_enabled(config):
+        names.discard("user_decision")
     configured_permissions = set(source_policy.plugin_permissions)
     if allowed_permissions is None:
         allowed_permissions = configured_permissions

@@ -153,6 +153,8 @@ def call_is_explicitly_async(call) -> bool:
             arguments.get("action") in {"call", "resume"}
             and arguments.get("wait") is False
         )
+    if call.name == "user_decision":
+        return arguments.get("action") == "ask" and arguments.get("mode") == "async"
     return False
 
 

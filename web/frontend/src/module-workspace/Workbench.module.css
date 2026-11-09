@@ -27,8 +27,10 @@
 .listBody .moduleButton.selected { background: var(--surface-2); border-color: var(--line-strong); box-shadow: var(--shadow-soft); }
 .moduleTitle { display: flex; align-items: center; gap: 8px; }
 .moduleTitle strong { min-width: 0; flex: 1; font-size: var(--t-sm); overflow-wrap: anywhere; }
-.moduleButton small { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
-.moduleDescription { color: var(--text-2); font-size: var(--t-xs); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.moduleMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.moduleMeta small { min-width: 0; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.moduleMeta .tags { flex-shrink: 0; flex-wrap: nowrap; margin-left: auto; }
+.moduleMeta .tags span { padding: 3px 4px; white-space: nowrap; }
 .dot, .badDot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
 .badDot { background: var(--danger); }
 .tags { display: flex; gap: 5px; flex-wrap: wrap; }
@@ -82,7 +84,13 @@
 .importArea { border: 1px solid var(--line); background: var(--surface-2); border-radius: 12px; padding: 18px; flex-shrink: 0; }
 .importArea h2 { margin: 0 0 8px; font-size: 17px; }
 .importArea p { color: var(--muted); font-size: var(--t-sm); line-height: 1.6; }
-.importArea select { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.importActions { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 16px; }
+.importActions > button { min-height: 42px; white-space: nowrap; }
+.importScope { display: grid; gap: 6px; min-width: 144px; }
+.importScope > span { font-size: var(--t-xs); color: var(--muted); }
+.importScope select { width: 100%; min-width: 144px; min-height: 42px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.importScope select::picker(select) { min-width: 144px; }
+.importScope select:not([multiple]):not([size]) option { white-space: nowrap; }
 .importPreview { margin-top: 16px; }
 .importPreview details { margin-bottom: 12px; }
 .expanded { position: fixed; inset: 0; z-index: 65; padding: 12px; background: var(--surface); }

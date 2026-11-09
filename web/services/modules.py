@@ -318,7 +318,7 @@ class MessageExpandServiceMixin:
             "deleted": True,
         }
 
-    def expands(self, user: Any) -> dict[str, Any]:
+    def expands(self, user: Any, *, include_files: bool = True) -> dict[str, Any]:
         name = self.require_user(user)
         config = load_config(name, self.root)
         source_policy = MainAgentSourcePolicy.from_config(config)
@@ -378,7 +378,7 @@ class MessageExpandServiceMixin:
                         "input_health": "异常",
                         "error": "拓展模块目录不能是符号链接、目录联接或越界路径",
                     }
-                files = _flat_files(module, relative_to=directory) if module_path_safe else []
+                files = _flat_files(module, relative_to=directory) if module_path_safe and include_files else []
                 valid = bool(health.get("valid"))
                 whitelisted = scope == "user" or module_name in selected
                 collected_markdown = self._read_expand_text(

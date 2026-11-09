@@ -16,7 +16,7 @@ from initialize_config import initialize
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 PANEL_STATUS_PATH = BASE_DIR / "module" / "status.json"
-USERS_DIR = BASE_DIR.parent.parent / "users"
+USERS_DIR = BASE_DIR.parents[2] / "users"
 USER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 

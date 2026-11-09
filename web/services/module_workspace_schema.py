@@ -112,7 +112,7 @@ def workspace_declaration(spec: ModuleSpec) -> dict[str, Any]:
             current = {"id": page_id, "label": _label(page.get("label")), "type": mode}
             if mode == "builtin":
                 allowed.add("view")
-                if page.get("view") not in {"overview", "data", "docs", "logs"}:
+                if page.get("view") not in {"overview", "collection", "injection", "docs", "logs"}:
                     raise InvalidRequestError("未知 builtin view")
                 current["view"] = page["view"]
             elif mode == "panel":
@@ -172,7 +172,10 @@ def workspace_declaration(spec: ModuleSpec) -> dict[str, Any]:
             assets = asset_files(root)
     defaults = [{"id": "overview", "label": "总览", "type": "builtin", "view": "overview"}]
     if spec.input_open:
-        defaults.append({"id": "data", "label": "采集与注入", "type": "builtin", "view": "data"})
+        defaults.extend([
+            {"id": "collection", "label": "采集数据", "type": "builtin", "view": "collection"},
+            {"id": "injection", "label": "注入数据", "type": "builtin", "view": "injection"},
+        ])
     if panel is not None or panel_error:
         defaults.append({"id": "panel", "label": "通用配置", "type": "panel"})
     if spec.control_entry is not None or (root / "README.md").is_file():

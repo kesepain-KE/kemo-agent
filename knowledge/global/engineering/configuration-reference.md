@@ -4,6 +4,23 @@
 
 这三类文件均使用 YAML，支持缩进、列表与 `#` 注释。根配置 `kemo.yaml` 使用扁平的环境变量映射；全局和用户配置按节嵌套，布尔值写为 `true`/`false`，数字可直接填写。Web 设置保存或更新器合并配置时会重新序列化 YAML，手写注释不会保留。
 
+## interactive_decisions.enabled — 交互式决策
+
+在 `users/<name>/user_config.yaml` 中设置：
+
+```yaml
+interactive_decisions:
+  enabled: false
+```
+
+默认关闭，必须为布尔值；属于用户专属段，不继承全局同名节。
+网页“设置 → 运行限制 → 交互式决策”可修改并保存，无需重启。
+启用后，获准的主智能体可以调用 `user_decision` 创建等待式或异步问题。
+用户可选择预设方案或填写自定义回复；30 分钟未答自动关闭，模型收到明确超时结果后自主继续。
+超时不预选推荐项，也不把沉默当作授权。
+关闭开关会关闭当前未回答问题；后续运行不再注册该工具。
+子智能体向主智能体报告问题，由主智能体统一提问。工具参数见 `plugins/user_decision/SKILL.md`。
+
 ## web_ui.language — 用户网页语言
 
 在 `users/<name>/user_config.yaml` 中配置：

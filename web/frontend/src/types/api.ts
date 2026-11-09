@@ -991,7 +991,7 @@ export interface ApiErrorPayload {
 export type ChatItem =
   | { id: string; kind: 'subagent_progress'; callId: string; agent: string; status: string; iteration: number; toolName: string; toolCount: number; nextAttempt: number }
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; level?: 'initial' | 'guidance' | 'interim' | 'final'; providerItemId?: string; providerResponseId?: string; integrationNumber?: number; attachments?: InputAttachment[]; streaming?: boolean; edited?: boolean; originalContent?: string }
-  | { id: string; kind: 'execution_marker'; planId: string }
+  | { id: string; kind: 'execution_marker'; planId: string; integrationNumber?: number }
   | { id: string; kind: 'context_compression'; runId: string; status: 'started' | 'ready' | 'failed'; trigger: string; historyTokensBefore: number; historyTokensAfter: number; absorbedCards: number; content: string }
   | { id: string; kind: 'retry_boundary'; attempt: number; phase: 'snapshot' | 'active' }
   | { id: string; kind: 'media'; artifact: MediaArtifact }

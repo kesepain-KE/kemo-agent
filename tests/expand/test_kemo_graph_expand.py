@@ -212,6 +212,15 @@ class KemoGraphExpandTests(unittest.TestCase):
         status = json.loads((self.module / "module" / "status.json").read_text("utf-8"))
         self.assertEqual(status["backend_status"], "离线")
         self.assertIn("offline", status["last_error"])
+        refreshed = start_expand.write_panel_status()
+        self.assertEqual(refreshed, status)
+        changed = self.portable_mapping()
+        changed["base_url"] = "http://127.0.0.1:8001/api/v1"
+        graph.save_config(graph.config_from_mapping(changed))
+        changed_status = start_expand.write_panel_status()
+        self.assertEqual(changed_status["backend_status"], "未检测")
+        self.assertEqual(changed_status["last_checked"], "")
+        self.assertEqual(changed_status["last_error"], "")
 
     def test_registry_requires_stable_ids_and_separate_absolute_paths(self) -> None:
         with self.assertRaisesRegex(graph.GraphExpandError, "allow_remote"):

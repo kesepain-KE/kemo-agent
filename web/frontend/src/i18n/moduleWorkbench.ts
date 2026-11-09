@@ -78,6 +78,8 @@ dirty 必须是布尔值|dirty must be a boolean|dirty debe ser booleano|dirty d
 此模块没有声明配置面板|This module has no configuration panel|Este módulo no declara un panel|Ce module n’a pas de panneau de configuration|Dieses Modul hat kein Konfigurationsfeld|Este módulo não tem painel de configuração|У модуля нет панели настроек|設定パネルは宣言されていません|이 모듈에는 설정 패널이 없습니다
 未声明的感知面板动作|Undeclared perception panel action|Acción de percepción no declarada|Action de perception non déclarée|Nicht deklarierte Wahrnehmungsaktion|Ação de percepção não declarada|Незаявленное действие панели наблюдения|宣言されていない感知操作|선언되지 않은 감지 패널 작업
 正在加载文档…|Loading document…|Cargando documento…|Chargement du document…|Dokument wird geladen…|Carregando documento…|Загрузка документа…|文書を読み込み中…|문서 불러오는 중…
+采集数据|Collected data|Datos recopilados|Données collectées|Erfasste Daten|Dados coletados|Собранные данные|収集データ|수집 데이터
+注入数据|Injected data|Datos inyectados|Données injectées|Eingefügte Daten|Dados injetados|Данные в контексте|注入データ|주입 데이터
 采集原文|Collected content|Contenido recopilado|Contenu collecté|Erfasster Inhalt|Conteúdo coletado|Собранный текст|収集した原文|수집 원문
 暂无采集数据|No collected data|No hay datos recopilados|Aucune donnée collectée|Keine erfassten Daten|Nenhum dado coletado|Нет собранных данных|収集データがありません|수집 데이터가 없습니다
 实际注入内容|Injected content|Contenido inyectado|Contenu injecté|Eingefügter Inhalt|Conteúdo injetado|Текст в контексте|実際に注入された内容|실제 주입 내용

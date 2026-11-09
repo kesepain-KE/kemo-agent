@@ -23,8 +23,9 @@ from datetime import datetime
 from pathlib import Path
 
 from lifecycle import load_ready_config
+from initialize_config import initialize
 from device_commands import DeviceCommandStore
-from panel_control import bind_user, set_device_token, set_port, unbind_user, write_status
+from panel_control import bind_user, public_status, set_device_token, set_port, unbind_user, write_status
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_PATH = Path(BASE_DIR)
@@ -739,6 +740,27 @@ def _panel_runtime_result(result: dict, *, was_running: bool) -> dict:
 def execute(command: str, params: dict | None = None, *, context: dict | None = None) -> dict:
     """框架操作层入口：execute(command, params)。"""
     cmd = str(command or "").strip().casefold()
+    if cmd == "initialize":
+        result = initialize(BASE_PATH)
+        if result["created"]:
+            write_status()
+        return result
+    if cmd == "dashboard_data":
+        runtime = status()
+        connections = _read_connections() if runtime["running"] else {}
+        return {
+            "ok": True,
+            "configuration": public_status(runtime),
+            "runtime": {key: runtime.get(key) for key in (
+                "active", "running", "activated", "pid", "unmanaged_process",
+                "initialized", "configured", "missing",
+            )},
+            "devices": [
+                {key: device.get(key) for key in ("user", "device_id", "connections", "connected_at")}
+                for device in connections.get("devices", [])
+            ],
+            "websocket_connections": connections.get("websocket_connections", 0),
+        }
     if cmd == "device_action":
         return device_action(params, context=context)
     if cmd == "device_action_status":

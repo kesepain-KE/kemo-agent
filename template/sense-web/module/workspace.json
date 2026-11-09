@@ -7,7 +7,8 @@
       "permissions": ["module.status.read", "module.config.read", "module.config.write", "module.action.invoke"]
     },
     {"id": "panel", "label": "通用配置", "type": "panel"},
-    {"id": "data", "label": "采集与注入", "type": "builtin", "view": "data"}
+    {"id": "collection", "label": "采集数据", "type": "builtin", "view": "collection"},
+    {"id": "injection", "label": "注入数据", "type": "builtin", "view": "injection"}
   ],
   "actions": [
     {"id": "refresh", "label": "立即采集", "handler": "refresh", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},

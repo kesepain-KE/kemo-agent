@@ -16,6 +16,7 @@ from run.extensions import (
     EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER, invoke_expand,
     module_execution_lock, module_update_timeout, read_expand_runtime, run_protocol_process,
 )
+from run.extensions.expand_errors import ExpandRuntimeError
 from run.modules import locate_modules
 from run.modules.paths import module_path
 from run.modules.spec import ModuleKind, ModuleSpec
@@ -79,7 +80,7 @@ class ModuleWorkspaceService:
     def _inventory(self, user: str, kind: str) -> dict[str, Any]:
         name = self.backend.require_user(user)
         typed_kind = self._kind(kind)
-        original = self.backend.expands(name) if kind == "expand" else self.backend.sense(name)
+        original = self.backend.expands(name, include_files=False) if kind == "expand" else self.backend.sense(name)
         specs = {spec.key: spec for spec in locate_modules(self.root, name, kind=typed_kind).specs}
         if kind == "expand":
             rows = [dict(item, scope=group["scope"]) for group in original["expands"] for item in group["items"]]
@@ -229,10 +230,13 @@ class ModuleWorkspaceService:
             return self.refresh(user, kind, scope, module)
         timeout = module_update_timeout(load_config(user, self.root))
         if kind == "expand":
-            return invoke_expand(
-                root=self.root, user=user, scope=scope, module=module,
-                command=action["handler"], params=params, timeout=timeout,
-            )
+            try:
+                return invoke_expand(
+                    root=self.root, user=user, scope=scope, module=module,
+                    command=action["handler"], params=params, timeout=timeout,
+                )
+            except ExpandRuntimeError as exc:
+                raise WebServiceError(f"拓展页面操作失败：{exc}") from exc
         if spec.ui_action_entry is None:
             raise InvalidRequestError("Sense 未声明 UI 动作入口")
         request = json.dumps({"command": action["handler"], "params": params, "context": {

@@ -24,6 +24,8 @@ class ToolRuntime:
         self._events: queue.Queue[RunEvent | BaseException] = queue.Queue()
         self._publish_lock = threading.Lock()
         self.changed = threading.Event()
+        self._decision_sequences: set[int] = set()
+        self._has_decisions = False
 
     def start(self, call, definition, *, context: dict[str, Any], timeout: float,
               transform=None) -> str:
@@ -47,6 +49,33 @@ class ToolRuntime:
                               "execution_live": True},
                 ))
                 self.changed.set()
+            if call.name == "user_decision":
+                # Native coordination is a short DB operation. In particular,
+                # waiting for a person never starts an executor or watchdog.
+                started = time.monotonic()
+                try:
+                    value = definition.load_callable()(
+                        **call.arguments,
+                        context={**context, "decision_execution_id": execution["execution_id"]},
+                    )
+                except (ValueError, KeyError) as error:
+                    self._publish(execution, self._error(error), "failed", started)
+                else:
+                    if call.arguments["action"] == "ask":
+                        self._has_decisions = True
+                        with self._publish_lock:
+                            # An HTTP answer can win immediately after tool
+                            # registration. Publish the initial pending receipt
+                            # only while still live; poll the committed answer.
+                            card = self.integration.publish_running_notice(
+                                execution["execution_id"], result=value,
+                            )
+                            if card is not None:
+                                self._publish_card(card)
+                            self.changed.set()
+                    else:
+                        self._publish(execution, value, "completed", started)
+                return execution["execution_id"]
             thread = threading.Thread(
                 target=self._execute, daemon=True, name=f"card-tool-{execution['execution_id']}",
                 args=(execution, definition, original, dict(context), timeout, transform),
@@ -113,6 +142,8 @@ class ToolRuntime:
     def _publish_card(self, card):
         payload = card.raw_payload
         original = payload["original_call"]
+        if original["name"] == "user_decision":
+            self._decision_sequences.add(card.seq)
         self._events.put(RunEvent(
             type="tool_call_result", tool_call_id=card.tool_call_id or "",
             tool_name=original["name"], arguments=original["arguments"],
@@ -123,6 +154,33 @@ class ToolRuntime:
                       "execution_live": payload["execution"]["execution_live"],
                       "card_seq": card.seq, "original_call": original},
         ))
+
+    def restore_decisions(self) -> None:
+        self._has_decisions = True
+
+    def poll_decisions(self, *, cancel=False) -> bool:
+        if not self._has_decisions:
+            return False
+        from run.tools.user_decisions import DecisionStore
+        decisions = DecisionStore(self.integration.store)
+        decisions.refresh(self.integration.source, self.integration.session_id,
+                          integration_id=self.integration.id, cancel=cancel)
+        cards = decisions.result_cards(self.integration)
+        with self._publish_lock:
+            for card in cards:
+                if card.seq not in self._decision_sequences:
+                    self._publish_card(card)
+                    self.changed.set()
+        return self.has_events()
+
+    def waiting_for_decision(self) -> bool:
+        if not self._has_decisions:
+            return False
+        from run.tools.user_decisions import DecisionStore
+        return any(item["mode"] == "wait" for item in DecisionStore(
+            self.integration.store,
+        ).list(self.integration.source, self.integration.session_id,
+               integration_id=self.integration.id))
 
     def handoff(self, execution_ids: list[str], *, grace_seconds: float = .15) -> None:
         """Wait briefly for fast calls; persist a live receipt before moving on."""

@@ -78,6 +78,7 @@
 | 记住、检索、修订或忘记 | `memory_manage`；相关记忆可显式用 `match_mode=fulltext`，融合证据仍用默认关键词覆盖率，必要时让记忆子智能体整理 |
 | 清晰独立的协作工作 | `subagent_dispatch` 交付目标、相关个人偏好、背景和验收；`general_worker` 执行 |
 | 多步骤事情与提醒 | `task_plan` 管步骤，`task_time` 管定时；`task_plan`、`time_plan` 子智能体只生成相应方案 |
+| 运行中需要用户选择 | 获准的 `user_decision` 展示选项和自定义回复；支持等待/异步，30 分钟未答自主继续，详见 `plugins/user_decision/SKILL.md` |
 | 连续对话与记忆维护 | `history_summary` 生成可找回的对话摘要；`self_improve`、`memory_temporary_important` 整理记忆 |
 | 用户需要可复用能力 | `skill_creater`、`expand_creater`、`sense_creater`；现有拓展用 `expand_call` |
 | 已获授权的外部通讯或知识图谱 | `external_message`、`kemo_graph_read` / `kemo_graph_write`，先读对应插件说明 |

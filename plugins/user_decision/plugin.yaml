@@ -1,0 +1,69 @@
+name: user_decision
+description: 运行中向当前用户提问并显示交互卡片。ask 的 mode=wait 等待回答，mode=async 允许继续独立工作；用户可选预设项或自定义回复，30 分钟未答返回 expired 后自主决策。close 关闭已自行解决的问题，get 查看状态。仅用户启用交互式决策时可用。
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - ask
+      - get
+      - close
+    mode:
+      type: string
+      enum:
+      - wait
+      - async
+      description: ask 默认 wait；async 创建后继续不依赖答案的工作
+    title:
+      type: string
+      minLength: 1
+      maxLength: 120
+    question:
+      type: string
+      minLength: 1
+      maxLength: 4000
+    options:
+      type: array
+      minItems: 2
+      maxItems: 6
+      items:
+        type: object
+        properties:
+          id:
+            type: string
+            minLength: 1
+            maxLength: 80
+          label:
+            type: string
+            minLength: 1
+            maxLength: 200
+          description:
+            type: string
+            maxLength: 1000
+          recommended:
+            type: boolean
+        required:
+        - id
+        - label
+        additionalProperties: false
+    decision_id:
+      type: string
+      description: get/close 必需，使用 ask 返回的 decision_id
+    resolution:
+      type: string
+      maxLength: 4000
+      description: close 必需，说明为何不再需要用户回答及实际解决方案
+  required:
+  - action
+  allOf:
+  - {"if": {"properties": {"action": {"const": "ask"}}}, "then": {"required": ["title", "question", "options"]}}
+  - {"if": {"properties": {"action": {"enum": ["get", "close"]}}}, "then": {"required": ["decision_id"]}}
+  - {"if": {"properties": {"action": {"const": "close"}}}, "then": {"required": ["resolution"]}}
+  additionalProperties: false
+version: 1.0.0
+enabled: true
+entrypoint: tool.py:run
+execution_mode: thread
+permission: write
+origin: builtin
