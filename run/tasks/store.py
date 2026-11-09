@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
-from run.infra import add_missing_columns, execute_schema, schema_migration
+from run.infra import add_missing_columns, enable_wal, execute_schema, schema_migration
 from run.tasks.errors import (
     PlanConflictError,
     PlanError,
@@ -184,7 +184,7 @@ class PlanStore:
                         plan = self._load(database, str(row["plan_id"]))
                         if plan is not None:
                             self._save_revision(database, plan, note="迁移现有计划")
-                database.execute("PRAGMA journal_mode=WAL")
+                enable_wal(database)
                 database.execute("PRAGMA synchronous=NORMAL")
                 database.commit()
             finally:

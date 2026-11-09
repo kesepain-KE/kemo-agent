@@ -18,6 +18,19 @@ class SchemaMigrationError(RuntimeError):
     """An unsupported schema or an unsafe migration must stop initialization."""
 
 
+def enable_wal(database: sqlite3.Connection) -> None:
+    """Allow a concurrent post-migration writer to release its journal lock."""
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            database.execute("PRAGMA journal_mode=WAL").fetchone()
+            return
+        except sqlite3.OperationalError as exc:
+            if str(exc) != "database is locked" or time.monotonic() >= deadline:
+                raise
+            time.sleep(.025)
+
+
 def backup_database(source: Path, destination: Path, *, timeout: float = 30.0) -> Path:
     """Publish a standalone backup only after SQLite has copied and checked it.
 

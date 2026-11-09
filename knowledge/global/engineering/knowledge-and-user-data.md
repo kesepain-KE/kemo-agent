@@ -169,6 +169,10 @@ users/<name>/
 | `completion_sound.*` | Windows 网页端成功结束音效 API | 上传后写入用户根目录；不进入 `download/`、`file_upload/` 或文件列表；未设置时不存在 |
 | `failure_sound.*` | Windows 网页端最终失败音效 API | 上传后写入用户根目录；不进入 `download/`、`file_upload/` 或文件列表；未设置时不存在 |
 
+历史、任务计划、日志和记忆数据库在迁移提交后才切换 WAL。并发写者可能在此时取得写锁，
+日志模式切换通过 `run/infra/sqlite_migrations.py` 在 5 秒期限内重试这一锁冲突；
+超时和其他数据库错误仍向调用方报告，不重放迁移或业务写入。
+
 ### 用户名规则
 
 - 长度最多 64 个字符。

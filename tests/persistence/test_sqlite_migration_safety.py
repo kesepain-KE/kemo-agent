@@ -1,6 +1,6 @@
 """Migration contracts use isolated databases, never a live installation."""
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 from pathlib import Path
 import sqlite3
@@ -11,7 +11,7 @@ import pytest
 from run.cards import CardStore
 from run.cards import schema as cards
 from run.infra import log_store as logs
-from run.infra.sqlite_migrations import SchemaMigrationError
+from run.infra.sqlite_migrations import SchemaMigrationError, enable_wal
 from run.memory import store as memory
 from run.tasks import store as tasks
 
@@ -301,3 +301,59 @@ def test_two_processes_serialize_schema_check_and_backup(tmp_path, kind):
             future.result(timeout=30)
     assert stored_version(path, kind) == VERSIONS[kind]
     assert len(list(path.parent.glob(path.name + ".bak.v0.*"))) == 1
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_wal_initialization_waits_for_writer_after_migration(tmp_path, kind):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    import threading
+
+    path = seed_version(tmp_path, kind, 0)
+    module = {"cards": cards, "tasks": tasks, "logs": logs, "memory": memory}[kind]
+    migrate = module.schema_migration
+    locked = threading.Event()
+    writers = []
+
+    @contextmanager
+    def migration_then_writer(database, **kwargs):
+        with migrate(database, **kwargs) as previous:
+            yield previous
+        writer = sqlite3.connect(path, check_same_thread=False)
+        writers.append(writer)
+        writer.execute("BEGIN IMMEDIATE")
+        locked.set()
+
+    with patch.object(module, "schema_migration", migration_then_writer):
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(open_store, tmp_path, kind)
+            try:
+                assert locked.wait(10)
+                with pytest.raises(FutureTimeoutError):
+                    future.result(timeout=.1)
+            finally:
+                for writer in writers:
+                    writer.rollback()
+                    writer.close()
+            future.result(timeout=10)
+    assert stored_version(path, kind) == VERSIONS[kind]
+    assert snapshot(path)[1] == "wal"
+    assert len(list(path.parent.glob(path.name + ".bak.v0.*"))) == 1
+    with closing(sqlite3.connect(path)) as database:
+        assert database.execute("SELECT body FROM audit_sentinel").fetchall() == [
+            ("keep original data",),
+        ]
+
+
+def test_wal_initialization_reports_a_lock_that_does_not_release(tmp_path):
+    path = seed_version(tmp_path, "memory", 0)
+    with closing(sqlite3.connect(path)) as writer, closing(sqlite3.connect(path)) as database:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            enable_wal(database)
+
+
+def test_wal_initialization_reports_read_only_database_errors(tmp_path):
+    path = seed_version(tmp_path, "memory", 0)
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as database:
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            enable_wal(database)

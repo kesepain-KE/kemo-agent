@@ -16,7 +16,7 @@ import yaml
 
 from run.infra.runtime_diagnostics import diagnostic_identifier, invalidate_runtime_log_cache
 from run.infra.message_log_projection import message_log_exchanges
-from run.infra.sqlite_migrations import add_missing_columns, execute_schema, schema_migration
+from run.infra.sqlite_migrations import add_missing_columns, enable_wal, execute_schema, schema_migration
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -210,7 +210,7 @@ class LogStore:
                             "input_last_restart_at": "TEXT",
                             "input_error": "TEXT",
                         })
-                    connection.execute("PRAGMA journal_mode=WAL")
+                    enable_wal(connection)
                     try:
                         self.path.parent.chmod(0o700)
                         self.path.chmod(0o600)

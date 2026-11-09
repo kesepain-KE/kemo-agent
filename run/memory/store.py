@@ -13,7 +13,7 @@ import threading
 from typing import Iterator
 
 from run.config import user_dir
-from run.infra import execute_schema, load_simple, schema_migration
+from run.infra import enable_wal, execute_schema, load_simple, schema_migration
 
 
 MEMORY_DB_FILENAME = "memory.sqlite3"
@@ -30,7 +30,7 @@ def _configure(database: sqlite3.Connection, *, initialize: bool = False) -> Non
     database.row_factory = sqlite3.Row
     load_simple(database)
     if initialize:
-        database.execute("PRAGMA journal_mode=WAL")
+        enable_wal(database)
         database.execute("PRAGMA synchronous=NORMAL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA busy_timeout=5000")

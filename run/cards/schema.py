@@ -10,7 +10,7 @@ from typing import Iterator
 
 from run.config import user_dir
 from run.infra import (
-    SchemaMigrationError, execute_schema, load_simple, schema_migration, schema_needs_repair,
+    SchemaMigrationError, enable_wal, execute_schema, load_simple, schema_migration, schema_needs_repair,
 )
 
 
@@ -247,7 +247,7 @@ def connection(root: Path, user: str, *, write: bool = False) -> Iterator[sqlite
             # Established snapshot readers never take BEGIN IMMEDIATE just to
             # run no-op DDL. Migration is an initialization operation only.
             if db.execute("PRAGMA journal_mode").fetchone()[0].casefold() != "wal":
-                db.execute("PRAGMA journal_mode=WAL")
+                enable_wal(db)
             db.execute("PRAGMA synchronous=NORMAL")
             if not write:
                 db.execute("PRAGMA query_only=ON")
