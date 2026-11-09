@@ -81,15 +81,21 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
 
     setattr(provider, "create", create)
     draining = threading.Event()
-    drain_started = []
+    deadlines = []
+    deadline_bounds = []
     drain_finished = []
     original_deadline = TaskCoordinator._deadline
     original_seal_finish = TaskCoordinator._seal_finish
 
     def deadline(coordinator):
+        before = time.monotonic()
+        creating = coordinator._completion_deadline is None
         value = original_deadline(coordinator)
+        if creating:
+            deadline_bounds.append((before + 1.0, time.monotonic() + 1.0))
+            assert coordinator._deadline_seconds == 1.0
+        deadlines.append(value)
         if not draining.is_set():
-            drain_started.append(time.monotonic())
             draining.set()
         return value
 
@@ -119,7 +125,11 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
         thread.join(10)
         assert not thread.is_alive(), "response did not finish after draining dependencies"
         assert not errors
-        assert drain_finished[0] - drain_started[0] < 3.5
+        # Check the deadline policy directly; ledger IO can finish after expiry.
+        assert len(deadline_bounds) == 1
+        assert deadline_bounds[0][0] <= deadlines[0] <= deadline_bounds[0][1]
+        assert all(value == deadlines[0] for value in deadlines)
+        assert drain_finished[0] >= deadlines[0]
         terminal = events[-1]
         assert terminal.type == "done" and terminal.metadata["status"] == "partial"
         if route == "limited":
