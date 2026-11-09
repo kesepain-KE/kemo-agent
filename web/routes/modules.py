@@ -23,6 +23,11 @@ from web.service import SKILL_ARCHIVE_MAX_BYTES, WebRunService
 
 
 def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
+    def invalidate_module_ui(user: str, kind: str, scope: str, module: str, *, all_users: bool = True) -> None:
+        workspace = getattr(app.state, "module_workspaces", None)
+        if workspace is not None:
+            workspace.invalidate(user, kind, scope, module, all_users=all_users)
+
     @app.get("/api/users/{user}/expand")
     async def expands(user: str) -> dict[str, Any]:
         return backend.expands(user)
@@ -86,12 +91,14 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
         module_name: str,
         body: SkillToggleBody,
     ) -> dict[str, Any]:
-        return backend.set_expand_module_enabled(
+        result = backend.set_expand_module_enabled(
             user,
             scope,
             module_name,
             body.enabled,
         )
+        invalidate_module_ui(user, "expand", scope, module_name, all_users=False)
+        return result
 
     @app.delete("/api/users/{user}/expand/{scope}/{module_name}")
     async def delete_expand_module(
@@ -99,7 +106,9 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
         scope: str,
         module_name: str,
     ) -> dict[str, Any]:
-        return backend.delete_expand_module(user, scope, module_name)
+        result = backend.delete_expand_module(user, scope, module_name)
+        invalidate_module_ui(user, "expand", scope, module_name)
+        return result
 
     @app.get("/api/users/{user}/knowledge", response_model=KnowledgeResponse)
     async def knowledge(user: str) -> dict[str, Any]:
@@ -256,8 +265,12 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
         module_name: str,
         body: SkillToggleBody,
     ) -> dict[str, Any]:
-        return backend.set_sense_module_enabled(user, module_name, body.enabled)
+        result = backend.set_sense_module_enabled(user, module_name, body.enabled)
+        invalidate_module_ui(user, "sense", "global", module_name, all_users=False)
+        return result
 
     @app.delete("/api/users/{user}/sense/{module_name}")
     async def delete_sense_module(user: str, module_name: str) -> dict[str, Any]:
-        return backend.delete_sense_module(user, module_name)
+        result = backend.delete_sense_module(user, module_name)
+        invalidate_module_ui(user, "sense", "global", module_name)
+        return result

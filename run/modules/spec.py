@@ -26,3 +26,5 @@ class ModuleSpec:
     control_open: bool
     control_script: Path | None
     control_entry: Path | None
+    ui_workspace: Path | None = None
+    ui_action_entry: Path | None = None

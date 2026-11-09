@@ -9,6 +9,9 @@ from typing import Any, Literal
 
 from web.errors import InvalidRequestError
 from web.services._io import atomic_write
+from web.errors import ConflictError
+from run.extensions import module_execution_lock
+import hashlib
 
 
 PanelKind = Literal["expand", "sense"]
@@ -353,9 +356,14 @@ def _field_default(field: dict[str, Any]) -> Any:
 
 
 def module_panel_response(module_root: Path, panel_kind: PanelKind) -> dict[str, Any]:
+    with module_execution_lock(module_root, timeout=15):
+        return _module_panel_response(module_root, panel_kind)
+
+
+def _module_panel_response(module_root: Path, panel_kind: PanelKind) -> dict[str, Any]:
     panel, panel_error = load_module_panel(module_root, panel_kind)
     if panel is None:
-        return {"panel": None, "panel_error": panel_error}
+        return {"panel": None, "panel_error": panel_error, "config_revision": ""}
     rendered = {**panel, "containers": []}
     for container in panel["containers"]:
         current = dict(container)
@@ -387,7 +395,17 @@ def module_panel_response(module_root: Path, panel_kind: PanelKind) -> dict[str,
             current["secret_set"] = secret_set
             current["data_error"] = data_error
         rendered["containers"].append(current)
-    return {"panel": rendered, "panel_error": ""}
+    return {"panel": rendered, "panel_error": "", "config_revision": panel_config_revision(module_root, panel)}
+
+
+def panel_config_revision(module_root: Path, panel: dict[str, Any]) -> str:
+    digest = hashlib.sha256(json.dumps(panel, sort_keys=True, ensure_ascii=False).encode())
+    for container in panel["containers"]:
+        if container["kind"] == "config":
+            _, path = _safe_panel_path(module_root, container["values"], "config.values")
+            digest.update(container["values"].encode())
+            digest.update(path.read_bytes() if path.exists() else b"")
+    return digest.hexdigest()
 
 
 def save_module_panel_values(
@@ -395,10 +413,21 @@ def save_module_panel_values(
     panel_kind: PanelKind,
     values: Any,
     clear_secrets: Any = None,
+    expected_revision: str | None = None,
+) -> dict[str, Any]:
+    with module_execution_lock(module_root, timeout=15):
+        return _save_module_panel_values(module_root, panel_kind, values, clear_secrets, expected_revision)
+
+
+def _save_module_panel_values(
+    module_root: Path, panel_kind: PanelKind, values: Any,
+    clear_secrets: Any, expected_revision: str | None,
 ) -> dict[str, Any]:
     panel, panel_error = load_module_panel(module_root, panel_kind)
     if panel is None:
         raise InvalidRequestError(panel_error or "当前模块没有用户配置面板")
+    if expected_revision is not None and expected_revision != panel_config_revision(module_root, panel):
+        raise ConflictError("配置已被其他页面修改，请重新读取后再保存")
     if not isinstance(values, dict):
         raise InvalidRequestError("values 必须是对象")
     clear = [] if clear_secrets is None else clear_secrets
@@ -433,7 +462,7 @@ def save_module_panel_values(
         if len(data) > _VALUES_MAX_BYTES:
             raise InvalidRequestError("panel.values.json 超过 128 KB")
         atomic_write(path, data)
-    return module_panel_response(module_root, panel_kind)
+    return _module_panel_response(module_root, panel_kind)
 
 
 def validate_expand_panel_action(panel: dict[str, Any], command: Any, params: Any) -> tuple[str, dict[str, Any]]:

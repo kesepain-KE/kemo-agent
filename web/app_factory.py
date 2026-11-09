@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Iterator, Protocol, cast
 
 from fastapi import FastAPI
 from fastapi.exceptions import ResponseValidationError
@@ -13,6 +13,7 @@ from web.auth_middleware import WebAuthMiddleware
 from web.operation_contracts import AuthStatusResponse, AuthLogoutResponse
 from web.service import WebRunService
 from web.routes.workspace import register_workspace_routes
+from web.routes.module_workspaces import register_module_workspace_routes
 from web.streaming import (
     ClosingStreamingResponse,
     DEFAULT_SSE_HEARTBEAT_SECONDS,
@@ -348,6 +349,7 @@ def create_app(
     register_identity_routes(app, backend)
     register_file_routes(app, backend)
     register_module_routes(app, backend)
+    register_module_workspace_routes(app, cast(WebRunService, backend))
     register_session_routes(app, backend)
     register_task_routes(app, backend)
     register_setting_routes(app, backend, configured_auth)

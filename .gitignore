@@ -102,3 +102,11 @@ message/out/*
 
 # Local dev tooling (graph builder etc.) — local only, never published
 tools/
+# Instance-admin approval of module UI capabilities is deployment-local.
+config/module_ui_grants.json
+
+# Built module UI examples ship with their source; host dist remains ignored.
+!template/sense-web/ui/dist/
+!template/sense-web/ui/dist/**
+!expand/global/kemo_gateway_status/ui/dist/
+!expand/global/kemo_gateway_status/ui/dist/**

@@ -13,6 +13,7 @@ PROTECTED = (
     '.backups/', 'message/out/', 'knowledge/global/kemo-graph-storage/',
     'knowledge/share/',
     'config/message_config.json',
+    'config/module_ui_grants.json',
 )
 LOCAL_NAMES = {
     'panel.values.json', 'status.json', 'input_data.md',

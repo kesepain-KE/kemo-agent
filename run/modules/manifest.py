@@ -13,6 +13,7 @@ import yaml
 from run.infra import cached_read_text, invalidate_source_cache
 from run.modules.errors import ModuleError, ModuleSpecError, Reason
 from run.modules.spec import ModuleKind, ModuleSpec
+from run.modules.paths import module_path
 
 
 _MANIFEST = "module.yaml"
@@ -29,6 +30,7 @@ _FIELDS = {
     "control_open",
     "control_script",
     "control_entry",
+    "ui",
 }
 _REQUIRED = {
     "kind",
@@ -197,6 +199,23 @@ def read_manifest(
         ".md",
         required=control_open,
     )
+    ui = raw.get("ui")
+    workspace = action_entry = None
+    if ui is not None:
+        if not isinstance(ui, dict) or set(ui) - {"workspace", "action_entry"} or "workspace" not in ui:
+            _fail("bad_type", "ui 必须声明 workspace，可选 action_entry", "ui")
+        try:
+            workspace = module_path(module_dir, ui["workspace"], file=False)
+            if workspace.suffix != ".json":
+                raise ValueError("ui.workspace 必须是 JSON 文件")
+            if "action_entry" in ui:
+                if kind_hint != "sense":
+                    raise ValueError("Expand UI 动作复用 control_script")
+                action_entry = module_path(module_dir, ui["action_entry"])
+                if action_entry.suffix != ".py":
+                    raise ValueError("ui.action_entry 必须是 Python 文件")
+        except (ValueError, OSError) as exc:
+            _fail("path_escape", str(exc), "ui")
     return ModuleSpec(
         kind=kind_hint,
         key=f"sense:{module_dir.name}" if kind_hint == "sense" else f"{scope}:{module_dir.name}",
@@ -212,6 +231,8 @@ def read_manifest(
         control_open=control_open,
         control_script=control_script,
         control_entry=control_entry,
+        ui_workspace=workspace,
+        ui_action_entry=action_entry,
     )
 
 
