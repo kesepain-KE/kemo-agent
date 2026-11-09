@@ -18,6 +18,10 @@ from tests.core.test_completion_barrier_exits import dispatch, request
 from tests.media_input_support import MediaProvider
 
 
+# Startup covers dispatch registration and disk IO, outside the response drain.
+STARTUP_TIMEOUT = 15
+
+
 def bounded_config(root):
     path = root / "config/global_config.yaml"
     config = json.loads(path.read_text("utf-8"))
@@ -42,7 +46,7 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
         def plan_boundary(**kwargs):
             # The in-flight tool receipt does not mean a child was registered.
             if kwargs["result_payload"].get("result", {}).get("status") == "queued":
-                assert started.wait(10)
+                assert started.wait(STARTUP_TIMEOUT)
                 return SimpleNamespace(stop_reason="task_plan_created", plan_id="test",
                                        awaiting_user_approval=True)
             return None
@@ -74,7 +78,7 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
 
     def create(value):
         if len(provider.requests) == 1:
-            assert started.wait(2)
+            assert started.wait(STARTUP_TIMEOUT)
             if route == "cancelled":
                 cancel.set()
         return original_create(value)
@@ -120,7 +124,7 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     try:
-        assert started.wait(10)
+        assert started.wait(STARTUP_TIMEOUT)
         assert draining.wait(10), "completion drain never started"
         thread.join(10)
         assert not thread.is_alive(), "response did not finish after draining dependencies"
@@ -194,7 +198,7 @@ def test_repeated_finish_uses_one_deadline_and_does_not_fake_child_exit(setup):
                                       ownership=coordinator.ownership("call"))
     thread = threading.Thread(target=lambda: coordinator.finish("failed"), daemon=True)
     try:
-        assert started.wait(10)
+        assert started.wait(STARTUP_TIMEOUT)
         thread.start()
         # The response deadline excludes terminal ledger persistence.
         thread.join(10)
@@ -240,7 +244,7 @@ def test_user_stop_keeps_children_running_unless_cascade_was_explicit(setup):
             session_id=f"stop-{cancel_children}",
             ownership=coordinator.ownership("call"),
         )
-        assert started.wait(2)
+        assert started.wait(STARTUP_TIMEOUT)
         coordinator.finish("cancelled")
         child_task = scheduler._tasks[child]
         root_record = coordinator.ledger.get(
@@ -271,7 +275,7 @@ def test_generator_close_keeps_partial_archive_and_fence_until_real_exit(setup):
         try:
             for event in iterator:
                 if event.type == "tool_call_result":
-                    assert started.wait(10)
+                    assert started.wait(STARTUP_TIMEOUT)
                     break
             iterator.close()
             closed.set()
