@@ -68,9 +68,8 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
     second = ProviderError("small invalid parameter", status_code=400) if route == "failed" else ChatResponse(text="saved draft")
     initial = dispatch()
     initial.text = "saved draft"
+    # A follow-up turn may arrive before the first dispatch's queued receipt.
     provider = MediaProvider([initial, second])
-    if route == "limited":
-        provider.responses = [initial, dispatch()]
     original_create = provider.create
 
     def create(value):
@@ -123,6 +122,8 @@ def test_deadline_keeps_partial_body_and_blocks_same_session_until_real_exit(set
         assert drain_finished[0] - drain_started[0] < 3.5
         terminal = events[-1]
         assert terminal.type == "done" and terminal.metadata["status"] == "partial"
+        if route == "limited":
+            assert terminal.metadata["requested_stop_reason"] == "task_plan_created"
         assert terminal.metadata["retryable"] is False
         assert terminal.metadata["unfinished_tasks"]
         assert "saved draft" in terminal.metadata["text"]
