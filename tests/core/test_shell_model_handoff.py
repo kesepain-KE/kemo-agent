@@ -77,6 +77,7 @@ def test_main_loop_waits_then_processes_receipt_without_replaying_tool(tmp_path)
         ChatResponse(text="final after Shell completion"),
     ])
     events, errors = [], []
+    waiting_after_response = threading.Event()
     def run():
         try:
             for event in iter_request_events({
@@ -84,12 +85,14 @@ def test_main_loop_waits_then_processes_receipt_without_replaying_tool(tmp_path)
                 "run_id": "run-shell-test", "prompt": "perform work",
             }, root=tmp_path, provider_factory=lambda _: provider):
                 events.append(event)
+                if event.type == "background_job_progress" and len(provider.requests) >= 2:
+                    waiting_after_response.set()
         except BaseException as error:
             errors.append(error)
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     try:
-        eventually(lambda: any(e.type == "background_job_progress" for e in events))
+        assert waiting_after_response.wait(8)
         requests_before_finish = len(provider.requests)
         assert thread.is_alive() and 2 <= requests_before_finish <= 3
         assert not any(e.type == "done" for e in events)
