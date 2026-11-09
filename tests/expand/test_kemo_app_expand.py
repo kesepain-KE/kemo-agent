@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from tests.type_assertions import require_present
-from deploy.core.policy import protected as protected_release_file
 
 import asyncio
 import hashlib
@@ -712,9 +711,7 @@ class KemoAppExpandTests(unittest.TestCase):
             self.assertIsInstance(manifest["recent_update"], str)
             self.assertTrue(manifest["recent_update"].strip())
 
-    def test_published_tree_has_no_runtime_identity_or_active_status(self) -> None:
-        for name in ("config.json", "users.json", "credential_registry.json", "_server.pid"):
-            self.assertTrue(protected_release_file(f"expand/global/kemo_app/{name}"), name)
+    def test_published_status_is_inactive_and_has_initialization_entrypoints(self) -> None:
         initial = (MODULE_ROOT / "input_data.md").read_text(encoding="utf-8")
         self.assertIn("未激活", initial)
         self.assertIn("未完成", initial)

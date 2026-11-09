@@ -460,8 +460,12 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
         self.assertEqual(sync.installed(self.root)['version'], '1.3.0')
 
     def test_pack_excludes_runtime_and_includes_templates(self):
-        for name in ('kemo.yaml', 'users/a/data.txt', 'expand/global/kemo_app/users.json', 'deploy/artifacts/release.zip', 'web/frontend/node_modules/a.js'):
+        for name in ('kemo.yaml', 'users/a/data.txt', 'deploy/artifacts/release.zip', 'web/frontend/node_modules/a.js'):
             self.assertFalse(publishable(name), name)
+        for name in ('config.json', 'users.json', 'credential_registry.json', '_server.pid'):
+            path = f'expand/global/kemo_app/{name}'
+            self.assertTrue(protected(path), path)
+            self.assertFalse(publishable(path), path)
         self.assertTrue(publishable('template/expand/module/panel.values.json'))
         self.assertTrue(publishable('web/frontend/dist/index.html'))
         self.assertTrue(publishable('provider/assets/deepseek_v4_tokenizer.zip'))
