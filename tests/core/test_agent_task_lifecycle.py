@@ -19,13 +19,13 @@ SCHEDULERS = {}
 JOBS = {}
 
 
-def eventually(predicate, timeout=15):
+def eventually(predicate, timeout=15, *, diagnostic=None):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if predicate():
             return
         time.sleep(.02)
-    assert predicate()
+    assert predicate(), diagnostic() if diagnostic is not None else None
 
 
 @pytest.fixture
@@ -268,9 +268,16 @@ def test_timed_out_running_is_not_an_execution_terminal(setup):
     def detached(cancel):
         raise AgentTimeoutError('still running', process_terminated=False, completion_future=future)
     JOBS['worker'] = detached
-    thread, _, _, errors, provider = launch(root)
+    thread, _, events, errors, provider = launch(root)
     try:
-        eventually(lambda: (root_record(root) or {}).get('status') == 'waiting_children')
+        eventually(
+            lambda: (root_record(root) or {}).get('status') == 'waiting_children',
+            diagnostic=lambda: {
+                'root': root_record(root), 'thread_alive': thread.is_alive(),
+                'events': [event.to_dict() for event in events[-5:]],
+                'errors': [repr(error) for error in errors], 'requests': len(provider.requests),
+            },
+        )
         time.sleep(.1)
         assert thread.is_alive() and 2 <= len(provider.requests) <= 3
     finally:
@@ -287,9 +294,16 @@ def test_guidance_wakes_the_same_parent_before_child_exits(setup):
     mailbox = GuidanceMailbox()
     release = threading.Event()
     JOBS['worker'] = lambda cancel: release.wait(30) and {'answer': 'child-output'}
-    thread, _, _, errors, provider = launch(root, mailbox=mailbox)
+    thread, _, events, errors, provider = launch(root, mailbox=mailbox)
     try:
-        eventually(lambda: (root_record(root) or {}).get('status') == 'waiting_children')
+        eventually(
+            lambda: (root_record(root) or {}).get('status') == 'waiting_children',
+            diagnostic=lambda: {
+                'root': root_record(root), 'thread_alive': thread.is_alive(),
+                'events': [event.to_dict() for event in events[-5:]],
+                'errors': [repr(error) for error in errors], 'requests': len(provider.requests),
+            },
+        )
         assert mailbox.offer('change the delivery format')[0]
         eventually(lambda: any(
             'change the delivery format' in value.model_dump_json() for value in provider.requests
