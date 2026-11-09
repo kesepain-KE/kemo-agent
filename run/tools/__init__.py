@@ -729,6 +729,7 @@ def execute_tool(
 
 _DOMAIN_MODULES = (
     "runtime",
+    "user_decisions",
     "result_contracts",
     "execution_watchdog",
     "provider_tool_recovery",

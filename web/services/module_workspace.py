@@ -13,10 +13,9 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from run.config import load_config
 from run.extensions import (
-    EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER, invoke_expand,
+    EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER, ExpandRuntimeError, invoke_expand,
     module_execution_lock, module_update_timeout, read_expand_runtime, run_protocol_process,
 )
-from run.extensions.expand_errors import ExpandRuntimeError
 from run.modules import locate_modules
 from run.modules.paths import module_path
 from run.modules.spec import ModuleKind, ModuleSpec

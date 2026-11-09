@@ -61,7 +61,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_repository_discovers_all_twenty_native_plugins(self) -> None:
+    def test_repository_discovers_all_native_plugins(self) -> None:
         manifests = discover_plugin_manifests(PROJECT_ROOT)
         names = [manifest.tool["name"] for manifest in manifests]
         self.assertEqual(
@@ -85,6 +85,7 @@ class PluginManifestTests(unittest.TestCase):
                 "subagent_dispatch",
                 "task_plan",
                 "task_time",
+                "user_decision",
                 "wait_for_condition",
                 "web_search",
             ],

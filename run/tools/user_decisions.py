@@ -5,8 +5,7 @@ from datetime import datetime
 import json
 from typing import Any
 
-from run.cards import CardConflictError, CardStore, IntegrationStore
-from run.cards.models import Card, session_key
+from run.cards import Card, CardConflictError, CardStore, IntegrationStore, session_key
 from run.config import interactive_decisions_enabled, load_config
 
 
