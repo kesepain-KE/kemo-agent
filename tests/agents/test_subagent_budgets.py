@@ -19,7 +19,12 @@ from tests.agents.test_subagent_continuation import Provider, call, write_plugin
 from provider.protocol.models import ToolCallItem, ToolResultItem
 
 
-def start(root, config, provider, *, limit=None, timeout: float = 10):
+TASK_TIMEOUT = 10
+# Completion waits also cover scheduling, agent setup and checkpoint finalization.
+TASK_WAIT_TIMEOUT = TASK_TIMEOUT + 5
+
+
+def start(root, config, provider, *, limit=None, timeout: float = TASK_TIMEOUT):
     runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
     scheduler = AgentScheduler.from_runner(runner)
     parent = TaskCoordinator(root, "alice", "web", "scope", "test", {"prompt": "audit"})
@@ -37,10 +42,9 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
     partial = {**OUTPUT, "status": "partial", "summary": "已完成前两项", "remaining": ["继续剩余项"]}
     provider = Provider([[call(value=v, index=i) for i, v in enumerate(["a", "b", "c"])], partial,
                          [call(value=v, index=i) for i, v in enumerate(["c", "d", "e"])], partial, OUTPUT])
-    wait_timeout = 15  # The 10-second execution budget starts after agent setup.
-    scheduler, parent, ownership, task_id = start(root, config, provider, limit=2, timeout=10)
+    scheduler, parent, ownership, task_id = start(root, config, provider, limit=2)
     try:
-        first = scheduler.wait(task_id, wait_timeout, source="web", session_id="scope")
+        first = scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["status"] == "tool_limit" and record["resumable"]
         assert first.data["summary"] == partial["summary"]
@@ -56,7 +60,7 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
         assert not provider.requests[1].tools
         parent.ledger.update(parent.id, status=parent_status)
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership, config=config)
-        scheduler.wait(task_id, wait_timeout, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         second = parent.ledger.get(task_id, "web", "scope")
         assert second["budget"]["tool_calls_used"] == 2
         assert second["budget"]["total_tool_calls"] == 4
@@ -66,7 +70,7 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
         assert (root / "effects.txt").read_text().splitlines() == ["a", "b", "c", "d"]
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership,
                          max_tool_calls=0, config=config)
-        assert scheduler.wait(task_id, wait_timeout, source="web", session_id="scope").data == OUTPUT
+        assert scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope").data == OUTPUT
         final = parent.ledger.get(task_id, "web", "scope")
         assert final["run_count"] == 3 and final["budget"]["unlimited"]
         assert final["budget"]["total_tool_calls"] == 4
@@ -86,7 +90,7 @@ def test_segment_budget_is_independent_of_retired_global_limit(workspace, limit)
     provider = Provider([[call(value="a")], [call(value="b", index=2)], OUTPUT])
     scheduler, parent, _, task_id = start(root, config, provider, limit=limit)
     try:
-        assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == OUTPUT
+        assert scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope").data == OUTPUT
         budget = parent.ledger.get(task_id, "web", "scope")["budget"]
         assert budget["max_tool_calls"] == (80 if limit is None else limit)
         assert budget["tool_calls_used"] == 2 and budget["timeout"] == 10
@@ -108,12 +112,12 @@ def test_failed_wrap_up_keeps_latest_usage_and_is_still_resumable(workspace):
     provider = Provider([[call(value="a"), call(value="b", index=2)], RuntimeError("wrap failed"), OUTPUT])
     scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
     try:
-        partial = scheduler.wait(task_id, 5, source="web", session_id="scope")
+        partial = scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["status"] == "tool_limit" and record["resumable"]
         assert record["usage"]["total_tokens"] == 3 and partial.data["status"] == "partial"
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership)
-        assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == OUTPUT
+        assert scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope").data == OUTPUT
         assert (root / "effects.txt").read_text().splitlines() == ["a"]
     finally:
         scheduler.close(wait=True, cancel_pending=True)
@@ -127,7 +131,7 @@ def test_execution_error_keeps_usage_but_does_not_gain_resume_authority(workspac
         AgentProviderError("bad", category="invalid_request", retryable=False)]))
     try:
         with pytest.raises(AgentQueueError):
-            scheduler.wait(task_id, 5, source="web", session_id="scope")
+            scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["status"] == "failed" and not record["resumable"]
         assert record["usage"]["total_tokens"] == 3
@@ -171,7 +175,7 @@ def test_output_truncation_recovers_without_replaying_tools(
     try:
         if truncations == 6:
             with pytest.raises(AgentQueueError, match="output_truncated"):
-                scheduler.wait(task_id, 5, source="web", session_id="scope")
+                scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
 
             record = parent.ledger.get(task_id, "web", "scope")
             assert record["status"] == "failed" and record["resumable"]
@@ -193,7 +197,7 @@ def test_output_truncation_recovers_without_replaying_tools(
             legacy_error.pop("process_terminated")
             parent.ledger.update(task_id, resumable=False, error=legacy_error)
             scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership)
-        assert scheduler.wait(task_id, 5, source="web", session_id="scope").data == OUTPUT
+        assert scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope").data == OUTPUT
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["status"] == "completed"
         assert record["usage"]["provider_attempt_count"] == truncations + 2
@@ -216,7 +220,7 @@ def test_internal_retry_does_not_reset_segment_tool_count(workspace):
         [call(value="b", index=2)], {**OUTPUT, "status": "partial"}])
     scheduler, parent, _, task_id = start(root, config, provider, limit=1)
     try:
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["status"] == "tool_limit"
         assert record["budget"]["tool_calls_used"] == 1
@@ -232,7 +236,7 @@ def test_soft_budget_reminder_and_public_list_permissions(workspace):
     provider = Provider([[call(value=str(i), index=i) for i in range(4)], OUTPUT])
     scheduler, parent, _, task_id = start(root, config, provider, limit=5)
     try:
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         assert "接近额度" in provider.requests[1].model_dump_json()
         description = describe_agent(root, "alice", scheduler.runner.registry.get("general_worker"), config)
         assert description["max_iterations"] == 80
@@ -261,7 +265,7 @@ def test_running_guidance_is_scope_bound_and_delivered_at_next_request(workspace
         reply = guide_task(root, "alice", task_id, "web", "scope", ownership, "只整理现有结果")
         assert reply["status"] == "guidance_queued"
         release.set()
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         assert "只整理现有结果" in provider.requests[1].model_dump_json()
         public = parent.ledger.public(parent.ledger.get(task_id, "web", "scope"))
         assert "_guidance" not in public
@@ -302,7 +306,7 @@ def test_closed_parent_can_be_controlled_without_model_ownership(workspace):
         )
         assert result["status"] == "guidance_queued"
         release.set()
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["guidance_delivered_count"] == 1
         public = parent.ledger.public(record)
@@ -322,14 +326,14 @@ def test_explicit_split_preserves_origin_and_aggregate_advice(workspace, parent_
                          {**OUTPUT, "status": "partial"}, OUTPUT, OUTPUT])
     scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
     try:
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         parent.ledger.update(parent.id, status=parent_status)
         result = split_task(scheduler, task_id, source="web", session_id="scope",
             ownership=ownership, tasks=[{"task": "stage b"}, {"task": "stage c"}],
             config=config, max_tool_calls=2, timeout=10)
         assert result["accepted_count"] == 2
         for child in result["task_ids"]:
-            scheduler.wait(child, 5, source="web", session_id="scope")
+            scheduler.wait(child, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
             assert parent.ledger.get(child, "web", "scope")["origin_task_id"] == task_id
         records = [{"id": "1", "status": "tool_limit"}, {"id": "2", "status": "tool_limit"}]
         assert failure_advice(records)[0]["count"] == 2
@@ -346,7 +350,7 @@ def test_split_after_limited_parent_is_allowed_but_active_parent_is_protected(wo
                          {**OUTPUT, "status": "partial"}, OUTPUT])
     scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
     try:
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         if parent_status == "limited":
             parent.finish("limited")
         new_parent = TaskCoordinator(root, "alice", "web", "scope", "next-run", {"prompt": "continue"})
@@ -362,7 +366,7 @@ def test_split_after_limited_parent_is_allowed_but_active_parent_is_protected(wo
                 tasks=[{"task": "continue b"}], config=config, max_tool_calls=2, timeout=10,
             )
             assert result["accepted_count"] == 1
-            scheduler.wait(result["task_ids"][0], 5, source="web", session_id="scope")
+            scheduler.wait(result["task_ids"][0], TASK_WAIT_TIMEOUT, source="web", session_id="scope")
             child = new_parent.children()[0]
             assert child["origin_task_id"] == task_id
             assert child["root_task_id"] == new_parent.id
@@ -381,7 +385,7 @@ def test_dispatch_budget_status_and_resume_no_tool_history(workspace, monkeypatc
     monkeypatch.setattr("plugins.subagent_dispatch.tool.get_agent_scheduler", lambda *a, **k: scheduler)
     context = {"root": str(root), "user": "alice", "source": "web", "session_id": "scope", "task_ownership": ownership}
     try:
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         response = dispatch("status", task_id=task_id, context=context)
         assert response["status"] == "tool_limit" and response["resumable"]
         assert response["usage"]["total_tokens"] == 6
@@ -414,7 +418,7 @@ def test_main_receives_soft_threshold_progress_once_after_accepted_response(work
         parent.acknowledge()
         assert parent.notifications() is None
         release.set()
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
     finally:
         release.set()
         scheduler.close(wait=True, cancel_pending=True)
@@ -596,7 +600,7 @@ def test_legacy_tool_limit_failure_can_resume_only_with_valid_matching_checkpoin
     provider = Provider([[call(value="a"), call(value="b", index=2)], {**OUTPUT, "status": "partial"}, OUTPUT])
     scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
     try:
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         # Recreate the exact old failure envelope without touching any real user.
         scheduler._tasks[task_id].status = "failed"
         scheduler._tasks[task_id].resumable = False
@@ -608,7 +612,7 @@ def test_legacy_tool_limit_failure_can_resume_only_with_valid_matching_checkpoin
         store.write(data)
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership,
                          config=config, max_tool_calls=2)
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
         assert record["status"] == "completed" and record["budget"]["total_tool_calls"] == 1
         assert (root / "effects.txt").read_text().splitlines() == ["a"]
@@ -622,7 +626,7 @@ def test_invalid_resume_budget_and_split_batch_do_not_mutate_stopped_task(worksp
     provider = Provider([[call(value="a"), call(value="b", index=2)], {**OUTPUT, "status": "partial"}])
     scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
     try:
-        scheduler.wait(task_id, 5, source="web", session_id="scope")
+        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         with pytest.raises(Exception, match="max_tool_calls"):
             scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership, max_tool_calls=-1)
         with pytest.raises(Exception):
