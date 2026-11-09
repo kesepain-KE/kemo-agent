@@ -336,9 +336,9 @@ def test_wal_initialization_waits_for_writer_after_migration(tmp_path, kind):
                     writer.close()
             future.result(timeout=10)
     assert stored_version(path, kind) == VERSIONS[kind]
-    assert snapshot(path)[1] == "wal"
     assert len(list(path.parent.glob(path.name + ".bak.v0.*"))) == 1
     with closing(sqlite3.connect(path)) as database:
+        assert database.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert database.execute("SELECT body FROM audit_sentinel").fetchall() == [
             ("keep original data",),
         ]
