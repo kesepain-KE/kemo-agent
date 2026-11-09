@@ -83,6 +83,7 @@ export interface ModulePanelResponse {
   scope?: 'global' | 'shared' | 'user'
   panel: ModulePanelDefinition | null
   panel_error: string
+  config_revision?: string
   saved?: boolean
   command?: string
   result?: unknown

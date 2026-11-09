@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { router as productionRouter } from './router'
 import type { ShellOutletContext } from './components/appShellTypes'
 import { ReferencePage } from './reference/ReferencePage'
+import { ModuleWorkbench } from './module-workspace/ModuleWorkbench'
 
 afterEach(cleanup)
 
@@ -12,7 +13,7 @@ describe('current UI production routes', () => {
   it.each([
     ['status', '运行诊断'], ['tasks', '任务中枢'], ['knowledge', '知识库'],
     ['memory', '记忆'], ['agents', '子智能体'], ['skills', '工具与技能'],
-    ['sense', '感知'], ['expand', '拓展'], ['messages', '外部消息'], ['runtime', '运行模块'],
+    ['messages', '外部消息'], ['runtime', '运行模块'],
   ])('%s loads the current ReferencePage UI, never the obsolete duplicate', async (path, heading) => {
     const children = productionRouter.routes[0].children!
     const route = children.find(item => item.path === path)
@@ -30,5 +31,10 @@ describe('current UI production routes', () => {
       router.dispose()
       client.clear()
     }
+  })
+  it.each(['sense', 'expand'])('%s loads the module workbench', async path => {
+    const route = productionRouter.routes[0].children!.find(item => item.path === path)!
+    const loaded = await (route.lazy as () => Promise<{ Component: unknown }>)()
+    expect(loaded.Component).toBe(ModuleWorkbench)
   })
 })

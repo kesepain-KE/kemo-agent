@@ -1,0 +1,130 @@
+.workbench { display: flex; flex-direction: column; height: 100%; min-height: 0; padding: 24px 28px; gap: 16px; color: var(--text); overflow: auto; }
+.workbench button, .workbench input, .workbench select { font: inherit; color: inherit; }
+.workbench button { cursor: pointer; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 8px 11px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.workbench button:hover { background: var(--surface-hover); border-color: var(--line-strong); }
+.workbench button:disabled { cursor: default; opacity: .5; }
+.workbench button:focus-visible, .separator:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.pageHeader { display: flex; gap: 20px; justify-content: space-between; align-items: center; flex-shrink: 0; }
+.pageHeader h1 { margin: 0; font-size: 26px; letter-spacing: -.6px; }
+.pageHeader p { margin: 7px 0 0; color: var(--muted); font-size: var(--t-sm); }
+.headerActions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px; min-width: 180px; background: var(--surface); }
+.search input { width: 170px; background: transparent; border: 0; outline: none; }
+.columns { display: grid; grid-template-columns: var(--scope-width, 168px) 8px var(--module-list-width, 270px) 8px minmax(0, 1fr); flex: 1; min-height: 480px; overflow: hidden; }
+.scopeNav, .moduleList, .details { min-width: 0; min-height: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.scopeNav, .moduleList { display: flex; flex-direction: column; overflow: hidden; }
+.listHeader { display: flex; flex-direction: column; gap: 7px; padding: 18px 15px 14px; border-bottom: 1px solid var(--line); }
+.listHeader strong { font-size: var(--t-base); display: flex; align-items: center; gap: 8px; }
+.listHeader strong span { padding: 1px 6px; border-radius: 5px; font-size: var(--t-xs); background: var(--surface-2); }
+.listHeader small { color: var(--muted); font-size: var(--t-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scopes { display: flex; flex-direction: column; gap: 5px; padding: 12px 8px; overflow: auto; }
+.scopes button { padding: 11px 10px; border-color: transparent; font-size: var(--t-sm); gap: 9px; justify-content: flex-start; }
+.scopes button[aria-pressed=true] { background: var(--surface-3); border-color: var(--line); }
+.scopes button span { flex: 1; text-align: start; }
+.scopes button small { font-size: var(--t-xs); color: var(--muted); }
+.listBody { flex: 1; min-height: 0; overflow: auto; padding: 10px 8px; }
+.listBody .moduleButton { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; text-align: start; width: 100%; gap: 8px; border: 1px solid transparent; padding: 13px 10px; margin-bottom: 5px; }
+.listBody .moduleButton.selected { background: var(--surface-2); border-color: var(--line-strong); box-shadow: var(--shadow-soft); }
+.moduleTitle { display: flex; align-items: center; gap: 8px; }
+.moduleTitle strong { min-width: 0; flex: 1; font-size: var(--t-sm); overflow-wrap: anywhere; }
+.moduleButton small { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.moduleDescription { color: var(--text-2); font-size: var(--t-xs); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.dot, .badDot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+.badDot { background: var(--danger); }
+.tags { display: flex; gap: 5px; flex-wrap: wrap; }
+.tags span { font-size: 10px; line-height: 1.4; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface-2); }
+.separator { cursor: col-resize; position: relative; touch-action: none; }
+.separator:hover::after, .separator:focus-visible::after { content: ''; position: absolute; width: 2px; background: var(--line-strong); top: 12px; bottom: 12px; left: 3px; }
+.functionTabs { display: flex; gap: 4px; flex-shrink: 0; padding: 0 14px; overflow: auto; border-bottom: 1px solid var(--line); }
+.functionTabs > button { flex-shrink: 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 13px 12px 11px; font-size: var(--t-sm); color: var(--muted); }
+.functionTabs > button[aria-current=page] { border-bottom-color: var(--brand); color: var(--text); font-weight: 600; background: var(--surface-2); }
+.details { display: flex; flex-direction: column; overflow: hidden; }
+.moduleHeader { padding: 18px 20px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; flex-shrink: 0; border-bottom: 1px solid var(--line); }
+.moduleHeader > div:first-child { flex: 1; min-width: 180px; }
+.moduleHeader h2 { font-size: 20px; margin: 7px 0; letter-spacing: -.3px; }
+.moduleHeader p { font-size: var(--t-xs); color: var(--muted); margin: 7px 0 11px; line-height: 1.6; max-height: 3.2em; overflow: auto; }
+.moduleHeader .headerActions { align-self: flex-start; }
+.moduleHeader button { font-size: var(--t-xs); padding: 6px 8px; }
+.breadcrumb { color: var(--muted); font-size: var(--t-xs); overflow-wrap: anywhere; }
+.workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; background: var(--surface); }
+.workspace:fullscreen { width: 100vw; height: 100dvh; color: var(--text); }
+.workspaceToolbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; gap: 12px; border-bottom: 1px solid var(--line); flex-shrink: 0; background: var(--surface-2); }
+.workspaceToolbar strong { font-size: var(--t-sm); }
+.workspaceToolbar button { padding: 6px 8px; font-size: var(--t-xs); }
+.workspaceBody { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.scrollContent { height: 100%; overflow: auto; padding: 22px; }
+.scrollContent h3 { margin: 0 0 14px; font-size: 16px; }
+.scrollContent h3:not(:first-child) { margin-top: 26px; }
+.scrollContent p { line-height: 1.8; }
+.overviewGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
+.overviewGrid > div { border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 10px; background: var(--surface-2); }
+.overviewGrid span { font-size: var(--t-xs); color: var(--muted); }
+.overviewGrid strong { font-size: 20px; }
+.featureList { display: flex; flex-wrap: wrap; gap: 8px; }
+.featureList span { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: var(--t-sm); }
+.muted { color: var(--muted); font-size: var(--t-xs); }
+.empty, .loading { padding: 28px; color: var(--muted); text-align: center; line-height: 1.7; }
+.details > .empty { margin: auto; }
+.details > .empty svg { margin: 0 auto 12px; }
+.error, .notice { border: 1px solid var(--line); border-radius: 8px; padding: 11px 15px; font-size: var(--t-sm); line-height: 1.6; flex-shrink: 0; overflow-wrap: anywhere; }
+.error { color: var(--danger); background: var(--surface-2); }
+.notice { color: var(--text-2); background: var(--surface-2); display: flex; align-items: center; gap: 10px; }
+.notice button { padding: 5px 8px; }
+.permissionArea { padding: 28px; display: flex; gap: 13px; line-height: 1.7; overflow: auto; }
+.permissionArea svg { flex-shrink: 0; margin-top: 4px; }
+.permissionArea p, .permissionArea ul { font-size: var(--t-sm); color: var(--muted); }
+.unsaved { font-size: var(--t-xs); color: var(--muted); font-weight: 400; }
+.webHost { display: flex; flex-direction: column; width: 100%; height: 100%; position: relative; min-height: 0; }
+.webHost .loading { position: absolute; left: 0; right: 0; top: 0; pointer-events: none; }
+.webHost .notice, .webHost .error { margin: 8px; }
+.webFrame { border: 0; width: 100%; flex: 1; min-height: 0; background: var(--surface); color-scheme: normal; }
+.code { white-space: pre-wrap; overflow-wrap: anywhere; padding: 15px; background: var(--surface-2); border-radius: 8px; border: 1px solid var(--line); max-height: 400px; overflow: auto; font-size: var(--t-xs); }
+.importArea { border: 1px solid var(--line); background: var(--surface-2); border-radius: 12px; padding: 18px; flex-shrink: 0; }
+.importArea h2 { margin: 0 0 8px; font-size: 17px; }
+.importArea p { color: var(--muted); font-size: var(--t-sm); line-height: 1.6; }
+.importArea select { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.importPreview { margin-top: 16px; }
+.importPreview details { margin-bottom: 12px; }
+.expanded { position: fixed; inset: 0; z-index: 65; padding: 12px; background: var(--surface); }
+:global([data-workspace-open]):has(.expanded) { z-index: 90; }
+.expanded .pageHeader, .expanded .scopeNav, .expanded .moduleList, .expanded .functionTabs, .expanded .separator, .expanded .moduleHeader { display: none; }
+.expanded .columns { display: flex; min-height: 0; }
+.expanded .details { flex: 1; }
+.spinning { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 1150px) {
+  .workbench { padding: 18px; }
+  .pageHeader { align-items: flex-start; flex-wrap: wrap; }
+  .columns { grid-template-columns: 140px 6px 230px 6px minmax(0, 1fr); }
+  .moduleHeader { padding: 14px; }
+}
+@media (max-width: 900px) {
+  .columns { grid-template-columns: 210px 8px minmax(0, 1fr); grid-template-rows: auto minmax(520px, 1fr); gap: 10px 0; overflow: visible; }
+  .scopeNav { grid-column: 1 / -1; }
+  .scopeNav .listHeader { display: none; }
+  .scopes { flex-direction: row; padding: 6px; }
+  .scopes button { flex: 1; padding: 8px; }
+  .scopeNav + .separator { display: none; }
+  .details { grid-column: 3; }
+}
+@media (max-width: 600px) {
+  .workbench { padding: 12px; }
+  .headerActions { gap: 5px; }
+  .search { width: 100%; }
+  .search input { width: 100%; }
+  .columns { display: flex; flex-direction: column; gap: 10px; overflow: visible; min-height: 0; }
+  .scopeNav { flex-shrink: 0; }
+  .moduleList { max-height: 260px; flex-shrink: 0; }
+  .listBody { display: flex; overflow: auto; gap: 6px; }
+  .listBody .moduleButton { min-width: 210px; max-width: 240px; }
+  .listHeader { padding: 11px; }
+  .scopes button { font-size: var(--t-xs); gap: 5px; }
+  .separator { display: none; }
+  .functionTabs { padding: 0 6px; }
+  .functionTabs > button { padding: 10px 9px; }
+  .details { min-height: 620px; }
+  .moduleHeader h2 { font-size: 18px; }
+  .scrollContent { padding: 15px; }
+  .expanded .columns { flex: 1; }
+  .expanded .details { min-height: 0; }
+}

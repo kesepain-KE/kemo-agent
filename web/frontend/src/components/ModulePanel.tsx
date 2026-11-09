@@ -1,5 +1,5 @@
 import { t as tr, useLanguage } from '../i18n'
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { DocumentMarkdown } from './DocumentMarkdown'
 import { Eye, EyeOff, Play, RotateCcw, Save, Settings2, Trash2 } from 'lucide-react'
 import type {
@@ -19,8 +19,9 @@ interface ModulePanelProps {
   busy?: boolean
   error?: string
   emptyText: string
-  onSave: (values: Record<string, ModulePanelValue>, clearSecrets: string[]) => Promise<void>
+  onSave: (values: Record<string, ModulePanelValue>, clearSecrets: string[], configRevision?: string) => Promise<void>
   onAction: (command: string, params: Record<string, ModulePanelValue>) => Promise<void>
+  onDirtyChange?: (dirty: boolean) => void
 }
 
 function fieldDefault(field: ModulePanelField): ModulePanelValue {
@@ -166,7 +167,7 @@ function ConfigContainer({ container, draft, clearSecrets, revealed, onChange, o
   </div>
 }
 
-export function ModulePanel({ kind, data, loading = false, busy = false, error = '', emptyText, onSave, onAction }: ModulePanelProps) {
+export function ModulePanel({ kind, data, loading = false, busy = false, error = '', emptyText, onSave, onAction, onDirtyChange }: ModulePanelProps) {
   useLanguage()
   const [draft, setDraft] = useState<Record<string, ModulePanelValue>>({})
   const [clearSecrets, setClearSecrets] = useState<Set<string>>(new Set())
@@ -174,24 +175,37 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
   const [actionValues, setActionValues] = useState<Record<string, ModulePanelValue>>({})
   const [feedback, setFeedback] = useState('')
   const [localError, setLocalError] = useState('')
+  const [savedSequence, setSavedSequence] = useState(0)
   const panel = data?.panel
-  const identity = `${data?.scope || kind}:${data?.module || ''}:${panel?.title || ''}`
+  const identity = `${data?.user || ''}:${data?.scope || kind}:${data?.module || ''}:${panel?.title || ''}`
+  const previousIdentity = useRef('')
+  const dirty = useRef(false)
+  const baseRevision = useRef<string | undefined>(undefined)
+  const dirtyCallback = useRef(onDirtyChange)
+  dirtyCallback.current = onDirtyChange
+  const markDirty = (value: boolean) => { dirty.current = value; dirtyCallback.current?.(value) }
 
   useEffect(() => {
+    if (previousIdentity.current === identity && dirty.current) return
+    previousIdentity.current = identity
+    dirty.current = false
+    dirtyCallback.current?.(false)
+    baseRevision.current = data?.config_revision
     setDraft(initialValues(data))
     setClearSecrets(new Set())
     setRevealed(new Set())
     setActionValues({})
     setFeedback('')
     setLocalError('')
-  }, [identity, data])
+  }, [identity, data, savedSequence])
 
   const hasConfig = useMemo(() => panel?.containers.some((container) => container.kind === 'config') ?? false, [panel])
   const updateDraft = (key: string, value: ModulePanelValue) => {
+    markDirty(true)
     setDraft((current) => ({ ...current, [key]: value }))
     setClearSecrets((current) => { const next = new Set(current); next.delete(key); return next })
   }
-  const applyPreset = (values: Record<string, ModulePanelValue>) => setDraft((current) => ({ ...current, ...values }))
+  const applyPreset = (values: Record<string, ModulePanelValue>) => { markDirty(true); setDraft((current) => ({ ...current, ...values })) }
   const toggleSet = (setter: Dispatch<SetStateAction<Set<string>>>, key: string) => setter((current) => {
     const next = new Set(current)
     if (next.has(key)) next.delete(key); else next.add(key)
@@ -208,7 +222,13 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
           if (!field.masked || value !== '') writable[field.key] = value
         }
       }
-      await onSave(writable, [...clearSecrets])
+      await onSave(writable, [...clearSecrets], baseRevision.current)
+      markDirty(false)
+      setSavedSequence(value => value + 1)
+      setClearSecrets(new Set())
+      setDraft(current => Object.fromEntries(Object.entries(current).map(([key, value]) => [
+        key, panel?.containers.some(c => c.kind === 'config' && c.fields.some(f => f.key === key && f.masked)) ? '' : value,
+      ])))
       setFeedback('配置已保存并触发刷新')
     } catch (caught) {
       setLocalError(caught instanceof Error ? caught.message : '配置保存失败')
@@ -247,7 +267,7 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
           revealed={revealed}
           onChange={updateDraft}
           onPreset={applyPreset}
-          onToggleClear={(key) => toggleSet(setClearSecrets, key)}
+          onToggleClear={(key) => { markDirty(true); toggleSet(setClearSecrets, key) }}
           onToggleReveal={(key) => toggleSet(setRevealed, key)}
         /> : <div className={styles.actions}>{container.controls.map((control) => <section key={`${control.command}-${control.label}`} className={styles.actionControl}>{control.inputs?.map((field) => <ConfigField
           key={field.key}
@@ -258,7 +278,7 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
           reveal={revealed.has(`${control.command}:${field.key}`)}
           onReveal={() => toggleSet(setRevealed, `${control.command}:${field.key}`)}
           onClear={() => undefined}
-          onChange={(value) => setActionValues((current) => ({ ...current, [`${control.command}:${field.key}`]: value }))}
+          onChange={(value) => { markDirty(true); setActionValues((current) => ({ ...current, [`${control.command}:${field.key}`]: value })) }}
           idPrefix={`action-${control.command}`}
         />)}<button type="button" disabled={busy} onClick={() => { void runAction(control.command, control.inputs) }}>{control.command === 'refresh' ? <RotateCcw size={14} /> : <Play size={14} />}{control.label}</button></section>)}</div>}</div>
       </section>

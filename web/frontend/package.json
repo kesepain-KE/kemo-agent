@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run check:ui && tsc -b && vite build && npm run check:ui -- --dist",
+    "build": "npm run check:ui && tsc -b && npm run build:module-uis && vite build && npm run check:ui -- --dist",
+    "build:module-uis": "node scripts/build-module-uis.mjs",
     "check:ui": "node scripts/check-ui-entry.mjs",
     "preview": "vite preview",
     "test": "vitest run",

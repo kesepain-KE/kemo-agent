@@ -9,6 +9,10 @@
   代替当前 UI，版本号相同、类型检查通过和页面无报错均不代表视觉与交互一致。
 - `npm run check:ui` 在构建前检查十条业务路由及废弃文件；构建后 `--dist` 检查旧页面 chunk
   不再进入产物。`router.production.test.tsx` 逐条核验真正 lazy 入口，不能仅渲染脱离生产的页面。
+- 感知与拓展的生产入口是 `src/module-workspace/ModuleWorkbench.tsx`，使用当前主题变量；
+  左栏分类、中栏模块、右栏完整详情与横向功能标签。其他业务路由继续使用原当前 UI。
+  独立网页和通用组件共存，布局放大不得重新挂载 iframe；完整协议见
+  `knowledge/global/modules/module-ui-workspace.md`。
 - 源码实例为 `E:\code\kemo-agent` / 1357；`D:\kemo-agent` / 1457 是独立部署预览版。
   修复或构建源码不授权覆盖、重启或清理部署版。历史备份和用户数据不属于旧 UI 删除范围。
 - 后续若改为声明式 React，须逐页保留当前 UI 与功能并进行桌面/移动端、明暗主题对照验收；
