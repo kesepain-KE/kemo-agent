@@ -330,7 +330,8 @@ def test_a_model_body_does_not_complete_a_live_tool(root):
     with ThreadPoolExecutor(1) as executor:
         future = executor.submit(lambda: events.extend(run(root, Provider(), tools=[definition(root, work)])))
         try:
-            assert entered.wait(3)
+            # The public entry prepares config and history before dispatching the tool.
+            assert entered.wait(15), events
             time.sleep(.1)
             assert len(requests) == 1
             assert not future.done()
