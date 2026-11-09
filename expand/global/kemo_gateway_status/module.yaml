@@ -1,4 +1,6 @@
 kind: expand
+ui:
+  workspace: module/workspace.json
 name: Kemo 网关运行状态
 explain: 使用独立 STATUS_TOKEN 读取 Kemo 网关的脱敏运行状态、调用统计和版本信息，并生成状态图表
 input_open: false

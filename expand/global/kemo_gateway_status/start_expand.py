@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from gateway_status import activate, configuration_status, configure_endpoint, deactivate, update_snapshot
+from gateway_status import DATA_PATH, activate, configuration_status, configure_endpoint, deactivate, sanitize_snapshot, update_snapshot
 
 
 def execute(command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -28,6 +28,13 @@ def execute(command: str, params: dict[str, Any] | None = None) -> dict[str, Any
         return result
     if normalized == "configuration_status":
         return configuration_status()
+    if normalized == "dashboard_data":
+        if not DATA_PATH.is_file():
+            return {"ok": True, "snapshot": None, "message": "尚无采集快照，请检查网关连接并刷新采集"}
+        snapshot = json.loads(DATA_PATH.read_text("utf-8"))
+        if not isinstance(snapshot, dict):
+            raise ValueError("网关采集快照不是对象")
+        return {"ok": True, "snapshot": sanitize_snapshot(snapshot)}
     if normalized == "panel_configure_endpoint":
         return configure_endpoint(arguments)
     if normalized == "deactivate":

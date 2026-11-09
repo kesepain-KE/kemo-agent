@@ -64,10 +64,14 @@ control_entry: expand_control.md
 | `control_script` | string | 操控开启时必填，模块内 `.py` 操控入口 |
 | `control_entry` | string | 模块内 `.md` 操作说明 |
 | `recent_update` | string 或 null，可选 | 非空时必须为 `YYYY-MM-DD HH:MM:SS`；尚未运行时可省略或写 null |
+| `ui` | object，可选 | `workspace` 指向模块内工作台 JSON；Sense 可额外声明 `action_entry` |
 
 感知与拓展均由 `run/modules/manifest.py` 校验 `module.yaml`。清单拒绝未知字段和重复键；
 数据或操控开启时，对应文件必须存在，关闭时可以省略。拓展至少开启数据或操控之一。
-清单路径只接受模块直接子级文件名；内部工程仍可以自由分层，由声明入口调用。
+采集、Prompt 数据和操控入口只接受模块直接子级文件名；内部工程由声明入口调用。
+`ui.workspace` 和 Sense 的 `ui.action_entry` 支持模块内多级相对路径。
+专属网页、通用面板、动作权限、SDK、热更新及 ZIP 安装合同见
+`knowledge/global/modules/module-ui-workspace.md`。UI 动作不会改变 Sense 的 `control_open=false`。
 
 校验顺序为：读取 YAML 映射、检查 kind 与目录、检查未知与缺失字段、检查字段类型、
 检查枚举与时间、检查开关组合、检查文件名与后缀、检查路径边界与链接、检查启用文件存在性。

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "title": "时间观测 · 用户配置",
+  "containers": [
+    {
+      "kind": "config",
+      "title": "观测时区",
+      "width": "half",
+      "values": "module/panel.values.json",
+      "fields": [
+        {
+          "key": "timezone",
+          "label": "时区",
+          "type": "enum",
+          "description": "时间观测使用的时区；保存后由感知刷新任务在下一次采集时生效。",
+          "options": [
+            { "value": "Asia/Shanghai", "label": "中国 · 北京" },
+            { "value": "Asia/Urumqi", "label": "中国 · 乌鲁木齐" },
+            { "value": "Asia/Hong_Kong", "label": "中国 · 香港" },
+            { "value": "Asia/Taipei", "label": "中国 · 台北" },
+            { "value": "Asia/Tokyo", "label": "日本 · 东京" },
+            { "value": "Asia/Seoul", "label": "韩国 · 首尔" },
+            { "value": "Asia/Singapore", "label": "新加坡" },
+            { "value": "Asia/Bangkok", "label": "泰国 · 曼谷" },
+            { "value": "Asia/Kolkata", "label": "印度 · 新德里" },
+            { "value": "Asia/Dubai", "label": "阿联酋 · 迪拜" },
+            { "value": "Europe/Moscow", "label": "俄罗斯 · 莫斯科" },
+            { "value": "Europe/Berlin", "label": "德国 · 柏林" },
+            { "value": "Europe/Paris", "label": "法国 · 巴黎" },
+            { "value": "Europe/London", "label": "英国 · 伦敦" },
+            { "value": "UTC", "label": "协调世界时 UTC" },
+            { "value": "America/New_York", "label": "美国 · 纽约" },
+            { "value": "America/Chicago", "label": "美国 · 芝加哥" },
+            { "value": "America/Denver", "label": "美国 · 丹佛" },
+            { "value": "America/Los_Angeles", "label": "美国 · 洛杉矶" },
+            { "value": "America/Sao_Paulo", "label": "巴西 · 圣保罗" },
+            { "value": "Australia/Sydney", "label": "澳大利亚 · 悉尼" },
+            { "value": "Pacific/Auckland", "label": "新西兰 · 奥克兰" }
+          ],
+          "default": "Asia/Shanghai"
+        }
+      ],
+      "presets": [
+        { "name": "北京", "values": { "timezone": "Asia/Shanghai" } },
+        { "name": "东京", "values": { "timezone": "Asia/Tokyo" } },
+        { "name": "伦敦", "values": { "timezone": "Europe/London" } },
+        { "name": "纽约", "values": { "timezone": "America/New_York" } },
+        { "name": "UTC", "values": { "timezone": "UTC" } }
+      ]
+    },
+    {
+      "kind": "status",
+      "title": "采集状态",
+      "width": "half",
+      "source": "module/status.json",
+      "fields": [
+        { "key": "health", "label": "健康", "type": "badge" },
+        { "key": "timezone", "label": "生效时区", "type": "text" },
+        { "key": "local", "label": "观测时间", "type": "text" },
+        { "key": "offset", "label": "UTC 偏移", "type": "text" },
+        { "key": "last", "label": "最近采集（北京时间）", "type": "text" },
+        { "key": "summary", "label": "摘要", "type": "markdown" }
+      ]
+    },
+    {
+      "kind": "action",
+      "title": "操作",
+      "width": "full",
+      "controls": [
+        { "type": "button", "label": "立即采集", "command": "refresh" }
+      ]
+    }
+  ]
+}

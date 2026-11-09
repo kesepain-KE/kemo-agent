@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "default_page": "dashboard",
+  "pages": [
+    {
+      "id": "dashboard",
+      "label": "网关控制台",
+      "type": "web",
+      "entry": "ui/dist/index.html",
+      "permissions": ["module.status.read", "module.action.invoke"]
+    },
+    {"id": "panel", "label": "通用配置", "type": "panel"},
+    {"id": "data", "label": "采集与注入", "type": "builtin", "view": "data"},
+    {"id": "docs", "label": "文档", "type": "builtin", "view": "docs"}
+  ],
+  "actions": [
+    {"id": "dashboard_data", "label": "读取网关快照", "handler": "dashboard_data", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},
+    {"id": "refresh", "label": "刷新采集", "handler": "refresh", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},
+    {
+      "id": "configure_endpoint", "label": "配置网关地址", "handler": "panel_configure_endpoint",
+      "input_schema": {
+        "type": "object", "additionalProperties": false, "required": ["scheme", "gateway_ip", "gateway_port"],
+        "properties": {
+          "scheme": {"type": "string", "enum": ["http", "https"]},
+          "gateway_ip": {"type": "string", "minLength": 1, "maxLength": 253},
+          "gateway_port": {"type": "integer", "minimum": 1, "maximum": 65535}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "default_page": "clock",
+  "pages": [
+    {
+      "id": "clock", "label": "时间控制台", "type": "web", "entry": "ui/dist/index.html",
+      "permissions": ["module.status.read", "module.config.read", "module.config.write", "module.action.invoke"]
+    },
+    {"id": "panel", "label": "通用配置", "type": "panel"},
+    {"id": "data", "label": "采集与注入", "type": "builtin", "view": "data"}
+  ],
+  "actions": [
+    {"id": "refresh", "label": "立即采集", "handler": "refresh", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},
+    {"id": "clock_data", "label": "读取时间观测", "handler": "clock_data", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}}
+  ]
+}

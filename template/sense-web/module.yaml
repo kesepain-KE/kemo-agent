@@ -1,0 +1,12 @@
+kind: sense
+name: time_console
+explain: 带独立网页控制台的真实时间观测示例
+health: 异常
+recent_update: null
+update_script: data_update.py
+input_open: true
+input_file: sense.md
+control_open: false
+ui:
+  workspace: module/workspace.json
+  action_entry: ui_actions.py

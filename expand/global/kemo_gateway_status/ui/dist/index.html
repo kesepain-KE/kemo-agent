@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kemo 网关控制台</title>  <script type="module" crossorigin src="./assets/index-D53mu_CC.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-C3tA1kMq.css">
+</head>
+<body>
+<header><div><small>KEMO GATEWAY</small><h1>网关控制台</h1><p><span id="connection">正在读取状态</span> · <span id="endpoint">—</span></p></div><div class="actions"><button id="reload">重新取数</button><button id="collect">刷新采集</button></div></header>
+<div id="message" role="status"></div>
+<nav role="tablist"><button role="tab" aria-selected="true" data-view="overview">运行总览</button><button role="tab" aria-selected="false" data-view="models">模型与服务商</button><button role="tab" aria-selected="false" data-view="logs">请求记录</button><button role="tab" aria-selected="false" data-view="settings">连接设置</button></nav>
+<main>
+<section data-section="overview"><p id="empty">尚无真实采集快照。请先检查网关连接、独立 STATUS_TOKEN 和采集状态。</p>
+<div id="metrics" class="metrics" hidden><article><label>请求数量</label><strong id="requests">—</strong></article><article><label>Token 用量</label><strong id="tokens">—</strong></article><article><label>网关阶段</label><strong id="phase">—</strong></article><article><label>启用模型</label><strong id="models">—</strong></article></div>
+<article><h2>服务商请求分布</h2><div id="chart"></div><small>最近采集：<span id="updated">—</span></small></article>
+<details><summary>统计原始数据</summary><pre id="raw"></pre></details></section>
+<section data-section="models" hidden><article><h2>服务商</h2><table id="providers-table"></table></article><article><h2>启用模型</h2><table id="models-table"></table></article></section>
+<section data-section="logs" hidden><article><h2>最近请求</h2><table id="logs-table"></table></article></section>
+<section data-section="settings" hidden><article><h2>网关连接</h2><p>此页面仅管理地址。独立 STATUS_TOKEN 沿用模块现有凭据管理方式，不向网页返回。</p>
+<form id="endpoint-form"><label>协议<select id="scheme"><option>http</option><option>https</option></select></label><label>主机<input id="host" required maxlength="253"></label><label>端口<input id="port" type="number" min="1" max="65535" required value="7531"></label><button id="save-endpoint" type="button">保存连接地址</button></form></article></section>
+</main></body></html>

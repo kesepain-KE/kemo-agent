@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>时间感知控制台</title>  <script type="module" crossorigin src="./assets/index-Cj-PtLuX.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-BD_JqB85.css">
+</head>
+<body><header><div><small>TIME PERCEPTION</small><h1>时间观测</h1><p>读取本机系统时钟，按所选时区换算。采集出口保持分钟精度。</p></div><button id="collect">立即采集</button></header>
+<div id="message" role="status"></div>
+<main><section class="clock-card"><span id="timezone">—</span><strong id="time">—</strong><p id="date">—</p><div class="references"><span>北京时间 <b id="beijing">—</b></span><span>UTC <b id="utc">—</b></span></div></section>
+<section class="settings"><h2>观测配置</h2><form id="settings"><label for="zone">时区</label><select id="zone"></select><button id="save" type="button">保存并采集</button><span id="dirty"></span></form>
+<dl><dt>采集状态</dt><dd id="health">—</dd><dt>最近采集</dt><dd id="last">—</dd><dt>UTC 偏移</dt><dd id="offset">—</dd></dl></section>
+<section><h2>当前结构化观测</h2><pre id="data"></pre></section></main></body></html>

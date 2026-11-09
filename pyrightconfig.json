@@ -89,6 +89,13 @@
       ]
     },
     {
+      "root": "template/sense-web",
+      "extraPaths": [
+        "template/sense-web",
+        "."
+      ]
+    },
+    {
       "root": "template/message",
       "extraPaths": [
         "template/message",
