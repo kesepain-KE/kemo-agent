@@ -92,8 +92,8 @@ class KemoNetworkRetryPolicy:
         cancel_event: threading.Event | None,
     ) -> None:
         retry_after_ms = getattr(error, "retry_after_ms", None)
-        if isinstance(retry_after_ms, int) and retry_after_ms >= 0:
-            delay = min(self.cap_seconds, retry_after_ms / 1000.0)
+        if type(retry_after_ms) is int and retry_after_ms >= 0:
+            delay = min(120.0, retry_after_ms / 1000.0)
         else:
             base = min(
                 self.cap_seconds,
