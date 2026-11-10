@@ -874,8 +874,8 @@ export function getLogoUrl(): string {
   return `${apiBase}/api/logo`
 }
 
-export async function getExpands(user: string, signal?: AbortSignal): Promise<ExpandsResponse> {
-  return requestJson(`/api/users/${encodeURIComponent(user)}/expand`, { signal })
+export async function getExpands(user: string, signal?: AbortSignal, includeFiles = true): Promise<ExpandsResponse> {
+  return requestJson(`/api/users/${encodeURIComponent(user)}/expand${includeFiles ? '' : '?include_files=false'}`, { signal })
 }
 
 export async function refreshExpandModule(user: string, scope: ExpandScope, moduleName: string): Promise<void> {
