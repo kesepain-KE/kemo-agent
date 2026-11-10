@@ -29,6 +29,7 @@ PANEL_VALUES_PATH = BASE_DIR / "module" / "panel.values.json"
 PANEL_STATUS_PATH = BASE_DIR / "module" / "status.json"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 PERSISTENCE_CHECKPOINT_SECONDS = 300
+PERIOD_LABELS = {"today": "当天", "24h": "最近 24 小时", "7d": "最近 7 天", "30d": "最近 30 天", "all": "全部历史"}
 
 
 class GatewayStatusError(RuntimeError):
@@ -49,6 +50,7 @@ class GatewayConfig:
     timeout_seconds: int = 15
     ranking_limit: int = 20
     log_limit: int = 20
+    period: str = "today"
 
     @property
     def status_url(self) -> str:
@@ -133,6 +135,15 @@ def _monotonic_timestamp(previous: Any, candidate: str) -> str:
 def _semantic_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     comparable = dict(snapshot)
     comparable.pop("generated_at", None)
+    statistics = dict(comparable.get("statistics") or {})
+    if isinstance(statistics.get("overview"), dict):
+        overview = dict(statistics["overview"])
+        overview.pop("end", None)
+        # Rolling window timestamps advance on every poll; metrics still determine changes.
+        if overview.get("period") in {"24h", "7d", "30d"}:
+            overview.pop("start", None)
+        statistics["overview"] = overview
+        comparable["statistics"] = statistics
     return comparable
 
 
@@ -174,6 +185,12 @@ def _normalized_base_url(value: Any) -> str:
     return raw
 
 
+def _period(value: Any) -> str:
+    if not isinstance(value, str) or value not in PERIOD_LABELS:
+        raise GatewayStatusError("period 必须是 today、24h、7d、30d 或 all")
+    return value
+
+
 def config_from_mapping(value: dict[str, Any]) -> GatewayConfig:
     if not isinstance(value, dict):
         raise GatewayStatusError("网关拓展配置必须是 JSON 对象")
@@ -194,6 +211,7 @@ def config_from_mapping(value: dict[str, Any]) -> GatewayConfig:
         log_limit=_integer(
             value.get("log_limit"), name="log_limit", default=20, minimum=1, maximum=100
         ),
+        period=_period(value.get("period", "today")),
     )
 
 
@@ -215,6 +233,7 @@ def _config_payload(config: GatewayConfig) -> dict[str, Any]:
         "timeout_seconds": config.timeout_seconds,
         "ranking_limit": config.ranking_limit,
         "log_limit": config.log_limit,
+        "period": config.period,
     }
 
 
@@ -229,6 +248,7 @@ def configuration_status() -> dict[str, Any]:
         "timeout_seconds": config.timeout_seconds if config else 15,
         "ranking_limit": config.ranking_limit if config else 20,
         "log_limit": config.log_limit if config else 20,
+        "period": config.period if config else "today",
     }
 
 
@@ -351,10 +371,13 @@ def _open_status_request(
     return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
 
 
-def fetch_status(config: GatewayConfig, *, target_date: str | None = None) -> dict[str, Any]:
+def fetch_status(
+    config: GatewayConfig, *, target_date: str | None = None, period: str | None = None,
+) -> dict[str, Any]:
     params: dict[str, str | int] = {
         "ranking_limit": config.ranking_limit,
         "log_limit": config.log_limit,
+        "period": _period(period if period is not None else config.period),
     }
     if target_date:
         try:
@@ -457,16 +480,99 @@ def _logs(items: Any) -> list[dict[str, Any]]:
     return [_clean_log(item) for item in items[:100] if isinstance(item, dict)]
 
 
+def _strings(value: Any) -> list[str]:
+    return [item[:256] for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def _records(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [_safe_dict(item, keys) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _overview_metrics(value: Any) -> dict[str, Any]:
+    cleaned = _safe_dict(value, (
+        "id", "name", "calls", "successful", "finished", "input_tokens", "output_tokens",
+        "total_tokens", "cached_tokens", "success_rate", "cache_hit_rate", "latency_ms",
+        "first_token_ms", "token_samples", "input_samples", "output_samples", "cache_samples",
+        "latency_samples", "first_token_samples", "cache_input_tokens", "cache_hits_for_rate",
+        "unknown_cost_calls", "estimated_calls", "upstream_count", "deployment_count",
+    ))
+    if not isinstance(value, dict):
+        return cleaned
+    costs = value.get("costs")
+    cleaned["costs"] = {
+        currency: amount for currency, amount in costs.items()
+        if isinstance(currency, str) and len(currency) == 3 and currency.isascii() and currency.isupper()
+        and currency.isalpha() and isinstance(amount, (int, float)) and not isinstance(amount, bool)
+    } if isinstance(costs, dict) else {}
+    cost = value.get("display_cost")
+    cleaned["display_cost"] = _safe_dict(cost, ("amount", "currency", "approximate"))
+    cleaned["display_cost"]["unconverted_currencies"] = _strings(
+        cost.get("unconverted_currencies") if isinstance(cost, dict) else None
+    )
+    return cleaned
+
+
+def _clean_overview(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    cleaned = _safe_dict(value, ("period", "timezone", "start", "end", "exchange_rate_date"))
+    cleaned["summary"] = _overview_metrics(value.get("summary"))
+    rankings = value.get("rankings")
+    cleaned["rankings"] = {
+        dimension: [_overview_metrics(item) for item in rows[:100] if isinstance(item, dict)]
+        if isinstance(rows := rankings.get(dimension), list) else []
+        for dimension in ("provider", "model", "key")
+    } if isinstance(rankings, dict) else {}
+    return cleaned
+
+
+def _clean_resources(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    kinds = ("protocol_adapters", "provider_templates")
+    cleaned = _safe_dict(value, ("restart_required", "error_code"))
+    for source in ("running", "installed"):
+        packs = value.get(source)
+        cleaned[source] = {
+            kind: {
+                **_safe_dict(pack, ("version",)),
+                "items": {identity: version for identity, version in items.items()
+                          if isinstance(identity, str) and isinstance(version, str)}
+                if isinstance(items := pack.get("items"), dict) else {},
+            }
+            for kind in kinds if isinstance(pack := packs.get(kind), dict)
+        } if isinstance(packs, dict) else None
+    user = value.get("user")
+    cleaned["user"] = {
+        kind: _records(user.get(kind), ("id", "name", "version", "source", "enabled", "valid"))
+        for kind in kinds
+    } if isinstance(user, dict) else {}
+    update = value.get("update")
+    cleaned["update"] = None
+    if isinstance(update, dict):
+        cleaned["update"] = _safe_dict(update, ("available", "branch", "target_commit"))
+        groups = update.get("groups")
+        cleaned["update"]["groups"] = {
+            kind: {
+                **_safe_dict(group, ("current", "target", "available")),
+                "changes": _records(group.get("changes"), ("id", "current", "target")),
+            }
+            for kind in kinds if isinstance(group := groups.get(kind), dict)
+        } if isinstance(groups, dict) else {}
+    return cleaned
+
+
 def sanitize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     """Persist only explicitly allow-listed, secret-free status fields."""
     runtime = _safe_dict(
         payload.get("runtime"),
-        ("instance_id", "phase", "active_executions", "started_at", "drain_reason"),
+        ("instance_id", "phase", "active_executions", "started_at", "drain_reason",
+         "max_concurrent_executions"),
     )
     version_raw = payload.get("version")
     version = _safe_dict(
         version_raw,
-        ("status", "update_available", "source", "checked_at", "message"),
+        ("status", "update_available", "source", "branch", "scope", "checked_at", "message"),
     )
     if isinstance(version_raw, dict):
         version["local"] = _safe_dict(
@@ -494,6 +600,18 @@ def sanitize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     rankings_raw = (checked_481 if isinstance(checked_481 := statistics_raw.get("rankings"), dict) else {})
     logs_raw = (checked_482 if isinstance(checked_482 := payload.get("logs"), dict) else {})
     last_invocation = logs_raw.get("last_invocation")
+    upstreams = []
+    upstream_items = payload.get("upstreams")
+    for item in upstream_items if isinstance(upstream_items, list) else []:
+        if isinstance(item, dict):
+            upstreams.append({
+                **_safe_dict(item, ("id", "name", "adapter_id", "enabled")),
+                "credentials": _records(item.get("credentials"), (
+                    "id", "status", "checked_at", "error_code", "provider_status", "cooldown_seconds",
+                )),
+            })
+    routing = payload.get("routing")
+    plugins = payload.get("plugins")
     return {
         "object": "kemo.gateway_status.safe_snapshot",
         "generated_at": payload.get("generated_at"),
@@ -511,6 +629,8 @@ def sanitize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
             "enabled_models": enabled_models,
         },
         "control": {
+            **_safe_dict(control_raw, ("enabled", "revision")),
+            "disabled_upstreams": _strings(control_raw.get("disabled_upstreams")),
             "disabled_providers": [
                 str(item)[:128] for item in control_raw.get("disabled_providers", [])[:100]
                 if isinstance(item, str)
@@ -520,6 +640,29 @@ def sanitize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(item, str)
             ] if isinstance(control_raw.get("disabled_models"), list) else [],
         },
+        "upstreams": upstreams,
+        "routing": {
+            **_safe_dict(routing, ("max_attempts", "cooldown_seconds")),
+            "models": _records(routing.get("models"), ("model", "task", "enabled", "verification")),
+            "deployments": _records(routing.get("deployments"), (
+                "id", "public_model", "upstream_id", "upstream_model", "enabled", "priority",
+                "weight", "rpm", "cooldown_seconds",
+            )),
+        } if isinstance(routing, dict) else None,
+        "plugins": {
+            **_safe_dict(plugins, ("revision",)),
+            "items": [
+                {
+                    **_safe_dict(item, (
+                        "id", "name", "version", "category", "enabled", "status", "model_count",
+                        "provider_id", "error_code", "update_available", "update_version",
+                    )),
+                    "models": _strings(item.get("models")),
+                }
+                for item in plugins.get("items", []) if isinstance(item, dict)
+            ] if isinstance(plugins.get("items"), list) else [],
+        } if isinstance(plugins, dict) else None,
+        "resources": _clean_resources(payload.get("resources")),
         "statistics": {
             "date": statistics_raw.get("date"),
             "timezone": statistics_raw.get("timezone"),
@@ -530,6 +673,7 @@ def sanitize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 "models": _ranking(rankings_raw.get("models")),
                 "gateway_keys": _ranking(rankings_raw.get("gateway_keys")),
             },
+            "overview": _clean_overview(statistics_raw.get("overview")),
         },
         "logs": {
             "recent": _logs(logs_raw.get("recent")),
@@ -546,6 +690,8 @@ def _number(value: Any) -> float:
 
 
 def _integer_text(value: Any) -> str:
+    if value is None:
+        return "--"
     return f"{int(_number(value)):,}"
 
 
@@ -566,6 +712,14 @@ def public_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
     registry = snapshot.get("registry") or {}
     providers = registry.get("providers") or []
     failures = (snapshot.get("logs") or {}).get("failed") or []
+    overview = statistics.get("overview")
+    upstreams = snapshot.get("upstreams") or []
+    plugins = (snapshot.get("plugins") or {}).get("items") or []
+    plugin_states: dict[str, int] = {}
+    for item in plugins:
+        status = item.get("status") or "unknown"
+        plugin_states[status] = plugin_states.get(status, 0) + 1
+    resources = snapshot.get("resources") or {}
     return {
         "generated_at": snapshot.get("generated_at"),
         "statistics_date": statistics.get("date"),
@@ -585,7 +739,31 @@ def public_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         "providers_enabled": sum(1 for item in providers if item.get("enabled") is True),
         "enabled_models": len(registry.get("enabled_models") or []),
         "recent_failure_codes": [item.get("error_code") for item in failures[:5] if item.get("error_code")],
+        "overview": {
+            **_safe_dict(overview, ("period", "timezone", "start", "end", "exchange_rate_date")),
+            "summary": overview.get("summary") or {},
+        } if isinstance(overview, dict) else None,
+        "upstreams_total": len(upstreams),
+        "upstreams_enabled": sum(1 for item in upstreams if item.get("enabled") is True),
+        "cooling_deployments": sum(
+            1 for item in (snapshot.get("routing") or {}).get("deployments") or []
+            if _number(item.get("cooldown_seconds")) > 0
+        ),
+        "plugin_states": plugin_states,
+        "resource_restart_required": resources.get("restart_required"),
+        "resource_error_code": resources.get("error_code"),
+        "resource_update_available": (resources.get("update") or {}).get("available"),
     }
+
+
+def _cost_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "未知"
+    amount = value.get("amount")
+    currency = value.get("currency") or ""
+    if not isinstance(amount, (int, float)) or isinstance(amount, bool):
+        return f"未知 {currency}".strip()
+    return f"{'约 ' if value.get('approximate') else ''}{amount:.6g} {currency}".strip()
 
 
 def _markdown(snapshot: dict[str, Any], *, collected_at: str) -> str:
@@ -596,6 +774,23 @@ def _markdown(snapshot: dict[str, Any], *, collected_at: str) -> str:
         version_text += "（发现更新）"
     failures = summary.get("recent_failure_codes") or []
     failure_text = "、".join(str(item) for item in failures) if failures else "无"
+    overview = summary.get("overview")
+    overview_text = ""
+    if overview:
+        metrics = overview.get("summary") or {}
+        label = PERIOD_LABELS.get(overview.get("period"), overview.get("period") or "未知")
+        overview_text = (
+            f"## 范围概览：{label}\n\n"
+            f"时间：{overview.get('start') or '历史起点'} 至 {overview.get('end') or '未知'}。\n\n"
+            "| 调用 | 成功 | 已结束 | 成功率 | 总 Token | 显示费用 |\n"
+            "|---:|---:|---:|---:|---:|---:|\n"
+            f"| {_integer_text(metrics.get('calls'))} | {_integer_text(metrics.get('successful'))} | "
+            f"{_integer_text(metrics.get('finished'))} | {_percent(metrics.get('success_rate'))} | "
+            f"{_integer_text(metrics.get('total_tokens'))} | {_cost_text(metrics.get('display_cost'))} |\n\n"
+            "口径：持久化的业务 Attempt，重试分别计数；成功率分母为已结束 Attempt。"
+            f"参考汇率日期：{overview.get('exchange_rate_date') or '未知'}，费用未知不代表免费。\n\n"
+        )
+    plugin_text = "、".join(f"{key}: {value}" for key, value in summary["plugin_states"].items()) or "无记录"
     return (
         "# Kemo 网关运行状态\n\n"
         f"> 最近采集：{collected_at} · 统计日：{summary.get('statistics_date') or '未知'} "
@@ -607,7 +802,13 @@ def _markdown(snapshot: dict[str, Any], *, collected_at: str) -> str:
         f"| 版本检查 | {version_text} |\n"
         f"| Provider | {summary.get('providers_enabled', 0)} / {summary.get('providers_total', 0)} 已启用 |\n"
         f"| 可用模型 | {_integer_text(summary.get('enabled_models'))} |\n\n"
-        "## 当日调用\n\n"
+        f"上游：{summary['upstreams_enabled']} / {summary['upstreams_total']} 已启用；"
+        f"冷却部署：{summary['cooling_deployments']}；插件：{plugin_text}。\n\n"
+        f"资源待重启：{ {True: '是', False: '否'}.get(summary['resource_restart_required'], '未知')}；"
+        f"资源更新：{ {True: '有可用更新', False: '缓存未发现更新'}.get(summary['resource_update_available'], '尚无缓存计划')}；"
+        f"资源错误码：{summary['resource_error_code'] or '无'}。\n\n"
+        + overview_text +
+        "## 单日辅助统计\n\n"
         "| 调用 | 成功 | 失败 | 成功率 | 平均延迟 | 缓存命中率 | 总 Token |\n"
         "|---:|---:|---:|---:|---:|---:|---:|\n"
         f"| {_integer_text(summary.get('calls'))} | {_integer_text(summary.get('successes'))} | "
@@ -651,18 +852,28 @@ def _render_chart(snapshot: dict[str, Any], target: Path) -> None:
     body_font = _font(20)
     small_font = _font(16)
     summary = public_summary(snapshot)
-    stats = (snapshot.get("statistics") or {}).get("summary") or {}
-    rankings = ((snapshot.get("statistics") or {}).get("rankings") or {}).get("providers") or []
+    statistics = snapshot.get("statistics") or {}
+    overview = statistics.get("overview")
+    stats = overview["summary"] if overview else statistics.get("summary") or {}
+    rankings = (overview.get("rankings") or {}).get("provider", []) if overview else (
+        statistics.get("rankings") or {}).get("providers") or []
+    tokens = {
+        "input_tokens": stats.get("input_tokens"),
+        "cached_input_tokens": stats.get("cached_tokens"),
+        "output_tokens": stats.get("output_tokens"),
+        "total_tokens": stats.get("total_tokens"),
+    } if overview else stats.get("tokens") or {}
 
     draw.text((64, 42), "Kemo Gateway Status", fill="#f7f8ff", font=title_font)
-    subtitle = f"{summary.get('statistics_date') or '--'}  |  phase: {summary.get('runtime_phase') or 'unknown'}  |  generated: {snapshot.get('generated_at') or '--'}"
+    scope = overview.get("period") if overview else summary.get("statistics_date") or "--"
+    subtitle = f"{scope}  |  phase: {summary.get('runtime_phase') or 'unknown'}  |  generated: {snapshot.get('generated_at') or '--'}"
     draw.text((67, 104), subtitle, fill="#8e99b8", font=small_font)
 
     cards = [
-        ("Calls", _integer_text(summary.get("calls")), "#7c6cff"),
-        ("Success rate", _percent(summary.get("success_rate")), "#35d399"),
-        ("Avg latency", f"{_integer_text(summary.get('average_latency_ms'))} ms", "#56b6ff"),
-        ("Cache hit", _percent(summary.get("cache_hit_rate")), "#f4bd50"),
+        ("Calls", _integer_text(stats.get("calls")), "#7c6cff"),
+        ("Success rate", _percent(stats.get("success_rate")), "#35d399"),
+        ("Avg latency", f"{_integer_text(stats.get('latency_ms' if overview else 'average_latency_ms'))} ms", "#56b6ff"),
+        ("Cache hit", _percent(stats.get("cache_hit_rate")), "#f4bd50"),
     ]
     card_y, card_w, gap = 155, 340, 28
     for index, (label, value, accent) in enumerate(cards):
@@ -690,17 +901,19 @@ def _render_chart(snapshot: dict[str, Any], target: Path) -> None:
         draw.rounded_rectangle((390, y + 5, 835, y + 24), radius=9, fill="#222b47")
         draw.rounded_rectangle((390, y + 5, 390 + max(4, int(445 * calls / max_calls)), y + 24), radius=9, fill="#7c6cff")
     if not rows:
-        draw.text((94, 440), "No provider calls for this date", fill="#7783a4", font=body_font)
+        draw.text((94, 440), "No provider calls in this window", fill="#7783a4", font=body_font)
 
-    tokens = (checked_682 if isinstance(checked_682 := stats.get("tokens"), dict) else {})
     details = [
         ("Input tokens", _integer_text(tokens.get("input_tokens"))),
         ("Cached input", _integer_text(tokens.get("cached_input_tokens"))),
         ("Output tokens", _integer_text(tokens.get("output_tokens"))),
-        ("Reasoning", _integer_text(tokens.get("reasoning_tokens"))),
+        ("Cost" if overview else "Reasoning",
+         _cost_text(stats.get("display_cost")) if overview else _integer_text(tokens.get("reasoning_tokens"))),
         ("Total tokens", _integer_text(tokens.get("total_tokens"))),
         ("Active executions", _integer_text(summary.get("active_executions"))),
-        ("Enabled providers", f"{summary.get('providers_enabled', 0)} / {summary.get('providers_total', 0)}"),
+        ("Upstreams" if overview else "Enabled providers",
+         f"{summary['upstreams_enabled']} / {summary['upstreams_total']}" if overview else
+         f"{summary.get('providers_enabled', 0)} / {summary.get('providers_total', 0)}"),
         ("Enabled models", _integer_text(summary.get("enabled_models"))),
     ]
     for index, (label, value) in enumerate(details):
@@ -739,7 +952,7 @@ def _resources() -> list[dict[str, str]]:
     ]
 
 
-def update_snapshot(*, target_date: str | None = None) -> dict[str, Any]:
+def update_snapshot(*, target_date: str | None = None, period: str | None = None) -> dict[str, Any]:
     now = datetime.now().astimezone()
     update_time = now.strftime("%Y-%m-%d %H:%M:%S")
     checkpoint_time = _checkpoint_time(now)
@@ -751,7 +964,7 @@ def update_snapshot(*, target_date: str | None = None) -> dict[str, Any]:
             _atomic_json(LAST_RUN_PATH, result)
             _write_panel_status(result)
             return result
-        snapshot = fetch_status(config, target_date=target_date)
+        snapshot = fetch_status(config, target_date=target_date, period=period)
         changed = _snapshot_changed(snapshot)
         if changed:
             _atomic_json(DATA_PATH, snapshot)
