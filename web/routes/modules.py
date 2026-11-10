@@ -29,8 +29,8 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
             workspace.invalidate(user, kind, scope, module, all_users=all_users)
 
     @app.get("/api/users/{user}/expand")
-    async def expands(user: str) -> dict[str, Any]:
-        return backend.expands(user)
+    async def expands(user: str, include_files: bool = True) -> dict[str, Any]:
+        return await asyncio.to_thread(backend.expands, user, include_files=include_files)
 
     @app.post("/api/users/{user}/expand/{scope}/{module_name}/refresh")
     async def refresh_expand_module(
@@ -166,7 +166,7 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
 
     @app.get("/api/users/{user}/skills")
     async def skills(user: str) -> dict[str, Any]:
-        return backend.skills(user)
+        return await asyncio.to_thread(backend.skills, user)
 
     @app.post("/api/users/{user}/skills/user-created/upload")
     async def upload_user_skills(
