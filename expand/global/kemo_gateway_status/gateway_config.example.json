@@ -4,6 +4,6 @@
   "status_token": "请填写网关独立的 STATUS_TOKEN",
   "timeout_seconds": 15,
   "ranking_limit": 20,
-  "log_limit": 20
+  "log_limit": 20,
+  "period": "today"
 }
-
