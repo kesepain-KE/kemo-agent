@@ -22,11 +22,15 @@
         "status_token": {"type": "string", "minLength": 1, "maxLength": 4096},
         "timeout_seconds": {"type": "integer", "minimum": 2, "maximum": 60},
         "ranking_limit": {"type": "integer", "minimum": 1, "maximum": 100},
-        "log_limit": {"type": "integer", "minimum": 1, "maximum": 100}
+        "log_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "period": {"type": "string", "enum": ["today", "24h", "7d", "30d", "all"]}
       }
     }},
     {"id": "dashboard_data", "label": "读取网关快照", "handler": "dashboard_data", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},
-    {"id": "refresh", "label": "刷新采集", "handler": "refresh", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}},
+    {"id": "refresh", "label": "刷新采集", "handler": "refresh", "input_schema": {"type": "object", "properties": {
+      "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+      "period": {"type": "string", "enum": ["today", "24h", "7d", "30d", "all"]}
+    }, "additionalProperties": false}},
     {
       "id": "configure_endpoint", "label": "配置网关地址", "handler": "panel_configure_endpoint",
       "input_schema": {
