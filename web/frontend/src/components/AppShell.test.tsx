@@ -3349,6 +3349,7 @@ describe('AppShell navigation', () => {
   })
 
   it('输入框能力按钮按类型引用拓展、技能和插件并追加稳定标记', async () => {
+    const references = vi.spyOn(globalThis, 'fetch')
     renderApp('/chat?user=kesepain&session=s1')
     const composer = await screen.findByRole('textbox', { name: '消息内容' })
     fireEvent.change(composer, { target: { value: '先检查当前状态' } })
@@ -3376,6 +3377,12 @@ describe('AppShell navigation', () => {
     expect(within(drawer).getByRole('navigation', { name: '插件层级' })).toHaveTextContent('全局')
     fireEvent.click(await within(drawer).findByRole('button', { name: '引用 clock' }))
     await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制\n[技能引用 user:user_create/manual] 用户自建技能\n[插件引用 global:clock] clock'))
+    const expandRequests = references.mock.calls
+      .map(([input]) => new URL(input instanceof Request ? input.url : String(input), window.location.origin))
+      .filter(url => url.pathname === '/api/users/kesepain/expand')
+    expect(expandRequests).toHaveLength(1)
+    expect(expandRequests[0].searchParams.get('include_files')).toBe('false')
+    references.mockRestore()
   })
 
   it('样例侧栏提供最近对话，完整历史仍由顶栏抽屉查看', async () => {
