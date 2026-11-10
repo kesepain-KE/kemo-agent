@@ -3,12 +3,14 @@ from __future__ import annotations
 from http.client import HTTPMessage
 
 import io
+import copy
 import urllib.request
 from tests.type_assertions import http_headers
 
 import yaml
 import json
 from pathlib import Path
+from typing import Any
 import sys
 import tempfile
 import unittest
@@ -108,6 +110,74 @@ def status_payload() -> dict[str, object]:
             "last_invocation": None,
         },
     }
+
+
+def current_status_payload() -> dict[str, Any]:
+    payload: dict[str, Any] = status_payload()
+    payload["protocol_version"] = "2.0"
+    payload["version"].update(branch="kemo-preview", scope="framework")
+    payload["control"].update(enabled=True, revision="r1", disabled_upstreams=["offline"])
+    payload["upstreams"] = [{
+        "id": "local", "name": "Local", "adapter_id": "openai-chat", "enabled": True,
+        "base_url": "must-not-persist-url", "headers": {"X-Key": "must-not-persist-header"},
+        "credentials": [{
+            "id": "c1", "status": "cooldown", "checked_at": "2026-11-10T10:00:00+00:00",
+            "error_code": "RATE_LIMITED", "provider_status": 429, "cooldown_seconds": 12,
+            "encrypted": "must-not-persist-credential",
+        }],
+    }]
+    payload["routing"] = {
+        "max_attempts": 3, "cooldown_seconds": 30,
+        "models": [{"model": "assistant", "task": "llm", "enabled": True, "verification": "verified"}],
+        "deployments": [{
+            "id": "d1", "public_model": "assistant", "upstream_id": "local",
+            "upstream_model": "remote", "enabled": True, "priority": 2, "weight": 3,
+            "rpm": 10, "cooldown_seconds": 12, "private": "must-not-persist-deployment",
+        }],
+    }
+    payload["plugins"] = {"revision": "p1", "items": [{
+        "id": "example", "name": "Example", "version": "1.2.0", "category": "model",
+        "enabled": True, "status": "degraded", "model_count": 1, "models": ["plugin-model"],
+        "provider_id": "plugin", "error_code": "PLUGIN_START_FAILED",
+        "update_available": True, "update_version": "1.3.0",
+        "config": {"token": "must-not-persist-plugin"}, "error": "must-not-persist-error",
+    }]}
+    pack = {"version": "1.0.0", "items": {"example": "1.0.0"}, "private": "must-not-persist-pack"}
+    payload["resources"] = {
+        "running": {"protocol_adapters": pack, "provider_templates": pack},
+        "installed": {"protocol_adapters": {**pack, "version": "1.1.0"}, "provider_templates": pack},
+        "restart_required": True, "error_code": None,
+        "user": {"provider_templates": [{
+            "id": "custom", "name": "Custom", "version": "1.0.0", "source": "user",
+            "enabled": False, "valid": True, "template": {"secret": "must-not-persist-template"},
+        }]},
+        "update": {
+            "available": True, "branch": "kemo-preview", "target_commit": "a" * 40,
+            "private": "must-not-persist-plan",
+            "groups": {"protocol_adapters": {
+                "current": "1.1.0", "target": "1.2.0", "available": True,
+                "changes": [{"id": "example", "current": "1.0.0", "target": "1.2.0",
+                             "url": "must-not-persist-download"}],
+            }},
+        },
+    }
+    metrics = {
+        "calls": 40, "successful": 30, "finished": 35, "success_rate": 30 / 35,
+        "input_tokens": 2000, "output_tokens": 500, "total_tokens": 2500,
+        "cached_tokens": 1000, "cache_hit_rate": .5, "latency_ms": 80, "first_token_ms": 15,
+        "unknown_cost_calls": 2, "estimated_calls": 1, "costs": {"USD": .5},
+        "display_cost": {"amount": 3.5, "currency": "CNY", "approximate": True,
+                         "unconverted_currencies": [], "secret": "must-not-persist-cost"},
+        "private": "must-not-persist-metrics",
+    }
+    payload["statistics"]["overview"] = {
+        "period": "7d", "timezone": "Asia/Shanghai",
+        "start": "2026-11-03T10:00:00+00:00", "end": "2026-11-10T10:00:00+00:00",
+        "exchange_rate_date": "2026-11-06", "summary": metrics,
+        "rankings": {"provider": [{"id": "local", "name": "Local", **metrics}],
+                     "model": [], "key": []},
+    }
+    return payload
 
 
 class GatewayStatusExpandTests(unittest.TestCase):
@@ -271,6 +341,7 @@ class GatewayStatusExpandTests(unittest.TestCase):
             status_token="status-only-token",
             ranking_limit=7,
             log_limit=9,
+            period="7d",
         )
         with patch.object(gateway, "_open_status_request", return_value=FakeResponse()) as request_call:
             snapshot = gateway.fetch_status(config, target_date="2026-07-28")
@@ -280,11 +351,105 @@ class GatewayStatusExpandTests(unittest.TestCase):
         self.assertIn("ranking_limit=7", request.full_url)
         self.assertIn("log_limit=9", request.full_url)
         self.assertIn("date=2026-07-28", request.full_url)
+        self.assertIn("period=7d", request.full_url)
         self.assertEqual(request.headers["Authorization"], "Bearer status-only-token")
         serialized = json.dumps(snapshot, ensure_ascii=False)
         self.assertNotIn("never-persist-this-system-prompt", serialized)
         self.assertNotIn("request_body", serialized)
         self.assertNotIn("error_message", serialized)
+
+    def test_current_snapshot_keeps_operational_fields_and_filters_nested_secrets(self):
+        snapshot = gateway.sanitize_snapshot(current_status_payload())
+        self.assertEqual(snapshot["version"]["branch"], "kemo-preview")
+        self.assertTrue(snapshot["control"]["enabled"])
+        self.assertEqual(snapshot["control"]["disabled_upstreams"], ["offline"])
+        self.assertEqual(snapshot["upstreams"][0]["credentials"][0]["cooldown_seconds"], 12)
+        self.assertEqual(snapshot["routing"]["deployments"][0]["weight"], 3)
+        self.assertEqual(snapshot["plugins"]["items"][0]["status"], "degraded")
+        self.assertEqual(snapshot["plugins"]["items"][0]["update_version"], "1.3.0")
+        self.assertTrue(snapshot["resources"]["restart_required"])
+        self.assertEqual(snapshot["resources"]["installed"]["protocol_adapters"]["version"], "1.1.0")
+        overview = snapshot["statistics"]["overview"]
+        self.assertEqual(overview["summary"]["display_cost"]["amount"], 3.5)
+        self.assertEqual(overview["rankings"]["provider"][0]["id"], "local")
+        self.assertNotIn("must-not-persist", json.dumps(snapshot))
+        self.assertNotIn("never-persist", json.dumps(snapshot))
+        # The dashboard reads an already sanitized file through the same whitelist.
+        self.assertEqual(gateway.sanitize_snapshot(snapshot), snapshot)
+        summary = gateway.public_summary(snapshot)
+        self.assertEqual(summary["calls"], 12)
+        self.assertEqual(summary["overview"]["summary"]["calls"], 40)
+        self.assertEqual(summary["plugin_states"], {"degraded": 1})
+        self.assertEqual(summary["cooling_deployments"], 1)
+        markdown = gateway._markdown(snapshot, collected_at="2026-11-10 18:00:00")
+        self.assertIn("最近 7 天", markdown)
+        self.assertIn("3.5 CNY", markdown)
+        self.assertIn("单日辅助统计", markdown)
+        gateway._render_chart(snapshot, self.module / "current.png")
+        with Image.open(self.module / "current.png") as image:
+            self.assertEqual(image.size, (1600, 900))
+
+    def test_period_override_preserves_saved_default_and_invalid_period_never_connects(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return json.dumps(current_status_payload()).encode()
+
+        with patch.object(gateway, "_open_status_request", return_value=Response()) as request:
+            gateway.activate({"base_url": "http://example.test", "status_token": "secret", "period": "7d"})
+            self.assertEqual(gateway.configuration_status()["period"], "7d")
+            result = gateway.update_snapshot(period="30d", target_date="2026-11-01")
+            self.assertTrue(result["ok"])
+            self.assertIn("period=30d", request.call_args.args[0].full_url)
+            self.assertIn("date=2026-11-01", request.call_args.args[0].full_url)
+            config = gateway.load_config()
+            self.assertIsNotNone(config)
+            assert config is not None
+            self.assertEqual(config.period, "7d")
+            before = request.call_count
+            failed = gateway.update_snapshot(period="90d")
+            self.assertFalse(failed["ok"])
+            self.assertEqual(request.call_count, before)
+        old_config = gateway.config_from_mapping({"base_url": "http://example.test", "status_token": "secret"})
+        self.assertEqual(old_config.period, "today")
+
+    def test_rolling_window_clock_changes_do_not_rewrite_artifacts_but_metrics_do(self):
+        first = gateway.sanitize_snapshot(current_status_payload())
+        clock = copy.deepcopy(first)
+        clock["generated_at"] = "2026-11-10T10:00:05+00:00"
+        clock["statistics"]["overview"].update(
+            start="2026-11-03T10:00:05+00:00", end="2026-11-10T10:00:05+00:00",
+        )
+        changed = copy.deepcopy(clock)
+        changed["statistics"]["overview"]["summary"]["calls"] = 41
+        gateway._atomic_json(gateway.CONFIG_PATH, {"base_url": "http://example.test", "status_token": "secret"})
+        with patch.object(gateway, "fetch_status", side_effect=[first, clock, changed]):
+            self.assertTrue(gateway.update_snapshot()["changed"])
+            before = gateway.CHART_PATH.stat().st_mtime_ns
+            self.assertFalse(gateway.update_snapshot()["changed"])
+            self.assertEqual(gateway.CHART_PATH.stat().st_mtime_ns, before)
+            self.assertTrue(gateway.update_snapshot()["changed"])
+        self.assertEqual(json.loads(gateway.DATA_PATH.read_text("utf-8"))["statistics"]["overview"]["summary"]["calls"], 41)
+
+    def test_unknown_cost_and_resource_failures_remain_explicit(self):
+        payload = current_status_payload()
+        payload["statistics"]["overview"]["summary"].update(
+            total_tokens=None, display_cost={"amount": None, "currency": "CNY", "approximate": True},
+        )
+        payload["resources"].update(installed=None, restart_required=None,
+                                    error_code="RESOURCE_INVENTORY_UNAVAILABLE", update=None)
+        snapshot = gateway.sanitize_snapshot(payload)
+        self.assertIsNone(snapshot["resources"]["installed"])
+        self.assertIsNone(snapshot["resources"]["update"])
+        self.assertIsNone(snapshot["statistics"]["overview"]["summary"]["display_cost"]["amount"])
+        markdown = gateway._markdown(snapshot, collected_at="2026-11-10")
+        self.assertIn("未知 CNY", markdown)
+        self.assertIn("RESOURCE_INVENTORY_UNAVAILABLE", markdown)
 
     def test_status_token_rejects_control_characters_and_http_redirects(self) -> None:
         with self.assertRaises(gateway.GatewayStatusError):
