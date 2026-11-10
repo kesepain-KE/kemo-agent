@@ -119,8 +119,8 @@ def invoke_bridge(service: ModuleWorkspaceService, token: str, body: dict[str, A
         if len(calls) >= 120:
             raise WorkspaceForbidden("插件页面调用过于频繁")
         instance["calls"] = [*calls, now]
-    panel = module_panel_response(spec.module_dir, service._kind(instance["kind"]))
     if method == "module.status.get":
+        panel = module_panel_response(spec.module_dir, service._kind(instance["kind"]))
         result = {
             "module": {key: item.get(key) for key in (
                 "module", "kind", "scope", "title", "description", "health", "enabled",
@@ -132,6 +132,7 @@ def invoke_bridge(service: ModuleWorkspaceService, token: str, body: dict[str, A
             "runtime": item.get("runtime", {}),
         }
     elif method == "module.config.get":
+        panel = module_panel_response(spec.module_dir, service._kind(instance["kind"]))
         result = {
             **panel,
             "panel": {**panel["panel"], "containers": [c for c in panel["panel"]["containers"] if c["kind"] == "config"]} if panel["panel"] else None,
