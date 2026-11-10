@@ -82,7 +82,7 @@ class RetryManager:
         raise AssertionError("RetryManager exhausted without a result or exception")
 
     def delay(self, retry_number: int, *, retry_after_ms: int | None = None) -> float:
-        suggested = (max(0, retry_after_ms) / 1000
+        suggested = (min(120.0, max(0, retry_after_ms) / 1000)
                      if type(retry_after_ms) is int else 0.0)
         backoff = self.base_delay * 2**max(0, retry_number - 1) * random.uniform(.75, 1.25)
-        return min(self.max_delay, max(suggested, backoff))
+        return max(suggested, min(self.max_delay, backoff))
