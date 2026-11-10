@@ -16,7 +16,7 @@ from run.extensions import (
     EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER, ExpandRuntimeError, invoke_expand,
     module_execution_lock, module_update_timeout, read_expand_runtime, run_protocol_process,
 )
-from run.modules import locate_modules
+from run.modules import ModuleSpecError, locate_modules, read_manifest
 from run.modules.paths import module_path
 from run.modules.spec import ModuleKind, ModuleSpec
 from web.errors import ConflictError, InvalidRequestError, NotFoundError, WebServiceError
@@ -73,18 +73,29 @@ class ModuleWorkspaceService:
         return data
 
     def inventory(self, user: str, kind: str) -> dict[str, Any]:
-        with self.lock:
-            return self._inventory(user, kind)
+        return self._inventory(user, kind)
 
-    def _inventory(self, user: str, kind: str) -> dict[str, Any]:
+    def _inventory(
+        self, user: str, kind: str, *, target: tuple[str, str, Path] | None = None,
+    ) -> dict[str, Any]:
         name = self.backend.require_user(user)
         typed_kind = self._kind(kind)
         original = self.backend.expands(name, include_files=False) if kind == "expand" else self.backend.sense(name)
-        specs = {spec.key: spec for spec in locate_modules(self.root, name, kind=typed_kind).specs}
+        if target is None:
+            specs = {spec.key: spec for spec in locate_modules(self.root, name, kind=typed_kind).specs}
+        else:
+            scope, module, path = target
+            try:
+                spec = read_manifest(path, kind_hint=typed_kind, scope=scope)
+            except ModuleSpecError as exc:
+                raise InvalidRequestError(str(exc)) from exc
+            specs = {spec.key: spec}
         if kind == "expand":
             rows = [dict(item, scope=group["scope"]) for group in original["expands"] for item in group["items"]]
         else:
             rows = [dict(item, scope="global") for item in original["sources"]]
+        if target is not None:
+            rows = [row for row in rows if row["scope"] == target[0] and row["name"] == target[1]]
         items = []
         grants = self._grants()
         for row in rows:
@@ -140,14 +151,14 @@ class ModuleWorkspaceService:
         }
 
     def describe(self, user: str, kind: str, scope: str, module: str) -> tuple[dict[str, Any], ModuleSpec]:
-        name, _ = self._identity(user, kind, scope, module)
-        item = next((row for row in self.inventory(name, kind)["items"] if row["module"] == module and row["scope"] == scope), None)
+        name, path = self._identity(user, kind, scope, module)
+        item = next(iter(self._inventory(name, kind, target=(scope, module, path))["items"]), None)
         if item is None:
             raise NotFoundError("模块未注册")
-        specs = locate_modules(self.root, name, kind=self._kind(kind)).specs
-        spec = next((s for s in specs if s.module_dir.name == module and s.scope == scope), None)
-        if spec is None:
-            raise InvalidRequestError(item["error"] or "模块清单无效")
+        try:
+            spec = read_manifest(path, kind_hint=self._kind(kind), scope=scope)
+        except ModuleSpecError as exc:
+            raise InvalidRequestError(str(exc)) from exc
         return item, spec
 
     def panel(self, user: str, kind: str, scope: str, module: str) -> dict[str, Any]:
