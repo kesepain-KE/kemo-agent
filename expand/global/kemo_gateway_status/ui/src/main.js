@@ -4,7 +4,10 @@ import './style.css'
 const $ = selector => document.querySelector(selector)
 const state = { snapshot: null, status: null, configuration: null, view: 'overview' }
 let busy = false
-const count = value => Number(value || 0).toLocaleString()
+const count = value => value == null ? '—' : Number(value).toLocaleString()
+const yesNo = value => value == null ? '未知' : value ? '是' : '否'
+const periods = { today: '当天', '24h': '最近 24 小时', '7d': '最近 7 天', '30d': '最近 30 天', all: '全部历史' }
+const resourceKinds = { protocol_adapters: '协议适配器', provider_templates: '提供商模板' }
 const text = (id, value) => { $(id).textContent = value ?? '—' }
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme.mode
@@ -45,17 +48,45 @@ function render() {
     const url = config?.base_url ? new URL(config.base_url) : null
     $('#scheme').value = url?.protocol.slice(0, -1) || 'http'; $('#host').value = url?.hostname || ''; $('#port').value = url?.port || (url?.protocol === 'https:' ? 443 : 7531)
   }
+  $('#period').value = snapshot?.statistics?.overview?.period || config?.period || 'today'
   if (!snapshot) return
-  const summary = snapshot.statistics?.summary || {}
-  const tokens = summary.tokens || {}
+  const overview = snapshot.statistics?.overview
+  const summary = overview?.summary || snapshot.statistics?.summary || {}
+  const tokens = overview ? { total_tokens: summary.total_tokens } : summary.tokens || {}
+  text('#usage-scope', overview
+    ? `${periods[overview.period] || overview.period} · ${overview.timezone} · ${overview.start || '历史起点'} 至 ${overview.end}。按业务 Attempt 统计，重试分别计数。`
+    : `单日辅助统计：${snapshot.statistics?.date || '未知'}（${snapshot.statistics?.timezone || '未知时区'}）。该快照未提供范围概览。`)
+  const cost = summary.display_cost
+  text('#cost', cost?.amount == null ? '未知' : `${cost.approximate ? '约 ' : ''}${Number(cost.amount).toLocaleString(undefined, { maximumSignificantDigits: 6 })} ${cost.currency}`)
+  text('#cost-note', overview ? `参考汇率：${overview.exchange_rate_date || '未知'}；未定价调用：${count(summary.unknown_cost_calls)}${cost?.unconverted_currencies?.length ? `；无法换算：${cost.unconverted_currencies.join('、')}` : ''}` : '费用未知不代表免费')
+  text('#version', `框架：${snapshot.version?.local?.version || '未知'} · 分支：${snapshot.version?.branch || '未知'} · ${snapshot.version?.status || '未检查'}`)
   text('#requests', count(summary.calls))
   text('#tokens', count(tokens.total_tokens))
   text('#phase', snapshot.runtime?.phase)
   text('#models', count(snapshot.registry?.enabled_models?.length))
   table('#providers-table', ['服务商', '启用', '已注册模型'], (snapshot.registry?.providers || []).map(p => [p.provider_id, p.enabled ? '是' : '否', (p.registered_models || []).join('、')]))
   table('#models-table', ['模型', '服务商'], (snapshot.registry?.enabled_models || []).map(p => [p.model, p.provider_id]))
+  table('#upstreams-table', ['上游', 'ID', '适配器', '启用'], (snapshot.upstreams || []).map(p => [p.name, p.id, p.adapter_id, yesNo(p.enabled)]))
+  table('#credentials-table', ['上游', '凭据 ID', '状态', '检查时间', '错误码', 'HTTP', '冷却秒数'], (snapshot.upstreams || []).flatMap(p => (p.credentials || []).map(c => [p.id, c.id, c.status, c.checked_at, c.error_code, c.provider_status, c.cooldown_seconds])))
+  const routing = snapshot.routing
+  text('#routing-options', routing ? `最大尝试：${routing.max_attempts}；默认冷却：${routing.cooldown_seconds} 秒` : '该快照未提供路由信息')
+  table('#routes-table', ['部署', '公开模型', '上游', '上游模型', '启用', '优先级', '权重', 'RPM', '冷却秒数'], (routing?.deployments || []).map(d => [d.id, d.public_model, d.upstream_id, d.upstream_model, yesNo(d.enabled), d.priority, d.weight, d.rpm, d.cooldown_seconds]))
+  table('#routing-models-table', ['模型', '任务', '启用', '验证状态'], (routing?.models || []).map(m => [m.model, m.task, yesNo(m.enabled), m.verification]))
+  table('#plugins-table', ['插件', '版本', '启用', '状态', '模型数', '模型', '错误码', '更新版本'], (snapshot.plugins?.items || []).map(p => [p.name || p.id, p.version, yesNo(p.enabled), p.status, p.model_count, (p.models || []).join('、'), p.error_code, p.update_version]))
+  const resources = snapshot.resources
+  text('#resource-status', resources
+    ? `待重启：${yesNo(resources.restart_required)}；${resources.update ? `缓存更新计划：${resources.update.available ? '有更新' : '未发现更新'}（${resources.update.branch}）` : '尚无缓存更新计划'}${resources.error_code ? `；${resources.error_code}` : ''}`
+    : '该快照未提供资源版本')
+  table('#resources-table', ['类型', '资源', '运行版本', '磁盘版本', '缓存目标版本'], Object.entries(resourceKinds).flatMap(([kind, label]) => {
+    const running = resources?.running?.[kind]
+    const installed = resources?.installed?.[kind]
+    const group = resources?.update?.groups?.[kind]
+    const ids = new Set([...Object.keys(running?.items || {}), ...Object.keys(installed?.items || {})])
+    return [[label, '资源包', running?.version, installed?.version, group?.target], ...[...ids].map(id => [label, id, running?.items?.[id], installed?.items?.[id], group?.changes?.find(c => c.id === id)?.target])]
+  }))
+  table('#extensions-table', ['类型', '扩展', '版本', '来源', '启用', '清单有效'], Object.entries(resourceKinds).flatMap(([kind, label]) => (resources?.user?.[kind] || []).map(e => [label, e.name || e.id, e.version, e.source, yesNo(e.enabled), yesNo(e.valid)])))
   if (state.view === 'logs') void renderLogs().catch(error => text('#message', error.message))
-  const rankings = snapshot.statistics?.rankings?.providers || []
+  const rankings = overview?.rankings?.provider || snapshot.statistics?.rankings?.providers || []
   $('#chart').replaceChildren()
   const maximum = Math.max(1, ...rankings.map(p => Number(p.calls || 0)))
   for (const row of rankings) {
@@ -75,12 +106,17 @@ async function run(callback) {
   if (busy) return
   busy = true
   document.querySelectorAll('button').forEach(button => { button.disabled = true })
+  $('#period').disabled = true
   text('#message', '')
   try { await callback(); await load() }
-  catch (error) { text('#message', error.message) }
+  catch (error) {
+    text('#message', error.message)
+    $('#period').value = state.snapshot?.statistics?.overview?.period || state.configuration?.period || 'today'
+  }
   finally {
     busy = false
     document.querySelectorAll('button').forEach(button => { button.disabled = false })
+    $('#period').disabled = false
   }
 }
 async function renderLogs() {
@@ -95,7 +131,8 @@ document.querySelectorAll('[data-view]').forEach(button => button.addEventListen
   if (state.view === 'logs') void renderLogs().catch(error => text('#message', error.message))
 }))
 $('#reload').addEventListener('click', () => run(async () => {}))
-$('#collect').addEventListener('click', () => run(() => action('refresh')))
+$('#collect').addEventListener('click', () => run(() => action('refresh', { period: $('#period').value })))
+$('#period').addEventListener('change', () => run(() => action('refresh', { period: $('#period').value })))
 $('#initialize').addEventListener('click', () => run(async () => {
   const result = await action('initialize'); text('#message', result.message)
 }))
@@ -115,6 +152,7 @@ $('#activate').addEventListener('click', () => {
       base_url: `${$('#scheme').value}://${$('#host').value.trim()}:${Number($('#port').value)}`,
       status_token: $('#status-token').value,
       timeout_seconds: config.timeout_seconds, ranking_limit: config.ranking_limit, log_limit: config.log_limit,
+      period: $('#period').value,
     })
     $('#activate-form').reset()
     delete $('#activate-form').dataset.dirty; delete $('#endpoint-form').dataset.dirty
