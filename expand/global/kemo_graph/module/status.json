@@ -5,7 +5,7 @@
   "scheme": "http",
   "base_url": "http://127.0.0.1:8000/api/v1",
   "allow_remote": false,
-  "backend_status": "未检测",
-  "last_checked": "",
-  "last_error": ""
+  "backend_status": "离线",
+  "last_checked": "2026-11-09T20:04:08+08:00",
+  "last_error": "kemo-graph HTTP 502 HTTP_ERROR: Bad Gateway"
 }
