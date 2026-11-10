@@ -290,13 +290,15 @@ export function ChatPage() {
   })
   const expandsQuery = useQuery({
     queryKey: ['expands', user],
-    queryFn: ({ signal }) => getExpands(user, signal),
+    queryFn: ({ signal }) => getExpands(user, signal, false),
     enabled: Boolean(user && capabilityDrawerOpen),
+    staleTime: 30_000,
   })
   const skillsQuery = useQuery({
     queryKey: ['skills', user],
     queryFn: ({ signal }) => getSkills(user, signal),
     enabled: Boolean(user && capabilityDrawerOpen),
+    staleTime: 30_000,
   })
   const capabilityItems = useMemo(
     () => buildCapabilityReferenceItems(expandsQuery.data, skillsQuery.data),
