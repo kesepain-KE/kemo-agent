@@ -17,7 +17,10 @@ def execute(command: str, params: dict[str, Any] | None = None) -> dict[str, Any
     if normalized == "activate":
         return activate(arguments)
     if normalized in {"refresh", "status"}:
-        result = update_snapshot(target_date=str(arguments.get("date") or "").strip() or None)
+        result = update_snapshot(
+            target_date=str(arguments.get("date") or "").strip() or None,
+            period=arguments.get("period"),
+        )
         if result.get("ok") and result.get("status") == "active":
             result = {
                 **result,
