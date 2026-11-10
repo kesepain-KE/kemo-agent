@@ -170,3 +170,32 @@ def test_slow_page_reads_do_not_block_creating_a_session(root, method, path):
                 await slow_request
     with patch.object(service, method, blocked_read):
         asyncio.run(check())
+
+
+def test_deleting_a_session_does_not_block_unrelated_web_requests(root):
+    service = WebRunService(root)
+    reserve_session(root, "alice", "web", "old")
+    app = create_app(service=service)
+    started, release = threading.Event(), threading.Event()
+    original_delete = service.delete_session
+
+    def blocked_delete(*args, **kwargs):
+        started.set()
+        assert release.wait(3), "删除历史不得阻塞事件循环"
+        return original_delete(*args, **kwargs)
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            pending = asyncio.create_task(client.delete("/api/users/alice/sessions/old"))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                health = await asyncio.wait_for(client.get("/api/health"), timeout=1)
+                assert health.status_code == 200 and not pending.done()
+            finally:
+                release.set()
+                deleted = await pending
+            assert deleted.status_code == 200 and deleted.json()["deleted"]
+            assert find_record(root, "alice", "web", "old") is None
+
+    with patch.object(service, "delete_session", blocked_delete):
+        asyncio.run(check())
