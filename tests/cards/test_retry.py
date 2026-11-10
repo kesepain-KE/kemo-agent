@@ -79,3 +79,79 @@ def test_cancellation_and_retry_limit_validation():
     for invalid in (-1, 6, True):
         with pytest.raises(ValueError):
             RetryManager(max_retries=invalid)
+
+
+@pytest.mark.parametrize("retry_after_ms,expected", [(30_000, 30), (999_999, 120)])
+def test_retry_after_is_not_shortened_to_the_local_backoff_cap(monkeypatch, retry_after_ms, expected):
+    attempts = []
+    waits = []
+
+    def operation():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise ProviderError("upstream cooling down", category="upstream_error",
+                                retryable=True, retry_after_ms=retry_after_ms)
+        return "recovered"
+
+    monkeypatch.setattr("provider.retry.time.sleep", waits.append)
+    result = RetryManager(max_retries=1).call(operation, replay_safe=True)
+    assert result == "recovered"
+    assert waits == [expected]
+    assert len(attempts) == 2
+    assert RetryManager().delay(20) <= 8
+
+
+def test_retry_after_wait_stops_at_the_request_deadline(monkeypatch):
+    clock = [100.0]
+    waits = []
+    attempts = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    def fail():
+        attempts.append(True)
+        raise ProviderError("upstream cooling down", category="upstream_error",
+                            retryable=True, retry_after_ms=30_000)
+
+    monkeypatch.setattr("provider.retry.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("provider.retry.time.sleep", wait)
+    with pytest.raises(TimeoutError, match="deadline exhausted"):
+        RetryManager().call(fail, replay_safe=True, deadline=105)
+    assert waits == [5]
+    assert len(attempts) == 1
+
+
+def test_retry_after_wait_remains_cancellable():
+    event = threading.Event()
+    attempts = []
+
+    def fail():
+        attempts.append(True)
+        event.set()
+        raise ProviderError("upstream cooling down", category="upstream_error",
+                            retryable=True, retry_after_ms=30_000)
+
+    with pytest.raises(RetryCancelled):
+        RetryManager().call(fail, replay_safe=True, cancel_event=event)
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("retry_after_ms,expected", [(30_000, 30), (999_999, 120)])
+def test_kemo_http_retry_after_is_not_shortened_to_the_local_cap(monkeypatch, retry_after_ms, expected):
+    attempts = []
+    waits = []
+
+    def operation():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise ProviderError("gateway unavailable", category="gateway_error", status_code=503,
+                                retryable=True, retry_after_ms=retry_after_ms)
+        return "recovered"
+
+    monkeypatch.setattr("provider.adapters.reliability.time.sleep", waits.append)
+    policy = KemoNetworkRetryPolicy(max_attempts=2)
+    assert policy.run(operation, cancel_event=None) == "recovered"
+    assert len(attempts) == 2
+    assert waits == [expected]
