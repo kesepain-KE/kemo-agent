@@ -2858,7 +2858,7 @@ def run(*, context):
         self.assertEqual(result["text"], "recovered")
         sleep.assert_called_once_with(1, retry_after_ms=999_999)
         from provider.retry import RetryManager
-        self.assertEqual(RetryManager().delay(1, retry_after_ms=999_999), 8.0)
+        self.assertEqual(RetryManager().delay(1, retry_after_ms=999_999), 120.0)
 
     def test_retry_blocks_duplicate_side_effect_without_reusing_result(self) -> None:
         _, root = self.make_root()
