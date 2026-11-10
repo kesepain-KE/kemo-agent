@@ -5,6 +5,7 @@ import io
 import json
 import shutil
 import stat
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -209,6 +210,119 @@ def test_workspace_reads_do_not_walk_unrelated_module_files(service: ModuleWorks
     token = grant(service)["nonce"]
     assert static_asset(service, token, "index.html")[0]
     assert invoke_bridge(service, token, {"method": "module.status.get"})["result"]["module"]["module"] == "demo"
+
+
+@pytest.mark.parametrize("kind", ["expand", "sense"])
+def test_instance_requests_validate_only_the_target_ui(
+    service: ModuleWorkspaceService, monkeypatch: pytest.MonkeyPatch, kind: str,
+):
+    target = make_module(service.root, kind=kind)
+    make_module(service.root, kind=kind, name="unrelated")
+    validated = []
+
+    def validate(spec):
+        validated.append(spec.module_dir)
+        assert spec.module_dir == target
+        return workspace_declaration(spec)
+
+    monkeypatch.setattr("web.services.module_workspace.workspace_declaration", validate)
+    token = grant(service, kind)["nonce"]
+    assert static_asset(service, token, "index.html")[0]
+    status = invoke_bridge(service, token, {"method": "module.status.get"})["result"]
+    assert status["collected_markdown"] == "真实采集数据"
+    assert status["collected_markdown"] in status["injected_markdown"]
+    assert validated and set(validated) == {target}
+
+
+def test_http_reference_inventory_skips_internal_files(
+    service: ModuleWorkspaceService, monkeypatch: pytest.MonkeyPatch,
+):
+    make_module(service.root)
+    app = create_app(root=service.root, service=service.backend)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            complete = await client.get("/api/users/alice/expand")
+            assert complete.status_code == 200
+            complete_item = complete.json()["expands"][0]["items"][0]
+            assert complete_item["files"]
+
+            def unexpected_walk(*args, **kwargs):
+                pytest.fail("对话引用不应扫描模块内部文件")
+
+            monkeypatch.setattr("web.services.modules._flat_files", unexpected_walk)
+            response = await client.get("/api/users/alice/expand?include_files=false")
+            assert response.status_code == 200
+            item = response.json()["expands"][0]["items"][0]
+            assert item["files"] == []
+            for key in ("name", "display_name", "description", "valid", "whitelisted", "injected_markdown"):
+                assert item[key] == complete_item[key]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("endpoint", ["overview", "runtime/status?sections=external"])
+def test_page_statistics_do_not_walk_module_dependencies(
+    service: ModuleWorkspaceService, monkeypatch: pytest.MonkeyPatch, endpoint: str,
+):
+    target = make_module(service.root)
+    dependencies = target / "node_modules"
+    dependencies.mkdir()
+    (dependencies / "package.js").write_text("export const value = 1", "utf-8")
+    expected = service.backend.expands("alice", include_files=False)
+    original_iterdir = Path.iterdir
+
+    def checked_iterdir(path):
+        assert path != dependencies, "页面统计不应递归枚举拓展的运行时依赖"
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", checked_iterdir)
+    app = create_app(root=service.root, service=service.backend)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/users/alice/{endpoint}")
+            assert response.status_code == 200, response.text
+            data = response.json()
+            if endpoint == "overview":
+                assert data["context_window"]["integrations"]["expands"] == expected["status_summary"]["enabled"]
+            else:
+                module = next(item for item in data["components"]["expand"] if item["id"] == "global:demo")
+                assert module["health"] == "healthy"
+                assert module["state"] == "injected"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("endpoint", ["expand", "skills"])
+def test_inventory_disk_reads_do_not_block_web_requests(
+    service: ModuleWorkspaceService, monkeypatch: pytest.MonkeyPatch, endpoint: str,
+):
+    make_module(service.root)
+    app = create_app(root=service.root, service=service.backend)
+    started, release = threading.Event(), threading.Event()
+    original = getattr(service.backend, "expands" if endpoint == "expand" else "skills")
+
+    def slow_read(*args, **kwargs):
+        started.set()
+        assert release.wait(3), "目录读取应在工作线程中等待，不得阻塞事件循环"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service.backend, "expands" if endpoint == "expand" else "skills", slow_read)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            pending = asyncio.create_task(client.get(f"/api/users/alice/{endpoint}"))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                health = await asyncio.wait_for(client.get("/api/health"), timeout=1)
+                assert health.status_code == 200 and not pending.done()
+            finally:
+                release.set()
+                response = await pending
+            assert response.status_code == 200
+
+    asyncio.run(run())
 
 
 def test_builtin_app_console_binds_real_instance_users_and_reports_errors(service: ModuleWorkspaceService):
