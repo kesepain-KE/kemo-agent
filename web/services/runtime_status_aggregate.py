@@ -304,7 +304,7 @@ def runtime_status(
             for item in sense_data.get("sources") or []
             if isinstance(item, dict)
         ]
-        expand_data = service.expands(name)
+        expand_data = service.expands(name, include_files=False)
         for scope in expand_data.get("expands") or []:
             if not isinstance(scope, dict):
                 continue

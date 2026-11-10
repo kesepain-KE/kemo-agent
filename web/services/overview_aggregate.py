@@ -116,7 +116,7 @@ def build_overview(
     active_integrations = _nonnegative_int(current_context.get("active_integrations"))
 
     sense_data = service.sense(name)
-    expand_data = service.expands(name)
+    expand_data = service.expands(name, include_files=False)
     message_data = service.message_status(name)
     knowledge_documents = knowledge_data.get("documents") or []
     enabled_knowledge = sum(

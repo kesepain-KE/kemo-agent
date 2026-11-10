@@ -172,7 +172,8 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
         source: str = Query(default="web"),
         client_id: str = Query(default=""),
     ) -> dict[str, Any]:
-        return backend.delete_session(
+        return await asyncio.to_thread(
+            backend.delete_session,
             user,
             session_id,
             source=source,
