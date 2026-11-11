@@ -1,4 +1,4 @@
-"""Declarative user-configuration panels for Expand and Sense modules."""
+"""Declarative user-configuration panels for Expand, Sense and message modules."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from run.extensions import module_execution_lock
 import hashlib
 
 
-PanelKind = Literal["expand", "sense"]
+PanelKind = Literal["expand", "sense", "message"]
 
 _PANEL_MAX_BYTES = 256 * 1024
 _VALUES_MAX_BYTES = 128 * 1024

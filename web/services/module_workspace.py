@@ -7,7 +7,7 @@ import secrets
 import sys
 import threading
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -21,7 +21,8 @@ from run.modules.paths import module_path
 from run.modules.spec import ModuleKind, ModuleSpec
 from web.errors import ConflictError, InvalidRequestError, NotFoundError, WebServiceError
 from web.services._io import atomic_write
-from web.services.module_panels import module_panel_response, save_module_panel_values
+from web.services.module_panels import PanelKind, load_module_panel, module_panel_response, save_module_panel_values
+from web.services.message_workspace import MessageWorkspaceSpec
 from web.services.module_workspace_schema import fingerprint, workspace_declaration
 
 if TYPE_CHECKING:
@@ -42,20 +43,29 @@ class ModuleWorkspaceService:
         self.imports: dict[str, dict[str, Any]] = {}
         self.grant_path = self.root / "config" / "module_ui_grants.json"
 
-    def _kind(self, kind: str) -> ModuleKind:
-        if kind not in {"expand", "sense"}:
-            raise InvalidRequestError("模块类型只支持 expand 或 sense")
+    def _kind(self, kind: str) -> PanelKind:
+        if kind not in {"expand", "sense", "message"}:
+            raise InvalidRequestError("模块类型只支持 expand、sense 或 message")
         return kind  # type: ignore[return-value]
 
     def _identity(self, user: str, kind: str, scope: str, module: str) -> tuple[str, Path]:
         self._kind(kind)
-        if kind == "sense":
+        if kind == "message":
+            if scope != "user":
+                raise InvalidRequestError("消息模块仅使用绑定用户作用域")
+            name, _, path, _ = self.backend._message_module_directory(user, module)
+        elif kind == "sense":
             if scope != "global":
                 raise InvalidRequestError("Sense 仅使用现有全局作用域")
             name, _, path = self.backend._sense_module_directory(user, module)
         else:
             name, _, _, path = self.backend._expand_module_directory(user, scope, module)
         return name, path
+
+    def _spec(self, path: Path, kind: str, scope: str) -> ModuleSpec | MessageWorkspaceSpec:
+        if kind == "message":
+            return MessageWorkspaceSpec.load(self.root, path)
+        return read_manifest(path, kind_hint=cast(ModuleKind, self._kind(kind)), scope=scope)
 
     def grant_key(self, user: str, kind: str, scope: str, module: str) -> str:
         return f"{kind}:{scope}:{module}" + (f":{user}" if scope == "user" else "")
@@ -80,20 +90,38 @@ class ModuleWorkspaceService:
     ) -> dict[str, Any]:
         name = self.backend.require_user(user)
         typed_kind = self._kind(kind)
-        original = self.backend.expands(name, include_files=False) if kind == "expand" else self.backend.sense(name)
-        if target is None:
-            specs = {spec.key: spec for spec in locate_modules(self.root, name, kind=typed_kind).specs}
+        if kind == "message":
+            original = self.backend.message_status(name)
+            rows = []
+            for transport in original["transports"]:
+                if target is not None and transport["id"] != target[1]:
+                    continue
+                rows.append({
+                    "name": transport["id"], "scope": "user",
+                    "display_name": transport["display_name"], "description": transport["description"],
+                    "health": transport["health"],
+                    "valid": True, "whitelisted": True, "active_for_main_agent": False,
+                    "runtime": {key: transport[key] for key in (
+                        "state", "connection_status", "health", "last_check", "last_error",
+                        "latency_ms", "last_message_at", "messages_received_today", "messages_sent_today",
+                    )},
+                })
+            specs = {}
         else:
-            scope, module, path = target
-            try:
-                spec = read_manifest(path, kind_hint=typed_kind, scope=scope)
-            except ModuleSpecError as exc:
-                raise InvalidRequestError(str(exc)) from exc
-            specs = {spec.key: spec}
-        if kind == "expand":
-            rows = [dict(item, scope=group["scope"]) for group in original["expands"] for item in group["items"]]
-        else:
-            rows = [dict(item, scope="global") for item in original["sources"]]
+            original = self.backend.expands(name, include_files=False) if kind == "expand" else self.backend.sense(name)
+            if target is None:
+                specs = {spec.key: spec for spec in locate_modules(self.root, name, kind=cast(ModuleKind, typed_kind)).specs}
+            else:
+                scope, module, path = target
+                try:
+                    spec = read_manifest(path, kind_hint=cast(ModuleKind, typed_kind), scope=scope)
+                except ModuleSpecError as exc:
+                    raise InvalidRequestError(str(exc)) from exc
+                specs = {spec.key: spec}
+            if kind == "expand":
+                rows = [dict(item, scope=group["scope"]) for group in original["expands"] for item in group["items"]]
+            else:
+                rows = [dict(item, scope="global") for item in original["sources"]]
         if target is not None:
             rows = [row for row in rows if row["scope"] == target[0] and row["name"] == target[1]]
         items = []
@@ -101,7 +129,7 @@ class ModuleWorkspaceService:
         for row in rows:
             module = row["name"]
             scope = row["scope"]
-            key = f"{scope}:{module}" if kind == "expand" else f"sense:{module}"
+            key = f"{scope}:{module}" if kind == "expand" else f"{kind}:{module}"
             item = {
                 **row, "key": key, "module": module, "kind": kind,
                 "title": row["display_name"],
@@ -113,8 +141,17 @@ class ModuleWorkspaceService:
                 "permission_revision": "",
             }
             spec = specs.get(key)
+            if kind == "message":
+                _, _, path, _ = self.backend._message_module_directory(name, module)
+                item["panel"], item["panel_error"] = load_module_panel(path, "message")
+                try:
+                    spec = self._spec(path, kind, scope)
+                except (ValueError, OSError, InvalidRequestError) as exc:
+                    item["ui_error"] = str(exc)
+                    spec = MessageWorkspaceSpec(path)
             if spec is not None:
-                item["description"] = spec.explain
+                if isinstance(spec, ModuleSpec):
+                    item["description"] = spec.explain
                 if kind == "sense":
                     item["runtime"] = read_expand_runtime(spec.module_dir)
                 try:
@@ -128,7 +165,7 @@ class ModuleWorkspaceService:
                     item["ui_error"] = str(exc)
                     item["pages"] = [
                         {"id": "overview", "label": "总览", "type": "builtin", "view": "overview"},
-                        *([{"id": "panel", "label": "通用配置", "type": "panel"}] if row.get("panel") or row.get("panel_error") else []),
+                        *([{"id": "panel", "label": "通用配置", "type": "panel"}] if item.get("panel") or item.get("panel_error") else []),
                     ]
                     item["default_page"] = "overview"
             if not item["pages"]:
@@ -150,14 +187,14 @@ class ModuleWorkspaceService:
             ]),
         }
 
-    def describe(self, user: str, kind: str, scope: str, module: str) -> tuple[dict[str, Any], ModuleSpec]:
+    def describe(self, user: str, kind: str, scope: str, module: str) -> tuple[dict[str, Any], ModuleSpec | MessageWorkspaceSpec]:
         name, path = self._identity(user, kind, scope, module)
         item = next(iter(self._inventory(name, kind, target=(scope, module, path))["items"]), None)
         if item is None:
             raise NotFoundError("模块未注册")
         try:
-            spec = read_manifest(path, kind_hint=self._kind(kind), scope=scope)
-        except ModuleSpecError as exc:
+            spec = self._spec(path, kind, scope)
+        except (ModuleSpecError, ValueError) as exc:
             raise InvalidRequestError(str(exc)) from exc
         return item, spec
 
@@ -176,12 +213,14 @@ class ModuleWorkspaceService:
         try:
             self.refresh(name, kind, scope, module)
         except WebServiceError as exc:
-            raise WebServiceError(f"配置已保存，但采集刷新失败：{exc}") from exc
+            raise WebServiceError(f"配置已保存，但模块刷新失败：{exc}") from exc
         return {"user": name, "scope": scope, "module": module, "saved": True, **saved}
 
     def refresh(self, user: str, kind: str, scope: str, module: str) -> dict[str, Any]:
         if kind == "expand":
             return self.backend.refresh_expand_module(user, scope, module)
+        if kind == "message":
+            return self.backend.check_message_module(user, module)
         return self.backend.refresh_sense_module(user, module)
 
     def set_permissions(self, user: str, kind: str, scope: str, module: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -248,7 +287,7 @@ class ModuleWorkspaceService:
             except ExpandRuntimeError as exc:
                 raise WebServiceError(f"拓展页面操作失败：{exc}") from exc
         if spec.ui_action_entry is None:
-            raise InvalidRequestError("Sense 未声明 UI 动作入口")
+            raise InvalidRequestError("模块未声明 UI 动作入口")
         request = json.dumps({"command": action["handler"], "params": params, "context": {
             "user": user, "scope": scope, "module": module, "source": "module_ui",
         }}, ensure_ascii=False)
@@ -259,8 +298,8 @@ class ModuleWorkspaceService:
                 stdin_payload=request,
             )
         if code or not payload or payload.get("ok") is not True:
-            raise WebServiceError("Sense UI 动作执行失败：" + str((payload or {}).get("reason", "无有效回执")))
+            raise WebServiceError("模块 UI 动作执行失败：" + str((payload or {}).get("reason", "无有效回执")))
         result = payload.get("result")
         if isinstance(result, dict) and (result.get("ok") is False or result.get("status") in {"error", "failed", "failure"}):
-            raise WebServiceError("Sense UI 动作返回失败：" + str(result.get("error") or result.get("message") or "无错误详情"))
+            raise WebServiceError("模块 UI 动作返回失败：" + str(result.get("error") or result.get("message") or "无错误详情"))
         return result

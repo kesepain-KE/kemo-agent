@@ -1,4 +1,4 @@
-"""Validated UI declarations attached to existing Sense/Expand modules."""
+"""Validated UI declarations attached to existing Sense/Expand/message modules."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from run.modules.paths import module_path
 from run.modules.spec import ModuleSpec
 from web.errors import InvalidRequestError
 from web.services.module_panels import load_module_panel
+from web.services.message_workspace import MessageWorkspaceSpec
 
 PERMISSIONS = frozenset({
     "module.status.read", "module.config.read", "module.config.write",
@@ -87,7 +88,7 @@ def _no_references(value: Any) -> None:
             _no_references(item)
 
 
-def workspace_declaration(spec: ModuleSpec) -> dict[str, Any]:
+def workspace_declaration(spec: ModuleSpec | MessageWorkspaceSpec) -> dict[str, Any]:
     root = spec.module_dir
     panel, panel_error = load_module_panel(root, spec.kind)
     pages: list[dict[str, Any]] = []
@@ -161,8 +162,8 @@ def workspace_declaration(spec: ModuleSpec) -> dict[str, Any]:
                 Draft202012Validator.check_schema(schema)
             except SchemaError as exc:
                 raise InvalidRequestError(f"动作 {action_id} schema 无效") from exc
-            if spec.kind == "sense" and handler != "refresh" and spec.ui_action_entry is None:
-                raise InvalidRequestError("Sense 自定义 UI 动作需要 ui.action_entry")
+            if spec.kind in {"sense", "message"} and handler != "refresh" and spec.ui_action_entry is None:
+                raise InvalidRequestError("自定义 UI 动作需要 ui.action_entry")
             actions.append({
                 "id": action_id, "label": _label(action.get("label")),
                 "input_schema": schema, "handler": handler,
