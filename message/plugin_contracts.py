@@ -34,6 +34,7 @@ _CONFIG_FIELDS = frozenset(
         "allowed_sender_ids",
         "message_buffer",
         "files_dir",
+        "ui",
     }
 )
 _MODULE_FIELDS = frozenset({"input", "output", "detect"})
