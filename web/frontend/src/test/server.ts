@@ -450,6 +450,7 @@ export const handlers = [
       path: 'message/out/onebot', files_path: 'message/out/onebot/files', log_path: 'runtime/logs.sqlite3', message_buffer: 'message/out/onebot/message.md',
       modules: { input: 'input.py', output: 'output.py', detect: 'detect.py' }, api_imported: true, polling_interval: '1s', health_interval: '30s', file_relay_enabled: true,
       log_rotation: '每日轮换', temporary_file_count: 1, temporary_file_bytes: 128, today_log_count: 12, logs_truncated: false,
+      temporary_files: [{ name: 'meeting_notes.docx', relative_path: 'meeting_notes.docx', size: 128, updated_at: 1 }],
       logs: [
         { id: 'log-1', direction: 'receive', kind: 'text', timestamp: '2026-07-21 12:49:08', content: '请查看今日任务', file_path: null, success: true, chat_type: 'private', chat_id: '123456', source: 'message/out/onebot/log/2026-07-21.md' },
         { id: 'log-2', direction: 'receive', kind: 'file', timestamp: '2026-07-21 12:48:21', content: 'meeting_notes.docx', file_path: 'message/out/onebot/files/meeting_notes.docx', success: true, chat_type: 'private', chat_id: '123456', source: 'message/out/onebot/log/2026-07-21.md' },
@@ -460,6 +461,9 @@ export const handlers = [
     summary: { total_bindings: 1, total_transports: 1, running_transports: 1, stopped_transports: 0, error_transports: 0, connected_transports: 1, temporary_files: 1, today_logs: 12 }, issues: [],
   })),
   http.post('/api/users/kesepain/message/modules/:module/check', ({ params }) => HttpResponse.json({ user: 'kesepain', module: params.module, checked: true, state: { health: 'healthy' }, transport: null })),
+  http.get('/api/users/kesepain/module-workspaces/message', () => HttpResponse.json({
+    user: 'kesepain', kind: 'message', items: [], summary: { total: 0, enabled: 0, invalid: 0, injected_tokens: 0 }, registry_revision: '',
+  })),
   http.delete('/api/users/kesepain/message/modules/:module', ({ params }) => HttpResponse.json({ user: 'kesepain', module: params.module, platform: params.module, path: `message/out/${params.module}`, deleted: true })),
   http.get('/api/users/kesepain/soul', () => HttpResponse.json({ user: 'kesepain', path: 'users/kesepain/user_soul.md', content: '# 用户人格', size: 12, updated_at: 1 })),
   http.put('/api/users/kesepain/soul', async ({ request }) => {
