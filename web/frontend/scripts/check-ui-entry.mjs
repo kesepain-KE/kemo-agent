@@ -13,7 +13,8 @@ const failures = []
 const router = readFileSync(join(root, 'src/router.tsx'), 'utf8')
 for (const [route, name] of Object.entries(businessPages)) {
   const line = router.split('\n').find(line => line.includes(`path: '${route}'`))
-  const current = ['sense', 'expand'].includes(route) ? './module-workspace/ModuleWorkbench' : './reference/ReferencePage'
+  const current = route === 'messages' ? './module-workspace/MessageWorkbench'
+    : ['sense', 'expand'].includes(route) ? './module-workspace/ModuleWorkbench' : './reference/ReferencePage'
   if (!line?.includes(`import('${current}')`)) {
     failures.push(`${route}: production must load the current ${current}`)
   }
@@ -48,6 +49,7 @@ if (process.argv.includes('--dist')) {
   }
   if (!assets.some(asset => /^ReferencePage-.*\.js$/.test(asset))) failures.push('current ReferencePage chunk is missing')
   if (!assets.some(asset => /^ModuleWorkbench-.*\.js$/.test(asset))) failures.push('module workbench chunk is missing')
+  if (!assets.some(asset => /^MessageWorkbench-.*\.js$/.test(asset))) failures.push('message workbench chunk is missing')
 }
 if (failures.length) {
   console.error(`Current UI guard failed:\n${failures.map(message => `- ${message}`).join('\n')}`)
