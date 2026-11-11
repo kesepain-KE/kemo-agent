@@ -37,6 +37,7 @@ class LogStoreTests(unittest.TestCase):
                 """)
             store = LogStore(root, retention_days=0)
             self.assertEqual(store.list_messages("bridge")[0]["content"], "old body")
+            self.assertEqual(store.list_messages("bridge")[0]["exchange_id"], "")
             self.assertEqual(store.runtime_log_records("alice")[0]["inputs"][0]["content"], "old body")
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
@@ -53,6 +54,7 @@ class LogStoreTests(unittest.TestCase):
             store.append_message_entries(entries)
             store.append_message_entries(entries)
             self.assertEqual(len(store.list_messages("bridge")), 3)
+            self.assertEqual({row["exchange_id"] for row in store.list_messages("bridge")}, {"", "one", "two"})
             self.assertEqual(len(store.runtime_log_records("alice")), 3)
 
     def test_message_route_state_round_trip_preserves_extension_fields(self) -> None:
