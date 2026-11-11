@@ -165,51 +165,6 @@ describe('样例替换后的生产路由', () => {
     expect(within(cards[1] as HTMLElement).getByText('失败')).toBeInTheDocument()
   })
 
-  it('外部消息使用子智能体双栏和六条分页，无搜索框，选中模块及日志筛选在刷新后保留', async () => {
-    const data = await loadReferenceData('/messages', 'kesepain', 's1')
-    const template = data.messages.transports[0]
-    data.messages.transports = Array.from({ length: 7 }, (_, index) => ({
-      ...template, id: `module-${index}`, name: `module-${index}`, display_name: `外部模块 ${index}`,
-      path: `message/out/module-${index}`, description: `**模块说明 ${index}**`,
-    }))
-    data.messages.transports.push({ ...template, id: 'foreign', bound_user: 'other', display_name: '其他用户模块' })
-    server.use(http.get('/api/users/kesepain/message/status', () => HttpResponse.json(data.messages)))
-    renderPage('/messages')
-    await screen.findByRole('button', { name: '外部模块 0' })
-    expect(document.querySelector('.split.messages-split')).not.toBeNull()
-    expect(document.querySelectorAll('.message-module-item')).toHaveLength(6)
-    expect(document.querySelector('.message-detail-column .doc-content strong')).toHaveTextContent('模块说明 0')
-    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
-    expect(document.querySelector('.messages-split input')).toBeNull()
-    expect(screen.queryByText('其他用户模块')).not.toBeInTheDocument()
-    fireEvent.click(within(document.querySelector('.message-list-column') as HTMLElement).getByRole('button', { name: '下一页' }))
-    expect(document.querySelectorAll('.message-module-item')).toHaveLength(1)
-    expect(screen.getByRole('button', { name: '外部模块 6' })).toHaveAttribute('aria-pressed', 'true')
-    expect(document.querySelector('.message-detail-column .editor-title')).toHaveTextContent('外部模块 6')
-    fireEvent.click(within(document.querySelector('.message-detail-column') as HTMLElement).getByRole('button', { name: '文件' }))
-    expect(document.querySelectorAll('.message-detail-column .log-line')).toHaveLength(1)
-    expect(document.querySelector('.message-detail-column .log-line')).toHaveTextContent('meeting_notes.docx')
-    data.messages.transports[6].description = '**刷新后的模块说明**'
-    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
-    await screen.findByText('刷新后的模块说明')
-    expect(screen.getByRole('button', { name: '外部模块 6' })).toHaveAttribute('aria-pressed', 'true')
-    expect(document.querySelectorAll('.message-detail-column .log-line')).toHaveLength(1)
-    expect(document.querySelector('.message-detail-column .editor-foot')).toHaveTextContent('检测连接')
-  })
-
-  it('外部消息未绑定时保留右侧详情容器，并不展示其他用户的模块', async () => {
-    const data = await loadReferenceData('/messages', 'kesepain', 's1')
-    data.messages.transports[0].bound_user = 'other'
-    server.use(http.get('/api/users/kesepain/message/status', () => HttpResponse.json(data.messages)))
-    renderPage('/messages')
-    await screen.findByText('当前用户未绑定消息模块')
-    expect(document.querySelector('.message-detail-column .editor-panel')).not.toBeNull()
-    expect(screen.getByText('暂无可查看的消息模块')).toBeInTheDocument()
-    expect(document.querySelectorAll('.message-module-item')).toHaveLength(0)
-    expect(screen.queryByRole('button', { name: '删除模块' })).not.toBeInTheDocument()
-    expect(screen.queryByText('OneBot 正向 WebSocket')).not.toBeInTheDocument()
-  })
-
   it('文件详情在右侧，移除区域说明；换区域清除预览，下载保持原文件接口', async () => {
     server.use(http.get('/api/users/kesepain/files/file_upload', () => HttpResponse.json({
       user: 'kesepain', scope: 'file_upload', root: 'users/kesepain/file_upload', path: '', search: '',
@@ -236,7 +191,7 @@ describe('样例替换后的生产路由', () => {
   it.each([
     ['/tasks', '任务中枢'], ['/knowledge', '知识库'], ['/memory', '记忆'],
     ['/agents', '子智能体'], ['/skills', '工具与技能'], ['/sense', '感知'],
-    ['/expand', '拓展'], ['/messages', '外部消息'], ['/status', '运行诊断'], ['/runtime', '运行模块'],
+    ['/expand', '拓展'], ['/status', '运行诊断'], ['/runtime', '运行模块'],
   ])('%s 使用真实响应渲染样例页面', async (path, title) => {
     renderPage(path)
     expect(await screen.findByRole('heading', { name: title })).toBeInTheDocument()
