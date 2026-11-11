@@ -40,6 +40,7 @@ from web.constants import (
 )
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
 from web.services._paths import _flat_files, _reject_tree_links, _visible_children
+from run.modules.paths import module_path
 from web.services.module_panels import (
     load_module_panel,
     module_panel_response,
@@ -157,7 +158,7 @@ class MessageExpandServiceMixin:
                 "name": directory.name,
                 "error": f"消息日志数据库不可用：{exc}",
             })
-        temporary_files = _flat_files(config.files_path, relative_to=self.root)
+        temporary_files = _flat_files(config.files_path)
         return {
             "id": directory.name,
             "name": config.machine_id,
@@ -192,6 +193,7 @@ class MessageExpandServiceMixin:
             "log_rotation": "按保留期清理",
             "temporary_file_count": len(temporary_files),
             "temporary_file_bytes": sum(int(item["size"]) for item in temporary_files),
+            "temporary_files": temporary_files,
             "today_log_count": today_logs,
             "logs": logs,
             "logs_truncated": logs_truncated,
@@ -261,6 +263,17 @@ class MessageExpandServiceMixin:
             },
             "issues": issues,
         }
+
+    def message_module_file(self, user: Any, module_name: Any, path: str) -> Path:
+        _, _, directory, config = self._message_module_directory(user, module_name)
+        try:
+            # Validate from the module root too: files_dir itself cannot be a link.
+            relative = (Path(config.files_dir) / path).as_posix()
+            target = module_path(directory, relative)
+            target.relative_to(config.files_path)
+        except ValueError as exc:
+            raise InvalidRequestError("文件必须位于当前消息模块的临时文件目录") from exc
+        return target
 
     def check_message_module(self, user: Any, module_name: Any) -> dict[str, Any]:
         name, logical_name, _, config = self._message_module_directory(user, module_name)
