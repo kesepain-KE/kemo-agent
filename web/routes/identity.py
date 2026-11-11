@@ -33,6 +33,11 @@ def register_identity_routes(app: FastAPI, backend: WebRunService) -> None:
     async def check_message_module(user: str, module_name: str) -> dict[str, Any]:
         return await asyncio.to_thread(backend.check_message_module, user, module_name)
 
+    @app.get("/api/users/{user}/message/modules/{module_name}/files/download")
+    async def message_file(user: str, module_name: str, path: str) -> FileResponse:
+        target = await asyncio.to_thread(backend.message_module_file, user, module_name, path)
+        return FileResponse(target, filename=target.name)
+
     @app.delete("/api/users/{user}/message/modules/{module_name}")
     async def delete_message_module(user: str, module_name: str) -> dict[str, Any]:
         return backend.delete_message_module(user, module_name)
