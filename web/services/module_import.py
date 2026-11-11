@@ -13,7 +13,7 @@ import time
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -126,7 +126,7 @@ def preview_import(service: ModuleWorkspaceService, user: str, kind: str, scope:
     temporary_root = service.root / "tmp"
     temporary_root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="module-import-", dir=temporary_root) as temporary:
-        root, spec, declaration = _extract(data, filename, Path(temporary), service._kind(kind), scope)
+        root, spec, declaration = _extract(data, filename, Path(temporary), cast(ModuleKind, service._kind(kind)), scope)
         target = module_path(base, root.name, file=False)
         result = {
             "module": root.name, "title": spec.name, "kind": kind, "scope": scope,
@@ -158,12 +158,12 @@ def install_import(service: ModuleWorkspaceService, user: str, token: str) -> di
         target = module_path(base, package["preview"]["module"], file=False)
         temporary_root = service.root / "tmp"
         with tempfile.TemporaryDirectory(prefix="module-install-", dir=temporary_root) as temporary:
-            stage, _, _ = _extract(package["data"], package["filename"], Path(temporary), service._kind(kind), scope)
+            stage, _, _ = _extract(package["data"], package["filename"], Path(temporary), cast(ModuleKind, service._kind(kind)), scope)
             with module_execution_lock(target, timeout=15) if target.exists() else nullcontext():
                 if _revision(target) != package["preview"]["target_revision"]:
                     raise ConflictError("目标模块在预览后发生变化，请重新审查")
                 if target.exists():
-                    old_spec = read_manifest(target, kind_hint=service._kind(kind), scope=scope)
+                    old_spec = read_manifest(target, kind_hint=cast(ModuleKind, service._kind(kind)), scope=scope)
                     protected = {".env", "_runtime.json", "_last_run.json"}
                     if old_spec.input_file is not None:
                         protected.add(old_spec.input_file.relative_to(target).as_posix())
