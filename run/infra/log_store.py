@@ -468,7 +468,7 @@ class LogStore:
         parameters = (machine_id, user) if user is not None else (machine_id,)
         with self._connection() as connection:
             rows = connection.execute(
-                f"""SELECT event_key, occurred_at, chat_type, chat_id, direction, kind,
+                f"""SELECT event_key, occurred_at, chat_type, chat_id, exchange_id, direction, kind,
                           content, file_path, mime, size, success, source
                    FROM message_route_logs WHERE machine_id = ?{owner_clause}
                    ORDER BY occurred_at_ms DESC, id DESC LIMIT ?""",
@@ -478,6 +478,7 @@ class LogStore:
             {
                 "timestamp": row["occurred_at"], "chat_type": row["chat_type"],
                 "chat_id": row["chat_id"], "source": row["source"],
+                "exchange_id": row["exchange_id"],
                 "id": f"{machine_id}:{row['event_key']}",
                 "direction": row["direction"], "kind": row["kind"],
                 "content": row["content"],
