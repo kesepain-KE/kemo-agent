@@ -15,6 +15,9 @@ from web.app import create_app
 from web.service import WebRunService
 from web.errors import WebServiceError
 from run.infra import LogStore
+from web.errors import ConflictError, NotFoundError
+from web.services.module_workspace import ModuleWorkspaceService, WorkspaceForbidden
+from web.services.module_ui_instances import invoke_bridge, open_instance, static_asset
 
 
 INPUT_SOURCE = '''import threading
@@ -112,6 +115,7 @@ class WebMessageApiTests(unittest.TestCase):
             "platform": "alice_bridge",
             "chat_type": "private",
             "chat_id": "chat-1",
+            "exchange_id": "exchange-1",
             "source": "runtime/logs.sqlite3",
             "success": True,
         }
@@ -137,13 +141,104 @@ class WebMessageApiTests(unittest.TestCase):
         self.assertEqual(transport["files_path"], "message/out/alice_bridge/files")
         self.assertEqual(transport["log_path"], "runtime/logs.sqlite3")
         self.assertEqual(transport["temporary_file_count"], 1)
+        self.assertEqual(transport["temporary_files"][0]["relative_path"], "meeting_notes.docx")
         self.assertEqual(len(transport["logs"]), 4)
+        self.assertEqual({item["exchange_id"] for item in transport["logs"]}, {"exchange-1"})
         self.assertEqual(
             {(item["direction"], item["kind"]) for item in transport["logs"]},
             {("receive", "text"), ("receive", "file"), ("send", "text"), ("send", "file")},
         )
         self.assertNotIn("bob_bridge", response.text)
         self.assertNotIn("other-user-private", response.text)
+
+    def test_files_download_is_confined_to_the_bound_module(self) -> None:
+        module = self.create_module("alice_files", "alice")
+        self.create_module("bob_files", "bob")
+        (module / "files" / "report.txt").write_text("real attachment", "utf-8")
+        response = self.request("GET", "/api/users/alice/message/modules/alice_files/files/download?path=report.txt")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.text, "real attachment")
+        self.assertIn("attachment;", response.headers["content-disposition"])
+        for path in ("../message.json", "../../bob_files/message.json", "C:/Windows/win.ini"):
+            response = self.request("GET", f"/api/users/alice/message/modules/alice_files/files/download?path={path}")
+            self.assertEqual(response.status_code, 400, response.text)
+        response = self.request("GET", "/api/users/alice/message/modules/bob_files/files/download?path=report.txt")
+        self.assertEqual(response.status_code, 404, response.text)
+
+    def test_message_workspace_reuses_permissions_panels_and_real_actions(self) -> None:
+        (self.root / "config" / "global_config.yaml").write_text("{}", "utf-8")
+        (self.root / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")
+        module = self.create_module("custom_ui", "alice")
+        (module / "module").mkdir()
+        (module / "ui" / "dist").mkdir(parents=True)
+        (module / "ui" / "dist" / "index.html").write_text("<h1>module console</h1>", "utf-8")
+        (module / "ui_actions.py").write_text(
+            "def execute(command, params, context=None):\n"
+            " return {'command':command, 'user':context['user'], 'value':params.get('value')}\n", "utf-8",
+        )
+        (module / "guide.md").write_text("# 消息模块指南", "utf-8")
+        config = json.loads((module / "message.json").read_text("utf-8"))
+        config["ui"] = {"workspace": "module/workspace.json", "action_entry": "ui_actions.py"}
+        (module / "message.json").write_text(json.dumps(config), "utf-8")
+        permissions = ["module.status.read", "module.config.read", "module.config.write", "module.action.invoke"]
+        (module / "module" / "workspace.json").write_text(json.dumps({
+            "schema_version": 1,
+            "pages": [
+                {"id": "console", "label": "专属控制台", "type": "web", "entry": "ui/dist/index.html", "permissions": permissions},
+                {"id": "guide", "label": "指南", "type": "markdown", "source": "guide.md"},
+            ],
+            "actions": [{"id": "echo", "label": "测试操作", "handler": "echo", "input_schema": {
+                "type": "object", "properties": {"value": {"type": "string"}},
+            }}],
+        }), "utf-8")
+        (module / "module" / "panel.json").write_text(json.dumps({
+            "schema_version": 1, "title": "消息配置", "containers": [{
+                "kind": "config", "title": "连接配置", "values": "module/values.json",
+                "fields": [{"key": "host", "type": "string"}, {"key": "token", "type": "string", "masked": True}],
+            }],
+        }), "utf-8")
+        (module / "module" / "values.json").write_text('{"host":"before","token":"private-value"}', "utf-8")
+        service = ModuleWorkspaceService(WebRunService(self.root))
+        response = self.request("GET", "/api/users/alice/module-workspaces/message")
+        self.assertEqual(response.status_code, 200, response.text)
+        item = response.json()["items"][0]
+        self.assertEqual(item["module"], "custom_ui")
+        self.assertFalse(item["ui_error"])
+        self.assertEqual({page["type"] for page in item["pages"]}, {"web", "markdown", "panel", "builtin"})
+        with self.assertRaises(NotFoundError):
+            service.describe("bob", "message", "user", "custom_ui")
+        with self.assertRaises(WorkspaceForbidden):
+            open_instance(service, "alice", "message", "user", "custom_ui", "console")
+        service.set_permissions("alice", "message", "user", "custom_ui", {
+            "authorization_revision": item["authorization_revision"], "permissions": permissions,
+        })
+        instance = open_instance(service, "alice", "message", "user", "custom_ui", "console")
+        token = instance["nonce"]
+        self.assertEqual(static_asset(service, token, "index.html")[0], b"<h1>module console</h1>")
+        self.assertEqual(service.document("alice", "message", "user", "custom_ui", "guide")["content"], "# 消息模块指南")
+        panel = invoke_bridge(service, token, {"method": "module.config.get"})["result"]
+        self.assertNotIn("private-value", json.dumps(panel))
+        invoke_bridge(service, token, {"method": "module.config.patch", "params": {
+            "values": {"host": "after"}, "clear_secrets": [], "config_revision": panel["config_revision"],
+        }})
+        values = json.loads((module / "module" / "values.json").read_text("utf-8"))
+        self.assertEqual(values, {"host": "after", "token": "private-value"})
+        with self.assertRaises(ConflictError):
+            service.save_config("alice", "message", "user", "custom_ui", {
+                "values": {"host": "stale"}, "config_revision": panel["config_revision"],
+            })
+        result = invoke_bridge(service, token, {"method": "module.action.invoke", "params": {"action": "echo", "params": {"value": "actual"}}})["result"]
+        self.assertEqual(result, {"command": "echo", "user": "alice", "value": "actual"})
+        service.set_permissions("alice", "message", "user", "custom_ui", {
+            "authorization_revision": item["authorization_revision"], "permissions": [],
+        })
+        with self.assertRaises(NotFoundError):
+            invoke_bridge(service, token, {"method": "module.status.get"})
+        (module / "module" / "workspace.json").write_text('{"schema_version":99}', "utf-8")
+        broken = service.inventory("alice", "message")["items"][0]
+        self.assertTrue(broken["valid"])
+        self.assertTrue(broken["ui_error"])
+        self.assertTrue(any(page["type"] == "panel" for page in broken["pages"]))
 
     def test_check_connection_updates_state_and_returns_refreshed_transport(self) -> None:
         self.create_module("check_bridge", "alice", healthy=False)
