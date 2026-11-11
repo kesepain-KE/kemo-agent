@@ -1,5 +1,6 @@
 export interface MessageLogEntry {
   id: string
+  exchange_id?: string
   direction: 'send' | 'receive'
   kind: 'text' | 'file' | 'system'
   timestamp: string
@@ -43,6 +44,7 @@ export interface MessageTransportSummary {
   log_rotation: string
   temporary_file_count: number
   temporary_file_bytes: number
+  temporary_files?: Array<{ name: string; relative_path: string; size: number; updated_at: number }>
   today_log_count: number
   logs: MessageLogEntry[]
   logs_truncated: boolean

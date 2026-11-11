@@ -1,6 +1,6 @@
 import type { ModulePanelDefinition } from '../types/api'
 
-export type ModuleKind = 'expand' | 'sense'
+export type ModuleKind = 'expand' | 'sense' | 'message'
 export type Scope = 'global' | 'shared' | 'user'
 export interface WorkspacePage {
   id: string

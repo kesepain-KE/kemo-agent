@@ -14,6 +14,8 @@ export const documentPage = (user: string, item: WorkspaceItem, page: string, si
   requestJson<{ content: string }>(`${modulePath(user, item)}/document/${segment(page)}`, { signal })
 export const permissions = (user: string, item: WorkspaceItem, granted: string[]) =>
   requestJson(`${modulePath(user, item)}/permissions`, json('PUT', { permissions: granted, authorization_revision: item.authorization_revision }))
+export const invokeAction = (user: string, item: WorkspaceItem, action: string, params: unknown) =>
+  requestJson(`${modulePath(user, item)}/action`, json('POST', { action, params }))
 export const openInstance = (user: string, item: WorkspaceItem, page: string) =>
   requestJson<WebInstance>(`${modulePath(user, item)}/instances`, json('POST', { page }))
 export const closeInstance = (nonce: string) => requestJson(`/api/module-ui/instances/${segment(nonce)}`, { method: 'DELETE', keepalive: true })

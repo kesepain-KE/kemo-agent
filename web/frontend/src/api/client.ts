@@ -854,6 +854,10 @@ export async function deleteMessageModule(user: string, moduleName: string): Pro
   )
 }
 
+export function messageFileDownloadUrl(user: string, moduleName: string, path: string): string {
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/message/modules/${encodeURIComponent(moduleName)}/files/download?path=${encodeURIComponent(path)}`
+}
+
 export async function getUserSoul(user: string, signal?: AbortSignal): Promise<SoulResponse> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/soul`, { signal })
 }
