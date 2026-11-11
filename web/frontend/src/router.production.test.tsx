@@ -6,6 +6,7 @@ import { router as productionRouter } from './router'
 import type { ShellOutletContext } from './components/appShellTypes'
 import { ReferencePage } from './reference/ReferencePage'
 import { ModuleWorkbench } from './module-workspace/ModuleWorkbench'
+import { MessageWorkbench } from './module-workspace/MessageWorkbench'
 
 afterEach(cleanup)
 
@@ -13,7 +14,7 @@ describe('current UI production routes', () => {
   it.each([
     ['status', '运行诊断'], ['tasks', '任务中枢'], ['knowledge', '知识库'],
     ['memory', '记忆'], ['agents', '子智能体'], ['skills', '工具与技能'],
-    ['messages', '外部消息'], ['runtime', '运行模块'],
+    ['runtime', '运行模块'],
   ])('%s loads the current ReferencePage UI, never the obsolete duplicate', async (path, heading) => {
     const children = productionRouter.routes[0].children!
     const route = children.find(item => item.path === path)
@@ -36,5 +37,10 @@ describe('current UI production routes', () => {
     const route = productionRouter.routes[0].children!.find(item => item.path === path)!
     const loaded = await (route.lazy as () => Promise<{ Component: unknown }>)()
     expect(loaded.Component).toBe(ModuleWorkbench)
+  })
+  it('messages loads the message workbench', async () => {
+    const route = productionRouter.routes[0].children!.find(item => item.path === 'messages')!
+    const loaded = await (route.lazy as () => Promise<{ Component: unknown }>)()
+    expect(loaded.Component).toBe(MessageWorkbench)
   })
 })
