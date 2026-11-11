@@ -167,7 +167,7 @@ kemo-agent/
 | 持续执行、异步结果计数、完成屏障与停止 | `run/conversation/main_orchestration.py`、`run/scheduler/runtime_host.py` |
 | 子智能体协作、输入约定、状态与续跑 | `plugins/subagent_dispatch/SKILL.md`、`run/agents/task_ledger.py` |
 | 技能、拓展、感知与子智能体开发 | `knowledge/global/modules/module-development.md` |
-| 拓展与感知的专属网页、通用面板、权限和热更新 | `knowledge/global/modules/module-ui-workspace.md` |
+| 拓展、感知与外部消息的专属网页、通用面板、权限和热更新 | `knowledge/global/modules/module-ui-workspace.md` |
 | 工具插件、执行合同与媒体处理 | `knowledge/global/modules/plugin-development.md` |
 | 内置 App、网关与图谱集成 | `knowledge/global/modules/builtin-expansions.md` |
 | 外部消息平台接入与路由 | `knowledge/global/modules/external-message-route-creation.md` |
