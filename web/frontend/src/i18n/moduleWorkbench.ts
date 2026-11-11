@@ -96,5 +96,9 @@ dirty 必须是布尔值|dirty must be a boolean|dirty debe ser booleano|dirty d
 搜索模块|Search modules|Buscar módulos|Rechercher des modules|Module suchen|Buscar módulos|Поиск модулей|モジュールを検索|모듈 검색
 启用|Enable|Activar|Activer|Aktivieren|Ativar|Включить|有効化|활성화
 未保存|Unsaved|Sin guardar|Non enregistré|Ungespeichert|Não salvo|Не сохранено|未保存|저장 안 됨
+收|In|Entrada|Reçu|Ein|Entrada|Вход|受|수신
+发|Out|Salida|Envoyé|Aus|Saída|Выход|送|발신
+展开消息|Expand message|Expandir mensaje|Développer le message|Nachricht aufklappen|Expandir mensagem|Развернуть сообщение|メッセージを展開|메시지 펼치기
+收起消息|Collapse message|Contraer mensaje|Replier le message|Nachricht einklappen|Recolher mensagem|Свернуть сообщение|メッセージを折りたたむ|메시지 접기
 白名单|Allowlist|Lista de permitidos|Liste d’autorisation|Freigabeliste|Lista de permissões|Список разрешений|許可リスト|허용 목록
 `

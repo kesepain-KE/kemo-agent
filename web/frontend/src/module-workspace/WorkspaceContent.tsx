@@ -40,6 +40,9 @@ export function WorkspaceContent({ user, item, page, refresh, onDirtyChange, onE
         if (item.kind === 'sense') {
           if (command !== 'refresh') throw new Error(t('未声明的感知面板动作'))
           await core.refreshSenseModule(user, item.module)
+        } else if (item.kind === 'message') {
+          if (command === 'refresh') await core.checkMessageModule(user, item.module)
+          else await api.invokeAction(user, item, command, params)
         } else await core.invokeExpandModulePanelAction(user, item.scope, item.module, command, params)
         await panel.refetch(); await refresh()
       } finally { setBusy(false) }

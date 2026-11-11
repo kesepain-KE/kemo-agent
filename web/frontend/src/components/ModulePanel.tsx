@@ -13,7 +13,7 @@ import { HoverPreview } from './HoverPreview'
 import styles from './ModulePanel.module.css'
 
 interface ModulePanelProps {
-  kind: 'expand' | 'sense'
+  kind: 'expand' | 'sense' | 'message'
   data?: ModulePanelResponse
   loading?: boolean
   busy?: boolean
@@ -251,7 +251,7 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
   if (!panel) return <div className={`${styles.state} ${styles.empty}`}><Settings2 size={19} />{emptyText}</div>
 
   return <section className={styles.panel} aria-label={panel.title} aria-busy={busy}>
-    <header className={styles.panelHeader}><span><Settings2 size={16} /><span><strong>{panel.title}</strong><small>{kind === 'expand' ? '拓展模块用户配置与快捷操作' : '感知模块用户配置与手动采集'}</small></span></span>{hasConfig ? <button type="button" className={styles.saveButton} disabled={busy} onClick={() => { void save() }}>{busy ? <RotateCcw className={styles.spinning} size={14} /> : <Save size={14} />}保存配置</button> : null}</header>
+    <header className={styles.panelHeader}><span><Settings2 size={16} /><span><strong>{panel.title}</strong><small>{kind === 'expand' ? '拓展模块用户配置与快捷操作' : kind === 'message' ? '消息模块用户配置与快捷操作' : '感知模块用户配置与手动采集'}</small></span></span>{hasConfig ? <button type="button" className={styles.saveButton} disabled={busy} onClick={() => { void save() }}>{busy ? <RotateCcw className={styles.spinning} size={14} /> : <Save size={14} />}保存配置</button> : null}</header>
     {(localError || feedback) ? <div className={`${styles.feedback} ${localError ? styles.error : styles.saved}`} role={localError ? 'alert' : 'status'}>{localError || feedback}</div> : null}
     <div className={styles.grid}>{panel.containers.map((container, index) => <HoverPreview
       key={`${container.kind}-${container.title}-${index}`}
