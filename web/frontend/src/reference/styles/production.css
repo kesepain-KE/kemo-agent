@@ -1056,33 +1056,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
   min-height: 260px;
 }
 .agents-split,
-.skills-split,
-.messages-split { --rightbar-w: calc(340px * 4 / 3); }
+.skills-split { --rightbar-w: calc(340px * 4 / 3); }
 .agents-split > div,
-.skills-split > div,
-.messages-split > div { min-width: 0; }
-.message-module-list { display: flex; flex-direction: column; gap: var(--s-3); }
-.message-module-item { padding: var(--s-3) var(--s-4); }
-.message-module-copy { min-width: 0; flex: 1; }
-.message-module-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.message-module-title > span:first-child { font-size: var(--t-sm); font-weight: 570; overflow-wrap: anywhere; }
-.message-module-desc { margin-top: 4px; font-size: var(--t-xs); color: var(--text-tertiary); line-height: 1.55; overflow-wrap: anywhere; }
-.message-module-meta { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-3); margin-top: 6px; font-size: var(--t-2xs); color: var(--text-faint); }
-.message-module-meta > span { display: inline-flex; align-items: center; gap: 4px; }
-.messages-detail-panel { min-height: 340px; }
-.message-detail-path { margin-top: 2px; font-size: var(--t-2xs); font-family: var(--font-mono); color: var(--text-faint); overflow-wrap: anywhere; }
-.messages-detail-panel .desc-val { min-width: 0; overflow-wrap: anywhere; }
-.message-parameters-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }
-.message-parameters-grid > div { min-width: 0; overflow-wrap: anywhere; }
-.messages-detail-panel .editor-foot { flex-wrap: wrap; gap: var(--s-2); }
+.skills-split > div { min-width: 0; }
 .profile-editor-foot { flex-wrap: wrap; gap: var(--s-3); }
 .profile-editor-meta { display: flex; align-items: center; gap: var(--s-2); flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
 .profile-editor-meta > svg { flex-shrink: 0; }
 .profile-editor-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); width: 100%; min-width: 0; }
 .profile-editor-actions > .btn { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .profile-editor-actions > .btn:only-child { margin-left: auto; }
-.message-detail-note { flex: 1 1 100%; font-size: var(--t-2xs); color: var(--text-faint); }
-.message-copy-path { margin-right: auto; }
 .skill-document-preview {
   width: 100%;
   min-height: 260px;
@@ -1731,7 +1713,6 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .runtime-message-exchange .runtime-message-body { margin-top: 0; min-width: 0; }
 .runtime-message-part + .runtime-message-part { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
 .runtime-message-body .runtime-muted { margin: 8px 0 0; font-size: var(--t-xs); }
-.message-log-body { color: var(--text-primary); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Recent conversations fill the remaining sidebar rail. The visible count
    therefore follows the viewport instead of being capped at seven items. */

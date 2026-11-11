@@ -35,7 +35,6 @@ export async function loadReferenceData(route: string, user: string, sessionId: 
     }
     case '/sense': return { sense: await api.getSense(user) }
     case '/expand': return { expand: await api.getExpands(user) }
-    case '/messages': return { messages: await api.getMessageStatus(user) }
     case '/runtime': {
       const [agents, messages, expand] = await Promise.all([api.getAgents(user), api.getMessageStatus(user), api.getExpands(user)])
       return { agents, messages, expand }
@@ -125,7 +124,7 @@ export function ReferencePage() {
     refetchOnWindowFocus: false,
     refetchInterval: query => {
       if (route === '/tasks') return query.state.data?.tasks.summary.active_plans > 0 ? 1_200 : 15_000
-      return route === '/messages' || route === '/status' ? 30_000 : false
+      return route === '/status' ? 30_000 : false
     },
   })
   useEffect(() => {
