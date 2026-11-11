@@ -76,7 +76,7 @@
 .exchangePreview + .exchangePreview { border-top: 1px solid var(--border-subtle); }
 .previewDirection { display: inline-flex; align-items: center; gap: 5px; color: var(--text-tertiary); }
 .previewText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
-.exchangeBody { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--border); }
+.exchangeBody { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border-top: 1px solid var(--border); }
 .exchangeSide { min-width: 0; }
 .exchangeSide + .exchangeSide { border-inline-start: 1px solid var(--border); }
 .exchangeSide > header { display: flex; align-items: center; gap: 7px; padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); font-size: var(--t-xs); color: var(--text-secondary); background: var(--bg-inset); }

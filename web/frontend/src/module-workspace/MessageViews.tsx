@@ -113,14 +113,14 @@ function MessageRecord({ entry, log = false }: { entry: MessageLogEntry; log?: b
   </article>
 }
 
-function MessageExchangeCard({ exchange }: { exchange: MessageExchange }) {
+function MessageExchangeCard({ exchange, direction }: { exchange: MessageExchange; direction?: MessageLogEntry['direction'] }) {
   const [expanded, setExpanded] = useState(false)
   const contentId = useId()
   const latest = exchange.entries[0]
   const directions = [
     { direction: 'receive', label: '接收', short: '收', Icon: ArrowDownLeft },
     { direction: 'send', label: '发送', short: '发', Icon: ArrowUpRight },
-  ].map(side => {
+  ].filter(side => !direction || side.direction === direction).map(side => {
     const entries = exchange.entries.filter(entry => entry.direction === side.direction).reverse()
     const text = entries.map(entry => entry.content || entry.file_path || '').join(' · ').replace(/\s+/g, ' ')
     return { ...side, entries, preview: text.length > 240 ? `${text.slice(0, 240)}…` : text }
@@ -153,9 +153,7 @@ export function MessageHistory({ transport: item, mode }: { transport: MessageTr
     (mode === 'logs' || entry.kind !== 'system')
     && (filter === 'all' || entry.direction === filter || entry.kind === filter)
   ))
-  const exchanges = mode === 'messages' ? messageExchanges(item.logs).filter(exchange => (
-    filter === 'all' || exchange.entries.some(entry => entry.direction === filter || entry.kind === filter)
-  )) : []
+  const exchanges = mode === 'messages' ? messageExchanges(entries) : []
   const count = mode === 'messages' ? exchanges.length : entries.length
   const total = Math.max(1, Math.ceil(count / 10))
   const page = Math.min(requestedPage, total)
@@ -172,7 +170,8 @@ export function MessageHistory({ transport: item, mode }: { transport: MessageTr
     {item.logs_truncated ? <div className={styles.notice} role="status">{t('日志已截断：每个模块最多返回 500 条记录，这里不代表完整历史。')}</div> : null}
     {!count ? <div className={styles.empty}>{mode === 'messages' ? <MessageSquare size={30} /> : <Terminal size={30} />}
       <h3>{t('当前分类暂无记录')}</h3></div> : <div className={styles.history}>
-      {mode === 'messages' ? exchanges.slice((page - 1) * 10, page * 10).map(exchange => <MessageExchangeCard key={exchange.id} exchange={exchange} />)
+      {mode === 'messages' ? exchanges.slice((page - 1) * 10, page * 10).map(exchange => <MessageExchangeCard key={exchange.id}
+        exchange={exchange} direction={filter === 'receive' || filter === 'send' ? filter : undefined} />)
         : visible.map(entry => <MessageRecord key={entry.id} entry={entry} log />)}
     </div>}
     <MessagePager page={page} total={total} onChange={setPage} />
