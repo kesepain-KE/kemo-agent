@@ -42,6 +42,33 @@
 
 清单拒绝未知字段。`modules` 必须且只能包含 input/output/detect；所有路径必须是模块目录内的相对路径。`bound_user` 必须是现有内部用户。
 
+### 可选的模块工作区
+
+外部消息页面内置状态、文件、消息、日志、诊断五个标签。模块可像拓展一样提供
+`module/panel.json` 通用配置，以及 `message.json` 中可选的 UI 声明：
+
+```json
+{
+  "ui": {
+    "workspace": "module/workspace.json",
+    "action_entry": "ui_actions.py"
+  }
+}
+```
+
+这只是 `message.json` 的新增字段片段，原有三入口合同不变。`workspace.json` 复用
+[模块工作台协议](module-ui-workspace.md) 的 `schema_version: 1`、`pages`、`actions`；
+`panel`、`markdown`、`web` 页面作为内置标签之后的自定义功能展示，无声明时只使用内置查看功能。
+网页资源仍限定 `ui/dist`，使用同一沙箱和宿主 Bridge，不直接访问平台凭据或父页面。
+消息模块使用 `kind=message`、`scope=user`、`module=<模块目录名>`，仅绑定用户的数据空间可访问；
+配置面板的密钥脱敏、乐观版本校验和网页逐模块授权均沿用拓展工作台。
+
+自定义动作通过 `ui.action_entry` 的 `execute(command, params, context=None)` 执行，
+必须在工作区 `actions` 中声明；`handler: "refresh"` 复用当前消息模块的连接检测。
+通用配置面板的 `refresh` 按钮也执行连接检测；保存配置后进行检测，
+不会声称已经重启适配器或热重载平台连接。模块应按自身生命周期读取保存的配置。
+UI 声明错误只影响自定义页面，不能使消息适配入口失效。
+
 `bound_user` 只决定归属，不代表任意发送者获准调用。可选 `allowed_sender_ids` 明确列出平台发送者 ID；
 未配置时，发送者须等于内部用户名，或经既有 `IdentityResolver` 绑定解析到该用户。可提供身份却不匹配时，
 返回 `rejected/sender_not_allowed`，不创建历史会话、不调用模型。原先仅配置 `bound_user` 的模块升级时应
