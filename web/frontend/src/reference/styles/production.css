@@ -1842,6 +1842,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .knowledge-preview-foot { display: flex; align-items: center; flex-shrink: 0; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-top: 1px solid var(--border-subtle); }
 .knowledge-unsaved { color: var(--warning); font-size: var(--t-xs); }
 .knowledge-preview-panel > .empty { margin: auto; }
+.knowledge-file-preview-host { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.knowledge-file-preview-host > .file-detail-panel { flex: 1; min-height: 0; max-height: none; border: 0; border-radius: 0; margin: 0; }
+.knowledge-file-preview-host .file-detail-body { flex: 1; min-height: 0; height: auto; }
+.knowledge-file-preview-host .file-pdf-viewer { min-height: 0; }
 .modal.modal-knowledge { max-width: 1560px; height: calc(100dvh - 48px); max-height: calc(100dvh - 48px); }
 .modal-knowledge > .modal-body { min-height: 0; }
 .knowledge-context-menu { position: fixed; z-index: 1200; min-width: 190px; max-width: calc(100vw - 16px); }

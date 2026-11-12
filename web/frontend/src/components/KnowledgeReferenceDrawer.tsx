@@ -9,6 +9,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { deleteKnowledgeEntry, getKnowledgeDocument, transferKnowledgeEntry } from '../api/client'
 import type { KnowledgeDirectory, KnowledgeDocumentSummary, KnowledgeRoot } from '../types/api'
 import { DocumentMarkdown } from './DocumentMarkdown'
+import { isEditableKnowledgeDocument, KnowledgeFilePreview } from '../reference/KnowledgeFilePreview'
 import { GlobalConfirmDialog } from './GlobalConfirmDialog'
 import { formatBytes, formatDateTime } from './ModuleUi'
 import {
@@ -92,6 +93,7 @@ export function KnowledgeReferenceDrawer({
     content?: string
     loading: boolean
     error?: string
+    document?: KnowledgeDocumentSummary
   } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const treeRef = useRef<HTMLElement>(null)
@@ -237,6 +239,10 @@ export function KnowledgeReferenceDrawer({
     }
     const key = entryKey(entry)
     previewKeyRef.current = key
+    if (!isEditableKnowledgeDocument(entry.relative_path)) {
+      setPreview({ key, title: entry.name, path: entry.relative_path, loading: false, document: entry.document })
+      return
+    }
     setPreview({ key, title: entry.name, path: entry.relative_path, loading: true })
     void getKnowledgeDocument(user, entry.scope, entry.relative_path).then((result) => {
       if (previewKeyRef.current === key) setPreview({ key, title: entry.name, path: entry.relative_path, content: result.content, loading: false })
@@ -567,12 +573,13 @@ export function KnowledgeReferenceDrawer({
       if (event.target === event.currentTarget) { previewKeyRef.current = ''; setPreview(null) }
     }}>
       <section className={styles.previewDialog} role="dialog" aria-modal="true" aria-label={preview.title}>
-        <header className={styles.previewHeader}>
+        {!preview.document && <header className={styles.previewHeader}>
           <div><strong>{preview.title}</strong><small>{preview.path}</small></div>
           <button type="button" className="icon-btn" aria-label={tr('关闭预览')} onClick={() => { previewKeyRef.current = ''; setPreview(null) }}><X size={17} /></button>
-        </header>
-        <div className={styles.previewContent}>
-          {preview.loading ? <div className={styles.empty}><LoaderCircle className={styles.spinning} size={22} /><strong>{tr('正在加载知识文件')}</strong></div>
+        </header>}
+        <div className={preview.document ? styles.mediaPreviewContent : styles.previewContent}>
+          {preview.document ? <KnowledgeFilePreview key={preview.key} document={preview.document} user={user} onClose={() => setPreview(null)} />
+            : preview.loading ? <div className={styles.empty}><LoaderCircle className={styles.spinning} size={22} /><strong>{tr('正在加载知识文件')}</strong></div>
             : preview.error ? <div className={styles.empty}><FileText size={22} /><strong>{preview.error}</strong></div>
               : <DocumentMarkdown content={preview.content || ''} />}
         </div>

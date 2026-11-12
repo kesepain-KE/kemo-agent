@@ -8,7 +8,8 @@ import type { ShellOutletContext } from '../components/appShellTypes'
 import { DocumentMarkdown } from '../components/DocumentMarkdown'
 import { ModulePanel } from '../components/ModulePanel'
 import { RuntimeCongestion } from '../components/RuntimeCongestion'
-import type { ModulePanelDefinition, ModulePanelResponse, ModulePanelValue, ExpandScope } from '../types/api'
+import type { KnowledgeDocumentSummary, ModulePanelDefinition, ModulePanelResponse, ModulePanelValue, ExpandScope } from '../types/api'
+import { KnowledgeFilePreview } from './KnowledgeFilePreview'
 import { disposeReferencePage, renderReferencePage, toast } from './runtime.js'
 
 type PageData = Record<string, any>
@@ -168,6 +169,8 @@ export function ReferencePage() {
     }
     ctx.mountCongestion = (initial: React.ComponentProps<typeof RuntimeCongestion>['initial']) => mount(
       <QueryClientProvider client={client}><RuntimeCongestion user={user} sessionId={sessionId} initial={initial} /></QueryClientProvider>)
+    ctx.mountKnowledgePreview = (document: KnowledgeDocumentSummary, onClose: () => void, onEdit?: () => void) =>
+      mount(<KnowledgeFilePreview document={document} user={user} onClose={onClose} onEdit={onEdit} />)
     ctx.mountMarkdown = (content: string, options: { readOnly?: boolean } = {}) => mount(<DocumentMarkdown content={content} onWidgetAction={options.readOnly ? undefined : action => {
       if (action.type === 'copy') void import('../utils/clipboard').then(({ copyText }) => copyText(action.text))
       else ctx.navigate('/chat', { prompt: action.text }) // 业务文档动作只回填，不自动发起运行。

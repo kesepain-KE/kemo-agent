@@ -1,6 +1,8 @@
 import { t as tr } from '../i18n'
 import { h, pageHead, chooseFile, mutate, Api, Store, icon, onClickOutside, toast, LIVE_KNOWLEDGE, makeSearchBox, fill, emptyState, fmtBytes, fmtRelative, renderMarkdownWithWidgets, Overlay, refreshPage, copyText } from './shared.js'
 import { canPasteKnowledge, isCutEntry, isWithin, pasteKnowledgeClipboard, useKnowledgeClipboard } from '../store/knowledgeClipboard'
+import { isEditableKnowledgeDocument } from './KnowledgeFilePreview'
+import { fileKind } from './FilePreview'
 
 const SCOPES = ['user', 'shared', 'global'];
 export const SCOPE_LABEL = {
@@ -11,6 +13,8 @@ export const SCOPE_LABEL = {
 const key = (entry) => `${entry.scope}:${entry.relative_path}`;
 const parentPath = (path) => path.split('/').slice(0, -1).join('/');
 const joinPath = (parent, name) => [parent, name].filter(Boolean).join('/');
+const entryIcon = (entry) => entry.kind === 'directory' ? 'folder'
+  : ({ image: 'image', audio: 'audio', video: 'video', document: 'fileText', text: 'fileText', file: 'file' })[fileKind(entry)];
 
 export function renderKnowledgePage(ctx) {
   const user = Store.user;
@@ -136,13 +140,15 @@ export function renderKnowledgePage(ctx) {
       selected = entry;
       previewMode = 'preview';
       loaded = false;
+      loading = false;
+      draft = savedContent = '';
     }
     draft = savedContent;
     remember();
     draw();
-    if (entry.kind === 'file') void loadDocument(entry);
   }
   async function loadDocument(entry) {
+    if (!isEditableKnowledgeDocument(entry.relative_path)) return;
     loading = true;
     drawEditor();
     try {
@@ -198,7 +204,7 @@ export function renderKnowledgePage(ctx) {
         }, dataset: { entry: key(entry) },
       },
         h('span.knowledge-tree-toggle', { 'aria-hidden': 'true' }, directory ? h('span', { html: icon(open ? 'chevronDown' : 'chevronRight', 'icon-sm') }) : null),
-        h('span.knowledge-entry-icon', { html: icon(directory ? 'folder' : entry.name.endsWith('.json') ? 'fileCode' : 'fileText', 'icon-sm') }),
+        h('span.knowledge-entry-icon', { html: icon(entryIcon(entry), 'icon-sm') }),
         h('span.knowledge-entry-name', entry.name),
       );
       const group = h('div.knowledge-tree-branch', row);
@@ -254,7 +260,7 @@ export function renderKnowledgePage(ctx) {
             remember(); drawNavigation();
           } else { anchor = key(entry); void browse(entry); }
         } },
-          h('span.knowledge-entry-icon', { html: icon(entry.kind === 'directory' ? 'folder' : 'fileText') }),
+          h('span.knowledge-entry-icon', { html: icon(entryIcon(entry)) }),
           h('span.knowledge-entry-copy', h('strong', { title: entry.name }, entry.name),
             h('small', entry.root ? entry.relative_path || LIVE_KNOWLEDGE.roots.find(root => root.scope === entry.scope).relative_path :
               entry.kind === 'directory' ? tr('文件夹') : `${fmtBytes(entry.size)} · ${fmtRelative(entry.updated_at * 1000)}`)),
@@ -271,21 +277,34 @@ export function renderKnowledgePage(ctx) {
       editorHost.appendChild(emptyState({ title: tr('选择知识文件'), desc: tr('从目录中选择文件，在此预览或编辑。'), icon: 'book' }));
       return;
     }
+    if (previewMode === 'preview' && !loaded || !isEditableKnowledgeDocument(selected.relative_path)) {
+      const preview = ctx.mountKnowledgePreview(selected, () => {
+        selected = null; remember(); drawTree(); drawEditor();
+      }, () => {
+        if (!isEditableKnowledgeDocument(selected.relative_path)) return;
+        previewMode = 'edit';
+        void loadDocument(selected);
+      });
+      preview.className = 'knowledge-file-preview-host';
+      editorHost.appendChild(preview);
+      return;
+    }
     editorHost.appendChild(h('div.knowledge-panel-head',
       h('div.knowledge-preview-title', h('strong', { title: selected.name }, selected.name),
         h('small', { title: selected.relative_path }, `${SCOPE_LABEL[selected.scope]} / ${selected.relative_path}`)),
       h('button.icon-btn', { title: tr('放大预览'), 'aria-label': tr('放大预览'), disabled: !loaded, onclick: () => openKnowledgeZoom(selected, draft) }, h('span', { html: icon('maximize') })),
     ));
+    const controls = h('div.knowledge-preview-toolbar', h('div.segments',
+      ['preview', 'edit'].map(mode => h('button.segment' + (previewMode === mode ? '.is-active' : ''), {
+        'aria-pressed': String(previewMode === mode),
+        onclick: () => { previewMode = mode; drawEditor(); },
+      }, tr(mode === 'preview' ? '预览' : '编辑')))), h('span.knowledge-file-meta', fmtBytes(new TextEncoder().encode(draft).length)));
+    editorHost.appendChild(controls);
     if (!loaded) {
       editorHost.appendChild(h('div.knowledge-preview-content', emptyState({ title: tr(loading ? '正在加载知识文件' : '读取失败'), icon: 'fileText',
         action: !loading ? h('button.btn.btn-outline', { onclick: () => void loadDocument(selected) }, tr('重试')) : null })));
       return;
     }
-    const controls = h('div.knowledge-preview-toolbar', h('div.segments',
-      ['preview', 'edit'].map(mode => h('button.segment' + (previewMode === mode ? '.is-active' : ''), {
-        onclick: () => { previewMode = mode; drawEditor(); },
-      }, tr(mode === 'preview' ? '预览' : '编辑')))), h('span.knowledge-file-meta', fmtBytes(new TextEncoder().encode(draft).length)));
-    editorHost.appendChild(controls);
     const dirtyFlag = h('span.knowledge-unsaved', { hidden: draft === savedContent }, tr('有未保存修改'));
     if (previewMode === 'edit') {
       const editor = h('textarea.textarea.mono.editor-md.knowledge-document-editor', { 'aria-label': tr('知识文件内容'), spellcheck: 'false',
@@ -439,10 +458,10 @@ export function renderKnowledgePage(ctx) {
     h('button.btn.btn-outline', { onclick: async () => {
       if (!await canLeave()) return;
       const directory = currentDirectory() || roots[0];
-      chooseFile('.md,.txt,.json', 80, async file => {
+      chooseFile('', 80, async file => {
         const path = joinPath(directory.relative_path, file.name);
         if (entries.some(entry => entry.scope === directory.scope && entry.relative_path === path) && !await Overlay.confirm({ title: tr('覆盖已有文件？'), detail: path, confirmLabel: tr('覆盖') })) return;
-        void mutate(async () => Api.putKnowledgeDocument(Store.user, directory.scope, path, await file.text()), tr('知识文件已导入'));
+        void mutate(() => Api.uploadKnowledgeFile(Store.user, directory.scope, path, file), tr('知识文件已导入'));
       });
     } }, h('span', { html: icon('upload', 'icon-sm') }), tr('导入文件')),
     h('button.btn.btn-primary', { onclick: event => showContextMenu(event, currentDirectory() || roots[0]) }, h('span', { html: icon('plus', 'icon-sm') }), tr('新建')),
@@ -451,7 +470,6 @@ export function renderKnowledgePage(ctx) {
   h('div.knowledge-workspace', h('aside.knowledge-tree-panel', h('div.knowledge-panel-head', h('strong', tr('知识目录'))), treeHost), listHost, editorHost));
   ctx.registerCleanup(useKnowledgeClipboard.subscribe(() => { if (ctx.active) drawNavigation(); }));
   draw();
-  if (selected) void loadDocument(selected);
   return page;
 }
 

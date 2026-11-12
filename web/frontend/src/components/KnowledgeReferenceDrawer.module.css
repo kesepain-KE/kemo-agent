@@ -60,6 +60,8 @@
 .previewHeader strong { font-size: .875rem; }
 .previewHeader small { color: var(--muted); font-size: .6875rem; }
 .previewContent { min-height: 120px; overflow: auto; padding: 18px 22px; overscroll-behavior: contain; }
+.mediaPreviewContent { min-height: 0; overflow: auto; }
+.mediaPreviewContent > :global(.file-detail-panel) { margin: 0; border: 0; border-radius: 0; }
 .empty { min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--muted-2); text-align: center; }
 .empty svg { color: var(--brand); }
 .empty strong { color: var(--text-2); font-size: .8125rem; }
