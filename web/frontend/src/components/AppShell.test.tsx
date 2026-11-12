@@ -1222,16 +1222,17 @@ describe('AppShell navigation', () => {
   it('首轮运行期间立即绑定空白空间，切页不丢流式事件与后台完成结果', async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>
     let requestSignal: AbortSignal | null | undefined
-    let chatRequests = 0
+    const sentSessionIds: string[] = []
     let committed = false
     const encoder = new TextEncoder()
     const interceptedFetch = globalThis.fetch.bind(globalThis)
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (!url.endsWith('/api/chat')) return interceptedFetch(input, init)
-      expect(JSON.parse(String(init?.body)).session_id).toBe('web_first_run')
+      // Record first, assert after the wait: a throw inside the mock would
+      // surface as an unexplained zero request count on slow runners.
+      sentSessionIds.push(String(JSON.parse(String(init?.body)).session_id))
       requestSignal = init?.signal
-      chatRequests += 1
       return new Response(new ReadableStream<Uint8Array>({
         start(controller) { streamController = controller },
       }), { headers: { 'Content-Type': 'text/event-stream' } })
@@ -1252,9 +1253,12 @@ describe('AppShell navigation', () => {
     )
     const app = renderApp('/chat?user=kesepain')
     const input = await screen.findByRole('textbox', { name: '消息内容' })
+    // The restore effect binds the blank space asynchronously. Sending before
+    // it lands would create a different session, so wait for the binding first.
+    await waitFor(() => expect(app.getSearch()).toBe('?user=kesepain&session=web_first_run'))
     fireEvent.change(input, { target: { value: '首轮跨页任务' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
-    await waitFor(() => expect(chatRequests).toBe(1))
+    await waitFor(() => expect(sentSessionIds).toEqual(['web_first_run']))
     expect(app.getSearch()).toBe('?user=kesepain&session=web_first_run')
     fireEvent.click(screen.getByRole('link', { name: '配置' }))
     await screen.findByRole('heading', { name: '配置' })
@@ -1266,7 +1270,7 @@ describe('AppShell navigation', () => {
     fireEvent.click(screen.getByRole('link', { name: '对话' }))
     expect(await screen.findByText('首轮后台完成')).toBeInTheDocument()
     expect(requestSignal?.aborted).toBe(false)
-    expect(chatRequests).toBe(1)
+    expect(sentSessionIds).toEqual(['web_first_run'])
     expect(app.getSearch()).toBe('?user=kesepain&session=web_first_run')
   })
 
