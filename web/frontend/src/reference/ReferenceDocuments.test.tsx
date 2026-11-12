@@ -2,7 +2,8 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Blob as NodeBlob } from 'node:buffer'
 import { server } from '../test/server'
 import { ReferencePage, loadReferenceData } from './ReferencePage'
 import { ModulePanel } from '../components/ModulePanel'
@@ -21,15 +22,18 @@ function renderPage(path: string) {
 }
 
 describe('业务文档复用知识库放大预览', () => {
+  afterEach(() => vi.unstubAllGlobals())
   it('知识预览与放大预览渲染同一完整文档，编辑仍显示原始 Markdown', async () => {
-    server.use(http.get('/api/users/kesepain/knowledge/:scope/document', () => HttpResponse.json({
+    vi.stubGlobal('Blob', NodeBlob)
+    server.use(http.get('/api/users/kesepain/knowledge/:scope/preview', () => HttpResponse.text(document)),
+      http.get('/api/users/kesepain/knowledge/:scope/document', () => HttpResponse.json({
       user: 'kesepain', scope: 'user', relative_path: 'notes.md', content: document, size: document.length, updated_at: 1,
     })))
     renderPage('/knowledge')
     fireEvent.click(await screen.findByRole('treeitem', { name: '用户' }))
     fireEvent.click(await screen.findByRole('treeitem', { name: 'notes.md' }))
     await screen.findByRole('heading', { name: '统一文档' })
-    const preview = window.document.querySelector('.knowledge-document-preview .document-markdown')!
+    const preview = window.document.querySelector('.knowledge-preview-panel .document-markdown')!
     const html = preview.innerHTML
     expect(preview.querySelector('blockquote')).toHaveTextContent('引用说明')
     expect(preview.querySelector('ol')).toHaveTextContent('第二步')
@@ -37,12 +41,12 @@ describe('业务文档复用知识库放大预览', () => {
     expect(within(preview as HTMLElement).getByRole('button', { name: '复制' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: '放大预览' }))
     const dialog = await screen.findByRole('dialog')
-    expect(dialog.querySelector('.modal')).toHaveClass('modal-knowledge')
+    expect(dialog.querySelector('.modal')).toHaveClass('modal-xl')
     await within(dialog).findByRole('heading', { name: '统一文档' })
     expect(dialog.querySelector('.document-markdown')?.innerHTML).toBe(html)
-    fireEvent.click(within(dialog).getAllByRole('button', { name: '关闭' })[0])
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭放大预览' }))
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    expect(window.document.querySelector('textarea.knowledge-document-editor')).toHaveValue(document)
+    expect(await screen.findByRole('textbox', { name: '知识文件内容' })).toHaveValue(document)
   })
 
   it('定时任务执行内容渲染 Markdown，编辑保留完整原文', async () => {

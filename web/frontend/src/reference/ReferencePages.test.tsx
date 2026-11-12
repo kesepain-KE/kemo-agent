@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { Blob as NodeBlob } from 'node:buffer'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../test/server'
 import { ReferencePage, loadReferenceData } from './ReferencePage'
 import { FilesPage } from './FilesPage'
@@ -19,6 +20,7 @@ function renderPage(path: string, files = false) {
 }
 
 describe('样例替换后的生产路由', () => {
+  afterEach(() => vi.unstubAllGlobals())
   it('调度页独立刷新共享请求池，不重建页面或请求完整提示词，切页后停止轮询', async () => {
     const data = await loadReferenceData('/status', 'kesepain', 's1')
     let active = 4
@@ -673,6 +675,7 @@ describe('样例替换后的生产路由', () => {
   })
 
   it('知识正文按需 GET，修改通过 PUT 保存当前用户与路径', async () => {
+    vi.stubGlobal('Blob', NodeBlob)
     let saved: unknown
     server.use(http.put('/api/users/kesepain/knowledge/user/document', async ({ request }) => {
       expect(new URL(request.url).searchParams.get('path')).toBe('notes.md')
@@ -684,7 +687,7 @@ describe('样例替换后的生产路由', () => {
     fireEvent.click(await screen.findByRole('treeitem', { name: 'notes.md' }))
     await screen.findByText('知识正文')
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    const editor = document.querySelector<HTMLTextAreaElement>('textarea.editor-md')!
+    const editor = await screen.findByRole('textbox', { name: '知识文件内容' })
     fireEvent.input(editor, { target: { value: '# 已更新' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(saved).toEqual({ content: '# 已更新' }))

@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Blob as NodeBlob } from 'node:buffer'
 import type { ShellOutletContext } from '../components/appShellTypes'
 import { ReferencePage } from './ReferencePage'
 import { server } from '../test/server'
@@ -19,10 +20,10 @@ const documents = [
   { scope: 'user', relative_path: 'projects/design/drafts/notes.md', title: '笔记', size: 20, updated_at: 1, active_for_main_agent: true },
   { scope: 'shared', relative_path: 'notes.md', title: '共享笔记', size: 20, updated_at: 1, active_for_main_agent: true },
 ]
-function renderPage() {
+function renderPage(files = documents) {
   server.use(http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({ user: 'kesepain', enabled: true,
-    retrieval: { mode: 'index_only', full_index: true }, roots, directories, documents,
-    summary: { documents: documents.length, user_documents: 1, shared_documents: 1, global_documents: 0 }, source_policy: {},
+    retrieval: { mode: 'index_only', full_index: true }, roots, directories, documents: files,
+    summary: { documents: files.length, user_documents: 1, shared_documents: 1, global_documents: 0 }, source_policy: {},
   })))
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const context = { user: 'kesepain', sessionId: 's1', chatRunning: false } as ShellOutletContext
@@ -37,8 +38,11 @@ async function openFolder() {
 }
 
 describe('真实路径知识库', () => {
-  beforeEach(() => useKnowledgeClipboard.setState({ user: '', clipboard: null, pending: false }))
-  afterEach(() => document.querySelector('.toast-stack')?.remove())
+  beforeEach(() => {
+    vi.stubGlobal('Blob', NodeBlob)
+    useKnowledgeClipboard.setState({ user: '', clipboard: null, pending: false })
+  })
+  afterEach(() => { document.querySelector('.toast-stack')?.remove(); vi.unstubAllGlobals() })
   it('全部根只有三个入口，展开真实三层路径并保留空目录，不显示分类控件', async () => {
     renderPage()
     const tree = await screen.findByRole('tree', { name: '知识目录' })
@@ -184,12 +188,84 @@ describe('真实路径知识库', () => {
     fireEvent.click(await screen.findByRole('treeitem', { name: 'notes.md' }))
     await screen.findByText('知识正文')
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    const editor = screen.getByRole('textbox', { name: '知识文件内容' })
+    const editor = await screen.findByRole('textbox', { name: '知识文件内容' })
     fireEvent.input(editor, { target: { value: '未保存的正文' } })
     fireEvent.input(screen.getByRole('searchbox'), { target: { value: '' } })
     fireEvent.click(screen.getByRole('treeitem', { name: 'empty' }))
     const dialog = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
     fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
     expect(editor).toHaveValue('未保存的正文')
+  })
+
+  it('知识库媒体复用文件预览、放大及原文件下载，未知格式也可见且不可文本编辑', async () => {
+    const files = ['movie.mp4', 'picture.png', 'archive.zip'].map(relative_path => ({
+      scope: 'shared', relative_path, title: relative_path, size: 64, updated_at: 1, active_for_main_agent: true,
+    }))
+    const textReads = vi.fn()
+    server.use(http.get('/api/users/kesepain/knowledge/shared/document', () => {
+      textReads()
+      return HttpResponse.json({ content: 'should not load binary as text' })
+    }))
+    renderPage(files)
+    fireEvent.click(await screen.findByRole('treeitem', { name: '共享' }))
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'movie.mp4' }))
+    await waitFor(() => expect(document.querySelector('.knowledge-preview-panel video')).toBeInTheDocument())
+    expect(document.querySelector('video')).toHaveAttribute('controls')
+    expect(document.querySelector('video')?.getAttribute('src')).toBe('/api/users/kesepain/knowledge/shared/preview?path=movie.mp4')
+    expect(screen.getByRole('link', { name: '下载' })).toHaveAttribute('href', '/api/users/kesepain/knowledge/shared/download?path=movie.mp4')
+    expect(screen.getByRole('button', { name: '编辑' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '放大预览' }))
+    expect(within(screen.getByRole('dialog', { name: '预览 movie.mp4' })).getByRole('link', { name: '下载' })).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.click(screen.getByRole('treeitem', { name: 'picture.png' }))
+    expect(await screen.findByRole('img', { name: 'picture.png' })).toHaveAttribute('src', '/api/users/kesepain/knowledge/shared/preview?path=picture.png')
+    fireEvent.click(screen.getByRole('treeitem', { name: 'archive.zip' }))
+    expect(await screen.findByText('此格式暂不支持预览')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '下载' })).toHaveAttribute('download', 'archive.zip')
+    expect(textReads).not.toHaveBeenCalled()
+  })
+
+  it.each(['md', 'txt'])('%s 默认只请求预览，主动编辑才读取正文并保留未保存的预览', async ext => {
+    const textReads = vi.fn()
+    server.use(http.get('/api/users/kesepain/knowledge/shared/document', () => {
+      textReads()
+      return HttpResponse.json({ content: '# 原始正文' })
+    }))
+    renderPage([{ ...documents[1], relative_path: `note.${ext}` }])
+    fireEvent.click(await screen.findByRole('treeitem', { name: '共享' }))
+    fireEvent.click(await screen.findByRole('treeitem', { name: `note.${ext}` }))
+    await screen.findByText('测试内容', { exact: false })
+    expect(screen.getByRole('button', { name: '预览' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('textbox', { name: '知识文件内容' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存' })).not.toBeInTheDocument()
+    expect(textReads).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    const editor = await screen.findByRole('textbox', { name: '知识文件内容' })
+    expect(editor).toHaveValue('# 原始正文')
+    expect(textReads).toHaveBeenCalledTimes(1)
+    fireEvent.input(editor, { target: { value: '# 未保存的新正文' } })
+    fireEvent.click(screen.getByRole('button', { name: '预览' }))
+    expect(await screen.findByRole('heading', { name: '未保存的新正文' })).toBeInTheDocument()
+    expect(textReads).toHaveBeenCalledTimes(1)
+  })
+
+  it('JSON 只预览，不开放编辑或读取编辑接口', async () => {
+    const textReads = vi.fn()
+    server.use(
+      http.get('/api/users/kesepain/knowledge/shared/preview', () => HttpResponse.text('{"value":1}')),
+      http.get('/api/users/kesepain/knowledge/shared/document', () => {
+        textReads()
+        return HttpResponse.json({ content: '{}' })
+      }),
+    )
+    renderPage([{ ...documents[1], relative_path: 'data.json' }])
+    fireEvent.click(await screen.findByRole('treeitem', { name: '共享' }))
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'data.json' }))
+    await screen.findByText(/"value"/)
+    const edit = screen.getByRole('button', { name: '编辑' })
+    expect(edit).toBeDisabled()
+    fireEvent.click(edit)
+    expect(screen.queryByRole('textbox', { name: '知识文件内容' })).not.toBeInTheDocument()
+    expect(textReads).not.toHaveBeenCalled()
   })
 })

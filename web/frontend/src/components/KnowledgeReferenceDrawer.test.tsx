@@ -37,6 +37,16 @@ function renderDrawer(overrides: Partial<ComponentProps<typeof KnowledgeReferenc
 
 describe('KnowledgeReferenceDrawer', () => {
   beforeEach(() => useKnowledgeClipboard.setState({ user: '', clipboard: null, pending: false }))
+  it('多媒体知识文件从引用侧栏打开时使用相同的预览和原文件下载', () => {
+    renderDrawer({ documents: [{
+      scope: 'shared', relative_path: 'movie.mp4', title: '视频', size: 64, updated_at: 1, active_for_main_agent: true,
+    }] })
+    fireEvent.click(screen.getByRole('treeitem', { name: '共享' }))
+    fireEvent.doubleClick(screen.getByRole('treeitem', { name: 'movie.mp4' }))
+    const dialog = screen.getByRole('dialog', { name: 'movie.mp4' })
+    expect(dialog.querySelector('video')).toHaveAttribute('src', '/api/users/kesepain/knowledge/shared/preview?path=movie.mp4')
+    expect(within(dialog).getByRole('link', { name: '下载' })).toHaveAttribute('href', '/api/users/kesepain/knowledge/shared/download?path=movie.mp4')
+  })
   it('保留关闭过渡并将目录树作为唯一层级导航', () => {
     const props = { user: 'kesepain', roots, directories, documents, onClose: vi.fn(), onReference: vi.fn(), onReferenceDirectory: vi.fn() }
     const client = new QueryClient()
