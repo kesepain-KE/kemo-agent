@@ -450,6 +450,22 @@ export async function putKnowledgeDocument(user: string, scope: string, path: st
   })
 }
 
+export function getKnowledgeFilePreviewUrl(user: string, scope: string, path: string): string {
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/preview?path=${encodeURIComponent(path)}`
+}
+
+export function getKnowledgeFileDownloadUrl(user: string, scope: string, path: string): string {
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/download?path=${encodeURIComponent(path)}`
+}
+
+export async function uploadKnowledgeFile(user: string, scope: string, path: string, file: File): Promise<Record<string, unknown>> {
+  const body = new FormData()
+  body.append('file', file)
+  return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/upload?path=${encodeURIComponent(path)}`, {
+    method: 'POST', body,
+  })
+}
+
 export async function createKnowledgeEntry(user: string, scope: string, path: string, kind: 'file' | 'directory'): Promise<Record<string, unknown>> {
   return requestJson(`/api/users/${encodeURIComponent(user)}/knowledge/${encodeURIComponent(scope)}/entry?path=${encodeURIComponent(path)}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind }),

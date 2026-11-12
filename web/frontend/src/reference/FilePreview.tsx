@@ -1,5 +1,5 @@
 import { t as tr, useLanguage } from '../i18n'
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import * as api from '../api/client'
 import type { FileListEntry } from '../types/api'
@@ -44,15 +44,17 @@ function textDocument(text: string, ext: string) {
 }
 
 /** One bounded fetch shared by the inline and expanded preview; no third-party viewers. */
-export function FilePreview({ file, user, area, onClose, active = true }: {
-  file: FileListEntry; user: string; area: FileArea; onClose: () => void; active?: boolean
+export function FilePreview({ file, user, area = 'file_upload', source, toolbar, onClose, active = true }: {
+  file: FileListEntry; user: string; area?: FileArea; onClose: () => void; active?: boolean
+  source?: { previewUrl: string; downloadUrl: string; workspacePath: string }
+  toolbar?: ReactNode
 }) {
   useLanguage()
   const media = fileKind(file)
   const ext = fileExtension(file)
-  const url = area === 'tmp' ? api.getTmpFilePreviewUrl(file.relative_path)
-    : api.getUserFilePreviewUrl(user, area, file.relative_path)
-  const download = area === 'tmp' ? api.getTmpFileDownloadUrl(file.relative_path) : api.getUserFileDownloadUrl(user, area, file.relative_path)
+  const url = source?.previewUrl ?? (area === 'tmp' ? api.getTmpFilePreviewUrl(file.relative_path)
+    : api.getUserFilePreviewUrl(user, area, file.relative_path))
+  const download = source?.downloadUrl ?? (area === 'tmp' ? api.getTmpFileDownloadUrl(file.relative_path) : api.getUserFileDownloadUrl(user, area, file.relative_path))
   const [text, setText] = useState<string>()
   const [pdf, setPdf] = useState('')
   const [error, setError] = useState('')
@@ -140,7 +142,7 @@ export function FilePreview({ file, user, area, onClose, active = true }: {
               ? <DocumentMarkdown content={textDocument(text, ext)} />
               : <div className="reference-loading" role="status"><span className="spinner" />正在读取文件…</div>
               : <div className="empty"><ReferenceIcon name="file" /><div className="empty-title">此格式暂不支持预览</div><div className="empty-desc">下载后使用本地应用查看。</div></div>
-  const footer = <><button className="btn btn-ghost btn-sm" onClick={() => void copyText(workspaceFilePath(user, area, file.relative_path))
+  const footer = <><button className="btn btn-ghost btn-sm" onClick={() => void copyText(source?.workspacePath ?? workspaceFilePath(user, area, file.relative_path))
     .then(() => toast('已复制相对路径', { kind: 'success' })).catch(() => toast(tr('复制失败'), { kind: 'error' }))}>
     <ReferenceIcon name="copy" small />复制路径</button><div className="spacer" />
     <a className="btn btn-outline btn-sm" href={download} download={file.name}><ReferenceIcon name="download" small />{tr("下载")}</a></>
@@ -151,6 +153,7 @@ export function FilePreview({ file, user, area, onClose, active = true }: {
       <button ref={enlargeRef} className="icon-btn" aria-label={tr("放大预览")} onClick={() => setExpanded(true)}><ReferenceIcon name="maximize" /></button>
       <button className="icon-btn" aria-label="关闭文件详情" onClick={onClose}><ReferenceIcon name="close" /></button></div>
     <div className="file-detail-meta"><span>{ext.toUpperCase() || 'FILE'} · {formatBytes(file.size)}</span><span>{formatDateTime(file.updated_at)}</span></div>
+    {toolbar}
     <div className="file-detail-body reference-file-preview">{expanded
       ? <div className="empty"><ReferenceIcon name="maximize" /><div className="empty-desc">正在放大预览</div></div> : content()}</div>
     <div className="editor-foot">{footer}</div>
