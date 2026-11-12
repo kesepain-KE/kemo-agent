@@ -9,8 +9,10 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
+from web.constants import FILE_UPLOAD_MAX_BYTES
+from web.routes.files import _preview_response
 from web.schemas import (
     KnowledgeEntryBody,
     KnowledgeTransferBody,
@@ -112,7 +114,26 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
 
     @app.get("/api/users/{user}/knowledge", response_model=KnowledgeResponse)
     async def knowledge(user: str) -> dict[str, Any]:
-        return backend.knowledge(user)
+        return await asyncio.to_thread(backend.knowledge, user)
+
+    @app.get("/api/users/{user}/knowledge/{scope}/preview")
+    async def preview_knowledge_file(user: str, scope: str, path: str = Query(...)) -> FileResponse:
+        target, media_type, _ = await asyncio.to_thread(backend.knowledge_file_preview, user, scope, path)
+        return _preview_response(target, media_type)
+
+    @app.get("/api/users/{user}/knowledge/{scope}/download")
+    async def download_knowledge_file(user: str, scope: str, path: str = Query(...)) -> FileResponse:
+        target = await asyncio.to_thread(backend.knowledge_file_download, user, scope, path)
+        return FileResponse(target, filename=target.name)
+
+    @app.post("/api/users/{user}/knowledge/{scope}/upload")
+    async def upload_knowledge_file(user: str, scope: str, file: UploadFile = File(...),
+                                    path: str = Query(...)) -> dict[str, Any]:
+        try:
+            data = await file.read(FILE_UPLOAD_MAX_BYTES + 1)
+        finally:
+            await file.close()
+        return await asyncio.to_thread(backend.save_knowledge_file, user, scope, path, data)
 
     @app.get("/api/users/{user}/knowledge/{scope}/document")
     async def knowledge_document(

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -196,3 +197,84 @@ class KnowledgeFilesystemTests(unittest.TestCase):
         response = self.request("PUT", "/api/users/alice/knowledge/user/document", params={"path": "bad.json"}, json={"content": "not JSON"})
         self.assertEqual(response.status_code, 400, response.text)
         self.assertFalse((self.user / "bad.json").exists())
+
+    def test_all_file_formats_are_listed_and_binary_imports_survive_file_operations(self):
+        payload = b"\x00\xfforiginal binary document\r\n"
+        for filename in ("movie.mp4", "slides.pptx", "report.docx", "table.xlsx", "data.bin"):
+            response = self.request("POST", "/api/users/alice/knowledge/shared/upload",
+                params={"path": f"assets/{filename}"}, files={"file": (filename, payload)})
+            self.assertEqual(response.status_code, 200, response.text)
+        view = self.request("GET", "/api/users/alice/knowledge").json()
+        self.assertEqual({item["relative_path"] for item in view["documents"]},
+                         {f"assets/{name}" for name in ("movie.mp4", "slides.pptx", "report.docx", "table.xlsx", "data.bin")})
+        source = self.root / "knowledge/share/assets/report.docx"
+        response = self.entry("PATCH", "assets/report.docx", scope="shared", json={
+            "action": "copy", "target_scope": "user", "target_path": "report.docx",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((self.user / "report.docx").read_bytes(), payload)
+        response = self.entry("PATCH", "report.docx", json={
+            "action": "move", "target_scope": "global", "target_path": "renamed.docx",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((self.root / "knowledge/global/renamed.docx").read_bytes(), payload)
+        self.assertFalse((self.user / "report.docx").exists())
+        self.assertEqual(self.entry("DELETE", "renamed.docx", scope="global").status_code, 200)
+        self.assertEqual(source.read_bytes(), payload)
+        response = self.request("PUT", "/api/users/alice/knowledge/shared/document",
+            params={"path": "assets/report.docx"}, json={"content": "cannot overwrite binary through text editor"})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(source.read_bytes(), payload)
+
+    def test_knowledge_previews_support_media_ranges_and_office_but_download_original_bytes(self):
+        converted = self.root / "converted.pdf"
+        converted.write_bytes(b"%PDF-1.7\nconverted")
+        for scope, directory in (("user", self.user), ("shared", self.root / "knowledge/share"),
+                                 ("global", self.root / "knowledge/global")):
+            for filename, mime in (("picture.png", "image/png"), ("movie.mp4", "video/mp4"),
+                                   ("sound.mp3", "audio/mpeg"), ("document.pdf", "application/pdf"),
+                                   ("table.csv", "text/plain")):
+                with self.subTest(scope=scope, filename=filename):
+                    (directory / filename).write_bytes(b"0123456789")
+                    response = self.request("GET", f"/api/users/alice/knowledge/{scope}/preview",
+                        params={"path": filename}, headers={"Range": "bytes=2-5"})
+                    self.assertEqual(response.status_code, 206, response.text)
+                    self.assertEqual(response.content, b"2345")
+                    self.assertIn(mime, response.headers["content-type"])
+                    self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+            for extension in ("docx", "xlsx", "pptx"):
+                filename = f"office.{extension}"
+                data = b"\x00original office bytes\xff"
+                (directory / filename).write_bytes(data)
+                with patch("web.services.files.office_pdf", return_value=converted) as convert:
+                    response = self.request("GET", f"/api/users/alice/knowledge/{scope}/preview", params={"path": filename})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.content, converted.read_bytes())
+                    convert.assert_called_once_with((directory / filename).resolve())
+                response = self.request("GET", f"/api/users/alice/knowledge/{scope}/download", params={"path": filename})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.content, data)
+                self.assertIn("attachment", response.headers["content-disposition"])
+        (self.user / "unknown.bin").write_bytes(b"\x00\xffdata")
+        response = self.request("GET", "/api/users/alice/knowledge/user/download", params={"path": "unknown.bin"})
+        self.assertEqual(response.content, b"\x00\xffdata")
+        response = self.request("GET", "/api/users/alice/knowledge/user/preview", params={"path": "unknown.bin"})
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_new_file_endpoints_keep_hidden_path_boundaries_and_text_import_validation(self):
+        for path in ("../outside.pdf", ".", ".secret/private.docx", "classify.sqlite3", "kemo-graph-storage/cache.pdf"):
+            for endpoint in ("preview", "download", "upload"):
+                with self.subTest(path=path, endpoint=endpoint):
+                    kwargs = {"files": {"file": ("document.pdf", b"data")}} if endpoint == "upload" else {}
+                    response = self.request("POST" if endpoint == "upload" else "GET",
+                        f"/api/users/alice/knowledge/user/{endpoint}", params={"path": path}, **kwargs)
+                    self.assertEqual(response.status_code, 400, response.text)
+        for data in (b"not json", b"\xff"):
+            response = self.request("POST", "/api/users/alice/knowledge/user/upload",
+                params={"path": "bad.json"}, files={"file": ("bad.json", data)})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertFalse((self.user / "bad.json").exists())
+        response = self.request("POST", "/api/users/alice/knowledge/user/upload",
+            params={"path": "note.md"}, files={"file": ("note.md", "# 完整正文".encode("utf-8"))})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((self.user / "note.md").read_text("utf-8"), "# 完整正文")

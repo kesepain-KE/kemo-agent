@@ -1,4 +1,4 @@
-"""三层知识库：真实目录、文本预览与文件操作。"""
+"""三层知识库：真实目录、多格式预览与文件操作。"""
 
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ _TRANSFER_LOCK = threading.Lock()
 class KnowledgeServiceMixin:
     if TYPE_CHECKING:
         require_user = WebRunService.require_user
+        _media_preview = WebRunService._media_preview
+        _write_area_file = WebRunService._write_area_file
         root: Path
 
     def knowledge(self, user: Any) -> dict[str, Any]:
@@ -58,7 +60,7 @@ class KnowledgeServiceMixin:
                     })
                 for item in sorted(files, key=str.casefold):
                     target = directory / item
-                    if not self._knowledge_visible(target) or target.suffix.lower() not in _KNOWLEDGE_SUFFIXES:
+                    if not self._knowledge_visible(target) or not target.is_file():
                         continue
                     stat = target.stat()
                     documents.append({
@@ -121,8 +123,30 @@ class KnowledgeServiceMixin:
     def _knowledge_target(self, user: Any, scope: Any, path: Any) -> tuple[str, str, Path]:
         result = self._knowledge_entry_target(user, scope, path)
         if result[2].suffix.lower() not in _KNOWLEDGE_SUFFIXES:
-            raise InvalidRequestError("知识文件只允许 .md、.txt 或 .json")
+            raise InvalidRequestError("在线编辑和新建只支持 .md、.txt 或 .json，其他文件请使用预览或导入")
         return result
+
+    def knowledge_file_download(self, user: Any, scope: Any, path: Any) -> Path:
+        _, _, target = self._knowledge_entry_target(user, scope, path)
+        if not target.is_file():
+            raise NotFoundError(f"知识文件不存在：{path}")
+        return target
+
+    def knowledge_file_preview(self, user: Any, scope: Any, path: Any) -> tuple[Path, str, str]:
+        name, scope, target = self._knowledge_entry_target(user, scope, path)
+        _, base = self._knowledge_root(name, scope)
+        return self._media_preview(base, target.relative_to(base.resolve()).as_posix())
+
+    def save_knowledge_file(self, user: Any, scope: Any, path: Any, data: bytes) -> dict[str, Any]:
+        name, scope, target = self._knowledge_entry_target(user, scope, path)
+        if target.suffix.lower() in _KNOWLEDGE_SUFFIXES:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                raise InvalidRequestError("知识文件不是有效 UTF-8 文本") from None
+            return self.put_knowledge_document(name, scope, path, text)
+        _, base = self._knowledge_root(name, scope)
+        return {"user": name, "scope": scope, **self._write_area_file(base, path, data)}
 
     def knowledge_document(self, user: Any, scope: Any, path: Any) -> dict[str, Any]:
         name, scope, target = self._knowledge_target(user, scope, path)
@@ -194,9 +218,6 @@ class KnowledgeServiceMixin:
                 raise InvalidRequestError("不能将目录复制或移动到自身内部")
             if directory:
                 self._validate_knowledge_subtree(source)
-            else:
-                self._knowledge_target(name, scope, path)
-                self._knowledge_target(name, target_scope, target_path)
             if action == "copy" and auto_rename:
                 original = target
                 suffix = "" if directory else original.suffix
@@ -228,7 +249,6 @@ class KnowledgeServiceMixin:
             self._validate_knowledge_subtree(target)
             shutil.rmtree(target)
         elif target.is_file():
-            self._knowledge_target(name, scope, path)
             target.unlink()
         else:
             raise NotFoundError(f"知识条目不存在：{path}")
