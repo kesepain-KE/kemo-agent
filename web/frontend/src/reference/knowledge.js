@@ -45,8 +45,64 @@ export function renderKnowledgePage(ctx) {
   const editorHost = h('section.knowledge-preview-panel', { 'aria-label': tr('知识文件预览') });
   const page = h('div.page.knowledge-page', h('div.page-inner.wide'));
   const inner = page.firstElementChild;
+  const treePanel = h('aside.knowledge-tree-panel', h('div.knowledge-panel-head', h('strong', tr('知识目录'))), treeHost);
+  const panels = [treePanel, listHost, editorHost];
+  const minimumWidths = [180, 220, 360];
+  let dragging = null;
+  const separators = ['调整知识目录宽度', '调整文件列表宽度'].map((label, index) => h('div.knowledge-pane-resizer', {
+    role: 'separator', 'aria-label': tr(label), 'aria-orientation': 'vertical', tabIndex: 0, title: tr(label),
+    onfocus: () => updateSeparators(panelWidths()),
+    onpointerdown: event => {
+      if (event.button !== 0 || dragging) return;
+      event.preventDefault();
+      event.currentTarget.focus({ preventScroll: true });
+      dragging = { index, pointerId: event.pointerId, startX: event.clientX, widths: panelWidths() };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      workspace.classList.add('is-resizing');
+    },
+    onpointermove: event => {
+      if (dragging?.pointerId === event.pointerId) resizePanels(index, event.clientX - dragging.startX, dragging.widths);
+    },
+    onpointerup: stopResizing, onpointercancel: stopResizing, onlostpointercapture: stopResizing,
+    onkeydown: event => {
+      const delta = { ArrowLeft: -10, ArrowRight: 10, Home: -Infinity, End: Infinity }[event.key];
+      if (delta === undefined) return;
+      event.preventDefault();
+      resizePanels(index, delta, panelWidths());
+    },
+  }));
+  const workspace = h('div.knowledge-workspace', treePanel, separators[0], listHost, separators[1], editorHost);
+  if (state.knowledgePaneWidths) applyWidths(state.knowledgePaneWidths);
+  const layoutFrame = requestAnimationFrame(() => updateSeparators(panelWidths()));
+  ctx.registerCleanup(() => cancelAnimationFrame(layoutFrame));
   ctx.registerCleanup(closeContextMenu);
 
+  function panelWidths() { return panels.map(panel => panel.getBoundingClientRect().width); }
+  function updateSeparators(widths) {
+    separators.forEach((separator, index) => {
+      if (!widths[index] || !widths[index + 1]) return;
+      separator.setAttribute('aria-valuemin', minimumWidths[index]);
+      separator.setAttribute('aria-valuemax', Math.round(widths[index] + widths[index + 1] - minimumWidths[index + 1]));
+      separator.setAttribute('aria-valuenow', Math.round(widths[index]));
+    });
+  }
+  function applyWidths(widths) {
+    widths.forEach((width, index) => workspace.style.setProperty(`--knowledge-pane-${index}`, `${width}fr`));
+    state.knowledgePaneWidths = widths;
+    updateSeparators(widths);
+  }
+  function resizePanels(index, delta, widths) {
+    const offset = Math.max(minimumWidths[index] - widths[index], Math.min(delta, widths[index + 1] - minimumWidths[index + 1]));
+    const next = [...widths];
+    next[index] += offset;
+    next[index + 1] -= offset;
+    applyWidths(next);
+  }
+  function stopResizing(event) {
+    if (dragging?.pointerId !== event.pointerId) return;
+    dragging = null;
+    workspace.classList.remove('is-resizing');
+  }
   function remember() {
     Object.assign(state, { knowledgeScope: activeScope, knowledgeDirectory: directoryPath,
       knowledgeSelected: selected ? key(selected) : '', knowledgeQuery: query,
@@ -467,7 +523,7 @@ export function renderKnowledgePage(ctx) {
     h('button.btn.btn-primary', { onclick: event => showContextMenu(event, currentDirectory() || roots[0]) }, h('span', { html: icon('plus', 'icon-sm') }), tr('新建')),
   ] }),
   clipboardHost,
-  h('div.knowledge-workspace', h('aside.knowledge-tree-panel', h('div.knowledge-panel-head', h('strong', tr('知识目录'))), treeHost), listHost, editorHost));
+  workspace);
   ctx.registerCleanup(useKnowledgeClipboard.subscribe(() => { if (ctx.active) drawNavigation(); }));
   draw();
   return page;

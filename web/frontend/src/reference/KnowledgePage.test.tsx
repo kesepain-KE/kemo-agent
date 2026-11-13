@@ -42,7 +42,32 @@ describe('真实路径知识库', () => {
     vi.stubGlobal('Blob', NodeBlob)
     useKnowledgeClipboard.setState({ user: '', clipboard: null, pending: false })
   })
-  afterEach(() => { document.querySelector('.toast-stack')?.remove(); vi.unstubAllGlobals() })
+  afterEach(() => { document.querySelector('.toast-stack')?.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  it('分隔线只交换相邻两栏的宽度，保留第三栏并限制最小宽度', async () => {
+    renderPage()
+    const treeSeparator = await screen.findByRole('separator', { name: '调整知识目录宽度' })
+    const listSeparator = screen.getByRole('separator', { name: '调整文件列表宽度' })
+    const workspace = document.querySelector('.knowledge-workspace') as HTMLElement
+    const initial = [220, 400, 700]
+    const panels = workspace.querySelectorAll('.knowledge-tree-panel, .knowledge-directory-panel, .knowledge-preview-panel')
+    panels.forEach((panel, index) => {
+      vi.spyOn(panel, 'getBoundingClientRect').mockImplementation(() => ({
+        width: parseFloat(workspace.style.getPropertyValue(`--knowledge-pane-${index}`)) || initial[index],
+      }) as DOMRect)
+    })
+    const widths = () => initial.map((_, index) => parseFloat(workspace.style.getPropertyValue(`--knowledge-pane-${index}`)))
+    fireEvent.keyDown(treeSeparator, { key: 'ArrowRight' })
+    expect(widths()).toEqual([230, 390, 700])
+    fireEvent.keyDown(listSeparator, { key: 'ArrowLeft' })
+    expect(widths()).toEqual([230, 380, 710])
+    fireEvent.keyDown(treeSeparator, { key: 'Home' })
+    expect(widths()).toEqual([180, 430, 710])
+    expect(treeSeparator).toHaveAttribute('aria-valuenow', '180')
+    fireEvent.keyDown(listSeparator, { key: 'End' })
+    expect(widths()).toEqual([180, 780, 360])
+    expect(widths().reduce((sum, value) => sum + value, 0)).toBe(1320)
+  })
+
   it('全部根只有三个入口，展开真实三层路径并保留空目录，不显示分类控件', async () => {
     renderPage()
     const tree = await screen.findByRole('tree', { name: '知识目录' })

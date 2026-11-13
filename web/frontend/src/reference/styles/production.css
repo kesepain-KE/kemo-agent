@@ -1783,11 +1783,19 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .knowledge-page .page-head-actions > .search-box .input::-webkit-search-cancel-button { display: none; }
 .knowledge-workspace {
   display: grid;
-  grid-template-columns: minmax(180px, 220px) minmax(220px, .65fr) minmax(360px, 1.5fr);
-  gap: var(--s-3);
+  grid-template-columns: minmax(180px, var(--knowledge-pane-0, 220px)) var(--s-3)
+    minmax(220px, var(--knowledge-pane-1, .65fr)) var(--s-3) minmax(360px, var(--knowledge-pane-2, 1.5fr));
   height: max(480px, calc(100dvh - 235px + var(--s-6) + var(--s-4) + 2rem));
   min-width: 0;
 }
+.knowledge-pane-resizer { position: relative; cursor: col-resize; touch-action: none; outline: none; }
+.knowledge-pane-resizer::after {
+  content: ''; position: absolute; inset: 12px auto 12px 50%; width: 2px;
+  transform: translateX(-50%); border-radius: 2px; background: var(--border-subtle);
+}
+.knowledge-pane-resizer:hover::after, .knowledge-pane-resizer:focus-visible::after,
+.knowledge-workspace.is-resizing .knowledge-pane-resizer::after { background: var(--accent); }
+.knowledge-workspace.is-resizing { cursor: col-resize; user-select: none; }
 .knowledge-tree-panel, .knowledge-directory-panel, .knowledge-preview-panel {
   display: flex; flex-direction: column; min-width: 0; min-height: 0;
   border: 1px solid var(--border-subtle); border-radius: var(--r-lg);
@@ -1856,8 +1864,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .knowledge-path-hint { color: var(--text-faint); font-size: var(--t-xs); line-height: 1.5; }
 .knowledge-dialog-actions { display: flex; justify-content: flex-end; gap: var(--s-2); }
 @media (max-width: 1250px) {
-  .knowledge-workspace { grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); }
-  .knowledge-directory-panel { display: none; }
+  .knowledge-workspace { grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); gap: var(--s-3); }
+  .knowledge-directory-panel, .knowledge-pane-resizer { display: none; }
 }
 @media (max-width: 700px) {
   .knowledge-workspace { display: flex; flex-direction: column; height: auto; }

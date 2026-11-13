@@ -172,6 +172,8 @@ Token 合计|Total tokens|Tokens totales|Total des tokens|Tokens gesamt|Total de
 删除整包|Delete entire package|Eliminar paquete completo|Supprimer tout le paquet|Gesamtes Paket löschen|Excluir pacote inteiro|Удалить весь пакет|パッケージ全体を削除|전체 패키지 삭제
 技能包已删除|Skill package deleted|Paquete eliminado|Paquet supprimé|Fähigkeitspaket gelöscht|Pacote excluído|Пакет навыка удалён|スキルパッケージを削除しました|스킬 패키지 삭제됨
 知识目录|Knowledge folders|Carpetas de conocimiento|Dossiers de connaissances|Wissensordner|Pastas de conhecimento|Папки знаний|ナレッジフォルダー|지식 폴더
+调整知识目录宽度|Resize knowledge folders|Ajustar ancho de carpetas|Ajuster la largeur des dossiers|Breite der Wissensordner ändern|Ajustar largura das pastas|Изменить ширину папок|ナレッジフォルダーの幅を調整|지식 폴더 너비 조절
+调整文件列表宽度|Resize file list|Ajustar ancho de la lista de archivos|Ajuster la largeur de la liste de fichiers|Breite der Dateiliste ändern|Ajustar largura da lista de arquivos|Изменить ширину списка файлов|ファイル一覧の幅を調整|파일 목록 너비 조절
 知识文件预览|Document preview|Vista previa del documento|Aperçu du document|Dokumentvorschau|Prévia do documento|Просмотр документа|ドキュメントプレビュー|문서 미리보기
 从目录中选择文件，在此预览或编辑。|Select a file to preview or edit it here.|Selecciona un archivo para verlo o editarlo aquí.|Sélectionnez un fichier à afficher ou modifier ici.|Datei zum Anzeigen oder Bearbeiten auswählen.|Selecione um arquivo para visualizar ou editar aqui.|Выберите файл для просмотра или редактирования.|ファイルを選んでプレビューまたは編集できます。|파일을 선택하여 미리 보거나 편집하세요.
 按名称或路径搜索…|Search by name or path…|Buscar por nombre o ruta…|Rechercher par nom ou chemin…|Nach Name oder Pfad suchen…|Buscar por nome ou caminho…|Поиск по имени или пути…|名前やパスで検索…|이름 또는 경로로 검색…
