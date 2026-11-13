@@ -22,7 +22,8 @@ import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom
 import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getRuntimeStatus, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, streamChat, submitGuidance, withdrawIntegration, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { GlobalConfirmDialog } from '../components/GlobalConfirmDialog'
-import { buildCapabilityReferenceItems, capabilityReferenceLine, capabilityReferenceMarker } from '../components/capabilityReferences'
+import { buildCapabilityReferenceItems, capabilityReferencePrompt, capabilityReferenceMarker } from '../components/capabilityReferences'
+import { knowledgeReferencePrompt } from '../components/knowledgeReferences'
 import { CONVERSATION_COMMAND_EVENT, chatRunKey, type ChatItemsUpdater, type ConversationCommandAction, type PendingNextTurnMessage, type ShellOutletContext } from '../components/AppShell'
 import { PlainTextMessage } from '../components/Chat/PlainTextMessage'
 import { CapabilityReferenceDrawer, type CapabilityReferenceItem } from '../components/CapabilityReferenceDrawer'
@@ -1095,7 +1096,8 @@ export function ChatPage() {
   }
   const referenceKnowledge = (document: KnowledgeDocumentSummary) => {
     const referenceId = `${document.scope}:${document.relative_path}`
-    const reference = `[知识库引用 ${referenceId}] ${document.title}`
+    const root = knowledgeQuery.data!.roots.find((entry) => entry.scope === document.scope)!
+    const reference = knowledgeReferencePrompt(document, root.relative_path)
     setDraft((current) => {
       if (current.includes(`[知识库引用 ${referenceId}]`)) return current
       const existing = current.trimEnd()
@@ -1106,16 +1108,20 @@ export function ChatPage() {
   const referenceKnowledgeDirectory = (scope: 'user' | 'shared' | 'global', relativePath: string, name: string) => {
     const referenceId = `${scope}:${relativePath}`
     const marker = `[知识库目录引用 ${referenceId}]`
+    const root = knowledgeQuery.data!.roots.find((entry) => entry.scope === scope)!
+    const reference = knowledgeReferencePrompt(
+      { scope, relative_path: relativePath, title: name }, root.relative_path, true,
+    )
     setDraft((current) => {
       if (current.includes(marker)) return current
       const existing = current.trimEnd()
-      return existing ? `${existing}\n${marker} ${name}` : `${marker} ${name}`
+      return existing ? `${existing}\n${reference}` : reference
     })
     setKnowledgeDrawerOpen(false)
   }
   const referenceCapability = (item: CapabilityReferenceItem) => {
     const marker = capabilityReferenceMarker(item)
-    const reference = capabilityReferenceLine(item)
+    const reference = capabilityReferencePrompt(item)
     setDraft((current) => {
       if (current.includes(marker)) return current
       const existing = current.trimEnd()

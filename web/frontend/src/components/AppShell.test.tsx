@@ -3309,8 +3309,27 @@ describe('AppShell navigation', () => {
     expect(within(drawer).queryByRole('button', { name: '全部' })).not.toBeInTheDocument()
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 个人笔记' }))
 
-    await waitFor(() => expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('[知识库引用 user:notes.md] 个人笔记'))
+    const composer = screen.getByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
+    await waitFor(() => expect(composer.value).toMatch(/^\[知识库引用 user:notes.md\] 个人笔记\n/))
+    expect(composer.value).toContain('"users/kesepain/knowledge/notes.md"')
+    expect(composer.value).toContain('先读取')
+    expect(composer.value).toContain('逐项落实到实际操作与最终结果')
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
+    const prompt = composer.value
+
+    fireEvent.click(screen.getByRole('button', { name: '打开知识库' }))
+    const reopened = await screen.findByRole('dialog', { name: '知识库引用' })
+    fireEvent.click(await within(reopened).findByRole('button', { name: '引用 个人笔记' }))
+    expect(composer).toHaveValue(prompt)
+
+    let submittedPrompt = ''
+    server.use(http.post('/api/chat', async ({ request }) => {
+      submittedPrompt = (await request.json() as { prompt: string }).prompt
+      return new HttpResponse('event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(submittedPrompt).toBe(prompt))
   })
 
   it('聊天知识引用按真实路径搜索并写入原始文件路径标记', async () => {
@@ -3321,11 +3340,11 @@ describe('AppShell navigation', () => {
     ]
     server.use(http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({
       user: 'kesepain', documents, summary: { documents: 3, user_documents: 1, shared_documents: 2, global_documents: 0 },
-      roots: ['user', 'shared', 'global'].map(scope => ({ scope, relative_path: `knowledge/${scope}`,
+      roots: ['user', 'shared', 'global'].map(scope => ({ scope, relative_path: scope === 'shared' ? 'knowledge/share' : `knowledge/${scope}`,
         absolute_path: `/project/knowledge/${scope}`, active_for_main_agent: true })), directories: [],
     })))
     renderApp('/chat?user=kesepain&session=s1')
-    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    const composer = await screen.findByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
     fireEvent.change(composer, { target: { value: '请参考规范' } })
     fireEvent.click(screen.getByRole('button', { name: '打开知识库' }))
     const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
@@ -3337,25 +3356,28 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(tree).getByRole('treeitem', { name: '共享' }))
     expect(await within(tree).findByRole('treeitem', { name: 'team.md' })).toBeInTheDocument()
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 共享规范' }))
-    await waitFor(() => expect(composer).toHaveValue('请参考规范\n[知识库引用 shared:team.md] 共享规范'))
+    await waitFor(() => expect(composer.value).toMatch(/^请参考规范\n\[知识库引用 shared:team.md\] 共享规范\n/))
+    expect(composer.value).toContain('"knowledge/share/team.md"')
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
   })
 
   it('聊天知识引用可将层级根路径追加到草稿', async () => {
     renderApp('/chat?user=kesepain&session=s1')
-    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    const composer = await screen.findByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
     fireEvent.click(screen.getByRole('button', { name: '打开知识库' }))
     const drawer = await screen.findByRole('dialog', { name: '知识库引用' })
     const tree = within(drawer).getByRole('tree', { name: '知识目录' })
     fireEvent.contextMenu(await within(tree).findByRole('treeitem', { name: '共享' }))
     fireEvent.click(screen.getByRole('menuitem', { name: '引用文件夹相对路径' }))
-    await waitFor(() => expect(composer).toHaveValue('[知识库目录引用 shared:.] 共享'))
+    await waitFor(() => expect(composer.value).toMatch(/^\[知识库目录引用 shared:\.\] 共享\n/))
+    expect(composer.value).toContain('file(action="list_dir", path="knowledge/share")')
+    expect(composer.value).toContain('按任务定位相关文档并读取完整正文')
   })
 
   it('输入框能力按钮按类型引用拓展、技能和插件并追加稳定标记', async () => {
     const references = vi.spyOn(globalThis, 'fetch')
     renderApp('/chat?user=kesepain&session=s1')
-    const composer = await screen.findByRole('textbox', { name: '消息内容' })
+    const composer = await screen.findByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
     fireEvent.change(composer, { target: { value: '先检查当前状态' } })
     fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
 
@@ -3365,7 +3387,11 @@ describe('AppShell navigation', () => {
     fireEvent.change(within(drawer).getByRole('textbox', { name: '搜索拓展' }), { target: { value: '客厅' } })
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 智能灯光控制' }))
 
-    await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制'))
+    await waitFor(() => expect(composer.value).toMatch(/^先检查当前状态\n\[拓展引用 global:example\] 智能灯光控制\n/))
+    expect(composer.value).toContain('"expand/global/example/expand_control.md"')
+    expect(composer.value).toContain('expand_call')
+    expect(composer.value).toContain('scope="global"、module="example"')
+    const expandPrompt = composer.value
     expect(screen.queryByRole('dialog', { name: '能力引用' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
@@ -3373,14 +3399,34 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(drawer).getByRole('tab', { name: '技能' }))
     fireEvent.click(within(drawer).getByRole('button', { name: '用户' }))
     fireEvent.click(await within(drawer).findByRole('button', { name: '引用 用户自建技能' }))
-    await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制\n[技能引用 user:user_create/manual] 用户自建技能'))
+    await waitFor(() => expect(composer.value).toContain('\n[技能引用 user:user_create/manual] 用户自建技能\n'))
+    expect(composer.value.startsWith(expandPrompt)).toBe(true)
+    expect(composer.value).toContain('"users/kesepain/user_skills/user_create/manual/SKILL.md"')
 
     fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
     drawer = await screen.findByRole('dialog', { name: '能力引用' })
     fireEvent.click(within(drawer).getByRole('tab', { name: '插件' }))
     expect(within(drawer).getByRole('navigation', { name: '插件层级' })).toHaveTextContent('全局')
     fireEvent.click(await within(drawer).findByRole('button', { name: '引用 clock' }))
-    await waitFor(() => expect(composer).toHaveValue('先检查当前状态\n[拓展引用 global:example] 智能灯光控制\n[技能引用 user:user_create/manual] 用户自建技能\n[插件引用 global:clock] clock'))
+    await waitFor(() => expect(composer.value).toContain('\n[插件引用 global:clock] clock\n'))
+    expect(composer.value).toContain('"plugins/clock/SKILL.md"')
+    expect(composer.value).toContain('名为 "clock" 的插件')
+    const prompt = composer.value
+
+    fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
+    drawer = await screen.findByRole('dialog', { name: '能力引用' })
+    fireEvent.click(await within(drawer).findByRole('button', { name: '全局' }))
+    fireEvent.click(await within(drawer).findByRole('button', { name: '引用 智能灯光控制' }))
+    expect(composer).toHaveValue(prompt)
+
+    let submittedPrompt = ''
+    server.use(http.post('/api/chat', async ({ request }) => {
+      submittedPrompt = (await request.json() as { prompt: string }).prompt
+      return new HttpResponse('event: done\ndata: {"type":"done","metadata":{"committed":true,"status":"completed"}}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(submittedPrompt).toBe(prompt))
     const expandRequests = references.mock.calls
       .map(([input]) => new URL(input instanceof Request ? input.url : String(input), window.location.origin))
       .filter(url => url.pathname === '/api/users/kesepain/expand')

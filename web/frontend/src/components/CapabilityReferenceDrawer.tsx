@@ -26,6 +26,7 @@ export interface CapabilityReferenceItem {
   title: string
   description: string
   path: string
+  instructionsPath?: string
   status: string
 }
 
