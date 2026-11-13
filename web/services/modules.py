@@ -454,6 +454,7 @@ class MessageExpandServiceMixin:
                         "start_update": health.get("start_update") or "",
                         "start_expand": health.get("start_expand") or "",
                         "start_control": health.get("start_control") or "",
+                        "control_file": health.get("control_file") or "",
                         "control_document": control_document,
                         "control_injection_markdown": control_injection,
                         "control_operation_markdown": control_operation,

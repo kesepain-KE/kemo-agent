@@ -44,6 +44,7 @@ export interface ExpandModuleSummary {
   start_update: string
   start_expand: string
   start_control: string
+  control_file: string
   control_document: string
   control_injection_markdown: string
   control_operation_markdown: string

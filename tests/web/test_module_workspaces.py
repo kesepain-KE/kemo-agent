@@ -237,7 +237,11 @@ def test_instance_requests_validate_only_the_target_ui(
 def test_http_reference_inventory_skips_internal_files(
     service: ModuleWorkspaceService, monkeypatch: pytest.MonkeyPatch,
 ):
-    make_module(service.root)
+    target = make_module(service.root)
+    (target / "operations.md").write_text("## 操作层\n按实际命令执行", "utf-8")
+    manifest = yaml.safe_load((target / "module.yaml").read_text("utf-8"))
+    manifest["control_entry"] = "operations.md"
+    (target / "module.yaml").write_text(yaml.safe_dump(manifest, allow_unicode=True), "utf-8")
     app = create_app(root=service.root, service=service.backend)
 
     async def run():
@@ -255,6 +259,7 @@ def test_http_reference_inventory_skips_internal_files(
             assert response.status_code == 200
             item = response.json()["expands"][0]["items"][0]
             assert item["files"] == []
+            assert item["control_file"] == "expand/global/demo/operations.md"
             for key in ("name", "display_name", "description", "valid", "whitelisted", "injected_markdown"):
                 assert item[key] == complete_item[key]
 

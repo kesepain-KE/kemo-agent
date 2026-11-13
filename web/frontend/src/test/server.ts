@@ -484,6 +484,7 @@ export const handlers = [
         type: 'directory', root: 'expand/global', path: 'expand/global/example', relative_path: 'example', has_register: true,
         valid: true, error: '', whitelisted: true, active_for_main_agent: true, input_health: '正常', open_input: true, open_control: true,
         input_data: 'input_data.md', start_update: 'data_update.py', start_expand: 'start_expand.py', start_control: 'expand_control.md',
+        control_file: 'expand/global/example/expand_control.md',
         control_document: '## 注入层\n灯光控制可用\n\n## 操作层\n用户要求开灯时调用 start_expand.py',
         control_injection_markdown: '灯光控制可用', control_operation_markdown: '用户要求开灯时调用 start_expand.py',
         collected_markdown: '# 灯光状态\n客厅已开启', injected_markdown: '[global:example]\n## 数据采集\n# 灯光状态\n客厅已开启', injected_tokens: 18,
