@@ -87,8 +87,10 @@ def protocol_items(cards: tuple[Card, ...], *, model: str = "") -> list[Item]:
         elif card.view_kind == "tool_result":
             identity = _call_id(card)
             execution = payload.get("execution", {})
+            original = payload.get("original_call") or {}
+            # arguments_raw/parse_error are diagnostics, not semantic call fields.
             if (identity in calls and identity not in completed
-                    and calls[identity] == payload.get("original_call")
+                    and calls[identity] == {key: original.get(key) for key in ("name", "arguments")}
                     and not execution.get("execution_live")):
                 output.append(ToolResultItem(
                     id=_item_id(card, "result"), call_id=identity, name=calls[identity]["name"],

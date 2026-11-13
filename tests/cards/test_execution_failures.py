@@ -9,7 +9,7 @@ import pytest
 from provider.adapters.compat import kemo_request_to_chat
 from provider.factory import provider_semaphore_status
 from provider.protocol.enums import ResponseStatus
-from provider.protocol.models import KemoRequest, KemoResponse, MessageItem, ToolCallItem
+from provider.protocol.models import JsonContent, KemoRequest, KemoResponse, MessageItem, ToolCallItem, ToolResultItem
 from provider.request_pool import FairRequestPool
 from provider.retry import RetryManager
 from run.cards import (
@@ -17,6 +17,7 @@ from run.cards import (
 )
 from run.context import CompressionBudgetExhausted
 from run.extensions import context_input_budget
+from run.tools import ToolRuntime
 from tests.cards.test_store import add, store, summary
 
 
@@ -138,6 +139,31 @@ def test_pending_native_tool_only_degrades_inside_the_chat_adapter(store):
     assert '"full": "arguments"' in chat.messages[0]["content"]
     assert "tool_result" in chat.messages[-1]["content"]
     assert isinstance(request.input[0], ToolCallItem), "adapter must not mutate native history"
+
+
+def test_blocked_tool_receipt_keeps_native_linkage_and_raw_argument_diagnostics(store):
+    integration = IntegrationStore(store, "web", "s1", "i")
+    integration.start()
+    call = ToolCallItem(
+        id="call_a", call_id="callid_a", name="shell",
+        arguments={"command": "echo ok"}, arguments_raw='{"command": "echo ok"}',
+    )
+    ToolRuntime(integration).record(
+        call, {"ok": False, "execution": {"executed": False},
+               "error": {"code": "duplicate_blocked"}},
+        status="duplicate_blocked",
+    )
+    cards = store.snapshot("web", "s1").cards
+    items = protocol_items(cards)
+    assert len(items) == 2
+    assert isinstance(items[0], ToolCallItem)
+    assert isinstance(items[1], ToolResultItem)
+    assert items[0].call_id == items[1].call_id
+    assert items[1].is_error is True
+    assert cards[1].raw_payload["original_call"]["arguments_raw"] == call.arguments_raw
+    assert isinstance(items[1].content[0], JsonContent)
+    assert items[1].content[0].data == cards[1].raw_payload
+    assert protocol_items(store.snapshot("web", "s1").cards) == items
 
 
 @pytest.mark.parametrize("response_closed", [False, True])
