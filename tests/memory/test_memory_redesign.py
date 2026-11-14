@@ -477,7 +477,8 @@ def test_generated_same_content_reuses_and_collision_suffix_preserves_existing(s
         "utf-8").startswith("# Existing")
 
 
-def test_source_edit_and_delete_stale_skill_but_normal_promotion_does_not(store):
+def test_source_edit_and_delete_stale_skill_but_normal_promotion_does_not(store, monkeypatch):
+    monkeypatch.setattr("run.memory.utc_now", lambda: NOW)
     seed(store)
     created = generated_skill(store)
     assert created["provenance"]["sources"][0]["filename"] == "deploy.md"
