@@ -1,5 +1,5 @@
 import { Fragment, Suspense, lazy, type MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
   ChevronDown,
@@ -19,7 +19,7 @@ import {
   X,
 } from 'lucide-react'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getHistory, getKnowledge, getRuntimeStatus, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, streamChat, submitGuidance, withdrawIntegration, uploadUserFile } from '../api/client'
+import { ApiError, cancelRun, closeSession, commandPlan, compressSession, deleteSession, getExpands, getKnowledge, getRuntimeStatus, getSkills, getTasks, getUserArtifactUrl, getUserAttachmentThumbnailUrl, getUserFileDownloadUrl, getUserFilePreviewUrl, retryPlanStep, streamChat, submitGuidance, withdrawIntegration, uploadUserFile } from '../api/client'
 import { AgentComposer } from '../components/AgentComposer'
 import { GlobalConfirmDialog } from '../components/GlobalConfirmDialog'
 import { buildCapabilityReferenceItems, capabilityReferencePrompt, capabilityReferenceMarker } from '../components/capabilityReferences'
@@ -33,7 +33,7 @@ import type { ScheduledTaskItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
-import type { ChatItem, CronTaskSummary, HistoryResponse, InputAttachment, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
+import type { ChatItem, CronTaskSummary, InputAttachment, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { randomUUID } from '../randomId'
@@ -42,6 +42,7 @@ import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploaded
 import { useCompressionStatus } from '../store/compressionStatus'
 import { useScratchSender } from '../store/scratchNotes'
 import { shouldPrefetchEarlierHistory } from './chatHistory'
+import { useChatHistory } from './useChatHistory'
 import {
   archiveTerminalPlansInConversation,
   buildHistoryItems,
@@ -91,7 +92,6 @@ import {
   createSessionId,
   EMPTY_CHAT_ITEMS,
   eventId,
-  HISTORY_PAGE_SIZE,
   isFailedRunCompletion,
   isSuccessfulRunCompletion,
   pendingInputAttachment,
@@ -247,20 +247,9 @@ export function ChatPage() {
     return sessionReady || sessionId === locallyCommittedSessionRef.current
       || sessions.some((session) => session.session_id === sessionId)
   }, [sessionId, sessionReady, sessions])
-  const historyQuery = useInfiniteQuery({
-    queryKey: ['history', user, sessionId],
-    queryFn: ({ pageParam, signal }) => getHistory(user, sessionId, {
-      limit: pageParam !== undefined && navigationTargetRef.current?.scope === `${user}\u0000${sessionId}`
-        ? 100 : HISTORY_PAGE_SIZE,
-      before: pageParam,
-    }, signal),
-    initialPageParam: undefined as number | undefined,
-    getNextPageParam: (lastPage) => lastPage.pagination?.has_more_before
-      ? lastPage.pagination.next_before ?? undefined
-      : undefined,
-    enabled: Boolean(user && sessionId && (hasCommitted || sessionReady)),
-    retry: false,
-  })
+  const historyQuery = useChatHistory(
+    user, sessionId, Boolean(user && sessionId && (hasCommitted || sessionReady)),
+  )
   const tasksQuery = useQuery({
     queryKey: ['tasks', user, sessionId],
     queryFn: ({ signal }) => getTasks(user, sessionId, signal),
@@ -1034,7 +1023,9 @@ export function ChatPage() {
     const nearLoadedHistoryEdge = shouldPrefetchEarlierHistory(
       activeRound, firstLoadedRound, Boolean(historyQuery.hasNextPage), 2,
     )
-    if ((movingUp && element.scrollTop <= 120) || nearLoadedHistoryEdge) {
+    if (movingUp && (
+      element.scrollTop <= Math.max(480, element.clientHeight * 1.5) || nearLoadedHistoryEdge
+    )) {
       followOutputRef.current = false
       setShowFollowOutput(true)
       void loadEarlierHistory()
@@ -1099,7 +1090,7 @@ export function ChatPage() {
     const root = knowledgeQuery.data!.roots.find((entry) => entry.scope === document.scope)!
     const reference = knowledgeReferencePrompt(document, root.relative_path)
     setDraft((current) => {
-      if (current.includes(`[知识库引用 ${referenceId}]`)) return current
+      if (current.includes(reference) || current.includes(`[知识库引用 ${referenceId}]`)) return current
       const existing = current.trimEnd()
       return existing ? `${existing}\n${reference}` : reference
     })
@@ -1113,7 +1104,7 @@ export function ChatPage() {
       { scope, relative_path: relativePath, title: name }, root.relative_path, true,
     )
     setDraft((current) => {
-      if (current.includes(marker)) return current
+      if (current.includes(reference) || current.includes(marker)) return current
       const existing = current.trimEnd()
       return existing ? `${existing}\n${reference}` : reference
     })
@@ -1123,7 +1114,7 @@ export function ChatPage() {
     const marker = capabilityReferenceMarker(item)
     const reference = capabilityReferencePrompt(item)
     setDraft((current) => {
-      if (current.includes(marker)) return current
+      if (current.includes(reference) || current.includes(marker)) return current
       const existing = current.trimEnd()
       return existing ? `${existing}\n${reference}` : reference
     })
