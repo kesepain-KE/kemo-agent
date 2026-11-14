@@ -2682,6 +2682,45 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(wakes, [True])
         extract.assert_not_called()
 
+    def test_session_manual_compression_excludes_recovered_orphans_but_blocks_live_work(self):
+        _, root = self.make_root()
+        history = card_seed(root, texts=("用户原文" * 2000, "回复原文" * 2000))
+        lost = IntegrationStore(history.store, "web", "s1", "lost")
+        lost.start()
+        execution, _ = lost.register_tool("call-old", {"name": "shell", "arguments": {}})
+        service = WebRunService(root, context_compressor=card_compressor)
+        app = create_app(service=service)
+        endpoint = "/api/users/alice/sessions/s1/compress"
+
+        self.assertEqual(self.request(app, "POST", endpoint).status_code, 409)
+        lost.finish("cancelled")
+        self.assertEqual(self.request(app, "POST", endpoint).status_code, 409)
+        with history.store.db(write=True) as db:
+            db.execute("UPDATE card_integrations SET owner_pid=987654321,owner_token='other' "
+                       "WHERE integration_id='lost'")
+        following = IntegrationStore(history.store, "web", "s1", "following")
+        with patch("run.infra.process_identity_matches", return_value=False):
+            self.assertEqual(following.recover_interrupted(), ["lost"])
+        record = find_record(root, "alice", "web", "s1")
+        assert record is not None
+        self.assertEqual(record["run_state"], "idle")
+
+        following.start()
+        self.assertEqual(self.request(app, "POST", endpoint).status_code, 409)
+        following.finish("cancelled")
+        before = [card.raw_payload_json for card in history.cards]
+        response = self.request(app, "POST", endpoint)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["compressed"])
+        self.assertTrue(response.json()["compression_verified"])
+        self.assertEqual([card.raw_payload_json for card in history.cards], before)
+        with history.store.db() as db:
+            tool = db.execute("SELECT * FROM card_tool_executions WHERE execution_id=?",
+                              (execution["execution_id"],)).fetchone()
+        self.assertEqual(tool["status"], "interrupted_unknown")
+        self.assertTrue(tool["execution_live"])
+        self.assertIsNone(tool["finished_at"])
+
     def test_session_manual_compression_reports_queue_failure_after_view_commit(self):
         _, root = self.make_root()
         history = card_seed(root, texts=("用户事实" * 2000, "回答" * 2000))
