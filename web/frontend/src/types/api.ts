@@ -657,6 +657,11 @@ export interface KemoModelCapabilities {
     multimodal_results: boolean
   }
   structured_output: boolean
+  limits?: {
+    context_window?: number
+    max_input_tokens?: number
+    max_output_tokens?: number
+  }
   metadata: Record<string, unknown>
   extensions: {
     reasoning_effort_map?: Partial<Record<ReasoningEffort, string>>
@@ -900,6 +905,14 @@ export interface OverviewResponse {
       context_tokens: number
       total_tokens: number
       capacity_tokens: number
+      input_limit_source?: 'max_input_tokens' | 'context_window' | 'configuration'
+      input_limit_tokens?: number
+      compression_threshold?: number
+      context_window_tokens?: number
+      context_window_source?: 'model' | 'configuration'
+      output_reserve_tokens?: number
+      compression_ratio?: number
+      compression_target_tokens?: number
       percent: number
       source: string
       measurement: string
@@ -948,6 +961,14 @@ export interface OverviewResponse {
     other_tokens: number
     total_tokens: number
     capacity_tokens: number
+    input_limit_source?: 'max_input_tokens' | 'context_window' | 'configuration'
+    input_limit_tokens?: number
+    compression_threshold?: number
+    context_window_tokens?: number
+    context_window_source?: 'model' | 'configuration'
+    output_reserve_tokens?: number
+    compression_ratio?: number
+    compression_target_tokens?: number
     percent: number
     cards_active: number
     last_seq?: number

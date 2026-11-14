@@ -70,13 +70,13 @@ export function ReasoningEffortSelect({
       const rect = rootRef.current?.querySelector('button')?.getBoundingClientRect()
       if (!rect) return
       if (variant === 'compact') {
-        // 顶栏模型卡自身可滚动，选项独立浮在 body 上；两边各内缩 4px。
-        const width = Math.min(Math.max(1, rect.width - 8), window.innerWidth - 24)
+        // 顶栏选项独立浮在 body 上，至少 280px 宽，右对齐按钮并保留视口边距。
+        const width = Math.min(Math.max(280, rect.width), window.innerWidth - 24)
         const below = Math.max(0, window.innerHeight - rect.bottom - 20)
         const above = Math.max(0, rect.top - 20)
         const upward = below < 180 && above > below
         setPosition({
-          left: Math.max(12, Math.min(rect.left + 4, window.innerWidth - width - 12)),
+          left: Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12)),
           top: upward ? undefined : rect.bottom + 8,
           bottom: upward ? window.innerHeight - rect.top + 8 : undefined,
           width,

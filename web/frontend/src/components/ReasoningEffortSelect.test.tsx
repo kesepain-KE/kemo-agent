@@ -60,17 +60,17 @@ describe('顶部模型思考强度弹层', () => {
     </div>)
     const trigger = screen.getByRole('combobox')
     vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
-      width: 250, left: 50, right: 300, top, bottom: top + 32, height: 32,
+      width: 80, left: 220, right: 300, top, bottom: top + 32, height: 32,
     } as DOMRect)
     fireEvent.click(trigger)
     return { ...rendered, trigger, onChange, popup: screen.getByRole('listbox') }
   }
 
-  it('移出模型卡的滚动裁切区，两侧各缩4px，选择原样保存并恢复焦点', () => {
+  it('窄按钮展开至少280px宽的右对齐面板，选择原样保存并恢复焦点', () => {
     const { trigger, popup, onChange } = openCompact()
     expect(popup.parentElement).toBe(document.body)
     expect(popup).toHaveClass('model-reasoning-popover')
-    expect(popup).toHaveStyle({ left: '54px', width: '242px', top: '240px', maxHeight: '348px' })
+    expect(popup).toHaveStyle({ left: '20px', width: '280px', top: '240px', maxHeight: '348px' })
     fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     expect(onChange).toHaveBeenCalledWith('high')
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
@@ -85,8 +85,11 @@ describe('顶部模型思考强度弹层', () => {
       width: 200, left: 30, right: 230, top: 100, bottom: 132, height: 32,
     } as DOMRect)
     act(() => window.dispatchEvent(new Event('scroll')))
-    expect(popup).toHaveStyle({ left: '34px', width: '192px', top: '140px' })
+    expect(popup).toHaveStyle({ left: '12px', width: '280px', top: '140px' })
     expect(popup.style.bottom).toBe('')
+    vi.stubGlobal('innerWidth', 240)
+    act(() => window.dispatchEvent(new Event('resize')))
+    expect(popup).toHaveStyle({ left: '12px', width: '216px' })
     unmount()
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })

@@ -69,6 +69,7 @@ import { ReasoningEffortSelect } from './ReasoningEffortSelect'
 import { UserProfileCard } from './UserProfileCard'
 import { KemoLogo } from './KemoLogo'
 import lifecycleStyles from './SessionLifecycle.module.css'
+import modelStyles from './ModelRuntimePopover.module.css'
 import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionSummary } from '../types/api'
 import { useUiStore } from '../store/ui'
 import { chatDraftKey, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
@@ -184,6 +185,24 @@ export function AppShell() {
     staleTime: 300_000,
     retry: false,
   })
+  useEffect(() => {
+    // The status page reuses the gateway capability cache, so a read that
+    // declares limits makes the already-fetched overview stale. Refresh only
+    // the bound conversation, only while its snapshot still lacks a declared
+    // source, and never during a save/close handover whose old binding is
+    // already gone.
+    if (!sessionId || sessionTransitioning) return
+    const declared = providerCapabilitiesQuery.data
+    if (!declared || declared.model !== overviewProvider?.model) return
+    const limits = declared.capabilities?.limits
+    const declaresLimits = Boolean(limits)
+      && (typeof limits?.max_input_tokens === 'number' || typeof limits?.context_window === 'number')
+    if (!declaresLimits) return
+    const snapshot = overviewQuery.data?.context_snapshot
+    if (!snapshot?.available || snapshot.input_limit_source) return
+    void queryClient.invalidateQueries({ queryKey: ['overview', user, sessionId] })
+  }, [queryClient, user, sessionId, sessionTransitioning, overviewProvider?.model,
+    providerCapabilitiesQuery.data, overviewQuery.data?.context_snapshot])
   const preferencesQuery = useQuery({
     queryKey: ['preferences', user],
     queryFn: () => getPreferences(user),
@@ -710,6 +729,19 @@ export function AppShell() {
   const contextTotal = Number(contextTokens?.total_tokens ?? 0)
   const contextLimit = Number(contextTokens?.capacity_tokens ?? 0)
   const contextPercent = Number(contextTokens?.percent ?? 0)
+  const runtimeInputLimit = contextAvailable ? contextTokens?.input_limit_tokens : undefined
+  const runtimeThreshold = contextAvailable ? contextTokens?.compression_threshold : undefined
+  const runtimeInputPercent = runtimeInputLimit ? contextTotal * 100 / runtimeInputLimit : 0
+  const runtimeTriggerPercent = runtimeInputLimit && runtimeThreshold !== undefined
+    ? runtimeThreshold * 100 / runtimeInputLimit : undefined
+  const runtimeCompressionPercent = !contextAvailable || contextTokens?.compression_ratio === undefined
+    ? undefined : contextTokens.compression_ratio * 100
+  const runtimeLimitSource = !contextAvailable ? '暂不可用' : contextTokens?.input_limit_source === 'max_input_tokens'
+    ? '模型最大输入' : contextTokens?.input_limit_source === 'context_window'
+      ? '模型上下文窗口' : contextTokens?.input_limit_source === 'configuration' ? '配置兜底' : '暂不可用'
+  const formatRuntimeTokens = (value: number | undefined) => (
+    contextAvailable && value !== undefined ? value.toLocaleString(ui.language) : '—'
+  )
   const cacheHitRateValue = overview?.context.usage.cache_hit_rate
   const cacheHitRate = typeof cacheHitRateValue === 'number'
     && Number.isFinite(cacheHitRateValue)
@@ -830,22 +862,56 @@ export function AppShell() {
               <span className="faint">{contextAvailable && contextLimit ? `${formatTokens(contextTotal)} / ${formatTokens(contextLimit)}` : tr('暂不可用')}</span>
             </button>
             <div className="reference-menu-anchor" ref={modelMenuRef}>
-              <button className="status-pill" onClick={() => setModelMenuOpen(value => !value)} aria-expanded={modelMenuOpen} title="模型与思考档位">
+              <button className={`status-pill ${modelStyles.trigger}`} onClick={() => setModelMenuOpen(value => !value)}
+                aria-expanded={modelMenuOpen} aria-haspopup="dialog" aria-controls={modelMenuOpen ? 'model-runtime-popover' : undefined} title="模型与思考档位">
                 <span className={`dot ${provider?.configured ? 'dot-success' : 'dot-warning'}`} /><span className="mono">{provider?.model || '未配置模型'}</span>
               </button>
-              {modelMenuOpen && <div className="menu reference-top-menu reference-model-menu" role="menu">
-                <div className="menu-label">当前模型路由</div><div className="reference-menu-copy reference-model-route"><strong>{provider?.model || '未读取模型'}</strong><small>{provider?.base_url || '未配置兼容端点'}</small></div>
-                <div className="reference-menu-copy"><span>思考强度 · {displayedReasoningLabel}</span>
+              {modelMenuOpen && <div className={modelStyles.popover} role="dialog" aria-labelledby="model-runtime-title" id="model-runtime-popover">
+                <div className={modelStyles.header}>
+                  <span id="model-runtime-title"><Bot size={16} />模型与上下文</span>
+                  <button className="icon-btn" aria-label="关闭模型与上下文" onClick={() => setModelMenuOpen(false)}><X size={15} /></button>
+                </div>
+                <div className={modelStyles.route}>
+                  <div className={modelStyles.routeLabel}><span>当前模型</span><span className={modelStyles.protocol}>{provider?.type || '未配置'}</span></div>
+                  <strong>{provider?.model || '未读取模型'}</strong>
+                  <small title={provider?.base_url}>{provider?.base_url || '未配置兼容端点'}</small>
+                </div>
+                <div className={modelStyles.reasoning}>
+                  <span><BrainCircuit size={15} />思考强度</span>
                   {provider?.type === 'chat' || (provider?.type === 'kemo' && kemoReasoningAvailable)
                     ? <ReasoningEffortSelect ariaLabel="顶部模型思考强度" variant="compact" value={displayedReasoningEffort}
                         options={provider?.type === 'kemo' ? kemoReasoningOptions : undefined} disabled={providerConfigSaving}
                         onChange={reasoningEffort => reasoningEffortMutation.mutate({ targetUser: user, reasoningEffort })} />
                     : <small>{providerCapabilitiesQuery.isPending ? tr('读取能力中…') : tr('模型未声明推理档位')}</small>}
                 </div>
-                {reasoningCapabilityNotice && <div className="reference-menu-copy">{reasoningCapabilityNotice}</div>}
+                {reasoningCapabilityNotice && <p className={modelStyles.notice}>{reasoningCapabilityNotice}</p>}
                 {providerCapabilitiesQuery.isError && <div className="banner banner-warning">{tr("模型能力读取失败")}</div>}
                 {reasoningEffortMutation.isError && <div className="banner banner-danger" role="alert">{tr("思考强度保存失败，请重试。")}</div>}
-                <button className="menu-item" onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}>编辑 Provider 配置</button>
+                <section className={modelStyles.context} aria-label="当前上下文参数">
+                  <div className={modelStyles.sectionHeading}><span><CircleGauge size={15} />上下文运行参数</span><small>Token · 本地估算</small></div>
+                  <dl className={modelStyles.metrics}>
+                    <div className={modelStyles.metric}><dt>上下文窗口</dt><dd>{formatRuntimeTokens(contextTokens?.capacity_tokens)}</dd><small>全局配置窗口</small></div>
+                    <div className={modelStyles.metric}><dt>有效输入上限</dt><dd>{formatRuntimeTokens(runtimeInputLimit)}</dd><small>{runtimeLimitSource}</small></div>
+                    <div className={`${modelStyles.metric} ${modelStyles.threshold}`}><dt>自动压缩阈值</dt><dd>{formatRuntimeTokens(runtimeThreshold)}</dd><small>{runtimeTriggerPercent === undefined ? '暂不可用' : `输入容量的 ${Number(runtimeTriggerPercent.toFixed(2))}%`}</small></div>
+                    <div className={modelStyles.metric}><dt>历史压缩目标</dt><dd>{formatRuntimeTokens(contextTokens?.compression_target_tokens)}</dd><small>{runtimeCompressionPercent === undefined ? '暂不可用' : `历史保留比例 ${Number(runtimeCompressionPercent.toFixed(2))}%`}</small></div>
+                  </dl>
+                  {contextAvailable && runtimeInputLimit ? <div className={modelStyles.usage}>
+                    <div className={modelStyles.usageLabel}><span>当前输入占用</span><strong>{formatRuntimeTokens(contextTotal)} <span>/ {formatRuntimeTokens(runtimeInputLimit)}</span></strong></div>
+                    <div className={modelStyles.track} role="progressbar" aria-label="有效输入容量占用" aria-valuemin={0} aria-valuemax={100}
+                      aria-valuenow={Math.min(100, Math.round(runtimeInputPercent))} aria-valuetext={`${formatRuntimeTokens(contextTotal)} / ${formatRuntimeTokens(runtimeInputLimit)} Token`}
+                      data-warning={runtimeTriggerPercent !== undefined && runtimeInputPercent >= runtimeTriggerPercent || undefined}>
+                      <span style={{ width: `${Math.min(100, runtimeInputPercent)}%` }} />
+                      {runtimeTriggerPercent !== undefined && <i style={{ left: `${Math.min(100, runtimeTriggerPercent)}%` }} aria-hidden="true" />}
+                    </div>
+                    <div className={modelStyles.usageHint}><span>{runtimeInputPercent.toFixed(1)}% · 按有效输入计算</span><span>{runtimeThreshold === undefined ? '—' : contextTotal >= runtimeThreshold ? '已到压缩阈值' : `距阈值 ${formatRuntimeTokens(runtimeThreshold - contextTotal)}`}</span></div>
+                  </div> : <p className={modelStyles.notice}>上下文参数暂不可用</p>}
+                  <dl className={modelStyles.details}>
+                    <div><dt>模型声明窗口</dt><dd>{contextAvailable && contextTokens?.context_window_source === 'model' ? formatRuntimeTokens(contextTokens.context_window_tokens) : '未声明'}</dd></div>
+                    <div><dt>输出预留</dt><dd>{formatRuntimeTokens(contextTokens?.output_reserve_tokens)}</dd></div>
+                  </dl>
+                  <p className={modelStyles.note}>仅压缩历史，固定提示词、工具定义和动态状态另计。目标随当前历史变化，实际摘要可能略高于目标。</p>
+                </section>
+                <div className={modelStyles.footer}><button onClick={() => { setModelMenuOpen(false); navigate(settingsPath('provider')) }}><Settings size={14} />编辑 Provider 配置</button></div>
               </div>}
             </div>
             <div className="reference-top-divider" />
@@ -899,7 +965,9 @@ export function AppShell() {
               <div className="context-metric"><span>{tr("工具定义")}</span><strong>{contextAvailable ? formatTokens(contextTokens?.tool_schema_tokens ?? 0) : '—'}</strong><small>Token</small></div>
               <div className="context-metric"><span>对话与摘要</span><strong>{contextAvailable ? formatTokens(Number(contextTokens?.conversation_tokens ?? contextWindow?.tokens.context_tokens ?? 0) + Number(contextTokens?.summary_tokens ?? 0)) : '—'}</strong><small>Token</small></div>
               <div className="context-metric emphasized"><span>当前总占用</span><strong>{contextAvailable ? formatTokens(contextTokens?.total_tokens ?? 0) : '—'}</strong><small>Token</small></div>
-              <div className="context-metric"><span>容量上限</span><strong>{contextLimit ? formatTokens(contextTokens?.capacity_tokens ?? 0) : '—'}</strong><small>Token</small></div>
+              <div className="context-metric"><span>容量上限</span><strong>{contextLimit ? formatTokens(contextLimit) : '—'}</strong><small>配置窗口 · Token</small></div>
+              <div className="context-metric"><span>有效输入上限</span><strong>{contextTokens?.input_limit_tokens ? formatTokens(contextTokens.input_limit_tokens) : '—'}</strong><small>{contextTokens?.input_limit_source === 'max_input_tokens' ? '模型输入上限 · Token' : contextTokens?.input_limit_source === 'context_window' ? '模型窗口 · Token' : '配置兜底 · Token'}</small></div>
+              <div className="context-metric"><span>自动压缩阈值</span><strong>{contextTokens?.compression_threshold ? formatTokens(contextTokens.compression_threshold) : '—'}</strong><small>Token</small></div>
               <div className="context-metric"><span>{tr('Token 总命中率')}</span><strong>{sessionId && overview?.session_id === sessionId ? cacheHitRate : '—'}</strong><small>{tr('当前对话空间累计')}</small></div>
             </div>
             <div className="context-capacity"><div><span>上下文容量</span><strong>{contextAvailable ? `${Number(contextTokens?.percent ?? 0).toFixed(2)}%` : '—'}</strong></div><span className="context-capacity-track"><i style={{ width: `${contextAvailable ? contextTokens?.percent ?? 0 : 0}%` }} /></span></div>

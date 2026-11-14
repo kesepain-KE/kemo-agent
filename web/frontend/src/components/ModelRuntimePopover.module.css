@@ -1,0 +1,269 @@
+.trigger {
+  border-radius: var(--r-sm);
+}
+
+.popover {
+  position: absolute;
+  z-index: 55;
+  top: calc(100% + 10px);
+  right: 0;
+  width: min(410px, calc(100vw - 24px));
+  max-height: calc(100dvh - var(--header-h) - 24px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--t-sm);
+  line-height: var(--lh-base);
+  text-align: left;
+}
+
+.header,
+.header > span,
+.routeLabel,
+.reasoning,
+.reasoning > span,
+.sectionHeading,
+.sectionHeading > span,
+.usageLabel,
+.usageHint,
+.details > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.header {
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.header > span,
+.reasoning > span,
+.sectionHeading > span {
+  justify-content: flex-start;
+}
+
+.header > button {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-xs);
+}
+
+.route {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-inset);
+}
+
+.routeLabel,
+.route > small,
+.sectionHeading > small,
+.metric > dt,
+.metric > small,
+.usageHint,
+.details,
+.note,
+.notice {
+  color: var(--text-tertiary);
+  font-size: var(--t-xs);
+}
+
+.protocol {
+  padding: 1px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  background: var(--bg-surface);
+  text-transform: uppercase;
+  font-size: var(--t-2xs);
+  letter-spacing: .04em;
+}
+
+.route > strong {
+  font-weight: 600;
+  line-height: var(--lh-base);
+  overflow-wrap: anywhere;
+}
+
+.route > small {
+  overflow-wrap: anywhere;
+}
+
+.reasoning {
+  margin-top: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.reasoning > :last-child {
+  max-width: 60%;
+}
+
+.notice {
+  margin: 8px 0;
+}
+
+.context {
+  margin-top: 14px;
+}
+
+.sectionHeading {
+  margin-bottom: 10px;
+  font-weight: 550;
+}
+
+.sectionHeading > small {
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.metric {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-inset);
+}
+
+.metric > dd {
+  margin: 3px 0;
+  font-size: var(--t-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em;
+  overflow-wrap: anywhere;
+}
+
+.metric > small {
+  display: block;
+}
+
+.threshold {
+  border-color: var(--accent-soft-strong);
+  background: var(--accent-soft);
+}
+
+.threshold > dd {
+  color: var(--accent-text);
+}
+
+.usage {
+  margin-top: 14px;
+}
+
+.usageLabel {
+  color: var(--text-secondary);
+  font-size: var(--t-xs);
+}
+
+.usageLabel > strong {
+  color: var(--text-primary);
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.usageLabel > strong > span {
+  color: var(--text-tertiary);
+  font-weight: 400;
+}
+
+.track {
+  position: relative;
+  height: 5px;
+  margin: 9px 0 7px;
+  border-radius: var(--r-full);
+  background: var(--bg-sunken);
+}
+
+.track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.track[data-warning] > span {
+  background: var(--warning);
+}
+
+.track > i {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 9px;
+  background: var(--text-tertiary);
+}
+
+.usageHint {
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  font-size: var(--t-2xs);
+}
+
+.details {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.details dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.note {
+  margin: 9px 0 0;
+  line-height: 1.6;
+}
+
+.footer {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.footer > button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  font-size: var(--t-xs);
+}
+
+.footer > button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+@media (max-width: 760px) {
+  .popover {
+    position: fixed;
+    top: calc(var(--header-h) + 8px);
+    left: 12px;
+    right: 12px;
+    width: auto;
+    padding: 12px;
+  }
+}

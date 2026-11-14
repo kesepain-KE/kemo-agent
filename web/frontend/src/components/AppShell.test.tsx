@@ -11,7 +11,7 @@ import { server } from '../test/server'
 import { chatDraftKey, useChatDraftStore } from '../store/chatDrafts'
 import { useCompressionStatus } from '../store/compressionStatus'
 import { useScratchSender } from '../store/scratchNotes'
-import type { SessionSummary } from '../types/api'
+import type { OverviewResponse, SessionSummary } from '../types/api'
 import { forgetSession, rememberSession } from '../sessionNavigation'
 import type { ShellOutletContext } from './appShellTypes'
 
@@ -739,12 +739,12 @@ describe('AppShell navigation', () => {
     expect(screen.getByText('输出 Token')).toBeInTheDocument()
   })
 
-  it('对话历史按 RAW seq 分页并在预览更早轮次时自动预取', async () => {
+  it('首屏后预取更早RAW到内存，向上滚动直接复用且保留首屏小页', async () => {
     const requestedBefore: Array<string | null> = []
     server.use(http.get('/api/users/kesepain/sessions/s1/history', ({ request }) => {
       const url = new URL(request.url)
       requestedBefore.push(url.searchParams.get('before'))
-      expect(url.searchParams.get('limit')).toBe('20')
+      expect(url.searchParams.get('limit')).toBe(url.searchParams.has('before') ? '100' : '20')
       if (url.searchParams.get('before') === '41') {
         return HttpResponse.json(cardHistory({
           user: 'kesepain', source: 'web', session_id: 's1',
@@ -766,21 +766,29 @@ describe('AppShell navigation', () => {
         pagination: { limit: 20, first_seq: 41, last_seq: 42, integration_count: 21, first_integration_number: 21, last_integration_number: 21, has_more_before: true, next_before: 41 },
       }))
     }))
-    renderApp('/chat?user=kesepain&session=s1')
+    const app = renderApp('/chat?user=kesepain&session=s1')
 
     expect(await screen.findByText('第21条问题')).toBeInTheDocument()
+    await waitFor(() => expect(app.client.getQueryState(
+      ['history', 'kesepain', 's1', 'page', 41],
+    )?.status).toBe('success'))
     expect(screen.queryByText('第1条问题')).not.toBeInTheDocument()
+    expect(screen.queryByText('正在加载更早对话…')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '加载更早对话' })).not.toBeInTheDocument()
     const chatScroll = document.querySelector<HTMLElement>('.chat-scroll')
     expect(chatScroll).not.toBeNull()
+    chatScroll!.scrollTop = 300
+    fireEvent.scroll(chatScroll!)
+    chatScroll!.scrollTop = 100
     fireEvent.scroll(chatScroll!)
     expect(await screen.findByText('第1条问题')).toBeInTheDocument()
     expect(requestedBefore).toContain(null)
     expect(requestedBefore).toContain('41')
+    expect(requestedBefore.filter(Boolean)).toEqual(['41'])
     expect(screen.getByText('已到达对话开头')).toBeInTheDocument()
   })
 
-  it('完整发言索引独立于正文分页，预选不拉页，激活最早发言后连续补页并居中定位', async () => {
+  it('完整发言索引独立于预取，预选不额外拉页，激活最早发言后复用缓存并居中定位', async () => {
     const full = cardHistory({
       user: 'kesepain', session_id: 's1',
       messages: Array.from({ length: 24 }, (_, index) => [
@@ -810,8 +818,11 @@ describe('AppShell navigation', () => {
         },
       })
     }))
-    renderApp('/chat?user=kesepain&session=s1')
+    const app = renderApp('/chat?user=kesepain&session=s1')
     await screen.findByText('导航问题24')
+    await waitFor(() => expect(app.client.getQueryState(
+      ['history', 'kesepain', 's1', 'page', 45],
+    )?.status).toBe('success'))
     const scroll = document.querySelector<HTMLDivElement>('.chat-scroll')!
     const scrollTo = vi.fn()
     Object.defineProperties(scroll, { scrollTo: { value: scrollTo }, clientHeight: { value: 600 } })
@@ -830,7 +841,7 @@ describe('AppShell navigation', () => {
     expect(scroll.querySelector('[data-user-message-id="history_card_s1_1_user"]')).toBeNull()
     fireEvent.keyDown(rail, { key: 'Home' })
     expect(screen.getByRole('button', { name: '第 1 轮：导航问题1' })).toHaveAttribute('aria-current', 'true')
-    expect(requestedBefore.filter(Boolean)).toEqual([])
+    expect(requestedBefore.filter(Boolean)).toEqual(['45'])
     fireEvent.keyDown(rail, { key: 'Enter' })
     await waitFor(() => expect(scroll.querySelector('[data-user-message-id="history_card_s1_1_user"]')).not.toBeNull())
     await waitFor(() => expect(scrollTo).toHaveBeenLastCalledWith({ top: 424, behavior: 'smooth' }))
@@ -873,23 +884,27 @@ describe('AppShell navigation', () => {
     }))
     const app = renderApp('/chat?user=kesepain&session=s1')
     await screen.findByText('当前导航问题')
+    await waitFor(() => expect(app.client.getQueryState(
+      ['history', 'kesepain', 's1', 'page', 3],
+    )?.status).toBe('error'))
+    expect(screen.queryByText(/消息定位失败/)).not.toBeInTheDocument()
     const rail = screen.getByRole('button', { name: /轮次位置/ })
     fireEvent.click(rail)
     fireEvent.keyDown(rail, { key: 'Home' })
     fireEvent.keyDown(rail, { key: 'Enter' })
     expect(await screen.findByText(/消息定位失败.*navigation offline/)).toBeInTheDocument()
-    expect(earlierRequests).toBe(1)
+    expect(earlierRequests).toBe(2)
     expect(screen.getByRole('status')).not.toHaveTextContent('正在定位消息')
     fail = false
     fireEvent.keyDown(rail, { key: 'Enter' })
-    await waitFor(() => expect(earlierRequests).toBe(2))
+    await waitFor(() => expect(earlierRequests).toBe(3))
     expect(screen.getByRole('status')).toHaveTextContent('正在定位消息')
     await act(async () => { app.navigate('/chat?user=kesepain&session=s2') })
     releasePage()
     await screen.findByText('另一个空间')
     expect(document.querySelector('.chat-scroll [data-user-message-id="history_card_s1_1_user"]')).toBeNull()
     expect(screen.queryByText(/消息定位失败/)).not.toBeInTheDocument()
-    expect(earlierRequests).toBe(2)
+    expect(earlierRequests).toBe(3)
   })
 
   it('长任务结束切回末页历史后原始提问仍在，刷新页面后也只显示一次', async () => {
@@ -940,7 +955,7 @@ describe('AppShell navigation', () => {
     expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
   })
 
-  it('展开后加载更早卡片保留工具状态和阅读位置，补位事件不连续拉页', async () => {
+  it('加载更早卡片保留工具状态和阅读位置，下一页预取不改变已显示页数', async () => {
     let releasePage!: () => void
     const pageGate = new Promise<void>((resolve) => { releasePage = resolve })
     const requestedBefore: Array<string | null> = []
@@ -961,7 +976,7 @@ describe('AppShell navigation', () => {
           has_more_before: true, next_before: before ? 21 : 41 },
       }))
     }))
-    renderApp('/chat?user=kesepain&session=s1')
+    const app = renderApp('/chat?user=kesepain&session=s1')
     await screen.findByText('当前问题')
     const scroll = document.querySelector<HTMLDivElement>('.chat-scroll')!
     let height = 2000
@@ -989,7 +1004,11 @@ describe('AppShell navigation', () => {
     expect(process.hidden).toBe(false)
     expect(tool).toHaveAttribute('aria-expanded', 'true')
     fireEvent.scroll(scroll)
-    expect(requestedBefore.filter(Boolean)).toEqual(['41'])
+    await waitFor(() => expect(requestedBefore.filter(Boolean)).toEqual(['41', '21']))
+    expect(app.client.getQueryData<{ pages: unknown[] }>(
+      ['history', 'kesepain', 's1'],
+    )?.pages).toHaveLength(2)
+    expect(scroll.scrollTop).toBe(660)
   })
 
   it('用户消息优先显示当前用户头像并在加载失败时回退图标', async () => {
@@ -1520,6 +1539,75 @@ describe('AppShell navigation', () => {
     fireEvent.pointerDown(document.body)
     expect(trigger).toHaveAttribute('aria-expanded', 'false')
     expect(patches).toBe(0)
+  })
+
+  it.each([
+    ['max_input_tokens', 120000, '模型最大输入', 200000],
+    ['context_window', 54000, '模型上下文窗口', 64000],
+    ['configuration', 990000, '配置兜底', undefined],
+  ] as const)('顶部模型弹层展示当前会话的上下文参数，输入来源为 %s', async (source, inputLimit, sourceLabel, modelWindow) => {
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    const providerButton = await screen.findByTitle('模型与思考档位')
+    await waitFor(() => expect(providerButton).toHaveTextContent('test-model'))
+    const key = ['overview', 'kesepain', 's1']
+    const original = app.client.getQueryData<OverviewResponse>(key)!
+    const snapshot = {
+      ...original.context_snapshot!,
+      capacity_tokens: 1000000, total_tokens: 30000, percent: 3,
+      input_limit_source: source, input_limit_tokens: inputLimit,
+      context_window_tokens: modelWindow ?? 1000000,
+      context_window_source: modelWindow ? 'model' as const : 'configuration' as const,
+      compression_threshold: inputLimit * .8, compression_ratio: .3,
+      compression_target_tokens: 9000, output_reserve_tokens: 10000,
+    }
+    server.use(http.get('/api/users/kesepain/overview', () => HttpResponse.json({
+      ...original, context_snapshot: snapshot,
+    })))
+    await act(async () => { await app.client.refetchQueries({ queryKey: key }) })
+    fireEvent.click(providerButton)
+    const dialog = screen.getByRole('dialog', { name: '模型与上下文' })
+    const metric = (label: string) => within(dialog).getByText(label, { selector: 'dt' }).parentElement
+    expect(metric('上下文窗口')).toHaveTextContent('1,000,000')
+    expect(metric('有效输入上限')).toHaveTextContent(inputLimit.toLocaleString('zh-CN'))
+    expect(metric('有效输入上限')).toHaveTextContent(sourceLabel)
+    expect(metric('自动压缩阈值')).toHaveTextContent((inputLimit * .8).toLocaleString('zh-CN'))
+    expect(metric('自动压缩阈值')).toHaveTextContent('80%')
+    expect(metric('历史压缩目标')).toHaveTextContent('9,000')
+    expect(metric('历史压缩目标')).toHaveTextContent('30%')
+    expect(metric('模型声明窗口')).toHaveTextContent(modelWindow ? modelWindow.toLocaleString('zh-CN') : '未声明')
+    expect(metric('输出预留')).toHaveTextContent('10,000')
+    expect(within(dialog).getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(Math.round(30000 * 100 / inputLimit)))
+
+    snapshot.total_tokens = inputLimit * .9
+    snapshot.compression_target_tokens = 12000
+    await act(async () => { await app.client.refetchQueries({ queryKey: key }) })
+    await waitFor(() => expect(metric('历史压缩目标')).toHaveTextContent('12,000'))
+    expect(within(dialog).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '90')
+    expect(dialog).toHaveTextContent('已到压缩阈值')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: '模型与上下文' })).not.toBeInTheDocument()
+  })
+
+  it('顶部模型弹层在运行参数不可用时不展示旧阈值或虚构默认值', async () => {
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    const providerButton = await screen.findByTitle('模型与思考档位')
+    await waitFor(() => expect(providerButton).toHaveTextContent('test-model'))
+    const key = ['overview', 'kesepain', 's1']
+    const original = app.client.getQueryData<OverviewResponse>(key)!
+    server.use(http.get('/api/users/kesepain/overview', () => HttpResponse.json({
+      ...original, context_snapshot: {
+        ...original.context_snapshot!, available: false,
+        input_limit_tokens: 120000, compression_threshold: 96000, compression_ratio: .3,
+      },
+    })))
+    await act(async () => { await app.client.refetchQueries({ queryKey: key }) })
+    fireEvent.click(providerButton)
+    const dialog = screen.getByRole('dialog', { name: '模型与上下文' })
+    expect(dialog).toHaveTextContent('上下文参数暂不可用')
+    expect(within(dialog).queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(within(dialog).getByText('自动压缩阈值', { selector: 'dt' }).parentElement?.querySelector('dd')).toHaveTextContent('—')
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭模型与上下文' }))
+    expect(screen.queryByRole('dialog', { name: '模型与上下文' })).not.toBeInTheDocument()
   })
 
   it('顶部模型气泡可单独保存思考强度', async () => {
@@ -2953,8 +3041,9 @@ describe('AppShell navigation', () => {
             available: true, source: 'cardstream', measurement: 'local_estimate',
             captured_at: '2026-11-07T00:00:00Z', system_prompt_tokens: 30000,
             tool_schema_tokens: 5000, conversation_tokens: 20000, summary_tokens: 4000,
-            other_tokens: 1000, total_tokens: 60000, capacity_tokens: 120000,
-            percent: 50, cards_active: 5, last_seq: 12,
+            other_tokens: 1000, total_tokens: 60000, capacity_tokens: 200000,
+            input_limit_tokens: 120000, compression_threshold: 96000, input_limit_source: 'max_input_tokens',
+            percent: 30, cards_active: 5, last_seq: 12,
           } },
         })}\n\n`))
       })
@@ -2976,9 +3065,9 @@ describe('AppShell navigation', () => {
       }).catch(() => undefined)
       await emitContextWindow()
       expect(app.client.getQueryData(overviewKey)).toMatchObject({
-        context_snapshot: { total_tokens: 60000, percent: 50 },
+        context_snapshot: { total_tokens: 60000, percent: 30, input_limit_tokens: 120000 },
         context_window: {
-          tokens: { total_tokens: 60000, percent: 50, system_prompt_tokens: 30000 },
+          tokens: { total_tokens: 60000, percent: 30, system_prompt_tokens: 30000, compression_threshold: 96000 },
           conversation: { cards_active: 5, last_seq: 12 },
         },
       })
@@ -2990,11 +3079,16 @@ describe('AppShell navigation', () => {
       })
       expect(app.client.getQueryData(overviewKey)).toMatchObject({ context: { usage: { cache_hit_rate: 0.7532 } } })
       expect(app.client.getQueryData(overviewKey)).toMatchObject({
-        context_snapshot: { total_tokens: 60000, percent: 50 },
+        context_snapshot: { total_tokens: 60000, percent: 30 },
       })
       fireEvent.click(screen.getByRole('button', { name: '查看上下文用量' }))
       expect(within(screen.getByRole('dialog', { name: '上下文用量' }))
-        .getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50')
+        .getByRole('progressbar')).toHaveAttribute('aria-valuenow', '30')
+      fireEvent.keyDown(document, { key: 'Escape' })
+      fireEvent.click(screen.getByTitle('查看上下文与运行状态'))
+      expect(screen.getByText('容量上限').closest('.context-metric')).toHaveTextContent('200K')
+      expect(screen.getByText('有效输入上限').closest('.context-metric')).toHaveTextContent('120K')
+      expect(screen.getByText('自动压缩阈值').closest('.context-metric')).toHaveTextContent('96.0K')
       fireEvent.keyDown(document, { key: 'Escape' })
       expect(screen.getByRole('button', { name: '缓存命中 75.32%' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
@@ -3310,10 +3404,11 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 个人笔记' }))
 
     const composer = screen.getByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
-    await waitFor(() => expect(composer.value).toMatch(/^\[知识库引用 user:notes.md\] 个人笔记\n/))
+    await waitFor(() => expect(composer.value).toMatch(/^当前已指定知识库“个人笔记”/))
     expect(composer.value).toContain('"users/kesepain/knowledge/notes.md"')
-    expect(composer.value).toContain('先读取')
-    expect(composer.value).toContain('逐项落实到实际操作与最终结果')
+    expect(composer.value).toContain('优先读取该文档内容')
+    expect(composer.value).toContain('充分使用知识库提供的资料')
+    expect(composer.value).not.toContain('\n')
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
     const prompt = composer.value
 
@@ -3356,7 +3451,7 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(tree).getByRole('treeitem', { name: '共享' }))
     expect(await within(tree).findByRole('treeitem', { name: 'team.md' })).toBeInTheDocument()
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 共享规范' }))
-    await waitFor(() => expect(composer.value).toMatch(/^请参考规范\n\[知识库引用 shared:team.md\] 共享规范\n/))
+    await waitFor(() => expect(composer.value).toMatch(/^请参考规范\n当前已指定知识库“共享规范”/))
     expect(composer.value).toContain('"knowledge/share/team.md"')
     expect(screen.queryByRole('dialog', { name: '知识库引用' })).not.toBeInTheDocument()
   })
@@ -3369,12 +3464,12 @@ describe('AppShell navigation', () => {
     const tree = within(drawer).getByRole('tree', { name: '知识目录' })
     fireEvent.contextMenu(await within(tree).findByRole('treeitem', { name: '共享' }))
     fireEvent.click(screen.getByRole('menuitem', { name: '引用文件夹相对路径' }))
-    await waitFor(() => expect(composer.value).toMatch(/^\[知识库目录引用 shared:\.\] 共享\n/))
-    expect(composer.value).toContain('file(action="list_dir", path="knowledge/share")')
-    expect(composer.value).toContain('按任务定位相关文档并读取完整正文')
+    await waitFor(() => expect(composer.value).toMatch(/^当前已指定知识库“共享”/))
+    expect(composer.value).toContain('"knowledge/share"')
+    expect(composer.value).toContain('优先读取目录内与任务相关的内容')
   })
 
-  it('输入框能力按钮按类型引用拓展、技能和插件并追加稳定标记', async () => {
+  it('输入框能力按钮按类型追加简短引用并避免重复', async () => {
     const references = vi.spyOn(globalThis, 'fetch')
     renderApp('/chat?user=kesepain&session=s1')
     const composer = await screen.findByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
@@ -3387,10 +3482,9 @@ describe('AppShell navigation', () => {
     fireEvent.change(within(drawer).getByRole('textbox', { name: '搜索拓展' }), { target: { value: '客厅' } })
     fireEvent.click(within(drawer).getByRole('button', { name: '引用 智能灯光控制' }))
 
-    await waitFor(() => expect(composer.value).toMatch(/^先检查当前状态\n\[拓展引用 global:example\] 智能灯光控制\n/))
+    await waitFor(() => expect(composer.value).toMatch(/^先检查当前状态\n当前已指定能力“智能灯光控制”/))
     expect(composer.value).toContain('"expand/global/example/expand_control.md"')
-    expect(composer.value).toContain('expand_call')
-    expect(composer.value).toContain('scope="global"、module="example"')
+    expect(composer.value).toContain('拓展 global:example')
     const expandPrompt = composer.value
     expect(screen.queryByRole('dialog', { name: '能力引用' })).not.toBeInTheDocument()
 
@@ -3399,7 +3493,7 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(drawer).getByRole('tab', { name: '技能' }))
     fireEvent.click(within(drawer).getByRole('button', { name: '用户' }))
     fireEvent.click(await within(drawer).findByRole('button', { name: '引用 用户自建技能' }))
-    await waitFor(() => expect(composer.value).toContain('\n[技能引用 user:user_create/manual] 用户自建技能\n'))
+    await waitFor(() => expect(composer.value).toContain('\n当前已指定能力“用户自建技能”'))
     expect(composer.value.startsWith(expandPrompt)).toBe(true)
     expect(composer.value).toContain('"users/kesepain/user_skills/user_create/manual/SKILL.md"')
 
@@ -3408,9 +3502,9 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(drawer).getByRole('tab', { name: '插件' }))
     expect(within(drawer).getByRole('navigation', { name: '插件层级' })).toHaveTextContent('全局')
     fireEvent.click(await within(drawer).findByRole('button', { name: '引用 clock' }))
-    await waitFor(() => expect(composer.value).toContain('\n[插件引用 global:clock] clock\n'))
+    await waitFor(() => expect(composer.value).toContain('\n当前已指定能力“clock”'))
     expect(composer.value).toContain('"plugins/clock/SKILL.md"')
-    expect(composer.value).toContain('名为 "clock" 的插件')
+    expect(composer.value).toContain('插件 clock')
     const prompt = composer.value
 
     fireEvent.click(screen.getByRole('button', { name: '打开能力引用' }))
