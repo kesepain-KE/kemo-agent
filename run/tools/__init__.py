@@ -52,6 +52,13 @@ from run.tools.errors import (
     ToolTimeoutError,
     ToolValidationError,
 )
+from run.tools.result_limits import (
+    MAX_TOOL_RESULT_CHARS,
+    TOOL_RESULT_VIEW_VERSION,
+    limit_tool_result,
+    limit_tool_result_items,
+    tool_result_card_view,
+)
 
 
 _TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
@@ -60,10 +67,6 @@ _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
 _TOOL_CANCEL_CLEANUP_GRACE = 0.1
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
 _SUBAGENT_DEFAULT_WATCHDOG_SECONDS = 3_600.0
-# Tool results are inline model context, not an unrestricted file transport.
-# Keep this contract centralized so every built-in, user, and sub-agent tool
-# receives the same bound through ``execute_tool``.
-MAX_TOOL_RESULT_CHARS = 100_000
 
 
 def _enforce_tool_result_limit(
@@ -74,44 +77,11 @@ def _enforce_tool_result_limit(
     *,
     preserve_result: bool = False,
 ) -> Any:
-    # CardStream owns full RAW and applies its ordinary card-capacity policy.
-    # Do not silently turn a main-integration result into a truncated receipt.
+    # Preserve execution truth for CardStream RAW. CardStore independently
+    # applies the same shared limit to VIEW before metering/provider assembly.
     if preserve_result:
         return value
-    rendered = json.dumps(value, ensure_ascii=False, default=str)
-    if len(rendered) > MAX_TOOL_RESULT_CHARS:
-        if context and context.get("root") and context.get("user") and (
-            not isinstance(value, dict) or "ok" not in value
-        ):
-            from run.infra import record_runtime_event
-            record_runtime_event(
-                Path(context["root"]), str(context["user"]),
-                category="backend", name="tool_result_missing_ok", status="failed",
-                tool_name=tool_name, session_id=str(context.get("session_id") or ""),
-            )
-        if context and context.get("root") and context.get("user"):
-            from run.tools.result_artifacts import save_result_artifact
-            try:
-                artifact = save_result_artifact(rendered, context)
-            except (OSError, ValueError, RuntimeError):
-                # Execution has already happened; the fallback exception also
-                # explicitly forbids blindly re-executing side effects.
-                artifact = None
-            if artifact is not None:
-                return {
-                    "ok": isinstance(value, dict) and value.get("ok") is True,
-                    "execution_completed": True,
-                    "content_omitted": True, "result_chars": len(rendered),
-                    "artifact": artifact,
-                    "instruction": "工具已执行完成，不要重复执行；请用 file.read_range 分页读取 artifact.path 核对完整结果。",
-                }
-        raise ToolResultTooLargeError(
-            tool_name,
-            arguments,
-            result_chars=len(rendered),
-            limit_chars=MAX_TOOL_RESULT_CHARS,
-        )
-    return value
+    return limit_tool_result(tool_name, arguments, value, context)
 
 
 def tool_call_signature(name: str, arguments: dict[str, Any]) -> str:
