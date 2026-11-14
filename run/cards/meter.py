@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable
 from run.cards.errors import CardCapacityError, CardConflictError
 from run.cards.models import Card, historical_data_text, json_text, user_content
 from provider.tokenizer import TOKENIZER_ID, count_value, count_items, count_request
+from run.tools import TOOL_RESULT_VIEW_VERSION
 
 
 def estimate_tokens(value: Any) -> int:
@@ -38,7 +39,7 @@ def request_calibration_key(meter_key: str, calibration_scope: str, items) -> st
 
 @dataclass(frozen=True, slots=True)
 class CardMeter:
-    key: str = f"cardstream-{TOKENIZER_ID}"
+    key: str = f"cardstream-{TOKENIZER_ID}-{TOOL_RESULT_VIEW_VERSION}"
     counter: Callable[[Any], int] = estimate_tokens
     calibration_scope: str = "default"
 
@@ -73,7 +74,7 @@ class CardMeter:
             str(model or "").casefold(),
         ]).encode()).hexdigest()
         return cls(
-            key=f"cardstream-{TOKENIZER_ID}",
+            key=f"cardstream-{TOKENIZER_ID}-{TOOL_RESULT_VIEW_VERSION}",
             counter=counter or estimate_tokens,
             calibration_scope=scope,
         )

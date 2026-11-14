@@ -1154,7 +1154,7 @@ def run(*, context):
             realtime_provider.requests[1].messages[0],
         )
 
-    def test_oversized_tool_result_preserves_complete_raw_and_provider_content(self) -> None:
+    def test_oversized_tool_result_preserves_raw_but_bounds_provider_content(self) -> None:
         _, root = self.make_root()
         self.write_tool(root / "plugins", "large_result", "large")
         (root / "plugins" / "large_result" / "tool.py").write_text(
@@ -1200,7 +1200,13 @@ def run(*, context):
         receipt = result_event.result["result"]
         self.assertEqual(receipt["content"], "X" * (MAX_TOOL_RESULT_CHARS + 1))
         self.assertEqual(len(provider.requests), 2)
-        self.assertIn("X" * 100, json.dumps(provider.requests[1].messages, ensure_ascii=False))
+        message = next(message for message in provider.requests[1].messages if message["role"] == "tool")
+        self.assertLessEqual(len(message["content"]), MAX_TOOL_RESULT_CHARS)
+        view = json.loads(message["content"])
+        self.assertTrue(view["result"]["content_omitted"])
+        self.assertTrue(view["result"]["ok"])
+        artifact = root / view["result"]["artifact"]["path"]
+        self.assertEqual(json.loads(artifact.read_text("utf-8")), result_event.result)
         self.assertEqual(events[-1].type, "done", events[-1].to_dict())
         history = require_present(session_history(root, "alice", "cli", "oversized-tool-result"))
         self.assertEqual(history.tools[0]["result"]["result"], receipt)

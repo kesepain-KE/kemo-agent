@@ -88,6 +88,8 @@ def protocol_items(cards: tuple[Card, ...], *, model: str = "") -> list[Item]:
             identity = _call_id(card)
             execution = payload.get("execution", {})
             original = payload.get("original_call") or {}
+            if original.get("arguments_omitted"):
+                original = card.raw_payload.get("original_call") or {}
             # arguments_raw/parse_error are diagnostics, not semantic call fields.
             if (identity in calls and identity not in completed
                     and calls[identity] == {key: original.get(key) for key in ("name", "arguments")}

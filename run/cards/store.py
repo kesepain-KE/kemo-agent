@@ -14,6 +14,7 @@ from run.cards.models import (
     utc_now, validate_summary,
 )
 from run.cards.schema import connection
+from run.tools import tool_result_card_view
 
 
 class CardStore:
@@ -74,7 +75,7 @@ class CardStore:
         ):
             raise ValueError("Invalid historical card level")
         raw = json_text(payload)
-        tokens = self.meter.tokens(kind, payload)
+        raw_tokens = self.meter.tokens(kind, payload)
         key = session_key(source, session_id)
         # Runtime registration/result routing and its historical event must
         # share one commit. Only trusted framework callers supply a connection.
@@ -97,16 +98,22 @@ class CardStore:
                         raise CardConflictError("An event key cannot identify different execution facts")
                     return card
             card_id, now, seq = "card_" + uuid4().hex, utc_now(), state["last_seq"] + 1
+            view = tool_result_card_view(
+                payload, {"root": str(self.root), "user": self.user, "session_id": session_id},
+                raw_card_id=card_id,
+            ) if kind == "tool_result" else payload
+            view_json = json_text(view) if view is not payload else raw
+            view_tokens = self.meter.tokens(kind, view) if view is not payload else raw_tokens
             db.execute(
                 "INSERT INTO context_cards(card_id,session_key,integration_id,seq,"
                 "raw_kind,raw_level,raw_payload,raw_tokens,view_kind,view_payload,view_tokens,"
                 "token_active,view_revision,tool_call_id,event_key,meter_key,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,?)",
-                (card_id, key, integration_id, seq, kind, level, raw, tokens, kind,
-                 raw, tokens, tool_call_id, event_key, self.meter.key, now),
+                (card_id, key, integration_id, seq, kind, level, raw, raw_tokens, kind,
+                 view_json, view_tokens, tool_call_id, event_key, self.meter.key, now),
             )
             db.execute("UPDATE card_sessions SET last_seq=?,active_tokens=active_tokens+?,"
-                       "updated_at=? WHERE session_key=?", (seq, tokens, now, key))
+                       "updated_at=? WHERE session_key=?", (seq, view_tokens, now, key))
             record = json.loads(state["record_json"])
             if record.get("memory_status") == "completed":
                 record["memory_status"] = "pending"
@@ -203,7 +210,7 @@ class CardStore:
         return after
 
     def remeter(self, source: str, session_id: str) -> CardSnapshot:
-        """Only VIEW tokens change with model/tokenizer; RAW tokens are evidence."""
+        """Refresh VIEW policy/tokens; immutable RAW and RAW tokens remain evidence."""
         key, total = session_key(source, session_id), 0
         with self.db(write=True) as db:
             state = db.execute("SELECT * FROM card_sessions WHERE session_key=?", (key,)).fetchone()
@@ -213,11 +220,17 @@ class CardStore:
                                       (key,)).fetchall():
                     card = Card.from_row(row)
                     assert card.view_kind is not None and card.view_payload is not None
-                    tokens = self.meter.tokens(card.view_kind, card.view_payload)
+                    view = card.view_payload
+                    if card.view_kind == "tool_result":
+                        view = tool_result_card_view(
+                            view, {"root": str(self.root), "user": self.user, "session_id": session_id},
+                            raw_card_id=card.card_id,
+                        )
+                    tokens = self.meter.tokens(card.view_kind, view)
                     total += tokens
-                    db.execute("UPDATE context_cards SET view_tokens=?,meter_key=?,"
+                    db.execute("UPDATE context_cards SET view_payload=?,view_tokens=?,meter_key=?,"
                                "view_revision=view_revision+1 WHERE card_id=?",
-                               (tokens, self.meter.key, card.card_id))
+                               (json_text(view), tokens, self.meter.key, card.card_id))
                 db.execute("UPDATE card_sessions SET active_tokens=?,meter_key=?,view_epoch=view_epoch+1 "
                            "WHERE session_key=?", (total, self.meter.key, key))
         return self.snapshot(source, session_id)

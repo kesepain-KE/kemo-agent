@@ -13,6 +13,7 @@ from plugins.memory_manage.tool import run as memory
 from plugins.sense_creater.tool import run as sense_creator
 from plugins.skill_creater.tool import run as skill_creator
 from provider.schema import ChatResponse, ToolCall
+from provider.protocol.models import JsonContent, ToolResultItem
 from run.agents import AgentRunner
 from run.engine import iter_request_events
 from run.infra import runtime_event_snapshot
@@ -131,3 +132,28 @@ def test_child_loop_uses_the_same_explicit_success_contract(workspace, value):
     expected_ok = value.get("ok") is True
     assert record["result"]["ok"] is expected_ok
     assert record["status"] == ("completed" if expected_ok else "failed")
+
+
+def test_child_final_boundary_includes_normalization_envelope(workspace):
+    root, config = workspace
+    plugin(root, "report")
+    content = "X" * (MAX_TOOL_RESULT_CHARS - len(json.dumps({"ok": True, "content": ""})))
+    (root / "plugins/report/tool.py").write_text(
+        f"def run(*, context): return {{'ok': True, 'content': 'X' * {len(content)}}}\n",
+        encoding="utf-8",
+    )
+    provider = MediaProvider([
+        ChatResponse(text="", tool_calls=[ToolCall(id="child-call", name="report", arguments={})]),
+        ChatResponse(text=json.dumps(OUTPUT)),
+    ])
+    result = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider).run(
+        "general_worker", {"task": "report"}, source="web", session_id="child-limit",
+    )
+    assert result.metadata["tool_calls"][0]["result"]["result"]["content"] == content
+    item = next(item for item in provider.requests[-1].input if isinstance(item, ToolResultItem))
+    assert isinstance(item.content[0], JsonContent)
+    receipt = item.content[0].data
+    assert len(json.dumps(receipt, ensure_ascii=False)) <= MAX_TOOL_RESULT_CHARS
+    assert receipt["ok"] is True and receipt["content_omitted"]
+    artifact = json.loads((root / receipt["artifact"]["path"]).read_text("utf-8"))
+    assert artifact["result"]["content"] == content
