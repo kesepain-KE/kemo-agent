@@ -89,7 +89,7 @@ export function ShellJobView({ user, jobId, sessionId, source, active }: {
       {job?.finished_at && <span>{t('完成时间')}：{formatDateTime(job.finished_at)}</span>}
     </div>
     <div className={styles.toolbar}>
-      <select aria-label={t('输出流')} value={stream} onChange={event => setStream(event.target.value)}>
+      <select className={styles.streamFilter} aria-label={t('输出流')} value={stream} onChange={event => setStream(event.target.value)}>
         <option value="all">OUT + ERR</option><option value="stdout">OUT</option><option value="stderr">ERR</option>
       </select>
       <span className={styles.status}>{t('只读')} · {t('输出按流分组显示')}</span>

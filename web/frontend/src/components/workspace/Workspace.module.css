@@ -28,6 +28,7 @@
 .toolbar input, .toolbar select { min-width: 0; min-height: 34px; padding: 5px 9px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-raised); color: var(--text-primary); font-size: var(--t-xs); }
 .toolbar input { flex: 1; width: 100px; }
 .toolbar select { max-width: 100%; }
+.toolbar .streamFilter { flex: none; width: 140px; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 34px; padding: 5px 9px; font-size: var(--t-xs); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-raised); }
 .button:hover { background: var(--bg-hover); }
 .button:disabled { opacity: .5; cursor: default; }
