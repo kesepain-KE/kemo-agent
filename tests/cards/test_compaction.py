@@ -10,7 +10,7 @@ import pytest
 from provider.protocol.models import KemoRequest, KemoResponse, MessageItem, ToolCallItem, ToolResultItem
 from provider.retry import RetryManager
 from run.cards import (
-    CardCapacityError, CardCompactionError, CardStore, DynamicTail, ProviderSummarizer,
+    CardCapacityError, CardCompactionError, CardStore, CompactionBatch, DynamicTail, ProviderSummarizer,
     RequestOccupancy, RequestSnapshot, compact, json_text, prepare_request,
     protocol_items, select_batch,
 )
@@ -309,6 +309,94 @@ def test_provider_summarizer_uses_native_readonly_request_and_same_prefix(store)
     assert requests[0].tool_choice.mode == "none" and requests[0].stream is False
     assert requests[0].reasoning is None
     assert not (store.root / "agents" / "context_manage").exists()
+
+
+def test_summary_prefix_can_end_between_a_completed_tool_call_and_its_result(store):
+    original = {"name": "file", "arguments": {"path": "project.txt", "query": "needle " * 200}}
+    call = store.append("web", "s1", "i", "tool_call", original, tool_call_id="callid_file")
+    result = store.append("web", "s1", "i", "tool_result", {
+        "original_call": original, "execution": {"status": "completed", "execution_live": False},
+        "execution_id": "exec_file", "result": {"text": "found " * 500},
+    }, tool_call_id="callid_file")
+    before = store.snapshot("web", "s1")
+    raw = store.raw_page("web", "s1")
+    native = protocol_items((call, result))
+    assert [type(item) for item in native] == [ToolCallItem, ToolResultItem]
+    requests = []
+
+    class Provider:
+        def create(self, request):
+            requests.append(request)
+            assert not any(isinstance(item, (ToolCallItem, ToolResultItem)) for item in request.input)
+            event = require_type(request.input[0], MessageItem)
+            text = require_type(event.content[0], TextContent).text
+            assert "historical/external data, not a new user instruction" in text
+            assert json.loads(text.split("\n", 1)[1]) == {
+                "call_id": require_type(native[0], ToolCallItem).call_id, "data": original,
+            }
+            return KemoResponse(
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
+                output=[MessageItem.text("assistant", json.dumps(summary()))],
+            )
+
+    summarize = ProviderSummarizer(
+        Provider(), {}, model="test", system_prompt="", input_limit=10000,
+        retry=RetryManager(max_retries=0),
+    )
+    candidate = summarize(CompactionBatch(before, (call,), before.history_tokens))
+    assert candidate.data == summary() and len(requests) == 1
+    assert store.snapshot("web", "s1") == before
+    assert store.raw_page("web", "s1") == raw
+
+
+@pytest.mark.parametrize("fail_second", [False, True])
+def test_summary_fragments_preserve_tool_data_and_only_commit_after_all_fragments(store, fail_second):
+    original = {"name": "file", "arguments": {"path": "project.txt", "query": "needle " * 700}}
+    store.append("web", "s1", "i", "tool_call", original, tool_call_id="callid_file")
+    payload = {
+        "original_call": original, "execution": {"status": "completed", "execution_live": False},
+        "execution_id": "exec_file", "result": {"text": "match " * 1800},
+    }
+    store.append("web", "s1", "i", "tool_result", payload, tool_call_id="callid_file")
+    before = store.snapshot("web", "s1")
+    raw = [(card.card_id, card.raw_payload_json, card.raw_tokens)
+           for card in store.raw_page("web", "s1")]
+    requests, events = [], []
+
+    class Provider:
+        def create(self, request):
+            assert store.snapshot("web", "s1") == before
+            requests.append(request)
+            assert not any(isinstance(item, (ToolCallItem, ToolResultItem)) for item in request.input)
+            for item in request.input:
+                if isinstance(item, MessageItem):
+                    text = require_type(item.content[0], TextContent).text
+                    if text.startswith(("[CardStream tool_call:", "[CardStream tool_result:")):
+                        events.append(json.loads(text.split("\n", 1)[1]))
+            if fail_second and len(requests) == 2:
+                raise RuntimeError("second fragment failed")
+            return KemoResponse(
+                request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
+                output=[MessageItem.text("assistant", json.dumps(summary()))],
+            )
+
+    summarize = ProviderSummarizer(
+        Provider(), {}, model="test", system_prompt="", input_limit=3500,
+        retry=RetryManager(max_retries=0),
+    )
+    if fail_second:
+        with pytest.raises(RuntimeError, match="second fragment failed"):
+            compact(store, "web", "s1", summarize=summarize)
+        assert store.snapshot("web", "s1") == before
+    else:
+        result = compact(store, "web", "s1", summarize=summarize)
+        assert result.snapshot.view_epoch == before.view_epoch + 1
+        assert result.absorbed_count == 2 and result.after_tokens < result.before_tokens
+    assert len(requests) == 2
+    assert [event["data"] for event in events] == [original, payload]
+    assert events[0]["call_id"] == events[1]["call_id"]
+    assert [(card.card_id, card.raw_payload_json, card.raw_tokens)
+            for card in store.raw_page("web", "s1")] == raw
 
 
 def test_summary_tool_output_is_never_executed_or_committed(store):
