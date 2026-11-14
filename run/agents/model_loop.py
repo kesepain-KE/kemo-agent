@@ -37,7 +37,7 @@ from run.retry import HOST_CONTROL_EXCEPTIONS, AttemptToolDedup, view_from_error
 from run.tools import (
     ConsecutiveIdenticalToolCallTracker, ConsecutiveToolFailureTracker, ShellInbox,
     ToolExecutionCapacityError, ToolResultTooLargeError, execute_tool,
-    invalid_tool_name, response_invalid_tool_arguments_error,
+    invalid_tool_name, limit_tool_result_items, response_invalid_tool_arguments_error,
     system_prompt_with_tool_argument_repair, tool_call_signature,
     tool_result_payload, validate_tool_call_batch,
 )
@@ -237,6 +237,10 @@ def run_model(
         request_input_limit = min(capacity["effective_token_limit"],
                                   context.input_token_limit or capacity["effective_token_limit"])
         media_inputs.input_limit = request_input_limit
+        limit_tool_result_items(items, {
+            "root": str(agent_runner.root), "user": agent_runner.user,
+            "session_id": context.session_id,
+        })
         if continuation is not None:
             continuation.capture(items, total_usage, response_ids)
         invalid_tool_arguments_retries = 0

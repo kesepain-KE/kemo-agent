@@ -7,7 +7,7 @@ from provider.protocol.enums import MessageRole
 from provider.protocol.models import MessageItem
 from run.agents.continuation import pair_pending
 from run.agents.contracts import AgentRunError
-from run.tools import _enforce_tool_result_limit, ToolResultTooLargeError
+from run.tools import _enforce_tool_result_limit, ToolResultTooLargeError, tool_result_payload
 from run.retry import HOST_CONTROL_EXCEPTIONS
 
 
@@ -43,7 +43,8 @@ def drain_tool(exc, *, tool_name, arguments, root, user):
         value = future.result()
         value = _enforce_tool_result_limit(tool_name, arguments, value,
                                           context={"root": str(root), "user": user})
-        return {"ok": True, "result": value}, "completed"
+        payload = tool_result_payload(tool_name, value, root=root, user=user)
+        return payload, "completed" if payload["ok"] is True else "failed"
     except ToolResultTooLargeError as error:
         return {"ok": False, "error": error.error_payload()}, "result_too_large"
     except HOST_CONTROL_EXCEPTIONS:
