@@ -87,12 +87,26 @@ def test_summary_deadline_retains_old_views_and_the_slot_until_real_exit(store):
     assert store.snapshot("web", "s1") == before
 
 
-def test_input_limit_and_shared_context_reserve_are_not_double_subtracted():
-    capabilities = SimpleNamespace(limits=SimpleNamespace(max_input_tokens=8000, context_window=10000),
-                                   extensions={})
-    assert context_input_budget(20000, capabilities, output_reserve=3000)["effective_token_limit"] == 7000
-    assert context_input_budget(20000, capabilities, output_reserve=1000)["effective_token_limit"] == 8000
-    assert context_input_budget(20000, None, output_reserve=1000)["effective_token_limit"] == 19000
+@pytest.mark.parametrize(("window", "input_limit", "configured", "reserve", "expected", "expected_window"), [
+    (10000, 8000, 20000, 3000, 8000, 10000),
+    (10000, 8000, 20000, 1000, 8000, 10000),
+    (2000000, 1500000, 1000000, 10000, 1500000, 2000000),
+    (2000000, None, 1000000, 10000, 1990000, 2000000),
+    (128000, 96000, 1000000, 10000, 96000, 128000),
+    (None, 2000000, 1000000, 10000, 2000000, 1000000),
+    (None, 128000, 1000000, 10000, 128000, 1000000),
+    (None, None, 20000, 1000, 19000, 20000),
+])
+def test_input_declaration_precedes_window_and_configuration(
+    window, input_limit, configured, reserve, expected, expected_window,
+):
+    capabilities = SimpleNamespace(
+        limits=SimpleNamespace(max_input_tokens=input_limit, context_window=window), extensions={},
+    ) if window or input_limit else None
+    capacity = context_input_budget(configured, capabilities, output_reserve=reserve)
+    assert capacity["effective_token_limit"] == expected
+    assert capacity["context_window_tokens"] == expected_window
+    assert capacity["context_window_source"] == ("model" if window else "configuration")
 
 
 def test_provider_pool_prefers_main_then_system_without_preemption():
@@ -167,7 +181,7 @@ def test_blocked_tool_receipt_keeps_native_linkage_and_raw_argument_diagnostics(
 
 
 @pytest.mark.parametrize("response_closed", [False, True])
-def test_dead_owner_keeps_unknown_side_effect_fenced_and_recovers_only_once(store, response_closed):
+def test_dead_owner_retires_incomplete_cards_and_recovers_only_once(store, response_closed):
     integration = IntegrationStore(store, "web", "s1", "lost")
     integration.start()
     execution, _ = integration.register_tool("callid_effect", {"name": "write", "arguments": {"data": "once"}})
@@ -183,8 +197,7 @@ def test_dead_owner_keeps_unknown_side_effect_fenced_and_recovers_only_once(stor
         seq = store.snapshot("web", "s1").last_seq
         assert following.recover_interrupted() == []
         assert store.snapshot("web", "s1").last_seq == seq
-        with pytest.raises(CardConflictError, match="未知副作用"):
-            following.start()
+        following.start()
     with store.db() as db:
         tool = dict(db.execute("SELECT * FROM card_tool_executions WHERE execution_id=?",
                               (execution["execution_id"],)).fetchone())
@@ -192,6 +205,14 @@ def test_dead_owner_keeps_unknown_side_effect_fenced_and_recovers_only_once(stor
     assert tool["execution_live"] and tool["status"] == "interrupted_unknown"
     assert not tool["finished_at"]
     assert row["response_closed"] and not json_value(row)["recovery"]["replay_permitted"]
+    assert json_value(row)["recovery"]["tools_detached"] is True
+    snapshot = store.snapshot("web", "s1")
+    assert [card.view_kind for card in snapshot.cards] == ["tool_result"]
+    items = protocol_items(snapshot.cards)
+    assert len(items) == 1 and isinstance(items[0], MessageItem)
+    assert "interrupted_unknown" in str(items[0])
+    assert snapshot.history_tokens == sum(card.view_tokens for card in snapshot.cards)
+    assert store.raw_page("web", "s1")[0].raw_kind == "tool_call"
     if response_closed:
         assert row["updated_at"] == before["updated_at"] and row["status"] == "cancelled"
     notice = store.raw_page("web", "s1")[-1]
@@ -236,3 +257,94 @@ def test_provider_continuation_restores_only_matching_live_opaque_state(store, m
     assert bool(state) == restored
     assert all(item.content is None and item.summary is None for item in state)
     assert "never send" not in str(items)
+
+
+@pytest.mark.parametrize("owner_matches", [True, None])
+def test_live_or_unconfirmed_owner_does_not_release_session(store, owner_matches):
+    integration = IntegrationStore(store, "web", "s1", "still-owned")
+    integration.start()
+    integration.register_tool("call-effect", {"name": "write", "arguments": {}})
+    with store.db(write=True) as db:
+        db.execute("UPDATE card_integrations SET owner_pid=987654321,owner_token='other'")
+    before = store.snapshot("web", "s1")
+    following = IntegrationStore(store, "web", "s1", "following")
+    with patch("run.infra.process_identity_matches", return_value=owner_matches):
+        assert following.recover_interrupted() == []
+        with pytest.raises(CardConflictError, match="未知副作用"):
+            following.start()
+    assert store.snapshot("web", "s1") == before
+
+
+def test_legacy_unknown_execution_is_retired_without_duplicating_recovery_notice(store):
+    integration = IntegrationStore(store, "web", "s1", "legacy")
+    integration.start()
+    completed, _ = integration.register_tool("call-known", {"name": "read", "arguments": {}})
+    integration.tool_result(completed["execution_id"], {"ok": True, "text": "known result"},
+                            status="completed", duration_ms=1)
+    original = {"name": "write", "arguments": {"data": "once"}}
+    execution, _ = integration.register_tool("call-unknown", original)
+    integration.publish_running_notice(execution["execution_id"])
+    integration.finish("cancelled", final_payload={"text": "saved progress"})
+    store.append("web", "s1", integration.id, "tool_result", {
+        "tool_call_id": execution["tool_call_id"], "execution_id": execution["execution_id"],
+        "original_call": original,
+        "execution": {"status": "interrupted_unknown", "execution_live": True},
+        "result": {"ok": False, "error": {"code": "owner_lost",
+                   "message": "宿主已退出；副作用与隔离执行状态未知，不自动重放"}},
+    }, tool_call_id=execution["tool_call_id"], event_key=f"{execution['execution_id']}:owner_lost")
+    with store.db(write=True) as db:
+        db.execute("UPDATE card_tool_executions SET status='interrupted_unknown' WHERE execution_id=?",
+                   (execution["execution_id"],))
+        row = db.execute("SELECT * FROM card_integrations WHERE integration_id=?", (integration.id,)).fetchone()
+        record = json_value(row)
+        record["recovery"] = {"reason": "owner_lost", "unknown_executions": 1, "replay_permitted": False}
+        import json
+        db.execute("UPDATE card_integrations SET owner_pid=987654321,owner_token='other',record_json=? "
+                   "WHERE integration_id=?", (json.dumps(record), integration.id))
+    before = store.snapshot("web", "s1")
+    raw = store.raw_page("web", "s1")
+    following = IntegrationStore(store, "web", "s1", "following")
+    with patch("run.infra.process_identity_matches", return_value=False):
+        assert following.recover_interrupted() == ["legacy"]
+        following.start()
+        assert following.recover_interrupted() == []
+    after = store.snapshot("web", "s1")
+    assert [(card.seq, card.raw_payload) for card in raw] == [
+        (card.seq, card.raw_payload) for card in store.raw_page("web", "s1")]
+    assert before.last_seq == after.last_seq
+    assert after.view_epoch == before.view_epoch + 1
+    assert after.history_tokens < before.history_tokens
+    assert [card.view_kind for card in after.cards] == [
+        "tool_call", "tool_result", "agent_text", "tool_result"]
+    assert after.cards[1].raw_payload["result"]["text"] == "known result"
+    assert after.cards[2].raw_payload["text"] == "saved progress"
+    assert all(card.tool_call_id != "call-unknown" or card.view_kind != "tool_call"
+               for card in after.cards)
+
+
+def test_interrupted_tool_cleanup_rolls_back_with_the_recovery_notice(store):
+    integration = IntegrationStore(store, "web", "s1", "lost")
+    integration.start()
+    for number in range(2):
+        integration.register_tool(f"call-{number}", {"name": "write", "arguments": {"n": number}})
+    with store.db(write=True) as db:
+        db.execute("UPDATE card_integrations SET owner_pid=987654321,owner_token='other'")
+    before = store.snapshot("web", "s1")
+    append, calls = store.append, []
+    def fail_second_notice(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            raise OSError("disk failure")
+        return append(*args, **kwargs)
+    following = IntegrationStore(store, "web", "s1", "following")
+    with patch("run.infra.process_identity_matches", return_value=False), patch.object(
+            store, "append", side_effect=fail_second_notice):
+        with pytest.raises(OSError, match="disk failure"):
+            following.recover_interrupted()
+    assert store.snapshot("web", "s1") == before
+    with store.db() as db:
+        assert db.execute("SELECT response_closed FROM card_integrations").fetchone()[0] == 0
+        assert [row[0] for row in db.execute("SELECT status FROM card_tool_executions")] == ["running", "running"]
+    with patch("run.infra.process_identity_matches", return_value=False):
+        following.start()
+    assert len(store.snapshot("web", "s1").cards) == 2

@@ -93,8 +93,11 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
                           "ORDER BY seq DESC LIMIT ?", (key, before_seq, size)).fetchall()[::-1]
         integrations = {row["integration_id"]: dict(row) for row in db.execute(
             "SELECT i.*,row_number() OVER(ORDER BY created_at,integration_id) AS ordinal,"
-            "(SELECT max(seq) FROM context_cards c WHERE c.integration_id=i.integration_id) AS last_seq "
+            "(SELECT max(seq) FROM context_cards c WHERE c.session_key=i.session_key "
+            "AND c.integration_id=i.integration_id) AS last_seq "
             "FROM card_integrations i WHERE session_key=?", (key,))}
+        saved_records = {iid: json.loads(integration["record_json"])
+                         for iid, integration in integrations.items()}
         user_messages = []
         if before is None:
             inputs = db.execute(
@@ -103,7 +106,7 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
             for row in inputs:
                 integration = integrations.get(row["integration_id"], {})
                 payload = json.loads(row["raw_payload"])
-                if (json.loads(integration.get("record_json", "{}")).get("withdrawn")
+                if (saved_records.get(row["integration_id"], {}).get("withdrawn")
                         or str(payload.get("text") or "").startswith("【任务计划连续执行】")):
                     continue
                 user_messages.append(_user_message(
@@ -135,21 +138,23 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
             # inspectable without inventing a completed integration.
             integration = {"ordinal": 0, "status": "unknown", "record_json": "{}"}
         number, iid = integration["ordinal"], row["integration_id"]
-        saved = json.loads(integration["record_json"])
+        saved = saved_records.get(iid, {})
         card = {key: row[key] for key in ("card_id", "integration_id", "seq", "raw_kind",
                                          "raw_level", "created_at")}
         cards.append(card)
-        metric = metrics.setdefault(iid, {
-            "integration_number": number, "integration_id": iid, "usage": saved.get("usage", {}),
-            "elapsed_ms": saved.get("elapsed_ms", 0), "tool_calls": saved.get("tool_calls", 0),
-            "guidance": [], "guidance_details": saved.get("guidance_details", []),
-            "status": integration["status"], "cancelled": integration["status"] == "cancelled",
-            "artifacts": [], "media_inputs": media_inputs(service.root, name, saved.get("media_inputs"), final=True),
-            "withdrawn": bool(saved.get("withdrawn")),
-            "response_closed": bool(integration.get("response_closed")),
-            "last_seq": integration.get("last_seq") or 0,
-            "acknowledged_seq": integration.get("acknowledged_seq") or 0,
-        })
+        if iid not in metrics:
+            metrics[iid] = {
+                "integration_number": number, "integration_id": iid, "usage": saved.get("usage", {}),
+                "elapsed_ms": saved.get("elapsed_ms", 0), "tool_calls": saved.get("tool_calls", 0),
+                "guidance": [], "guidance_details": saved.get("guidance_details", []),
+                "status": integration["status"], "cancelled": integration["status"] == "cancelled",
+                "artifacts": [], "media_inputs": media_inputs(service.root, name, saved.get("media_inputs"), final=True),
+                "withdrawn": bool(saved.get("withdrawn")),
+                "response_closed": bool(integration.get("response_closed")),
+                "last_seq": integration.get("last_seq") or 0,
+                "acknowledged_seq": integration.get("acknowledged_seq") or 0,
+            }
+        metric = metrics[iid]
         if iid in initial_cards and "initial_card" not in metric:
             initial = initial_cards[iid]
             metric["initial_card"] = {
@@ -186,6 +191,11 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
                     and original.get("arguments", {}).get("completion_mode") == "detached"):
                 continue
             execution = executions.get(eid, {})
+            if (execution.get("status") == "interrupted_unknown"
+                    and (saved.get("recovery") or {}).get("tools_detached")):
+                # Retain RAW sequence/cursors and audit facts, without rendering
+                # the abandoned call or its recovery notice as a tool card.
+                continue
             result = payload.get("result")
             # Latest durable execution truth supersedes an older timeout notice.
             # The historical receipt remains RAW, including its original status.

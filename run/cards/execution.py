@@ -96,7 +96,9 @@ class IntegrationStore:
             pending = db.execute(
                 "SELECT 1 FROM card_integrations i WHERE i.session_key=? AND "
                 "(i.response_closed=0 OR EXISTS(SELECT 1 FROM card_tool_executions t "
-                "WHERE t.integration_id=i.integration_id AND t.execution_live=1))",
+                "WHERE t.integration_id=i.integration_id AND t.execution_live=1 AND NOT "
+                "(t.status='interrupted_unknown' AND "
+                "coalesce(json_extract(i.record_json,'$.recovery.tools_detached'),0)=1)))",
                 (self.key,),
             ).fetchone()
             if pending:
@@ -113,8 +115,9 @@ class IntegrationStore:
     def recover_interrupted(self) -> list[str]:
         """Only a confirmed lost process can retire its abandoned response.
 
-        An unknown side-effect execution stays fenced. A dead coordinator is
-        not proof that an isolated child exited or that its effect failed.
+        Unknown side effects remain recorded without replay. Their incomplete
+        tool cards retire from VIEW, allowing a new integration to continue.
+        A dead coordinator is not proof that an isolated child exited.
         """
         from run.infra import process_identity_matches, process_snapshot
         recovered = []
@@ -122,13 +125,14 @@ class IntegrationStore:
             rows = db.execute(
                 "SELECT * FROM card_integrations i WHERE session_key=? AND "
                 "(response_closed=0 OR EXISTS(SELECT 1 FROM card_tool_executions t "
-                "WHERE t.integration_id=i.integration_id AND t.execution_live=1 "
-                "AND t.status!='interrupted_unknown'))", (self.key,),
+                "WHERE t.integration_id=i.integration_id AND t.execution_live=1))", (self.key,),
             ).fetchall()
             for row in rows:
                 if row["owner_pid"] == os.getpid() and row["owner_token"] == _OWNER:
                     continue
                 record = json.loads(row["record_json"])
+                if row["response_closed"] and (record.get("recovery") or {}).get("tools_detached"):
+                    continue
                 expected = record.get("owner_identity") or {}
                 snapshot = process_snapshot(row["owner_pid"])
                 matches = process_identity_matches(snapshot,
@@ -141,8 +145,9 @@ class IntegrationStore:
                     # effect. The recovery worker claims this same integration.
                     continue
                 executions = db.execute("SELECT * FROM card_tool_executions WHERE integration_id=? "
-                                         "AND execution_live=1 AND status!='interrupted_unknown'",
+                                         "AND execution_live=1",
                                          (row["integration_id"],)).fetchall()
+                retired_tokens = 0
                 for execution in executions:
                     self.store.append(
                         self.source, self.session_id, row["integration_id"], "tool_result", {
@@ -153,10 +158,28 @@ class IntegrationStore:
                                        "message": "宿主已退出；副作用与隔离执行状态未知，不自动重放"}},
                         }, tool_call_id=execution["tool_call_id"],
                         event_key=f"{execution['execution_id']}:owner_lost", transaction=db)
+                    # Keep RAW and the self-contained unknown-result notice.
+                    # Pending native calls/notices must not reach another request.
+                    parameters = (self.key, row["integration_id"], execution["tool_call_id"],
+                                  f"{execution['execution_id']}:owner_lost")
+                    predicate = ("session_key=? AND integration_id=? AND tool_call_id=? "
+                                 "AND event_key IS NOT ? AND token_active=1 "
+                                 "AND view_kind IN ('tool_call','tool_result')")
+                    retired_tokens += db.execute(
+                        "SELECT coalesce(sum(view_tokens),0) FROM context_cards WHERE " + predicate,
+                        parameters,
+                    ).fetchone()[0]
+                    db.execute("UPDATE context_cards SET token_active=0,view_revision=view_revision+1 "
+                               "WHERE " + predicate, parameters)
                     db.execute("UPDATE card_tool_executions SET status='interrupted_unknown' "
                                "WHERE execution_id=?", (execution["execution_id"],))
+                if retired_tokens:
+                    db.execute("UPDATE card_sessions SET active_tokens=active_tokens-?,"
+                               "view_epoch=view_epoch+1,updated_at=? WHERE session_key=?",
+                               (retired_tokens, utc_now(), self.key))
                 record.update(recovery={"reason": "owner_lost", "unknown_executions": len(executions),
-                                        "replay_permitted": False, "observed_at": utc_now()})
+                                        "replay_permitted": False, "tools_detached": True,
+                                        "observed_at": utc_now()})
                 # A previously closed partial/cancelled response keeps its true
                 # terminal status/time. Recovery describes the orphan execution,
                 # not a second fabricated response completion.
