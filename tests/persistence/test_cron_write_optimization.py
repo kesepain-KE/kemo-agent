@@ -24,6 +24,13 @@ from run.scheduler import CronStore, normalize_task
 from run.infra import LogStore
 
 
+def _recent_executed_at(minutes_ago: int = 0, seconds_ago: int = 0) -> str:
+    """Retention pruning deletes old rows, so fixtures must stay inside it."""
+    return (datetime.now(BEIJING) - timedelta(
+        minutes=minutes_ago, seconds=seconds_ago,
+    )).isoformat()
+
+
 def _system_task(root: Path, task_id: str = "expand_update") -> tuple[CronStore, Path]:
     store = CronStore(root, "__system__", system=True)
     store.create(
@@ -49,7 +56,7 @@ def test_one_hundred_successes_are_persisted_as_one_aggregate() -> None:
         for index in range(100):
             aggregator.record_success(
                 {
-                    "executed_at": f"2026-08-16T12:{index // 60:02d}:{index % 60:02d}+08:00",
+                    "executed_at": _recent_executed_at(index % 60),
                     "user": "__system__",
                     "task_id": "expand_update",
                     "status": "success",
@@ -75,7 +82,7 @@ def test_error_flushes_pending_successes_and_is_immediately_durable() -> None:
         root = Path(directory)
         aggregator = CronLogAggregator(root, flush_seconds=3600)
         common = {
-            "executed_at": "2026-08-16T12:00:00+08:00",
+            "executed_at": _recent_executed_at(1),
             "user": "alice",
             "task_id": "perception_update",
             "duration_ms": 10,
@@ -86,7 +93,7 @@ def test_error_flushes_pending_successes_and_is_immediately_durable() -> None:
         aggregator.record_immediate(
             {
                 **common,
-                "executed_at": "2026-08-16T12:00:05+08:00",
+                "executed_at": _recent_executed_at(seconds_ago=5),
                 "status": "failed",
                 "result": {},
                 "error": {"type": "RuntimeError", "message": "boom"},
@@ -108,7 +115,7 @@ def test_due_success_window_flushes_without_another_record() -> None:
         aggregator = CronLogAggregator(root, flush_seconds=10)
         aggregator.record_success(
             {
-                "executed_at": "2026-08-16T12:00:00+08:00",
+                "executed_at": _recent_executed_at(),
                 "user": "alice",
                 "task_id": "expand_update",
                 "status": "success",
@@ -126,7 +133,7 @@ def test_failed_success_flush_does_not_suppress_immediate_error() -> None:
         aggregator = CronLogAggregator(Path(directory), flush_seconds=3600)
         aggregator.record_success(
             {
-                "executed_at": "2026-08-16T12:00:00+08:00",
+                "executed_at": _recent_executed_at(seconds_ago=5),
                 "user": "alice",
                 "task_id": "expand_update",
                 "status": "success",
