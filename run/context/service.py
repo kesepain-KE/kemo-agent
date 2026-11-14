@@ -45,6 +45,7 @@ def context_status(request: dict[str, Any], *, root: Path | None = None,
         output_reserve=min(output_reserve, max_output_tokens) if max_output_tokens else output_reserve,
     )
     limit = capacity["effective_token_limit"]
+    compression_ratio = agents.get("token_compression_ratio", .3)
     tools = [tool.model_dump(mode="json", exclude_none=True) for tool in registry.protocol_tools()]
     occupancy = RequestOccupancy(
         estimate_tokens(bundle.text) if bundle.text else 0, snapshot.history_tokens if snapshot else 0,
@@ -61,11 +62,15 @@ def context_status(request: dict[str, Any], *, root: Path | None = None,
             "dynamic_tokens": occupancy.dynamic_tokens, "schema_tokens": occupancy.schema_tokens,
             "estimated_tokens_before": occupancy.total, "input_budget": limit,
             "effective_token_limit": limit, "capability_unknown": capacity["capability_unknown"],
+            "context_window_tokens": capacity["context_window_tokens"],
+            "context_window_source": capacity["context_window_source"],
+            "input_limit_source": capacity["input_limit_source"],
             "cards_active": len(snapshot.cards) if snapshot else 0,
             "last_seq": snapshot.last_seq if snapshot else 0,
             "view_epoch": snapshot.view_epoch if snapshot else 0,
             "compression_needed": occupancy.should_compact(),
             "compression_threshold": int(limit * .8),
+            "compression_target_tokens": int(occupancy.history_tokens * compression_ratio),
             "summary": {"exists": summary is not None,
                         "card_id": summary.card_id if summary else None,
                         "compression_stage": summary.compression_stage if summary else 0},
@@ -73,6 +78,6 @@ def context_status(request: dict[str, Any], *, root: Path | None = None,
         },
         "prompt": bundle.diagnostics,
         "policy": {"token_limit": configured, "output_reserve": capacity["output_reserve"],
-                   "compression_ratio": agents.get("token_compression_ratio", .3),
+                   "compression_ratio": compression_ratio,
                    "trigger_ratio": .8, "compression_unit": "card"},
     }

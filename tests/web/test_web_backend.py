@@ -431,6 +431,7 @@ class WebBackendTests(unittest.TestCase):
                 "provider_id": "test",
                 "provider_model": "mapped-upstream",
                 "task": "llm",
+                "limits": {"context_window": 2000000, "max_input_tokens": 1500000},
                 "reasoning": {
                     "supported": True,
                     "efforts": ["minimal", "low", "medium", "high", "max"],
@@ -458,8 +459,20 @@ class WebBackendTests(unittest.TestCase):
                 "GET",
                 "/api/users/alice/provider/model-capabilities?model=mapped-model&refresh=true",
             )
+            overview = self.request(app, "GET", "/api/users/alice/overview")
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(overview.status_code, 200, overview.text)
+        snapshot = overview.json()["context_snapshot"]
+        self.assertEqual(snapshot["capacity_tokens"], 1000000)
+        self.assertEqual(snapshot["input_limit_tokens"], 1500000)
+        self.assertEqual(snapshot["compression_threshold"], 1200000)
+        self.assertEqual(snapshot["input_limit_source"], "max_input_tokens")
+        self.assertEqual(snapshot["context_window_tokens"], 2000000)
+        self.assertEqual(snapshot["context_window_source"], "model")
+        self.assertEqual(snapshot["output_reserve_tokens"], 10000)
+        self.assertEqual(snapshot["compression_ratio"], .3)
+        self.assertEqual(snapshot["compression_target_tokens"], 0)
         self.assertEqual(response.headers["cache-control"], "no-store")
         payload = response.json()
         self.assertEqual(
@@ -5373,6 +5386,10 @@ class WebBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             context_window["tokens"]["capacity_tokens"],
+            overview.json()["context"]["limit"],
+        )
+        self.assertEqual(
+            context_window["tokens"]["input_limit_tokens"],
             overview.json()["context"]["limit"] - 10000,
         )
         self.assertEqual(context_window["conversation"]["cards_active"], 2)

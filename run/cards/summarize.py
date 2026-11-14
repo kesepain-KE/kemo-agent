@@ -216,13 +216,9 @@ class ProviderSummarizer:
             ):
                 if type(value) is int and value > 0:
                     limits.append(value)
-            for value in (
-                getattr(capabilities_limits, "context_window", None),
-                extension_limits.get("context_window"),
-                self.configured_token_limit,
-            ):
-                if type(value) is int and value > 0:
-                    limits.append(value - input_tokens)
+            if (capacity["context_window_source"] == "model"
+                    or capacity["capability_unknown"] and self.configured_token_limit is not None):
+                limits.append(capacity["context_window_tokens"] - input_tokens)
             if not limits:
                 return current
             return max(current, min(_MAX_RECOVERY_OUTPUT_TOKENS, *limits))

@@ -678,6 +678,12 @@ class ProviderTests(ServerMixin, unittest.TestCase):
             },
         )
         self.assertEqual(declared_input_token_limit(legacy), 120_000)
+        typed.limits.context_window = 100_000
+        self.assertEqual(declared_input_token_limit(typed), 150_000)
+        legacy.limits.context_window = 80_000
+        self.assertEqual(declared_input_token_limit(legacy), 120_000)
+        legacy.extensions["limits"].pop("max_input_tokens")
+        self.assertEqual(declared_input_token_limit(legacy), 80_000)
         self.assertIsNone(declared_input_token_limit(None))
 
     def test_chat_missing_usage_is_marked_estimated(self) -> None:

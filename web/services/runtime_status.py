@@ -128,20 +128,28 @@ class RuntimeStatusServiceMixin:
         summary_tokens = sum(card.view_tokens for card in history.cards
                              if card.view_kind == "summary") if history else 0
         used, capacity = value["estimated_tokens_before"], value["effective_token_limit"]
+        window = status["policy"]["token_limit"]
         snapshot = {
             "available": True, "source": "cardstream", "measurement": "local_estimate",
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "system_prompt_tokens": value["fixed_tokens"], "tool_schema_tokens": value["schema_tokens"],
             "conversation_tokens": value["history_tokens"] - summary_tokens,
             "summary_tokens": summary_tokens, "other_tokens": value["dynamic_tokens"],
-            "total_tokens": used, "capacity_tokens": capacity,
-            "percent": round(100 * used / capacity, 4), "cards_active": value["cards_active"],
+            "total_tokens": used, "capacity_tokens": window,
+            "input_limit_source": value["input_limit_source"],
+            "input_limit_tokens": capacity, "compression_threshold": value["compression_threshold"],
+            "context_window_tokens": value["context_window_tokens"],
+            "context_window_source": value["context_window_source"],
+            "output_reserve_tokens": status["policy"]["output_reserve"],
+            "compression_ratio": status["policy"]["compression_ratio"],
+            "compression_target_tokens": value["compression_target_tokens"],
+            "percent": round(100 * used / window, 4), "cards_active": value["cards_active"],
             "last_seq": value["last_seq"], "view_epoch": value["view_epoch"],
             "active_integrations": active_integrations,
         }
         return {"selected": bool(session_id), "available": not session_id or bool(record),
                 "engine": "cardstream", "used_tokens": used, "max_tokens": capacity,
-                "percent": snapshot["percent"], "active_integrations": active_integrations,
+                "percent": round(100 * used / capacity, 4), "active_integrations": active_integrations,
                 "integration_count": record["integration_count"] if record else 0,
                 "cards_active": value["cards_active"], "last_seq": value["last_seq"],
                 "compression_threshold": value["compression_threshold"], "source": "cardstream",

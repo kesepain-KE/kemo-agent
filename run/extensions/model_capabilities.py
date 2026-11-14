@@ -39,16 +39,15 @@ class ReasoningSelection:
 def declared_input_token_limit(
     capabilities: ModelCapabilities | None,
 ) -> int | None:
-    """Return the most conservative declared input limit for a model.
+    """Prefer a declared input limit and fall back to the model context window.
 
     Older Kemo gateways put the limit in ``extensions.limits`` while newer
     capability responses expose it in the typed ``limits`` object.  Runtime
     context protection must understand both forms, but a malformed optional
     extension must never make an otherwise usable capability response fail.
 
-    ``context_window`` is used as a conservative input limit when an explicit
-    ``max_input_tokens`` is not available.  If both are present, the smaller
-    value wins because the Provider must satisfy both declarations.
+    ``context_window`` is only used when neither location declares an explicit
+    ``max_input_tokens``.
     """
 
     if capabilities is None:
@@ -67,21 +66,19 @@ def declared_input_token_limit(
             candidates.append(parsed)
 
     limits = getattr(capabilities, "limits", None)
-    if limits is not None:
-        add_candidate(getattr(limits, "max_input_tokens", None))
-        add_candidate(getattr(limits, "context_window", None))
-
     extensions = getattr(capabilities, "extensions", {})
     extension_limits = (
         extensions.get("limits")
         if isinstance(extensions, dict)
         else None
     )
-    if isinstance(extension_limits, dict):
-        add_candidate(extension_limits.get("max_input_tokens"))
-        add_candidate(extension_limits.get("context_window"))
-
-    return min(candidates) if candidates else None
+    for name in ("max_input_tokens", "context_window"):
+        add_candidate(getattr(limits, name, None))
+        if isinstance(extension_limits, dict):
+            add_candidate(extension_limits.get(name))
+        if candidates:
+            return min(candidates)
+    return None
 
 
 def model_output_token_limit(
@@ -105,7 +102,7 @@ def context_input_budget(
     configured_limit: int, capabilities: ModelCapabilities | None,
     *, output_reserve: int = 0,
 ) -> dict[str, Any]:
-    """Input-only limits and shared context windows are distinct constraints."""
+    """Prefer an input declaration, then a model window, then configuration."""
     if type(configured_limit) is not int or configured_limit < 1:
         raise ValueError("Configured context capacity must be a positive integer")
     if type(output_reserve) is not int or output_reserve < 0:
@@ -116,21 +113,28 @@ def context_input_budget(
         extension_limits = {}
     if output_reserve:
         output_reserve = model_output_token_limit(capabilities, configured=output_reserve) or output_reserve
-    candidates = []
+    input_limits = []
     for value in (getattr(limits, "max_input_tokens", None),
                   extension_limits.get("max_input_tokens")):
         if type(value) is int and value > 0:
-            candidates.append(value)  # Already input-only; do not subtract again.
+            input_limits.append(value)  # Already input-only; do not subtract again.
+    windows = []
     for value in (getattr(limits, "context_window", None),
                   extension_limits.get("context_window")):
         if type(value) is int and value > 0:
-            candidates.append(max(0, value - output_reserve))
-    declared = min(candidates) if candidates else None
-    effective = min([max(0, configured_limit - output_reserve), *candidates])
+            windows.append(value)
+    window = min(windows) if windows else configured_limit
+    declared = (min(input_limits) if input_limits
+                else max(0, window - output_reserve) if windows else None)
+    effective = declared if declared is not None else max(0, configured_limit - output_reserve)
     if effective < 1:
         raise ValueError("输出预留已占满上下文容量")
     return {
         "configured_token_limit": configured_limit,
+        "context_window_tokens": window,
+        "context_window_source": "model" if windows else "configuration",
+        "input_limit_source": ("max_input_tokens" if input_limits
+                               else "context_window" if windows else "configuration"),
         "provider_declared_input_limit": declared,
         "effective_token_limit": effective,
         "output_reserve": output_reserve,
@@ -180,9 +184,16 @@ def cached_model_capabilities(
     """Read current evidence without probing the network from a status page."""
     key = _cache_key(runtime_provider, str(runtime_provider.get("model") or ""), capabilities_url)
     with _capability_lock:
-        cached = _capability_cache.get(key)
-        return (cached.capabilities
-                if cached is not None and cached.fresh_until > time.monotonic() else None)
+        now = time.monotonic()
+        # Catalogs may provide a custom capability URL. Status readers know the
+        # selected route and model, and can reuse its declaration without I/O.
+        candidates = [
+            cached for cache_key, cached in _capability_cache.items()
+            if (cache_key == key if capabilities_url else cache_key[:4] == key[:4])
+            and cached.fresh_until > now
+        ]
+        cached = max(candidates, key=lambda value: value.fresh_until, default=None)
+        return cached.capabilities if cached is not None else None
 
 
 def clear_model_capability_cache(

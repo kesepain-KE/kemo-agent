@@ -231,6 +231,14 @@ def build_overview(
                 "capacity_tokens": _nonnegative_int(
                     context_snapshot.get("capacity_tokens")
                 ),
+                "input_limit_source": context_snapshot.get("input_limit_source"),
+                "input_limit_tokens": context_snapshot.get("input_limit_tokens"),
+                "compression_threshold": context_snapshot.get("compression_threshold"),
+                "context_window_tokens": context_snapshot.get("context_window_tokens"),
+                "context_window_source": context_snapshot.get("context_window_source"),
+                "output_reserve_tokens": context_snapshot.get("output_reserve_tokens"),
+                "compression_ratio": context_snapshot.get("compression_ratio"),
+                "compression_target_tokens": context_snapshot.get("compression_target_tokens"),
                 "percent": min(
                     100.0, float(context_snapshot.get("percent") or 0.0)
                 ),

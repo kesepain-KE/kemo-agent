@@ -547,7 +547,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             if cancel_event.is_set():
                 raise RetryCancelled("用户停止了当前整合")
             yield RunEvent(type="context_window", metadata={
-                "context_snapshot": request_context_snapshot(barrier),
+                "context_snapshot": request_context_snapshot(
+                    barrier, capacity=capacity, compression_ratio=ratio),
             })
             integration.request_started()
             request_inflight = True

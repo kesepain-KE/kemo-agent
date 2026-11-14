@@ -41,7 +41,7 @@ def test_output_reservation_respects_model_maximum_before_subtracting_context():
     )
     budget = context_input_budget(10000, capabilities, output_reserve=8192)
     assert budget["output_reserve"] == 512
-    assert budget["effective_token_limit"] == 5488
+    assert budget["effective_token_limit"] == 7000
 
 
 def test_summary_output_fits_the_same_model_as_the_main_request(store):
@@ -621,15 +621,17 @@ def test_single_oversized_card_splits_only_readonly_input_and_preserves_raw(stor
     assert store.raw_page("web", "s1")[0].raw_payload_json == before.cards[0].raw_payload_json
 
 
-@pytest.mark.parametrize(("limits", "extension_limits", "max_tokens", "expected_output", "expected_input"), [
+@pytest.mark.parametrize(("limits", "extension_limits", "max_tokens", "expected_output", "expected_input", "expected_window"), [
     ({"max_input_tokens": 7000, "context_window": 6000, "max_output_tokens": 512},
-     {}, None, 512, 5488),
-    ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, None, 384000, 990000),
-    ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, 16384, 16384, 990000),
-    ({}, {}, None, None, 990000),
+     {}, None, 512, 7000, 6000),
+    ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, None, 384000, 1000000, 1000000),
+    ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, 16384, 16384, 1000000, 1000000),
+    ({"context_window": 2000000, "max_input_tokens": 1500000}, {}, None, None, 1500000, 2000000),
+    ({}, {"context_window": 2000000}, None, None, 1990000, 2000000),
+    ({}, {}, None, None, 990000, 1000000),
 ])
 def test_main_runtime_uses_the_effective_output_reservation(
-    root, monkeypatch, limits, extension_limits, max_tokens, expected_output, expected_input,
+    root, monkeypatch, limits, extension_limits, max_tokens, expected_output, expected_input, expected_window,
 ):
     path = root / "config/global_config.yaml"
     config = json.loads(path.read_text("utf-8"))
@@ -659,12 +661,17 @@ def test_main_runtime_uses_the_effective_output_reservation(
         root=root, provider_factory=lambda _: Provider(),
     ))
     assert events[-1].type == "done", events[-1].error
+    snapshot = next(event.metadata["context_snapshot"] for event in events if event.type == "context_window")
+    assert snapshot["capacity_tokens"] == 1000000
+    assert snapshot["input_limit_tokens"] == expected_input
+    assert snapshot["compression_threshold"] == int(expected_input * .8)
     assert len(requests) == 1 and requests[0].generation.max_output_tokens == expected_output
     assert estimate_request_tokens(requests[0].system_prompt, requests[0].input, requests[0].tools) <= expected_input
     from run.context.service import context_status
     status = context_status(
         {"user": "alice", "source": "web", "session_id": "capacity"}, root=root)
     assert status["context"]["effective_token_limit"] == expected_input
+    assert status["context"]["context_window_tokens"] == expected_window
     assert status["policy"]["output_reserve"] == min(expected_output or 10000, 10000)
     assert status["context"]["capability_unknown"] is (not limits and not extension_limits)
     monkeypatch.setenv("KEMO_API_KEY", "different-fake-identity")
@@ -673,6 +680,63 @@ def test_main_runtime_uses_the_effective_output_reservation(
     assert isolated["context"]["capability_unknown"] is True
     assert isolated["context"]["effective_token_limit"] == 1000000 - min(max_tokens or 10000, 10000)
     assert len(requests) == 1, "reading diagnostics must not make model requests"
+
+
+def test_switching_models_updates_compression_capacity_without_changing_display_window(root):
+    from run.context.service import context_status
+
+    path = root / "config/global_config.yaml"
+    config = json.loads(path.read_text("utf-8"))
+    config["agents"].update(token_limit=1000000, output_reserve=10000, token_compression_ratio=.3)
+    path.write_text(json.dumps(config), "utf-8")
+    user_path = root / "users/alice/user_config.yaml"
+    user_config = json.loads(user_path.read_text("utf-8"))
+    declarations = {
+        "fake": {"context_window": 2000000, "max_input_tokens": 1500000},
+        "small": {"context_window": 64000},
+        "unknown": {},
+    }
+    probes = []
+
+    class Provider:
+        def capabilities(self, model):
+            probes.append(model)
+            return ModelCapabilities.model_validate({
+                "protocol_version": "2.0", "model": model, "provider_id": "fake",
+                "provider_model": model, "limits": declarations[model],
+            })
+
+        def create(self, request):
+            return reply(request)
+
+    for model, expected in (("fake", 1500000), ("small", 54000),
+                            ("unknown", 990000), ("fake", 1500000)):
+        user_config["provider"]["model"] = model
+        user_path.write_text(json.dumps(user_config), "utf-8")
+        events = list(iter_request_events(
+            {"user": "alice", "source": "web", "session_id": "switch-model", "prompt": "work"},
+            root=root, provider_factory=lambda _: Provider(),
+        ))
+        assert events[-1].type == "done", events[-1].error
+        snapshot = next(event.metadata["context_snapshot"] for event in events
+                        if event.type == "context_window")
+        assert snapshot["capacity_tokens"] == 1000000
+        assert snapshot["input_limit_tokens"] == expected
+        assert snapshot["compression_ratio"] == config["agents"]["token_compression_ratio"]
+        assert snapshot["output_reserve_tokens"] == 10000
+        assert snapshot["compression_target_tokens"] == int(
+            (snapshot["conversation_tokens"] + snapshot["summary_tokens"])
+            * snapshot["compression_ratio"]
+        )
+        status = context_status(
+            {"user": "alice", "source": "web", "session_id": "switch-model"}, root=root,
+        )
+        assert status["context"]["effective_token_limit"] == expected
+        assert status["policy"]["token_limit"] == 1000000
+        assert status["context"]["compression_target_tokens"] == int(
+            status["context"]["history_tokens"] * status["policy"]["compression_ratio"]
+        )
+    assert probes == ["fake", "small", "unknown"]
 
 
 def test_failed_compaction_still_records_its_received_usage_in_the_run(root):

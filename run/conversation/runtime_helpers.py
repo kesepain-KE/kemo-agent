@@ -250,7 +250,7 @@ def observed_exchange(stream, *, store, source, session_id, integration_id, inte
     return accepted, provider_retry_recovery
 
 
-def request_context_snapshot(barrier):
+def request_context_snapshot(barrier, *, capacity, compression_ratio):
     occupancy = barrier.occupancy
     history = barrier.snapshot.history
     summary_tokens = sum(
@@ -268,8 +268,16 @@ def request_context_snapshot(barrier):
         "summary_tokens": summary_tokens,
         "other_tokens": occupancy.dynamic_tokens,
         "total_tokens": total_tokens,
-        "capacity_tokens": occupancy.input_limit,
-        "percent": round(total_tokens * 100 / occupancy.input_limit, 4),
+        "capacity_tokens": capacity["configured_token_limit"],
+        "input_limit_tokens": occupancy.input_limit,
+        "input_limit_source": capacity["input_limit_source"],
+        "context_window_tokens": capacity["context_window_tokens"],
+        "context_window_source": capacity["context_window_source"],
+        "output_reserve_tokens": capacity["output_reserve"],
+        "compression_threshold": int(occupancy.input_limit * .8),
+        "compression_ratio": compression_ratio,
+        "compression_target_tokens": int(occupancy.history_tokens * compression_ratio),
+        "percent": round(total_tokens * 100 / capacity["configured_token_limit"], 4),
         "cards_active": len(history.cards),
         "last_seq": history.last_seq,
     }
