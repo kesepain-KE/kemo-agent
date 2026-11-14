@@ -78,11 +78,11 @@
     },
     {
       "id": "tool-result",
-      "claim": "[机制] 主整合工具结果完整写入 CardStream RAW，由 VIEW 压缩和请求容量检查管理；子代理内联结果预算为 {limit:,} 字符（`run/tools/__init__.py` 的 `MAX_TOOL_RESULT_CHARS`）。",
+      "claim": "[机制] 主整合工具结果完整写入 CardStream RAW；主整合 VIEW 与子代理内联结果统一预算为 {limit:,} JSON 字符（`run/tools/result_limits.py` 的 `MAX_TOOL_RESULT_CHARS`）。",
       "facts": {
         "limit": {
           "kind": "python",
-          "path": "run/tools/__init__.py",
+          "path": "run/tools/result_limits.py",
           "symbol": "MAX_TOOL_RESULT_CHARS",
           "key": []
         }
@@ -99,12 +99,37 @@
         {
           "path": "run/tools/__init__.py",
           "symbol": "_enforce_tool_result_limit",
-          "ast_sha256": "5693f664bd1b8c196a3789b39b557866108a2c17e835ecf776d50cd616c21102"
+          "ast_sha256": "1a6b19d8f9ae457628ba4b258eb0079aa5008623d3a0b4c78ef1f88fc6047945"
         },
         {
           "path": "run/tools/runtime.py",
           "symbol": "ToolRuntime._execute",
           "ast_sha256": "b21d5f19260a30581dcb73e2e85a27518807540c57fa5a0bfae2f42f0320d9ba"
+        },
+        {
+          "path": "run/tools/result_limits.py",
+          "symbol": "limit_tool_result",
+          "ast_sha256": "006e95162342b766adbd10083e3c0e0da50e49f392a095561f99c4bad81ad880"
+        },
+        {
+          "path": "run/tools/result_limits.py",
+          "symbol": "tool_result_card_view",
+          "ast_sha256": "d5dc0cf4330f594fa05777bfef109f02bf6918967dd034189053a555e8880aeb"
+        },
+        {
+          "path": "run/tools/result_limits.py",
+          "symbol": "limit_tool_result_items",
+          "ast_sha256": "6d96ee5dd07ddd3db645e5f0062335631ec2073432cbae16333501f5aa5300e1"
+        },
+        {
+          "path": "run/cards/store.py",
+          "symbol": "CardStore.append",
+          "ast_sha256": "fb0e82e2a5cbaed16a61728dd58eb3ccee7904515aaa4bfea44bcfc308c55792"
+        },
+        {
+          "path": "run/cards/store.py",
+          "symbol": "CardStore.remeter",
+          "ast_sha256": "61e2cd19feb58f58d4cefcd112b2791981e826bccd1bc74c95cb69343d19c21e"
         }
       ]
     },

@@ -327,14 +327,30 @@ file 动态读取、network get/read、shell status、subagent_dispatch list/sta
 
 ## 工具结果大小
 
-`run/tools/__init__.py::MAX_TOOL_RESULT_CHARS` 当前为 100,000。结果先序列化为 JSON 字符串再计算字符数；这是内联回填预算，不是已执行动作的业务失败阈值。
-超过预算且存在有效 root/user 上下文时，完整结果由 `run/tools/result_artifacts.py` 保存，返回
-有界回执 `execution_completed=true`、`content_omitted=true`、原结果字符数与 artifact 路径/校验信息。
-原 `ok=false` 仍是业务失败；`execution_completed` 只说明调用已执行完，不证明业务成功。
-需要正文时按 artifact.path 分页核对，不重复执行原动作。
+`run/tools/result_limits.py::MAX_TOOL_RESULT_CHARS` 当前为 100,000，统一用于所有内置、
+用户插件和拓展的模型可见工具结果。按 `ensure_ascii=false` 的 JSON 序列化字符数计量，
+包含嵌套内容和转义；这是每次结果的内联回填预算，不是 token 数或业务失败阈值，
+也不是可由模型传参放大的工具选项。
 
-缺少有效上下文、完整结果文件无法落地时仍抛 `ToolResultTooLargeError`；它不计普通连续失败，
-但工具可能已产生副作用，仍须先核对状态，不得沿用“缩小范围后重试”的通用提示。
+主对话在 CardStore 追加结果时保留完整 RAW，统一生成有界 VIEW，再按 VIEW 计量和
+组装请求；同步结果、运行中通知、迟到结果和被摘要吸收调用后的独立结果都走此入口。
+预算覆盖整个结果卡片载荷；过长的重复调用参数/解析诊断只在 VIEW 中省略，RAW 保留，
+原生 tool call/result 配对不受影响。已有对话在下次请求前更新 VIEW 策略并重新计量，
+不改 RAW 或其原始 token 证据。子代理执行入口及最终请求边界复用同一组件，
+同时覆盖结果包装、媒体处理和续跑快照中的历史工具结果。
+
+超限时，完整结果由 `run/tools/result_artifacts.py` 保存到当前用户
+`download/tool_results/`，模型收到含部分预览、`content_omitted=true`、
+原字符数、限额和 artifact 路径/校验信息的回执。
+原 `ok=false` 或缺显式 `ok=true` 仍不算业务成功；`execution_completed` 只说明调用
+是否已结束，运行中通知保持 `false`，不能因为正文被省略而重复启动工具。
+需要正文时按 artifact.path 提取少量字段或字符；多行文件可用 `file.read_range`
+小范围读取，长单行 JSON 应通过 `shell` 解析并限制输出，避免把整文件读回上下文。
+
+主对话导出文件失败时，完整结果仍保存在 RAW，VIEW 明示 `artifact_error` 和
+`raw_card_id`，不把结果保存失败伪装成原工具失败。没有 RAW 归档的直接执行或子代理
+结果若缺有效上下文、无法保存完整文件，仍抛 `ToolResultTooLargeError`；它不计普通
+连续失败，已执行副作用须先核对，不能盲目重跑。
 expand 不另设 256k 事后失败阈值，使用同一回传边界。
 
 常见处理方式：

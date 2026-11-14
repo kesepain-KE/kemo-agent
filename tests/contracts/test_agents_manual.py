@@ -136,7 +136,7 @@ def test_same_shell_returns_with_changed_condition_are_rejected(isolated_reposit
     assert any("claim shell-selection: source behavior changed" in item for item in result["errors"])
 
 
-def test_main_result_truncation_is_rejected(isolated_repository: Path) -> None:
+def test_main_raw_preservation_bypass_is_rejected(isolated_repository: Path) -> None:
     path = isolated_repository / "run/tools/__init__.py"
     text = path.read_text("utf-8")
     assert "if preserve_result:" in text

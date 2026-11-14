@@ -216,8 +216,8 @@ Kemo 网关状态是独立只读连接，未激活不得猜测地址、扫描端
 [机制 / L2] Schema 未提供的参数不能发送；工具开关、白名单和知识开关仍要满足。返回 status 要区分 limited、temporarily_unavailable、identical_call_blocked、duplicate_blocked；详细分支见 `knowledge/global/modules/plugin-development.md`。查询调用每次真实执行以取得最新状态；已知副作用按同签名防重，拦截回执不包含旧结果。只有返回对象显式 `ok=true` 才算业务成功；缺失或非布尔真值按失败统计且不缓存，不能外层包装成成功。子代理超时/额度停止保留部分结论但不是成功确认，插件 duplicate/cached 标记须连同模型可见解释判读。
 
 <!-- rule:tool-result -->
-[机制] 主整合工具结果完整写入 CardStream RAW，由 VIEW 压缩和请求容量检查管理；子代理内联结果预算为 100,000 字符（`run/tools/__init__.py` 的 `MAX_TOOL_RESULT_CHARS`）。
-主整合结果始终携带 original_call、tool_call_id、execution_id 和执行状态，原调用被摘要吸收也能独立理解，快照不是新的执行指令。子代理超限时优先保存完整结果文件并返回有界回执，缺有效上下文或落文件失败才报 ToolResultTooLargeError。已执行不等于业务成功，原 ok=false 或缺显式 ok=true 不能提升为成功；收到 execution_completed 先核对结果，不要盲目重试。
+[机制] 主整合工具结果完整写入 CardStream RAW；主整合 VIEW 与子代理内联结果统一预算为 100,000 JSON 字符（`run/tools/result_limits.py` 的 `MAX_TOOL_RESULT_CHARS`）。
+主整合结果始终携带 original_call、tool_call_id、execution_id 和执行状态，原调用被摘要吸收也能独立理解，快照不是新的执行指令。超限时保存完整结果文件，模型只接收部分预览、省略标记与路径；过长重复参数仅省略 VIEW，RAW 不变。旧对话在下一请求前更新 VIEW 并重新计量；子代理请求边界也覆盖包装和续跑结果。主整合导出失败仍保留 RAW 并明示错误，无 RAW 归档的调用缺有效上下文或落文件失败才报 ToolResultTooLargeError。已执行不等于业务成功，原 ok=false 或缺显式 ok=true 不能提升为成功；收到 execution_completed 先核对结果，不要盲目重试。
 <!-- /rule -->
 
 ### 超时与真实结束
@@ -326,6 +326,7 @@ Web 服务确认宿主已退出、原会话代际有效且无状态未知的外�
 [机制] CardStream 配置基线：`agents.token_limit=1000000`、`agents.output_reserve=10000`、`agents.token_compression_ratio=0.3`；主请求前占用超过有效输入上限的80%时自动压缩。比例是软目标，实际容量/缩减与原子提交是硬门槛；明确超限才原整合压缩恢复，不重跑工具。预防压缩失败而请求仍可用时保留原 VIEW 继续，详见架构专题。
 来源：`config/global_config.yaml`，用户覆盖后以有效配置为准。对话历史由每用户 `cards.sqlite3` 管理，RAW 追加后不可变；VIEW 可压缩。目标是有效历史Token乘比例，固定上下文、动态尾部与工具Schema另行计量；所有历史卡片均可压缩，候选验证后原子提交，失败不改变已提交VIEW。上游上下文超限恢复只在请求实际缩小后播报重试，容量不可缩小时保留原超限诊断结束，见 `provider/retry.py` 与 `run/conversation/provider_exchange.py`。旧window、轮数配置与context_manage退出运行，不读取、迁移或删除旧历史文件。
 主请求与子智能体的上下文预留独立于模型生成上限：缺省预留10000，生成上限取显式配置或模型声明；上限未知时省略，不按预留量强制截断正文、思考或工具参数。实际生成上限低于预留量时才减少预留；摘要请求仍按自身输出额度计算容量。历史目标还受剩余容量限制。
+有效输入容量依次采用当前用户所选模型的 max_input_tokens、context_window、配置 token_limit；最大输入直接使用，后两项扣除实际输出预留。网页窗口显示配置 token_limit，自动压缩仍按有效输入容量的80%触发，历史保留目标使用配置压缩比例。
 过大的前缀先按完整卡片分片；单张超大卡片仅拆只读摘要输入并保留来源偏移，RAW 不截断，临时摘要不提前提交，全部片段共用压缩时限与额外重试额度；
 提交前检查完整请求容量，失败保留原VIEW及独立新到卡片。原生媒体载荷不按文字Token计量，用量统计仍以实际回执为准。
 <!-- /rule -->
