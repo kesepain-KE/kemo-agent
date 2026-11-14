@@ -32,20 +32,20 @@ describe('capabilityReferences', () => {
       'expand/share/calendar', 'users/demo/user_skills/release', 'plugins/clock',
     ])
     const prompt = capabilityReferencePrompt(result[0])
+    expect(prompt).toContain('当前已指定能力“共享日历”')
     expect(prompt).toContain('"expand/share/calendar/operations.md"')
-    expect(prompt).toContain('expand_call')
-    expect(prompt).toContain('scope="shared"、module="calendar"')
-    expect(prompt).toContain('根据真实工具返回检查是否成功')
+    expect(prompt).toContain('拓展 shared:calendar')
+    expect(prompt).toContain('优先读取能力操作手册及相关文档')
   })
 
-  it('为三类能力生成稳定且互不冲突的引用标记', () => {
+  it('生成简短能力提示并保留旧草稿的引用标记识别', () => {
     const item = { id: 'skill:user:release', kind: 'skill', scope: 'user', name: 'release', title: '发布检查', description: '', path: 'users/demo/user_skills/release', status: '已启用' } as const
     expect(capabilityReferenceMarker(item)).toBe('[技能引用 user:release]')
     const prompt = capabilityReferencePrompt(item)
-    expect(prompt).toMatch(/^\[技能引用 user:release\] 发布检查\n/)
+    expect(prompt).toMatch(/^当前已指定能力“发布检查”/)
     expect(prompt).toContain('"users/demo/user_skills/release/SKILL.md"')
-    expect(prompt).toContain('前置条件、操作顺序、分支、限制和输出格式')
-    expect(prompt).toContain('按技能的验收标准检查真实产物')
+    expect(prompt).toContain('充分使用指定的能力')
+    expect(prompt).not.toContain('\n')
   })
 
   it('没有操控说明路径时要求读取清单确认入口，不猜测默认文件名', () => {
@@ -53,8 +53,7 @@ describe('capabilityReferences', () => {
     const prompt = capabilityReferencePrompt(item)
     expect(prompt).toContain('"users/demo/expand/calendar/module.yaml"')
     expect(prompt).toContain('control_entry')
-    expect(prompt).toContain('当前状态：配置异常')
-    expect(prompt).toContain('未启用、工具不可用、读取或调用失败时')
+    expect(prompt).toContain('按 control_entry 定位操作手册')
     expect(prompt).not.toContain('undefined')
   })
 })
