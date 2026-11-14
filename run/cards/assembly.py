@@ -32,12 +32,15 @@ def _data_message(card: Card, label: str, payload: Any) -> MessageItem:
     )
 
 
-def protocol_items(cards: tuple[Card, ...], *, model: str = "") -> list[Item]:
+def protocol_items(
+    cards: tuple[Card, ...], *, model: str = "", historical_tools: bool = False,
+) -> list[Item]:
     """Native event order is authoritative, including pending/interleaved tools.
 
     An absorbed call is never resurrected just to manufacture linkage. Its late
     result stays self-describing data. Chat-specific restrictions belong in the
-    Chat adapter, not in this native runtime projection.
+    Chat adapter, not in this native runtime projection. Read-only summaries use
+    historical tool data so arbitrary prefix/fragment boundaries need no linkage.
     """
     output: list[Item] = []
     calls: dict[str, dict[str, Any]] = {}
@@ -46,6 +49,10 @@ def protocol_items(cards: tuple[Card, ...], *, model: str = "") -> list[Item]:
         payload = card.view_payload or {}
         if card.view_kind == "summary":
             output.append(_data_message(card, "rolling_summary", payload))
+        elif historical_tools and card.view_kind in {"tool_call", "tool_result"}:
+            output.append(_data_message(card, card.view_kind, {
+                "call_id": _call_id(card), "data": payload,
+            }))
         elif card.view_kind in {"user_text", "agent_text"}:
             role = "user" if card.view_kind == "user_text" else "assistant"
             if role == "assistant" and model:

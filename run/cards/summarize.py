@@ -243,7 +243,9 @@ class ProviderSummarizer:
                 while not fragment_offset and low <= high:
                     middle = (low + high) // 2
                     candidate = [
-                        *carry, *protocol_items(batch.cards[offset:offset + middle], model=self.model),
+                        *carry, *protocol_items(
+                            batch.cards[offset:offset + middle], model=self.model, historical_tools=True,
+                        ),
                         instruction,
                     ]
                     if fits(candidate):
