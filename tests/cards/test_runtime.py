@@ -30,7 +30,8 @@ from run.cards import CardConflictError, CardStore, IntegrationStore, compact
 from run.conversation import GuidanceMailbox
 from run.engine import handle_request, iter_request_events
 from run.infra import EngineError
-from run.tools import ToolDefinition, ToolRegistry, ToolRuntime
+from run.tools import MAX_TOOL_RESULT_CHARS, ToolDefinition, ToolRegistry, ToolRuntime
+from tests.type_assertions import require_present
 
 
 @pytest.fixture
@@ -624,7 +625,8 @@ def test_raw_registration_and_execution_result_stay_related_after_compression(ro
     assert len(store.raw_page("web", "s1")) == 3
 
 
-def test_watchdog_is_not_tool_exit_and_late_result_is_not_reexecuted(root):
+@pytest.mark.parametrize("body", ["full original", "late result" * 20_000], ids=["small", "oversized"])
+def test_watchdog_is_not_tool_exit_and_late_result_is_not_reexecuted(root, body):
     entered, release = threading.Event(), threading.Event()
     executions = []
     store = CardStore(root, "alice")
@@ -636,7 +638,7 @@ def test_watchdog_is_not_tool_exit_and_late_result_is_not_reexecuted(root):
         entered.set()
         executions.append(True)
         assert release.wait(5)
-        return {"ok": True, "late": "full original"}
+        return {"ok": True, "late": body}
 
     runtime.start(call(), definition(root, work), context={
         "root": str(root), "user": "alice", "source": "web", "session_id": "s1",
@@ -671,7 +673,39 @@ def test_watchdog_is_not_tool_exit_and_late_result_is_not_reexecuted(root):
     results = [card for card in store.raw_page("web", "s1") if card.raw_kind == "tool_result"]
     assert len(results) == 2
     assert results[-1].raw_payload["result"] == {
-        "ok": True, "result": {"ok": True, "late": "full original"},
+        "ok": True, "result": {"ok": True, "late": body},
     }
+    view = require_present(results[-1].view_payload)
+    assert len(json.dumps(view, ensure_ascii=False)) <= MAX_TOOL_RESULT_CHARS
+    if len(body) > MAX_TOOL_RESULT_CHARS:
+        assert view["result"]["content_omitted"]
     assert len(executions) == 1
     IntegrationStore(store, "web", "s1", "new").start()
+
+
+def test_public_runtime_continues_after_dead_owner_without_replaying_pending_tool(root):
+    store = CardStore(root, "alice")
+    lost = IntegrationStore(store, "web", "s1", "lost")
+    lost.start()
+    store.append("web", "s1", lost.id, "user_text", {"text": "start work"}, level="initial")
+    execution, _ = lost.register_tool("pending", {"name": "work", "arguments": {"data": "once"}})
+    lost.publish_running_notice(execution["execution_id"])
+    with store.db(write=True) as db:
+        db.execute("UPDATE card_integrations SET owner_pid=987654321,owner_token='other'")
+    requests = []
+    class Provider:
+        def create(self, request):
+            requests.append(request)
+            return response(request, "conversation resumed")
+    with patch("run.infra.process_identity_matches", return_value=False):
+        events = list(run(root, Provider(), text="continue"))
+    assert events[-1].type == "done" and events[-1].metadata["status"] == "completed"
+    assert len(requests) == 1
+    assert all(not isinstance(item, ToolCallItem) for item in requests[0].input)
+    assert "interrupted_unknown" in str(requests[0].input)
+    assert "start work" in str(requests[0].input)
+    assert not any(event.type == "tool_call_start" for event in events)
+    with store.db() as db:
+        assert db.execute("SELECT count(*) FROM card_tool_executions").fetchone()[0] == 1
+        row = db.execute("SELECT * FROM card_tool_executions").fetchone()
+        assert row["execution_live"] and row["status"] == "interrupted_unknown"
