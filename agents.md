@@ -155,7 +155,7 @@ kemo-agent/
 | 需要了解什么 | 资料入口 |
 |---|---|
 | 项目定位、能力与使用入口 | `knowledge/global/overview/project-introduction.md` |
-| 请求流程、上下文与并发 | `knowledge/global/overview/architecture-overview.md` |
+| 请求流程、上下文、只读压缩与并发 | `knowledge/global/overview/architecture-overview.md` |
 | Apache-2.0 许可与分发 | `knowledge/global/overview/open-source-license.md` |
 | 配置字段、默认值与用户覆盖 | `knowledge/global/engineering/configuration-reference.md` |
 | 人格、手册、知识与技能各该放什么 | `knowledge/global/engineering/prompt-authoring-standard.md` |
