@@ -69,13 +69,39 @@ Expand 网页动作复用 `control_script`，不声明 `action_entry`。UI 文�
 }
 ```
 
-页面支持 `web`、`panel`、`markdown`，以及 `builtin` 的 `overview`、`collection`、`injection`、`docs`、`logs`。
+页面支持 `web`、`embed`、`panel`、`markdown`，以及 `builtin` 的 `overview`、`collection`、`injection`、`docs`、`logs`。
 总览、采集数据、注入数据、通用配置、文档和运行记录按实际模块能力自动补充，不要求每个模块都有相同入口。
 采集数据与注入数据使用两个独立的功能标签：`collection` 展示 `collected_markdown` 原文，
 `injection` 展示遵循当前数据空间白名单与上下文预算的 `injected_markdown`。
 当前没有注入内容时显示未注入状态，不用采集原文填充。
 声明已有同名 ID 时使用声明项。无 `ui` 的模块继续正常显示通用面板与已有能力。
 UI 声明错误只在该模块显示诊断，保留其原有运行能力与可用面板。
+
+## 内嵌本机服务控制台
+
+模块自带独立本机 Web 服务时，可声明 `embed` 页面，通过已声明动作获取控制台地址，
+直接显示在当前工作区，不需要打开新标签页。例如：
+
+```json
+{
+  "schema_version": 1,
+  "default_page": "console",
+  "pages": [{"id": "console", "label": "控制台", "type": "embed", "action": "console_link"}],
+  "actions": [{
+    "id": "console_link", "label": "获取控制台地址", "handler": "console_link",
+    "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}
+  }]
+}
+```
+
+动作沿用现有模块身份、启用检查、参数校验与隔离执行，接收空对象，返回
+`{"console_url": "http://127.0.0.1:端口/路径"}`，也兼容 `url` 字段及现有动作结果封装。
+地址只接受 HTTP/HTTPS 与精确回环主机 `127.0.0.1`、`localhost`、`[::1]`。
+地址或令牌不写入宿主配置，也不在工具栏展示；模块负责本机服务的鉴权与生命周期。
+`embed` 无需 `ui/dist`；它不使用静态网页 Bridge，而是以允许脚本、同源存储、表单、弹窗和下载
+的独立 iframe 运行本机控制台，不允许顶层导航。下面的静态网页权限合同继续适用于 `web` 页面。
+库存轮询、健康与采集状态更新保留现有 iframe；切换模块、页面、用户或 UI 声明，以及点击
+“重新打开”时重新获取地址。切走后迟到的动作结果不会覆盖当前控制台，也不表示后端动作已取消。
 
 ## 网页构建与 SDK
 

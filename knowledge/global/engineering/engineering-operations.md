@@ -140,7 +140,7 @@ continuation 标识，不把 reasoning 正文发给上游。
 
 ### 记忆与知识
 
-[入口 / L1] 全局 `memory.prompt_injection` 控制自动记忆注入，关闭时通过工具按需检索；`memory_manage` 的 `match_mode` / `regex` 支持与历史搜索一致的文本匹配，默认保留关键词评分。`memory_manage` 用于明确的记住、检索、修订或忘记；系统提取不替代用户明确要求。`important` 是只读热画像，不得由主智能体增删改。临时重要记忆文件任何情况下不可删除、不可清空、不可写入空内容；无事实时保留占位文本。知识按用户→共享→全局检索，新知识默认写用户层；写共享/全局须有明确要求，不能搬入私人信息。
+[入口 / L1] 全局 `memory.prompt_injection` 控制自动记忆注入总开关，用户 `memory.tiered_prompt_injection` / `memory.important_prompt_injection` 分别控制层级记忆和临时重要热画像；总开关与分类开关均开启才注入，热画像失效时始终不注入。关闭时通过工具按需检索；`memory_manage` 的 `match_mode` / `regex` 支持与历史搜索一致的文本匹配，默认保留关键词评分。`memory_manage` 用于明确的记住、检索、修订或忘记；系统提取不替代用户明确要求。`important` 是只读热画像，不得由主智能体增删改。临时重要记忆文件任何情况下不可删除、不可清空、不可写入空内容；无事实时保留占位文本。知识按用户→共享→全局检索，新知识默认写用户层；写共享/全局须有明确要求，不能搬入私人信息。
 
 [机制 / L2] `memory.profile` 决定开放的记忆域：`companion` 是个人智能默认形态，开放长期事实 fact、相处关系 relation 与近期状态 state；`work` 是收敛模式，只保留 fact。三域新建/改写/遗忘仍只接受用户原话。state 固定 seven_days、正文更新默认续期且不晋升，relation 默认晋升阈值1；临时层按状态、关系、事实优先选片，预算不变。字段与生命周期见配置、持久化专题。
 记忆提取使用完整执行上下文，分页始终由持久账本和租约保护，不提供缺字段时的无账本路径。
@@ -285,6 +285,8 @@ Kemo 网关状态是独立只读连接，未激活不得猜测地址、扫描端
 <!-- rule:session-lifecycle -->
 [机制] 仓库空闲归档配置为 5400 秒（`cron.session_idle_close_seconds`，`config/global_config.yaml`）；Web 空会话清理宽限为 90 秒（`run/history/web_lifecycle.py` 的 `WEB_EMPTY_GRACE_SECONDS`）。
 是否可关闭还取决于实际调度、租约和执行状态，不是所有来源统一按网页宽限清理；只读/closed 会话不隐式复活。
+Web 零数据会话无论 open 或 closed，均在宽限结束且无有效租约、运行任务时回收；有 RAW 的会话只归档并补排尚未处理的记忆提取和标题/简介任务，不删除正文。记忆提取仍受 extraction_mode 开关控制，关闭提取不阻止标题/简介排队。
+宿主中断恢复已标记 tools_detached 的未知工具不再阻止非破坏性的归档或显式重开；RAW 中的未知执行状态保持原样，历史删除和重置仍要求工具已确认退出。
 <!-- /rule -->
 
 Cron 遗留 running 在重启后进入 paused 待确认，不默认立刻重跑；attempt_id 用于追溯一次执行，取消不计成功。维护出错或存活未知有诊断，不得把未知当成功或把仍活着的线程当已退出。实现见 `run/tasks/lifecycle.md`。

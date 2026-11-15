@@ -134,6 +134,9 @@ Kemo Graph 是可选的侧载超级文档站，只有用户明确要求时才查
 API 处理已支持模态；Chat 兼容协议保留图片直传链路，其余资产通过专用多模态或文件工具处理。
 `attach_media` 可在工具取得文件后将其排入下一次原生请求；它与委托专用模型分析的
 `multimodal` 是不同入口。装载队列、授权范围与实际发送状态见 `knowledge/global/modules/plugin-development.md`。
+文件理解专用模型通过用户配置 `multimodal_models.file_understanding` 指定，调用
+`multimodal(action="analyze_file")` 返回文档分析、摘要或问答；仅 Kemo 模式可用，
+实际文件格式取决于所选模型和网关适配器。未配置时保留 `file` 工具读取。
 
 ### Web 正文内联组件
 

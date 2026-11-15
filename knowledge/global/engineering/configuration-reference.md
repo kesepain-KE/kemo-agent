@@ -77,6 +77,18 @@ web_ui:
 `web_ui` 不继承全局同名节，背景不能通过全局配置或 `PATCH preferences` 保存；
 `GET preferences` 可返回生效背景参数，但不在 `web_preferences.json` 建立第二份配置真值。
 
+## 网页配置入口
+
+Web 的“配置”按作用域显示“全局”和“用户”标记。全局自动记忆注入总开关和上下文预算
+在“记忆与上下文”；同页的记忆模式、分类注入开关和各层注入数量保存到当前用户。
+记忆模式可选择继承全局；临时重要记忆失效时不会因开启开关重新获得注入资格。
+Provider 密钥环境变量在“模型与 Provider”，插件操作权限在“权限边界”。
+
+“高级配置”提供其余全局运行参数的编辑入口，包括媒体 asset_id 存活秒数。
+记忆晋升路径和存储版本属于只读字段，已废弃字段不再显示。
+高级配置仅 PATCH 修改字段；显式 null 的临时记忆有效期和晋升阈值按运行时语义保存，
+不会被误当成删除配置。调度、消息工作线程和网页连接心跳等进程参数保存后需要重启。
+
 ## `kemo.yaml` 环境变量参数说明
 
 项目根目录 `kemo.yaml` 保存本机启动参数和密钥兜底；无密钥模板为 `kemo.yaml.example`。文件使用 YAML 映射，例如 `OPENAI_API_KEY: "..."`。建议将值写成引号包裹的字符串，避免数字、布尔值被 YAML 转成其他类型；空行与 `#` 注释可正常使用。
@@ -257,6 +269,33 @@ kemo-agent 全局配置文件，位于 `config/global_config.yaml`。所有用�
 
 ---
 
+### media_assets — 文件与媒体资源接续
+
+在 `config/global_config.yaml` 中配置，缺失时使用 120 秒：
+
+```yaml
+media_assets:
+  ttl_seconds: 120
+```
+
+`ttl_seconds` 必须是正整数，单位为秒。Web 与 Android App 提交到对话的上传附件、
+外部消息附件、运行中追加附件、`attach_media` / `multimodal` 装载的本地路径，以及
+专用多模态与主模型保存的输出、`expand_call` 成功发布的拓展产物，统一登记到当前用户的 `runtime/media_assets.sqlite3`。
+登记从附件进入当前对话或本地路径装载时开始计时，生成产物从保存并校验成功时开始计时；
+附件与产物的 `reference_expires_at` 给出到期时间。只上传但未提交对话的文件不占用引用期限。
+
+同一安装、用户、来源和对话空间的后续 Run、隔离工具进程及获准子代理均可通过
+`attach_media` 和 `multimodal` 接续；来源 `app`、`web`、`message:<platform>` 彼此隔离。
+上传到网关后生成的远端 ID 也关联到本地文件，并沿用原引用的到期时间；读取、重传及添加
+远端别名均不续期。网关 ID 失效时，可按当前通道从本地编码或重新上传。
+
+外部消息原件由 Transport 在本轮结束后清理；框架先将已授权附件复制到当前用户
+`file_upload/message/<module>/<unique-id>/`，复用时仍核对消息模块的绑定用户。
+引用过期只清理索引，不删除用户上传、下载或导入的消息附件副本；文件沿用用户文件管理生命周期。
+每次复用仍验证文件存在性、来源授权、校验和与模型能力。到期后可重新提交获准的 `paths`。
+只有网关 ID、没有已保存本地文件的资产仍使用网关自己的有效期，不能由本配置延长。
+配置变更对之后登记的资源生效；用户配置沿用普通框架段的覆盖规则。
+
 ### history — 对话历史
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -309,7 +348,7 @@ kemo-agent 全局配置文件，位于 `config/global_config.yaml`。所有用�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `storage_schema_version` | int | `3` | `improve/memory.sqlite3` 表结构版本号；运行时以数据库 `memory_meta` 为准 |
-| `prompt_injection` | bool | `true` | 仅全局配置；控制永久记忆、热画像及三层临时记忆的自动注入。关闭后只提示可通过工具检索，记忆存储、提取和工具授权保持原有规则 |
+| `prompt_injection` | bool | `true` | 仅全局配置的自动注入总开关；用户分类开关不能绕过它。关闭后只提示可通过工具检索，记忆存储、提取和工具授权保持原有规则 |
 | `profile` | string | `companion` | 个人智能默认模式，开放 fact/relation/state；用户明确选择 work 时仅保留 fact。按用户覆盖，非法值加载失败 |
 | `domain_rules` | object | 见下文 | companion 的关系晋升和状态续期规则；仅允许 relation/state，键或类型错误加载失败 |
 | `extraction_mode` | string | `compression_only` | 记忆提取模式：`disabled` 关闭自动提取；`compression_only` 在会话关闭或 CardStream 压缩成功后登记 RAW seq 范围；`background` 允许 Maintenance 领取 pending RAW；兼容值 `on_commit` 当前也只允许后台领取 pending RAW，不在请求线程同步提取 |
@@ -326,7 +365,7 @@ memory:
   prompt_injection: false
 ```
 
-省略该字段时默认开启。关闭后，固定记忆段只保留“当前记忆没有开启注入，可以通过工具进行记忆检索”，不加载记忆正文；`memory_manage` 仍可按需检索。配置在下一次 Run 构建提示词时生效，不回改正在执行的请求。
+省略该字段时默认开启。用户通过 `memory.tiered_prompt_injection` 与 `memory.important_prompt_injection` 选择要注入的类型；实际注入要求总开关和对应用户开关同时开启。总开关关闭或两个用户开关都关闭时，固定记忆段只保留“当前记忆没有开启注入，可以通过工具进行记忆检索”，不加载记忆正文；`memory_manage` 仍可按需检索。临时重要热画像即使开关全部开启，也必须保持有效；来源过期、删除、晋升或内容改变导致失效时不注入。配置在下一次 Run 构建提示词时生效，不回改正在执行的请求。
 
 #### temporary_injection_limits — 临时记忆注入上限
 
@@ -655,8 +694,14 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 | `speech_to_speech` | 语音生语音 |
 | `video_understanding` | 视频理解、时间轴摘要 |
 | `video_generation` | 视频生成 |
+| `file_understanding` | 文件理解、文档摘要、信息提取与问答；具体格式以模型及网关适配器支持为准 |
 
-> 不含 embedding 和 rerank。Chat 模式只保证文本、工具和图片识别。音频、视频、普通文件输入及所有媒体生成/转换只在 Kemo 模式启用；Kemo 同时校验输入/输出模态与 `extensions.operations`，不会跨协议自动回退。
+> 不含 embedding 和 rerank。Chat 模式只保证文本、工具和图片识别。音频、视频、普通文件输入及所有媒体生成/转换只在 Kemo 模式启用；Kemo 同时校验输入/输出模态及对应操作，不会跨协议自动回退。文件理解沿用标准 `conversation` 操作，不新增协议操作名，也不要求 `extensions.operations.file_understanding`。
+
+`file_understanding` 由 `multimodal(action="analyze_file")` 使用，须显式指定模型，并校验其 `file`
+输入和 `text` 输出能力；`conversation` 被明确禁用时拒绝调用。主模型已接收文件时仍直接处理；
+未接收且已配置本项时，首次输入及运行中引导的附件说明会提示调用专用工具。未配置本项时
+继续使用 `file` 工具读取，不把普通主模型当作专用模型兜底。本项保存在用户配置，不写入全局配置。
 
 ### multimodal_routing — 多模态路由
 
@@ -668,7 +713,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 图片文件在后端经过来源目录约束或显式本地路径登记、完整解码、真实格式与大小检查后，Chat 请求才会临时内联；Chat 图片仅接受 JPEG、PNG、WEBP 和 GIF，Base64 不写入 Web 状态或文本历史。Kemo 输入先通过认证 Asset API 流式上传，再以远端 `asset_id` 进入请求；生成结果经下载和 SHA-256 校验后防重名保存到用户 `download` 目录。专用插件不重复携带主对话历史。
 
-识别类动作（图片理解、音频转写、视频理解）只对明确标记为可重试的瞬时错误进行一次额外尝试。生成、编辑和转换类动作不自动重试，避免重复计费或产生重复产物。失败结果不会作为下一次调用的结果；智能体根据错误分类再次调用时会真正发起新请求，同名工具连续失败保护仍然生效。
+识别类动作（图片理解、音频转写、视频理解、文件理解）只对明确标记为可重试的瞬时错误进行一次额外尝试。生成、编辑和转换类动作不自动重试，避免重复计费或产生重复产物。失败结果不会作为下一次调用的结果；智能体根据错误分类再次调用时会真正发起新请求，同名工具连续失败保护仍然生效。
 
 ---
 
@@ -785,10 +830,22 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 
 ### memory — 记忆系统
 
-覆盖全局 `global_config.yaml → memory`，按对象深合并；`prompt_injection` 仅由全局控制，用户配置不能覆盖，用户配置 API 拒绝写入该字段。
+覆盖全局 `global_config.yaml → memory`，按对象深合并；`prompt_injection` 仅由全局控制，用户配置不能覆盖，用户配置 API 拒绝写入该字段。两个分类注入开关仅属于用户配置，省略时均为 true，忽略全局文件中的同名值，全局配置 API 拒绝写入。Web 设置页将分类开关与周、月、半年注入数量上限保存到当前用户，不影响其他用户；未设置的数量上限仍沿用现有全局默认值。
+
+例如仅自动注入有效的临时重要记忆，在 `users/<name>/user_config.yaml` 中设置：
+
+```yaml
+memory:
+  tiered_prompt_injection: false
+  important_prompt_injection: true
+```
+
+仍需全局 `memory.prompt_injection: true`。两个用户开关都关闭时不自动注入任何记忆；全局总开关关闭时，即使两个用户开关均开启，也不自动注入。临时重要记忆失效时不注入，不自动恢复失效状态。
 
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
+| `tiered_prompt_injection` | bool | `true`（用户默认值） | 控制永久记忆及周、月、半年记忆注入，还需全局总开关开启 |
+| `important_prompt_injection` | bool | `true`（用户默认值） | 独立控制临时重要热画像注入，还需全局总开关开启且热画像有效 |
 | `profile` | string | `companion` | 默认个人模式开放 fact/relation/state；选择 work 时仅保留 fact |
 | `domain_rules` | object | relation 阈值1；state 不晋升、正文更新续期 | 字段校验和生命周期边界见全局 memory 节 |
 | `extraction_mode` | string | `compression_only` | `disabled` 关闭自动提取；`compression_only` 在会话关闭或 CardStream 压缩成功后登记 RAW seq；`background` 与兼容值 `on_commit` 允许 Maintenance 领取 pending RAW |
@@ -894,7 +951,7 @@ Chat 兼容传输的重试与降级行为是内置的保守策略，不提供配
 |--------|---------|
 | `provider` | type, base_url, api_key, api_key_env, model, stream, reasoning_effort, input_modalities |
 | `agent_models` | default, cheap, reasoning |
-| `multimodal_models` | vision, image_generation, image_edit, audio_transcription, speech_generation, speech_to_speech, video_understanding, video_generation |
+| `multimodal_models` | vision, image_generation, image_edit, audio_transcription, speech_generation, speech_to_speech, video_understanding, video_generation, file_understanding |
 | `multimodal_routing` | vision |
 | `knowledge` | use_shared, use_global |
 | `skills` | shared_whitelist |
