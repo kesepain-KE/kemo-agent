@@ -1,5 +1,5 @@
 name: attach_media
-description: 将已取得的媒体装载到当前 Run，供下一次主模型请求原生接收；不调用专用模型。优先 asset_ids，也可用明确获准的本地 paths。
+description: 将已取得的文件、图片、音频或视频装载到当前 Run，供下一次主模型请求原生接收；不调用专用模型。Chat 仅支持图片，Kemo 按主模型能力接收四类输入。
 input_schema:
   type: object
   properties:
@@ -9,6 +9,7 @@ input_schema:
         type: string
         pattern: ^asset_[A-Za-z0-9_.:-]+$
       maxItems: 8
+      description: 当前 Run 已登记的稳定资产标识或当前 Kemo 网关账户已授权的 Asset 标识；与 paths 合计最多 8 项
     paths:
       type: array
       items:
@@ -16,6 +17,7 @@ input_schema:
         minLength: 1
         maxLength: 4096
       maxItems: 8
+      description: 明确获准的本地文件或媒体路径，支持绝对路径或相对项目根目录路径
     note:
       type: string
       maxLength: 4000
@@ -25,6 +27,7 @@ input_schema:
       - auto
       - low
       - high
+      description: 图片输入细节等级，Chat 与 Kemo 均保留该值
   additionalProperties: false
 version: 1.0.0
 enabled: true

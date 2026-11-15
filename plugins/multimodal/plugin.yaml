@@ -1,5 +1,5 @@
 name: multimodal
-description: 使用主 Run 明确授权的资产调用专用多模态模型，支持图片理解/生成/编辑、音频转写/生成/转换以及视频理解/生成。Chat 模式只支持图片理解，完整能力要求 Kemo 模式。
+description: 使用主 Run 明确授权的资产调用专用多模态模型，支持文件理解、图片理解/生成/编辑、音频转写/生成/转换以及视频理解/生成。Chat 模式只支持图片理解，完整能力要求 Kemo 模式。
 input_schema:
   type: object
   properties:
@@ -14,20 +14,22 @@ input_schema:
       - convert_speech
       - analyze_video
       - generate_video
+      - analyze_file
     asset_ids:
       type: array
       items:
         type: string
         pattern: ^asset_[A-Za-z0-9_.:-]+$
       maxItems: 8
-      description: 当前 Run 附件说明中出现的本地稳定资产标识；纯生成动作可省略
+      description: 当前 Run 附件说明中的稳定资产标识或当前网关已授权的 Asset 标识；纯生成动作可省略
     paths:
       type: array
       items:
         type: string
         minLength: 1
+        maxLength: 4096
       maxItems: 8
-      description: 明确的本地媒体路径；支持绝对路径或相对项目根目录路径，与 asset_ids 合计最多 8 项
+      description: 明确的本地文件或媒体路径；支持绝对路径或相对项目根目录路径，与 asset_ids 合计最多 8 项
     instruction:
       type: string
       minLength: 1
@@ -39,6 +41,7 @@ input_schema:
       - auto
       - low
       - high
+      description: 图片输入细节等级，Chat 与 Kemo 均保留该值
     output_format:
       type: string
       maxLength: 20

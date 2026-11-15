@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from run.extensions import invoke_expand
+from run.config import load_config, media_asset_ttl_seconds
+from run.extensions import invoke_expand, retain_media_assets
 from run.agents import require_non_agent_expand_command
 
 
@@ -31,7 +32,7 @@ def run(
         raise ValueError("拓展工具超时必须是正数") from exc
     if effective_timeout <= 0:
         raise ValueError("拓展工具超时必须是正数")
-    return invoke_expand(
+    result = invoke_expand(
         root=root,
         user=user,
         scope=scope,
@@ -41,3 +42,13 @@ def run(
         timeout=min(effective_timeout, 3600.0),
         cancel_event=context.get("cancel_event"),
     )
+    source = str(context.get("source") or "")
+    session_id = str(context.get("session_id") or "")
+    if result["artifacts"] and source and session_id:
+        artifacts = retain_media_assets(
+            root, user, result["artifacts"], source=source, session_id=session_id,
+            ttl_seconds=media_asset_ttl_seconds(load_config(user, root)),
+        )
+        result["artifacts"] = artifacts
+        result["result"]["artifacts"] = artifacts
+    return result

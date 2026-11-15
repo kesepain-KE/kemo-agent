@@ -16,7 +16,7 @@ REEXECUTE_ACTIONS = {
     "expand_creater": frozenset({"list", "validate"}),
     "sense_creater": frozenset({"list", "validate"}),
     "skill_creater": frozenset({"list", "get", "validate"}),
-    "multimodal": frozenset({"analyze_image", "transcribe_audio", "analyze_video"}),
+    "multimodal": frozenset({"analyze_image", "transcribe_audio", "analyze_video", "analyze_file"}),
     "kemo_graph_write": frozenset({"operation_guide"}),
 }
 REEXECUTE_TOOLS = frozenset({
