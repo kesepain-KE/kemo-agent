@@ -18,7 +18,7 @@
 6. **控制结果规模**：`list` 与搜索默认最多返回 50 条。`list.has_more=true` 时使用返回的 `next_offset` 读取下一页；`truncated` 为兼容字段，与 `has_more` 同义。`compact=true` 时列表省略时间元数据；`include_content=true` 时额外附带完整正文。`page_char_limit` 会在条目数量上限之前按序列化字符预算截页，避免触发框架 100,000 字符硬限制；`page_limited_by_chars=true` 表示本页由字符预算截断，但仍应正常沿 `next_offset` 继续。
 7. **精确寻址**：`get`、`edit`、`delete` 使用 `tier + filename` 寻址 SQLite 表行；逻辑文件名在全部层级全局唯一，跨层同名会由数据库拒绝。删除成功返回 `row_removed=true`，不再存在文件孤儿修复语义。
 8. **稳定引用**：`list`、搜索及所有单条 CRUD 结果均返回 `memory_ref`，格式为 `tier:filename`；展示标题仍使用 `filename`，程序传递目标时优先保留 `memory_ref`。
-9. **按主题组织**：`add` / `edit` 前先检索同主题。A 类可承载连贯画像或持续主题，硬上限 1000 字；B 类用于确需单独取用的约定、参数或事件，硬上限 150 字。超过 150 字需显式传 `memory_type: "A"`；这只是存储上限，不是拆碎画像的理由。`important` 是运行时维护的只读热画像，主智能体不能通过本工具直接新增、编辑或删除。
+9. **按主题组织**：`add` / `edit` 前先检索同主题。A 类可承载连贯画像或持续主题，硬上限 2000 字；B 类用于确需单独取用的约定、参数或事件，硬上限 300 字。超过 300 字需显式传 `memory_type: "A"`；这只是存储上限，不是拆碎画像的理由。`important` 是运行时维护的只读热画像，主智能体不能通过本工具直接新增、编辑或删除。
 
 全局 `memory.prompt_injection=false` 只关闭自动记忆注入，本工具仍按原授权开放；需要背景时先检索相关记忆，再按需获取正文。
 

@@ -56,7 +56,7 @@ input_schema:
       enum:
       - A
       - B
-      description: add/edit 的主题记忆类型；A 为连贯画像或主题，超过 150 字需显式声明 A，硬上限 1000 字
+      description: add/edit 的主题记忆类型；A 为连贯画像或主题，超过 300 字需显式声明 A，硬上限 2000 字
     limit:
       type: integer
       minimum: 1
