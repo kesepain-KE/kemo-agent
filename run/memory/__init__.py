@@ -32,8 +32,8 @@ DEFAULT_EXTRACTION_INPUT_TOKENS = 12000
 DEFAULT_EXTRACTION_MAX_CANDIDATES_PER_BATCH = 30
 MAX_EXTRACTION_CANDIDATES_PER_BATCH = 40
 MEMORY_OPERATION_HISTORY_LIMIT = 512
-FILENAME_MAX_CHARS = 50
-MEMORY_FRAGMENT_TYPE_LIMITS = {"A": 1000, "B": 150}
+FILENAME_MAX_CHARS = 100
+MEMORY_FRAGMENT_TYPE_LIMITS = {"A": 2000, "B": 300}
 DEFAULT_TIERS = {
     "seven_days": {"days": 7, "upgrade_threshold": 3, "next": "one_month"},
     "one_month": {"days": 30, "upgrade_threshold": 10, "next": "half_year"},
@@ -340,8 +340,8 @@ def validate_memory_fragment_size(
 ) -> tuple[str, str | None]:
     """Fail closed when a promotion would preserve an oversized fragment.
 
-    B-class facts have a 150-character hard ceiling (100 is the normal target),
-    while A-class profile clusters have a 1000-character emergency ceiling.
+    B-class facts have a 300-character hard ceiling (200 is the normal target),
+    while A-class profile clusters have a 2000-character emergency ceiling.
     Content over the B ceiling must explicitly declare itself as A so a missing
     model classification cannot silently turn a large fact into a profile blob.
     """
