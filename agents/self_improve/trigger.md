@@ -23,7 +23,7 @@
 宿主传入 `memory_profile` 和 `memory_domains`，候选用 `memory_domain` 标注域，缺省 fact。
 `work` 仅 fact，继续按下面的长期事实门槛判断；`companion` 是个人智能模式，
 另开放 relation（称呼、玩笑、口癖、相处方式、用户提起的共同经历）和 state（近况、近期计划与感受）。
-relation 只要求出现过且可辨认；state 允许过期，固定 seven_days、B 类 ≤150 字，
+relation 只要求出现过且可辨认；state 允许过期，固定 seven_days、B 类 ≤300 字，
 一个滚动主题一个文件名，同主题 revise，不建跨主题容器。
 这两个域不套用“必须长期稳定”或“默认不创建”的 fact 门槛，也不要求 durable=true；
 但 create/revise/forget 仍必须有用户原话。助手扮演台词不能成为新记忆。
@@ -77,14 +77,14 @@ create/revise/forget 仅用户原文；reinforce 可用助手确定性正文，�
 
 流程:
   通用前置（两种路径都执行）:
-    0. 超限检查：每项决策必须返回 `memory_type: "A" | "B"`。正文超出类型上限（A 类画像 1000 字 / B 类事实通常 100 字、硬上限 150 字）时，先产出拆分决策再晋升；`split_into` 子项沿用顶层类型，类型不同时在子项单独声明。
+    0. 超限检查：每项决策必须返回 `memory_type: "A" | "B"`。正文超出类型上限（A 类画像 2000 字 / B 类事实通常 200 字、硬上限 300 字）时，先产出拆分决策再晋升；`split_into` 子项沿用顶层类型，类型不同时在子项单独声明。
        按 A 类子主题、B 类独立事实拆成多条；不设总纲；就地留在目标档位；
        子碎片继承 expires_at 与 tier_entered_at；权重按新档位归零；不产生加权事件；只给决策。
 
   7d→30d / 30d→180d:
     1. 按目标层分组，通过 memory_manage `search_many tier=<目标层> include_content=true` 批量查询相似碎片；禁止调用 list/get 或扫描整层
     2. **仅当命中的是同一事实的更新版时才融合**（例："生活费 1500→2000"）；主题相近但事实不同的碎片各自独立成条，不融合 → merged_with=null
-    3. **融合结果永不跨越上限**（A 类 1000 字 / B 类 100 字）；到上限即停止合并，稳定在「多条、各自达标」，避免拆了又合的震荡
+    3. **融合结果永不跨越上限**（A 类 2000 字 / B 类 300 字）；到上限即停止合并，稳定在「多条、各自达标」，避免拆了又合的震荡
     4. cron 根据决策在 SQLite 事务内更新、融合或按拆分创建多条表行；拆分时来源删除，目标 weight=0，并继承源 expires_at 与 tier_entered_at
 
   180d→permanent:
@@ -142,7 +142,7 @@ skill_retry_only=true 时只补技能，不重做晋升；conversion_sources 中
 - 所有阈值从 `global_config.yaml → memory.tiers` 读取
 - `submit_memory_extraction()` 管线已废弃；保存/压缩、background、on_commit 共用宿主证据验证与持久化契约
 - 候选统一由调用方写入 MemoryStore；宿主验证 evidence_rounds 和检索 memory_ref，通过数据库按原证据日去重，每天最多+1；不要输出权重、日期或内容哈希
-- 候选文件名基础名称最长 20 字符，并遵守全层级唯一命名规则
+- 候选文件名基础名称最长 40 字符，并遵守全层级唯一命名规则
 - context_compression 模式下 memory_manage 只用于搜索，不直接增删改
 - context_compression / memory_promotion 模式下禁止搜索 `important`；用户主动 manual_review 可只读查看
 - memory_promotion 模式下 memory_manage 只通过批量搜索读取命中项并比对，不调用 list/get，也不直接删除或移动；cron 根据 promotions 决策原子落盘
