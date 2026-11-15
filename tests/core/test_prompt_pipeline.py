@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from itertools import product
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1029,6 +1030,51 @@ class PromptPipelineTests(unittest.TestCase):
         self.assertEqual(restored.text, original.text)
         self.assertEqual(restored.memory_files, original.memory_files)
         self.assertTrue(restored.diagnostics["memory_prompt_injection"])
+
+    def test_memory_category_switches_gate_initial_and_refreshed_prompts(self) -> None:
+        _, root, config = self.make_root()
+        self.populate_all_sections(root)
+        original = build_prompt_bundle(root, "alice", config)
+        global_path = root / "config/global_config.yaml"
+        user_path = root / "users/alice/user_config.yaml"
+        global_config = json.loads(global_path.read_text("utf-8"))
+        user_config = json.loads(user_path.read_text("utf-8"))
+        for master, tiered, important in product((False, True), repeat=3):
+            with self.subTest(master=master, tiered=tiered, important=important):
+                global_config["memory"] = {"prompt_injection": master}
+                user_config["memory"] = {
+                    "prompt_injection": not master,
+                    "tiered_prompt_injection": tiered,
+                    "important_prompt_injection": important,
+                }
+                global_path.write_text(json.dumps(global_config), "utf-8")
+                user_path.write_text(json.dumps(user_config), "utf-8")
+                effective = load_config("alice", root)
+                store = MemoryStore(root, "alice", effective)
+                for bundle in (
+                    build_prompt_bundle(root, "alice", effective, memory_store=store),
+                    refresh_memory_prompt_bundle(original, root, "alice", effective, memory_store=store),
+                ):
+                    for content in ("PERMANENT", "HALF", "MONTH", "SEVEN"):
+                        self.assertEqual(content in bundle.text, master and tiered)
+                    self.assertEqual("IMPORTANT" in bundle.text, master and important)
+                    self.assertEqual(bool(bundle.memory_ids), master and tiered)
+                    self.assertEqual(
+                        "memory_temporary_important.md" in bundle.memory_files,
+                        master and important,
+                    )
+                    self.assertEqual(bundle.diagnostics["memory_injection"], {
+                        "global": master, "tiered": master and tiered,
+                        "important": master and important,
+                    })
+                    self.assertEqual(
+                        bundle.diagnostics["memory_prompt_injection"],
+                        master and (tiered or important),
+                    )
+                    self.assertEqual(
+                        "当前记忆没有开启注入" in bundle.text,
+                        not (master and (tiered or important)),
+                    )
 
     def test_default_important_memory_injection_budget_is_20000_chars(self) -> None:
         _, root, config = self.make_root()

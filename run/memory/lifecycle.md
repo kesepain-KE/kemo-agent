@@ -81,7 +81,7 @@ companion 不以 durable=true 或长期稳定门槛拒绝 relation/state，fact 
 
 ## Prompt 注入
 
-全局 `memory.prompt_injection` 默认 true，用户配置不能覆盖。设为 false 时，永久记忆、热画像和三层临时记忆均不自动注入，仅保留“当前记忆没有开启注入，可以通过工具进行记忆检索”。此开关不关闭存储、提取、后台整理或 `memory_manage`；下列排序与预算在开启注入时适用。
+全局 `memory.prompt_injection` 是自动注入总开关，默认 true，用户配置不能覆盖。用户 `memory.tiered_prompt_injection` 控制永久记忆及周、月、半年三层记忆，`memory.important_prompt_injection` 独立控制临时重要热画像；两个用户开关省略时均为 true。实际注入要求总开关与对应用户开关同时开启；总开关关闭或两个用户开关都关闭时，仅保留“当前记忆没有开启注入，可以通过工具进行记忆检索”。临时重要热画像还必须通过来源有效性检查，即使全部开关开启，已失效的热画像也不会注入；运行中刷新时同样移除失效内容。设置不关闭存储、提取、后台整理或 `memory_manage`；下列排序与预算在对应类型开启注入时适用。
 
 - 永久层全部注入，按逻辑文件名稳定排序。
 - `memory_temporary_important.md` 是独立单文件，受字符上限控制，不参与普通权重。

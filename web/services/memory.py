@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from run.config import load_config
+from run.config import load_config, memory_prompt_injection
 from run.memory import (
     TIERS,
     MemoryError as RuntimeMemoryError,
@@ -189,7 +189,7 @@ class MemoryServiceMixin:
             }
         lifecycle["prompt_eligible"] = bool(
             lifecycle["is_current"]
-            and (config.get("memory") or {}).get("prompt_injection", True)
+            and memory_prompt_injection(config, kind="important")
             and int((config.get("memory") or {}).get("important_memory_max_chars", 20000)) > 0
         )
         return {

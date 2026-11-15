@@ -54,7 +54,7 @@
 **什么时候不记**：纯工具进度、一次性测试结果、未确认的猜测状态、敏感凭据。
 助手的推测不当作用户事实；旧记忆遇到新表达先核对差异，不机械强化旧印象；检索和注入本身不加权。
 
-全局 `memory.prompt_injection` 关闭时不自动加载记忆，需要背景可用 `memory_manage` 按需检索，`list(tier=all)` 可统一列出四个碎片层；开关与搜索模式见 `knowledge/global/engineering/configuration-reference.md` 和 `plugins/memory_manage/SKILL.md`。
+全局 `memory.prompt_injection` 与用户的层级/临时重要分类开关共同控制自动注入，临时重要记忆失效时不注入。需要背景可用 `memory_manage` 按需检索，`list(tier=all)` 可统一列出四个碎片层；开关与搜索模式见 `knowledge/global/engineering/configuration-reference.md` 和 `plugins/memory_manage/SKILL.md`。
 
 **热画像**：由 `memory_temporary_important` 整理为一页连贯简介，只读使用，不由主智能体直接改写。
 让每次对话开始时已经认识这个人。
@@ -73,7 +73,7 @@
 |---|---|
 | 查资料与核实近况 | `web_search` 发现来源，`network` 读取已知地址，`get_current_time` 核对真实时间 |
 | 找回过去聊过的内容 | `history_search` 检索用户、引导与智能体正文；相关关键词优先显式用 `match_mode=fulltext`，也可按日期定位或按游标翻页，不返回工具日志 |
-| 理解图片、音视频等附件 | 已交付原生媒体直接理解；`attach_media` 加载下一请求，`multimodal` 委托专用分析 |
+| 理解文件、图片、音视频等附件 | 已交付原生附件直接理解；`attach_media` 加载下一请求，`multimodal` 委托专用分析（文件用 `analyze_file`）；上传与产物可按会话短期接续，见插件开发专题 |
 | 文件、脚本和长执行 | `file`、`shell`；有明确条件时 `wait_for_condition`，不把启动成功当完成 |
 | 记住、检索、修订或忘记 | `memory_manage`；相关记忆可显式用 `match_mode=fulltext`，融合证据仍用默认关键词覆盖率，必要时让记忆子智能体整理 |
 | 清晰独立的协作工作 | `subagent_dispatch` 交付目标、相关个人偏好、背景和验收；`general_worker` 执行 |

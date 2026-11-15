@@ -401,7 +401,9 @@ def build_prompt_bundle(
 
     root = root.resolve()
     settings = parse_prompt_settings(config)
-    inject_memory = memory_prompt_injection(config)
+    inject_tiered_memory = memory_prompt_injection(config, kind="tiered")
+    inject_important_memory = memory_prompt_injection(config, kind="important")
+    inject_memory = inject_tiered_memory or inject_important_memory
     source_policy = MainAgentSourcePolicy.from_config(config)
     manifests = (
         discover_plugin_manifests(root)
@@ -495,7 +497,7 @@ def build_prompt_bundle(
     memory_ids: list[str] = []
     memory_files: list[str] = []
     memory_integrity_warnings: list[str] = []
-    if inject_memory:
+    if inject_tiered_memory:
         for (
             tier,
             section_name,
@@ -526,48 +528,47 @@ def build_prompt_bundle(
         if "permanent_memory" in tier_sections:
             sections.append(tier_sections["permanent_memory"])
 
-        if settings.important_memory_max_chars > 0:
-            important_path = root / "users" / user / "memory_temporary_important.md"
-            important = (
-                read_optional_text(important_path)
-                if store.important_view_is_current()
-                else ""
-            )
-            injected, truncated = truncate_chars(important, settings.important_memory_max_chars)
-            if injected:
-                memory_files.append("memory_temporary_important.md")
-                sections.append(
-                    PromptSection(
-                        "important_memory",
-                        injected,
-                        (relative_path(important_path, root),),
-                        original_chars=len(important),
-                        injected_chars=len(injected),
-                        original_items=1,
-                        injected_items=1,
-                        truncated=truncated,
-                        mode=INJECTION_MODE,
-                    )
+    if inject_important_memory and settings.important_memory_max_chars > 0:
+        important_path = root / "users" / user / "memory_temporary_important.md"
+        important = (
+            read_optional_text(important_path)
+            if store.important_view_is_current()
+            else ""
+        )
+        injected, truncated = truncate_chars(important, settings.important_memory_max_chars)
+        if injected:
+            memory_files.append("memory_temporary_important.md")
+            sections.append(
+                PromptSection(
+                    "important_memory",
+                    injected,
+                    (relative_path(important_path, root),),
+                    original_chars=len(important),
+                    injected_chars=len(injected),
+                    original_items=1,
+                    injected_items=1,
+                    truncated=truncated,
+                    mode=INJECTION_MODE,
                 )
-        for name in (
-            "temporary_memory:half_year",
-            "temporary_memory:one_month",
-            "temporary_memory:seven_days",
-        ):
-            if name in tier_sections:
-                sections.append(tier_sections[name])
-    else:
+            )
+    for name in (
+        "temporary_memory:half_year",
+        "temporary_memory:one_month",
+        "temporary_memory:seven_days",
+    ):
+        if name in tier_sections:
+            sections.append(tier_sections[name])
+    if not inject_memory:
         notice = "当前记忆没有开启注入，可以通过工具进行记忆检索"
         sections.append(PromptSection(
             "important_memory", notice,
             original_chars=len(notice), injected_chars=len(notice),
         ))
 
-    padded = _ordered_prompt_sections(
-        sections,
-        disabled_names=(frozenset(name for _, name, _ in tier_specs_all)
-                        if not inject_memory else frozenset()),
-    )
+    disabled_names = {name for _, name, _ in tier_specs_all} if not inject_tiered_memory else set()
+    if inject_memory and not inject_important_memory:
+        disabled_names.add("important_memory")
+    padded = _ordered_prompt_sections(sections, disabled_names=frozenset(disabled_names))
     order = [section.name for section in padded]
     text = _render_prompt_sections(padded)
     diagnostics = {
@@ -578,6 +579,11 @@ def build_prompt_bundle(
         "source_selection": registered_sources.selection_diagnostics(),
         "memory_integrity_warnings": list(dict.fromkeys(memory_integrity_warnings)),
         "memory_prompt_injection": inject_memory,
+        "memory_injection": {
+            "global": memory_prompt_injection(config),
+            "tiered": inject_tiered_memory,
+            "important": inject_important_memory,
+        },
         "task_plan_scope": {"source": source, "session_id": session_id},
     }
     return PromptBundle(
@@ -606,4 +612,5 @@ def refresh_memory_prompt_bundle(bundle: PromptBundle, root: Path, user: str,
     diagnostics["sections"] = {section.name: _section_diagnostic(section) for section in sections}
     diagnostics["memory_integrity_warnings"] = current.diagnostics.get("memory_integrity_warnings", [])
     diagnostics["memory_prompt_injection"] = current.diagnostics["memory_prompt_injection"]
+    diagnostics["memory_injection"] = current.diagnostics["memory_injection"]
     return PromptBundle(text, sections, current.memory_ids, diagnostics, current.memory_files)

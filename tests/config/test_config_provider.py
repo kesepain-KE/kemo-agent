@@ -325,6 +325,28 @@ class ConfigAndHistoryTests(unittest.TestCase):
         default_config = load_config("bob", root)
         self.assertFalse(default_config["task_plan"]["auto_retry_on_fix"])
 
+    def test_memory_category_switches_are_user_owned_with_enabled_defaults(self) -> None:
+        _, root = self.make_root()
+        global_path = root / "config/global_config.yaml"
+        global_config = json.loads(global_path.read_text("utf-8"))
+        global_config["memory"] = {
+            "prompt_injection": True,
+            "tiered_prompt_injection": False,
+            "important_prompt_injection": False,
+        }
+        global_path.write_text(json.dumps(global_config), "utf-8")
+        self.assertTrue(load_config("bob", root)["memory"]["tiered_prompt_injection"])
+        self.assertTrue(load_config("bob", root)["memory"]["important_prompt_injection"])
+        user_path = root / "users/alice/user_config.yaml"
+        user_config = json.loads(user_path.read_text("utf-8"))
+        for field in ("tiered_prompt_injection", "important_prompt_injection"):
+            for invalid in ("false", 0, [], {}):
+                with self.subTest(field=field, invalid=invalid):
+                    user_config["memory"] = {field: invalid}
+                    user_path.write_text(json.dumps(user_config), "utf-8")
+                    with self.assertRaisesRegex(ConfigError, field):
+                        load_config("alice", root)
+
     def test_global_provider_is_not_a_user_fallback(self) -> None:
         _, root = self.make_root()
         config = load_config("bob", root)
@@ -483,12 +505,14 @@ class ConfigAndHistoryTests(unittest.TestCase):
             "multimodal_models": {
                 "vision": "vision-model",
                 "image_generation": "",
+                "file_understanding": "document-model",
             },
         }
         with patch.dict(os.environ, {"OPENAI_API_KEY": "environment-key"}, clear=False):
             provider = provider_runtime_config(config)
         self.assertEqual(provider["api_key"], "inline-key")
         self.assertEqual(resolve_capability_model(config, "vision"), "vision-model")
+        self.assertEqual(resolve_capability_model(config, "file_understanding"), "document-model")
         self.assertEqual(
             resolve_capability_model(config, "image_generation"),
             "chat-model",

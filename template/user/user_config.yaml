@@ -4,6 +4,9 @@ schema_version: 1
 memory:
   # companion 让记忆覆盖事实偏好、关系语境和近期状态；work 仅保留事实。
   profile: companion
+  # 自动注入还需全局 memory.prompt_injection 开启；临时重要记忆失效时不注入。
+  tiered_prompt_injection: true
+  important_prompt_injection: true
 web_ui:
   language: zh-CN
   background:
@@ -35,6 +38,7 @@ multimodal_models:
   speech_to_speech: ''
   video_understanding: ''
   video_generation: ''
+  file_understanding: ''
 multimodal_routing:
   vision: auto
 task_plan:

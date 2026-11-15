@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from run.config import build_prompt_bundle
+from run.config import build_prompt_bundle, refresh_memory_prompt_bundle
 from run.memory import MemoryStore, connection
 
 
@@ -35,17 +35,47 @@ class ImportantMemoryLifecycleTests(unittest.TestCase):
         self.assertTrue(other.important_view_is_current())
 
     def test_changed_source_invalidates_prompt_until_provenance_is_rebuilt(self) -> None:
+        config = {"memory": {
+            "prompt_injection": True,
+            "tiered_prompt_injection": True,
+            "important_prompt_injection": True,
+        }}
+        original = build_prompt_bundle(self.root, "alice", config, plugin_manifests=())
+        self.assertIn("DERIVED_PROFILE", original.text)
         self.store.edit_fragment("seven_days", "source.md", "updated fact", now=self.now)
         status = self.store.important_view_status()
         self.assertEqual(status["reason_codes"], ["source_changed"])
         self.assertFalse(self.store.important_view_is_current())
         self.assertEqual(self.store.load_important_view_sources(), set())
-        bundle = build_prompt_bundle(self.root, "alice", {}, plugin_manifests=())
-        self.assertNotIn("DERIVED_PROFILE", bundle.text)
-        self.assertIn("updated fact", bundle.text)
+        for bundle in (
+            build_prompt_bundle(self.root, "alice", config, plugin_manifests=()),
+            refresh_memory_prompt_bundle(original, self.root, "alice", config, memory_store=self.store),
+        ):
+            self.assertNotIn("DERIVED_PROFILE", bundle.text)
+            self.assertIn("updated fact", bundle.text)
+            self.assertNotIn("memory_temporary_important.md", bundle.memory_files)
         self.assertEqual(self.path.read_text("utf-8"), "DERIVED_PROFILE")
         self.store.set_important_view_sources(["source.md"])
         self.assertEqual(self.store.important_view_status()["status"], "valid")
+        self.assertIn("DERIVED_PROFILE", build_prompt_bundle(self.root, "alice", config, plugin_manifests=()).text)
+
+    def test_expired_important_only_memory_is_not_injected(self) -> None:
+        config = {"memory": {
+            "prompt_injection": True,
+            "tiered_prompt_injection": False,
+            "important_prompt_injection": True,
+        }}
+        original = build_prompt_bundle(self.root, "alice", config, plugin_manifests=())
+        self.assertIn("DERIVED_PROFILE", original.text)
+        self.assertNotIn("original fact", original.text)
+        with patch("run.memory.utc_now", return_value=self.now + timedelta(days=8)):
+            for bundle in (
+                build_prompt_bundle(self.root, "alice", config, plugin_manifests=()),
+                refresh_memory_prompt_bundle(original, self.root, "alice", config, memory_store=self.store),
+            ):
+                self.assertNotIn("DERIVED_PROFILE", bundle.text)
+                self.assertEqual(bundle.memory_files, ())
+        self.assertEqual(self.path.read_text("utf-8"), "DERIVED_PROFILE")
 
     def test_deleted_and_promoted_sources_have_honest_short_reasons(self) -> None:
         self.store.delete_fragment("seven_days", "source.md")
