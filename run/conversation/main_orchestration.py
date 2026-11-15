@@ -241,7 +241,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             normalized = persist_guidance(values)
             preparing_guidance.extend(normalized)
             prepared_guidance = prepare_guidance(
-                normalized, root=root, user=user, session_id=session_id, config=config,
+                normalized, root=root, user=user, source=source, session_id=session_id, config=config,
                 runtime_provider=runtime, provider=provider, cancel_event=cancel_event,
                 known_descriptors=descriptors,
             )

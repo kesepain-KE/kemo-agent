@@ -18,6 +18,8 @@ from provider.schema import ProviderError
 from run.conversation.provider_events import provider_events
 from run.conversation.provider_projection import final_answer_messages
 from run.infra import EngineError
+from run.config import media_asset_ttl_seconds
+from run.extensions import retain_media_assets
 from run.tools import (
     is_invalid_tool_arguments_error,
     response_invalid_tool_arguments_error,
@@ -105,6 +107,7 @@ def exchange(
         terminal = None
         partial = False
         media_emitted = False
+        retained_artifacts = []
         stream_usage: Usage | None = None
         try:
             with provider_request_slot(config, cancel_event=cancel_event), closing(provider_events(
@@ -151,10 +154,21 @@ def exchange(
                             pass
                     if event.type == "media_output":
                         media_emitted = True
+                        artifact = retain_media_assets(
+                            root, user, [event.result],
+                            source=str(request.metadata.get("source") or ""),
+                            session_id=str(request.metadata.get("session_id") or ""),
+                            ttl_seconds=media_asset_ttl_seconds(config),
+                        )[0]
+                        event.result = artifact
+                        event.metadata["artifact"] = artifact
+                        retained_artifacts.append(artifact)
                     yield event
             if terminal is None or not captured:
                 raise ConnectionError("响应流在完整终态到达前结束")
             response = captured[-1]
+            if retained_artifacts:
+                response.metadata["artifacts"] = retained_artifacts
             if (response.status not in {"completed", "requires_action"}
                     and not _argument_correction(response)):
                 raise EngineError("Provider 未提供可接受的完整响应")

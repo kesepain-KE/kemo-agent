@@ -10,16 +10,17 @@ from provider.protocol.models import VideoContent as _AnnotationVideoContent
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from provider.factory import provider_request_slot
 from provider.protocol.models import AudioContent, FileContent, ImageContent, TextContent, VideoContent
 from provider.schema import ProviderError
 from run.agents import AgentRunner
-from run.config import MainAgentSourcePolicy, load_config, provider_runtime_config
+from run.config import MainAgentSourcePolicy, load_config, media_asset_ttl_seconds, provider_runtime_config
 from run.infra import EngineError
 from run.extensions import (
     AttachmentError, RunAssetResolver, history_attachment_descriptors,
-    main_model_supports_input, select_vision_route,
+    main_model_supports_input, select_vision_route, retain_media_descriptors, retain_media_aliases,
 )
 from run.conversation.request_input import uploaded_file_context as _uploaded_file_context
 
@@ -59,6 +60,22 @@ def prepare_provider_request(
         for item in (request.get("uploaded_files") or [])
         if isinstance(item, dict)
     ]
+    # Only verified assets carry an ID worth retaining. The engine boundary also
+    # accepts plain path descriptors, which keep their previous behaviour.
+    retainable = [
+        item for item in uploaded_descriptors if str(item.get("asset_id") or "").strip()
+    ]
+    if retainable:
+        retained = retain_media_descriptors(
+            base, user, retainable, source=source, session_id=session_id,
+            ttl_seconds=media_asset_ttl_seconds(config),
+        )
+        refreshed = {str(item["asset_id"]): item for item in retained}
+        uploaded_descriptors = [
+            refreshed.get(str(item.get("asset_id") or ""), item)
+            for item in uploaded_descriptors
+        ]
+    request = {**request, "uploaded_files": uploaded_descriptors}
     history_attachments = history_attachment_descriptors(uploaded_descriptors)
     image_descriptors = [
         item
@@ -155,7 +172,7 @@ def prepare_provider_request(
                             "purpose": "input",
                             "capability": "conversation",
                         },
-                        idempotency_key=asset_id,
+                        idempotency_key=f"{uuid4().hex}:{asset_id}",
                         checksum_sha256=str(verified["checksum_sha256"]),
                         mime_type=str(verified["mime_type"]),
                         cancel_event=cancel_event,
@@ -164,6 +181,9 @@ def prepare_provider_request(
                         remote,
                         cancel_event=cancel_event,
                     )
+                retain_media_aliases(
+                    base, user, {str(getattr(remote, "id")): asset_id}, source=source, session_id=session_id,
+                )
                 provider_media.append(
                     resolver.remote_content(
                         asset_id,
@@ -177,6 +197,10 @@ def prepare_provider_request(
         request,
         vision_route=vision_route,
         direct_asset_ids=direct_asset_ids,
+        file_understanding=(
+            runtime_provider.get("type") == "kemo"
+            and bool(str((config.get("multimodal_models") or {}).get("file_understanding") or "").strip())
+        ),
     )
     durable_user_content_blocks = []
     for block in content_blocks:

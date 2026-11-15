@@ -8,6 +8,7 @@ from typing import Any, Literal
 from run.config import ConfigError
 from run.extensions.model_capabilities import (
     lookup_model_capabilities,
+    model_supports_operation,
 )
 
 
@@ -108,13 +109,7 @@ def main_model_supports_input(
         return modality in explicit if "input_modalities" in provider_config else False
     if modality not in set(getattr(declared, "input_modalities", []) or []):
         return False
-    operations = (getattr(declared, "extensions", {}) or {}).get("operations")
-    if operation == "conversation" or not isinstance(operations, dict):
-        return True
-    operation_value = operations.get(operation)
-    if isinstance(operation_value, dict):
-        return operation_value.get("supported") is True
-    return operation_value is True
+    return "text" in declared.output_modalities and model_supports_operation(declared, operation)
 
 
 def main_model_supports_images(
@@ -129,7 +124,7 @@ def main_model_supports_images(
         runtime_provider,
         provider,
         "image",
-        operation="vision",
+        operation="conversation",
         cancel_event=cancel_event,
     )
 

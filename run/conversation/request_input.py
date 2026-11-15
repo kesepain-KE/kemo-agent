@@ -58,6 +58,7 @@ def uploaded_file_context(
     *,
     vision_route: str | None = None,
     direct_asset_ids: set[str] | None = None,
+    file_understanding: bool = False,
 ) -> str:
     raw_files = request.get("uploaded_files") or []
     if not isinstance(raw_files, list):
@@ -98,8 +99,18 @@ def uploaded_file_context(
                 if direct
                 else f"；视频资产 {asset_id}，需要分析时调用 multimodal 工具"
             )
-        elif media_kind == "file" and asset_id and direct:
-            suffix = f"；文件资产 {asset_id} 已直接提供给主模型"
+        elif media_kind == "file" and asset_id:
+            if direct:
+                suffix = f"；文件资产 {asset_id} 已直接提供给主模型"
+            elif file_understanding:
+                suffix = (
+                    f"；文件资产 {asset_id}，需要理解内容时调用 multimodal 工具"
+                    "（action=analyze_file），使用已配置的文件理解专用模型"
+                )
+            else:
+                suffix = f"；文件资产 {asset_id}，需要读取内容时使用 file 工具"
+        if item.get("reference_expires_at"):
+            suffix += f"；短期 ID 引用到期时间 {item['reference_expires_at']}"
         lines.append(
             f"- {name or Path(path).name}：{path}（{mime_type}，{size} bytes{suffix}）"
         )
@@ -107,8 +118,8 @@ def uploaded_file_context(
         return ""
     return (
         "\n\n[本轮输入资产]\n"
-        "以下文件已经由 Web、外部消息或运行工具登记；普通文件可按需使用 file 工具读取，"
-        "并请严格按每项资产说明选择主模型或 multimodal 工具：\n"
+        "以下文件已经由 Web、外部消息或运行工具登记；"
+        "请严格按每项资产说明选择主模型、multimodal 或 file 工具：\n"
         + "\n".join(lines)
     )
 

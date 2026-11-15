@@ -9,7 +9,9 @@ import uuid
 from typing import Any, Iterable
 
 from provider.factory import provider_request_slot
-from run.extensions.attachments import AttachmentError, RunAssetResolver
+from provider.schema import ProviderError
+from run.extensions.attachments import AttachmentError, RunAssetResolver, gateway_asset_content
+from run.extensions.media_asset_cache import retain_media_aliases
 from run.extensions.model_capabilities import (
     capability_cache_identity,
     lookup_model_capabilities,
@@ -21,6 +23,32 @@ class NativeMediaTransport:
     def __init__(self) -> None:
         self.remote: dict[tuple[Any, ...], Any] = {}
         self.generations: dict[tuple[Any, ...], str] = {}
+
+    def gateway_descriptor(
+        self, asset_id: str, *, config: dict[str, Any],
+        runtime_provider: dict[str, Any], provider: Any, user: str,
+        cancel_event: Any = None,
+    ) -> dict[str, Any]:
+        if str(runtime_provider.get("type") or "").casefold() != "kemo" or not all(
+            callable(getattr(provider, name, None)) for name in ("get_asset", "wait_asset_ready")
+        ):
+            raise AttachmentError(f"资产不属于当前 Run 或不存在：{asset_id}")
+        try:
+            with provider_request_slot(config, cancel_event=cancel_event):
+                remote = provider.wait_asset_ready(provider.get_asset(asset_id), cancel_event=cancel_event)
+        except ProviderError as exc:
+            if exc.status_code == 404:
+                raise AttachmentError(f"资产不属于当前 Run 或不存在：{asset_id}") from exc
+            raise
+        block = gateway_asset_content(remote)
+        identity = capability_cache_identity(runtime_provider)
+        self.remote[("gateway_asset", *identity, user, remote.id)] = remote
+        return {
+            "asset_id": remote.id, "name": remote.filename or remote.id,
+            "mime_type": remote.mime_type, "size": remote.size,
+            "checksum_sha256": remote.checksum_sha256, "media_kind": block.type,
+            "origin": "gateway_asset", "provider_identity": identity,
+        }
 
     def validate(
         self, entries: Iterable[Any], *, config: dict[str, Any],
@@ -107,12 +135,21 @@ class NativeMediaTransport:
             raise AttachmentError(f"请求图片总数超过当前模型上限 {limit}")
 
     def content(
-        self, entry: Any, *, resolver: RunAssetResolver,
+        self, entry: Any, *, resolver: RunAssetResolver | None,
         verified: dict[str, Any], config: dict[str, Any],
         runtime_provider: dict[str, Any], provider: Any, user: str,
-        session_id: str, cancel_event: Any = None,
+        session_id: str, source: str = "", cancel_event: Any = None,
     ) -> dict[str, Any]:
         asset_id = str(verified["asset_id"])
+        if verified.get("origin") == "gateway_asset":
+            identity = capability_cache_identity(runtime_provider)
+            if verified["provider_identity"] != identity:
+                raise AttachmentError("网关资产不属于当前 Provider 账户，请重新装载")
+            remote = self.remote[("gateway_asset", *identity, user, asset_id)]
+            return gateway_asset_content(
+                remote, expected_kind=verified["media_kind"], detail=entry.detail,
+            ).model_dump(mode="json", exclude_none=True)
+        assert resolver is not None
         if str(runtime_provider.get("type") or "").casefold() == "chat":
             block = resolver.image_content(
                 asset_id, provider="chat", detail=entry.detail
@@ -153,9 +190,11 @@ class NativeMediaTransport:
             if checksum is not None and checksum != verified["checksum_sha256"]:
                 raise AttachmentError("网关媒体校验和与本地文件不一致")
             self.remote[key] = remote
+            retain_media_aliases(
+                resolver.root, user, {str(remote.id): asset_id},
+                source=source, session_id=session_id,
+            )
         block = resolver.remote_content(
-            asset_id, remote_asset_id=str(getattr(remote, "id"))
+            asset_id, remote_asset_id=str(getattr(remote, "id")), detail=entry.detail,
         )
-        if verified["media_kind"] == "image":
-            block = block.model_copy(update={"detail": entry.detail})
         return block.model_dump(mode="json", exclude_none=True)

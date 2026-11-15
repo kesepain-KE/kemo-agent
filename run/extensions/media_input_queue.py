@@ -63,11 +63,27 @@ class MediaInputQueue:
         input_limit: int | None = None,
     ) -> dict[str, Any]:
         intent = request_media_attachment(**arguments)["media_input_request"]
-        descriptors = resolve_media_attachment(
-            root, user, intent,
-            [*known, *(entry.descriptor for entry in self.entries.values())],
+        local = [
+            item for item in [*known, *(entry.descriptor for entry in self.entries.values())]
+            if item.get("origin") != "gateway_asset"
+        ]
+        local_ids = {str(item["asset_id"]) for item in local}
+        resolved = resolve_media_attachment(
+            root, user, {**intent, "asset_ids": [value for value in intent["asset_ids"] if value in local_ids]},
+            local,
             user_text=user_text, tool_records=tool_records,
         )
+        local_by_id = {str(item["asset_id"]): item for item in resolved}
+        descriptors = []
+        for asset_id in intent["asset_ids"]:
+            descriptor = local_by_id.pop(asset_id, None)
+            if descriptor is None:
+                descriptor = self.transport.gateway_descriptor(
+                    asset_id, config=config, runtime_provider=runtime_provider,
+                    provider=provider, user=user, cancel_event=cancel_event,
+                )
+            descriptors.append(descriptor)
+        descriptors.extend(local_by_id.values())
         candidates = dict(self.entries)
         attachment_id = f"attachment_{uuid.uuid4().hex}"
         canonical_ids: list[str] = []
@@ -114,7 +130,7 @@ class MediaInputQueue:
 
     def prepare(
         self, *, root: Path, user: str, config: dict[str, Any],
-        runtime_provider: dict[str, Any], provider: Any, session_id: str,
+        runtime_provider: dict[str, Any], provider: Any, session_id: str, source: str = "",
         cancel_event: Any = None,
         visible_asset_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
@@ -136,9 +152,12 @@ class MediaInputQueue:
         messages = []
         for entry in pending:
             try:
-                checked_media_path(root, user, str(entry.descriptor["path"]))
-                resolver = RunAssetResolver(root, user, [entry.descriptor])
-                _, verified = resolver.local_asset(str(entry.descriptor["asset_id"]))
+                resolver = None
+                verified = entry.descriptor
+                if verified.get("origin") != "gateway_asset":
+                    checked_media_path(root, user, str(entry.descriptor["path"]))
+                    resolver = RunAssetResolver(root, user, [entry.descriptor])
+                    _, verified = resolver.local_asset(str(entry.descriptor["asset_id"]))
                 if visible_asset_ids and verified["asset_id"] in visible_asset_ids:
                     if entry.status != "included":
                         entry.status = "prepared"
@@ -146,7 +165,7 @@ class MediaInputQueue:
                 block = self.transport.content(
                     entry, resolver=resolver, verified=verified, config=config,
                     runtime_provider=runtime_provider, provider=provider,
-                    user=user, session_id=session_id, cancel_event=cancel_event,
+                    user=user, session_id=session_id, source=source, cancel_event=cancel_event,
                 )
             except AttachmentError as exc:
                 entry.status, entry.error = "failed", str(exc)

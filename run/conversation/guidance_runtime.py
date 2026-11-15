@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, Callable, Iterable
 
 from provider.factory import provider_request_slot
@@ -22,7 +23,10 @@ from run.extensions import (
     history_attachment_descriptors,
 )
 from run.conversation.guidance import GuidanceInput, normalize_guidance
-from run.extensions import main_model_supports_input, select_vision_route
+from run.extensions import (
+    main_model_supports_input, select_vision_route, retain_media_descriptors, retain_media_aliases,
+)
+from run.config import media_asset_ttl_seconds
 from run.conversation.request_input import content_for_message, uploaded_file_context
 
 
@@ -63,6 +67,7 @@ def prepare_guidance(
     root: Path,
     user: str,
     session_id: str,
+    source: str = "",
     config: dict[str, Any],
     runtime_provider: dict[str, Any],
     provider: Any,
@@ -109,6 +114,10 @@ def prepare_guidance(
             _, verified = resolver.local_asset(asset_id, expected_kind=media_kind)
             verified_descriptors.append(copy.deepcopy(verified))
 
+        verified_descriptors = retain_media_descriptors(
+            root, user, verified_descriptors, source=source, session_id=session_id,
+            ttl_seconds=media_asset_ttl_seconds(config),
+        )
         image_descriptors = [
             value
             for value in verified_descriptors
@@ -174,7 +183,7 @@ def prepare_guidance(
                                 "purpose": "input",
                                 "capability": "conversation",
                             },
-                            idempotency_key=asset_id,
+                            idempotency_key=f"{uuid4().hex}:{asset_id}",
                             checksum_sha256=str(checked["checksum_sha256"]),
                             mime_type=str(checked["mime_type"]),
                             cancel_event=cancel_event,
@@ -182,6 +191,9 @@ def prepare_guidance(
                         remote = wait_asset_ready(remote, cancel_event=cancel_event)
                     remote_id = str(getattr(remote, "id"))
                     remote_assets[asset_id] = remote_id
+                    retain_media_aliases(
+                        root, user, {remote_id: asset_id}, source=source, session_id=session_id,
+                    )
                 provider_media.append(
                     resolver.remote_content(
                         asset_id,
@@ -194,6 +206,10 @@ def prepare_guidance(
             {"uploaded_files": verified_descriptors},
             vision_route=vision_route,
             direct_asset_ids=direct_asset_ids,
+            file_understanding=(
+                runtime_provider.get("type") == "kemo"
+                and bool(str((config.get("multimodal_models") or {}).get("file_understanding") or "").strip())
+            ),
         )
         label = item.text.strip() or "请处理本次新增的输入资产。"
         text = f"[运行中引导]\n- {label}"

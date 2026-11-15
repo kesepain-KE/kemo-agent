@@ -11,6 +11,8 @@ from provider.protocol.models import MessageItem
 from run.extensions.attachments import AttachmentError
 from run.extensions.media_input_queue import MediaInputQueue
 from run.extensions.media_input_request import request_media_attachment
+from run.extensions.media_asset_cache import resolve_retained_media, retain_media_descriptors
+from run.config import media_asset_ttl_seconds
 
 
 class MediaInputHost:
@@ -22,6 +24,7 @@ class MediaInputHost:
         input_limit: int | None = None, audit: list[dict[str, Any]] | None = None,
         visible_asset_ids: set[str] | None = None,
     ) -> None:
+        self.source = scope[1]
         scope = (str(root.resolve()), user, *scope)
         queue = state.get("media_input_queue")
         if queue is None:
@@ -41,6 +44,10 @@ class MediaInputHost:
     def _sync(self) -> None:
         ids = {str(item.get("asset_id")) for item in self.known}
         for entry in self.queue.entries.values():
+            if entry.descriptor.get("origin") == "gateway_asset":
+                # Gateway IDs are reauthorized by the selected account, not
+                # promoted into local filesystem attachment descriptors.
+                continue
             if entry.descriptor["asset_id"] not in ids:
                 self.known.append(dict(entry.descriptor))
                 ids.add(entry.descriptor["asset_id"])
@@ -60,13 +67,28 @@ class MediaInputHost:
         if result != request_media_attachment(**arguments):
             raise AttachmentError("attach_media 返回了无效装载意图")
         try:
-            return self.queue.enqueue(
-                arguments, root=self.root, user=self.user, call_id=call_id,
+            asset_ids, retained = resolve_retained_media(
+                self.root, self.user, arguments.get("asset_ids") or [],
+                source=self.source, session_id=self.session_id,
+            )
+            known_ids = {item.get("asset_id") for item in [*self.known, *retained]}
+            current_ids = {item.get("asset_id") for item in self.known}
+            self.known.extend(item for item in retained if item["asset_id"] not in current_ids)
+            receipt = self.queue.enqueue(
+                {**arguments, "asset_ids": asset_ids}, root=self.root, user=self.user, call_id=call_id,
                 known=self.known, user_text=self.user_text, tool_records=tool_records,
                 config=self.config, runtime_provider=self.runtime_provider,
                 provider=self.provider, cancel_event=self.cancel_event,
                 input_limit=self.input_limit,
             )
+            local = [entry.descriptor for key, entry in self.queue.entries.items()
+                     if key in receipt["asset_ids"] and key not in known_ids
+                     and entry.descriptor.get("origin") != "gateway_asset"]
+            retain_media_descriptors(
+                self.root, self.user, local, source=self.source, session_id=self.session_id,
+                ttl_seconds=media_asset_ttl_seconds(self.config),
+            )
+            return receipt
         finally:
             self._sync()
 
@@ -75,7 +97,7 @@ class MediaInputHost:
             return self.queue.prepare(
                 root=self.root, user=self.user, config=self.config,
                 runtime_provider=self.runtime_provider, provider=self.provider,
-                session_id=self.session_id, cancel_event=self.cancel_event,
+                session_id=self.session_id, source=self.source, cancel_event=self.cancel_event,
                 visible_asset_ids=self.visible_asset_ids,
             )
         finally:

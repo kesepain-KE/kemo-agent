@@ -36,6 +36,20 @@ class ReasoningSelection:
     error: BaseException | None = None
 
 
+def model_supports_operation(capabilities: ModelCapabilities, operation: str) -> bool:
+    """Match Kemo's implicit conversation and explicit specialized operations."""
+    operations = capabilities.extensions.get("operations") or {}
+    declaration = operations.get(operation)
+    if operation == "conversation":
+        return not (
+            declaration is False
+            or isinstance(declaration, dict) and declaration.get("supported") is False
+        )
+    return declaration is True or (
+        isinstance(declaration, dict) and declaration.get("supported") is True
+    )
+
+
 def declared_input_token_limit(
     capabilities: ModelCapabilities | None,
 ) -> int | None:
