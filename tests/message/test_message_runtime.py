@@ -480,6 +480,11 @@ timestamp: 2026-07-18T14:32:25+08:00
         ).local_asset(payload["assets"][0]["asset_id"], expected_kind="image")
         self.assertEqual(resolved, image.resolve())
         self.assertIn("TEXT_ATTACHMENT", payload["prompt"])
+        from run.extensions import retain_media_descriptors, resolve_retained_media
+        retain_media_descriptors(
+            self.root, "alice", payload["assets"], source="message:filedemo",
+            session_id="private:c1", ttl_seconds=120,
+        )
 
         for envelope in received:
             outbound = OutboundMessage.reply(
@@ -509,6 +514,14 @@ timestamp: 2026-07-18T14:32:25+08:00
         self.assertEqual(group_output["reply_to"], "g2")
         self.assertFalse(image.exists())
         self.assertFalse(text_file.exists())
+        retained_ids, retained = resolve_retained_media(
+            self.root, "alice", [payload["assets"][0]["asset_id"]],
+            source="message:filedemo", session_id="private:c1",
+        )
+        retained_path, verified = RunAssetResolver(self.root, "alice", retained).local_asset(retained_ids[0])
+        self.assertEqual(retained_path.read_bytes(), _PNG)
+        self.assertEqual(verified["origin"], "message_snapshot")
+        self.assertEqual(verified["source"], "filedemo")
         self.assertFalse(list(self.directory.glob("*.processing.md")))
         logs = LogStore(self.root).list_messages("msg_filedemo")
         self.assertIn("请分析附件", {item["content"] for item in logs})

@@ -218,10 +218,12 @@ describe('current settings and profile pages', () => {
     expect(screen.getByText('历史标题和记忆提取等轻量后台任务；留空时继承主对话模型')).toBeInTheDocument()
     expect(screen.getByText('任务计划、自我改进和需要较深分析的后台任务；留空时继承主对话模型')).toBeInTheDocument()
     expect(screen.getByLabelText('图片识别')).toHaveValue('vision-model')
+    expect(screen.getByLabelText('文件理解')).toHaveValue('document-model')
     fireEvent.click(screen.getByRole('combobox', { name: '思考强度' }))
     fireEvent.click(screen.getByRole('option', { name: /高.*深度推理/ }))
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'next-model' } })
     fireEvent.change(screen.getByLabelText('轻量子智能体模型'), { target: { value: 'summary-model-next' } })
+    fireEvent.change(screen.getByLabelText('文件理解'), { target: { value: 'document-model-next' } })
     fireEvent.click(screen.getByRole('switch', { name: '主模型支持图片输入' }))
     fireEvent.keyDown(visionRoutingSelect, { key: 'ArrowDown' })
     fireEvent.click(screen.getByRole('option', { name: /仅专用视觉模型/ }))
@@ -247,6 +249,7 @@ describe('current settings and profile pages', () => {
       provider: { reasoning_effort: 'high', input_modalities: ['text', 'image'] },
       agent_models: { default: 'agent-default', cheap: 'summary-model-next', reasoning: 'agent-reasoning' },
       multimodal_routing: { vision: 'dedicated' },
+      multimodal_models: { file_understanding: 'document-model-next' },
     }))
 
     fireEvent.click(screen.getByRole('button', { name: '用户切换' }))
