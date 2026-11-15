@@ -39,6 +39,8 @@ from run.config import (
     provider_runtime_config,
     read_yaml_object,
     cron_history_retention_days,
+    memory_prompt_injection,
+    PromptConfigError,
 )
 from run.extensions import (
     clear_model_capability_cache,
@@ -75,6 +77,8 @@ from web.services.settings_support import (
     _merge_patch,
     _positive_float_or_default,
     _redact_config,
+    validate_settings_document,
+    validate_settings_patch,
 )
 
 
@@ -88,6 +92,8 @@ _CONFIG_SOURCE_PATHS = (
     "tools.invalid_tool_arguments_retries",
     "tools.timeout",
     "memory.prompt_injection",
+    "memory.tiered_prompt_injection",
+    "memory.important_prompt_injection",
     "memory.extraction_mode",
     "memory.history_read_enabled",
     "memory.temporary_injection_limits.half_year",
@@ -172,7 +178,8 @@ class SettingsServiceMixin:
                 and self._has_path(user_config, dotted)
                 else "global"
                 if (
-                    dotted.split(".", 1)[0] not in USER_ONLY_SECTIONS
+                    dotted not in {"memory.tiered_prompt_injection", "memory.important_prompt_injection"}
+                    and dotted.split(".", 1)[0] not in USER_ONLY_SECTIONS
                     and self._has_path(global_config, dotted)
                 )
                 else "default"
@@ -241,24 +248,35 @@ class SettingsServiceMixin:
                 raise InvalidRequestError("CardStream 已移除旧轮级上下文配置；请使用卡片/Token 设置")
         if user is None and {"web_ui", "interactive_decisions"}.intersection(changes):
             raise InvalidRequestError("web_ui 和 interactive_decisions 仅支持用户配置")
+        if user is None and isinstance(changes.get("memory"), dict) and {
+            "tiered_prompt_injection", "important_prompt_injection",
+        }.intersection(changes["memory"]):
+            raise InvalidRequestError("记忆分类注入开关仅支持用户配置")
+        if user is not None and "provider_security" in changes:
+            raise InvalidRequestError("Provider 访问范围仅支持全局配置")
         current = read_yaml_object(path, allow_empty=user is not None)
         updated = _merge_patch(current, changes)
+        from run.config import merge_user_config
+        from run.memory import MemoryConfigError
+
+        try:
+            effective = merge_user_config(
+                read_yaml_object(self.root / "config/global_config.yaml"), updated,
+            ) if user is not None else updated
+            validate_settings_patch(effective, changes)
+        except (ValueError, ConfigError, MemoryConfigError) as exc:
+            raise InvalidRequestError(str(exc)) from None
         if user is not None:
             from web.services.web_ui_config import validate_web_ui_patch
 
             validate_web_ui_patch(updated, changes, path, self.root)
-        from provider.retry import RetryManager
-        from run.config import validate_cardstream_settings
         try:
-            validate_cardstream_settings(updated)
-            RetryManager(max_retries=(updated.get("provider_runtime") or {}).get("max_retries", 3))
-        except (ValueError, ConfigError) as exc:
+            validate_settings_document(updated)
+        except (ValueError, ConfigError, PromptConfigError) as exc:
             raise InvalidRequestError(str(exc)) from None
         if user is not None and isinstance(changes.get("memory"), dict) and "prompt_injection" in changes["memory"]:
             raise InvalidRequestError("记忆注入开关仅支持全局配置")
         if user is None:
-            from run.config import memory_prompt_injection
-
             try:
                 memory_prompt_injection(updated)
                 cron_history_retention_days(updated)
@@ -553,6 +571,8 @@ class SettingsServiceMixin:
                 "knowledge": True,
                 "history_read": bool(memory.get("history_read_enabled", True)),
                 "memory_injection": memory["prompt_injection"],
+                "tiered_memory_injection": memory_prompt_injection(config, kind="tiered"),
+                "important_memory_injection": memory_prompt_injection(config, kind="important"),
                 "task_plan_auto_accept": bool(task_plan.get("auto_accept", False)),
                 "cron": bool(cron.get("enabled", False)),
                 "background_scheduler": bool(
