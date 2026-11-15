@@ -314,14 +314,14 @@ export const handlers = [
     return HttpResponse.json({ enabled: body.enabled })
   }),
   http.delete('/api/users/kesepain/sense/:module', ({ params }) => HttpResponse.json({ module: params.module, deleted: true })),
-  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, schema_versions: { config_schema: 1, card_schema: 1, memory_storage_schema: 1 }, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true, perception_prompt_injection: true, expand_prompt_injection: true }, limits: { context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_timeout: 240, tool_argument_retries: 2, memory_items: 600, memory_chars: 20000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false, ip_rate_limit_enabled: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
+  http.get('/api/users/kesepain/settings', () => HttpResponse.json({ user: 'kesepain', schema_version: 1, schema_versions: { config_schema: 1, card_schema: 1, memory_storage_schema: 1 }, provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741/v1', model: 'test-model', reasoning_effort: 'medium', timeout: 120, stream: false, credential_source: 'environment', configured: true }, features: { tools: true, knowledge: true, history_read: true, memory_injection: true, tiered_memory_injection: true, important_memory_injection: true, task_plan_auto_accept: false, cron: true, background_scheduler: true, perception_prompt_injection: true, expand_prompt_injection: true }, limits: { context_tokens: 1000000, compression_ratio: 0.3, task_plan_steps: 20, tool_timeout: 240, tool_argument_retries: 2, memory_items: 600, memory_chars: 20000 }, users: ['kesepain', 'reviewer'], authentication: { enabled: false, token_enabled: false, password_enabled: false, session_cookie_configured: false, ip_rate_limit_enabled: false }, source_policy: sourcePolicy, provenance: { 'provider.model': 'user', 'tools.enabled': 'global' } })),
   http.get('/api/users/kesepain/config/full', () => HttpResponse.json({
     user: 'kesepain',
     config: {
       schema_version: 1,
       provider: { type: 'kemo', model: 'test-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: false, reasoning_effort: 'medium' },
       agent_models: { default: 'agent-default', cheap: 'summary-model', reasoning: 'agent-reasoning' },
-      multimodal_models: { vision: 'vision-model', image_generation: '', image_edit: '', audio_transcription: '', speech_generation: '', speech_to_speech: '', video_generation: '' },
+      multimodal_models: { vision: 'vision-model', image_generation: '', image_edit: '', audio_transcription: '', speech_generation: '', speech_to_speech: '', video_generation: '', file_understanding: 'document-model' },
       task_plan: { auto_accept: false },
       knowledge: { use_shared: true, use_global: true },
       skills: { shared_whitelist: [] },

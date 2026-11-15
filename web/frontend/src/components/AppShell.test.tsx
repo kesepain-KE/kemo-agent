@@ -3549,43 +3549,116 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('button', { name: '收缩侧边栏' })).toBeInTheDocument()
   })
 
-  it('记忆注入全局开关可回显、保存，修改各层上限不丢失开关值', async () => {
-    let memory = { prompt_injection: false, temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } }
-    const saved: typeof memory[] = []
+  it('记忆总开关与用户分类和注入上限分开保存，刷新保留关闭总开关时的用户选择', async () => {
+    let globalMemory = { prompt_injection: false, temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } }
+    let userMemory: Record<string, unknown> = { tiered_prompt_injection: false, important_prompt_injection: true, temporary_injection_limits: { seven_days: 7 } }
+    const globalSaves: Record<string, unknown>[] = []
+    const userSaves: Record<string, unknown>[] = []
     server.use(
-      http.get('/api/global-config', () => HttpResponse.json({ scope: 'global', config: { memory }, redacted_paths: [] })),
+      http.get('/api/global-config', () => HttpResponse.json({ scope: 'global', config: { memory: globalMemory }, redacted_paths: [] })),
+      http.get('/api/users/kesepain/config/full', () => HttpResponse.json({ user: 'kesepain', config: { memory: userMemory }, redacted_paths: [] })),
       http.patch('/api/global-config', async ({ request }) => {
-        const { changes } = await request.json() as { changes: { memory: typeof memory } }
-        memory = changes.memory
-        saved.push(memory)
-        return HttpResponse.json({ scope: 'global', config: { memory }, redacted_paths: [], updated: true })
+        const { changes } = await request.json() as { changes: { memory: { prompt_injection: boolean } } }
+        globalMemory = { ...globalMemory, ...changes.memory }
+        globalSaves.push(changes.memory)
+        return HttpResponse.json({ scope: 'global', config: { memory: globalMemory }, redacted_paths: [], updated: true })
+      }),
+      http.patch('/api/users/kesepain/config', async ({ request }) => {
+        const { changes } = await request.json() as { changes: { memory: Record<string, unknown> } }
+        userMemory = changes.memory
+        userSaves.push(userMemory)
+        return HttpResponse.json({ user: 'kesepain', config: { memory: userMemory }, redacted_paths: [], updated: true })
       }),
     )
     const app = renderApp('/settings?user=kesepain&tab=memory')
-    const toggle = await screen.findByRole('switch', { name: '自动注入记忆' })
-    expect(toggle).not.toBeChecked()
+    const master = await screen.findByRole('switch', { name: '自动注入记忆' })
+    const tiered = screen.getByRole('switch', { name: '注入层级记忆' })
+    const important = screen.getByRole('switch', { name: '注入临时重要记忆' })
+    expect(master).not.toBeChecked()
+    expect(tiered).not.toBeChecked()
+    expect(important).toBeChecked()
+    expect(tiered).not.toBeDisabled()
+    expect(important).not.toBeDisabled()
     expect(screen.getByText(/关闭后仍可通过工具检索/)).toBeInTheDocument()
+    expect(screen.getByText(/失效时不注入/)).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: '周记忆上限' })).toHaveValue(7)
+    expect(screen.getByRole('spinbutton', { name: '月记忆上限' })).toHaveValue(200)
+    expect(within(tiered.closest('.setting-row') as HTMLElement).getByText('用户')).toBeInTheDocument()
+    expect(within(master.closest('.setting-row') as HTMLElement).getByText('全局')).toBeInTheDocument()
 
-    fireEvent.click(toggle)
+    fireEvent.click(master)
+    fireEvent.click(tiered)
+    fireEvent.click(important)
     for (const [name, value] of [['周记忆上限', '11'], ['月记忆上限', '22'], ['半年记忆上限', '33']]) {
       fireEvent.change(screen.getByRole('spinbutton', { name }), { target: { value } })
-      expect(toggle).toBeChecked()
+      expect(master).toBeChecked()
+      expect(tiered).toBeChecked()
+      expect(important).not.toBeChecked()
     }
     fireEvent.click(screen.getByRole('button', { name: '保存记忆与上下文' }))
-    await waitFor(() => expect(saved).toEqual([{
-      prompt_injection: true, temporary_injection_limits: { seven_days: 11, one_month: 22, half_year: 33 },
+    await waitFor(() => expect(globalSaves).toEqual([{ prompt_injection: true }]))
+    await waitFor(() => expect(userSaves).toEqual([{
+      tiered_prompt_injection: true, important_prompt_injection: false,
+      temporary_injection_limits: { seven_days: 11, one_month: 22, half_year: 33 },
     }]))
     await waitFor(() => expect(screen.getByRole('button', { name: '保存记忆与上下文' })).not.toBeDisabled())
 
-    fireEvent.click(toggle)
+    fireEvent.click(master)
+    fireEvent.click(important)
     fireEvent.click(screen.getByRole('button', { name: '保存记忆与上下文' }))
-    await waitFor(() => expect(saved).toHaveLength(2))
-    expect(saved[1]).toEqual({
-      prompt_injection: false, temporary_injection_limits: { seven_days: 11, one_month: 22, half_year: 33 },
+    await waitFor(() => expect(globalSaves).toHaveLength(2))
+    await waitFor(() => expect(userSaves).toHaveLength(2))
+    expect(globalSaves[1]).toEqual({ prompt_injection: false })
+    expect(userSaves[1]).toEqual({
+      tiered_prompt_injection: true, important_prompt_injection: true,
+      temporary_injection_limits: { seven_days: 11, one_month: 22, half_year: 33 },
     })
-    await act(async () => { await app.client.resetQueries({ queryKey: ['global-config'] }) })
+    await act(async () => { await app.client.resetQueries({ queryKey: ['global-config'] }); await app.client.resetQueries({ queryKey: ['user-config', 'kesepain'] }) })
     expect(await screen.findByRole('switch', { name: '自动注入记忆' })).not.toBeChecked()
+    expect(screen.getByRole('switch', { name: '注入层级记忆' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: '注入临时重要记忆' })).toBeChecked()
     expect(screen.getByRole('spinbutton', { name: '周记忆上限' })).toHaveValue(11)
+  })
+
+  it('记忆模式、密钥环境变量和插件权限均保存到当前用户且不会写回脱敏密钥', async () => {
+    const userSaves: Record<string, unknown>[] = []
+    server.use(http.patch('/api/users/kesepain/config', async ({ request }) => {
+      const { changes } = await request.json() as { changes: Record<string, unknown> }
+      userSaves.push(changes)
+      return HttpResponse.json({ user: 'kesepain', config: {}, updated: true, redacted_paths: [] })
+    }))
+    renderApp('/settings?user=kesepain&tab=memory')
+    fireEvent.change(await screen.findByRole('combobox', { name: '记忆模式' }), { target: { value: 'work' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存记忆与上下文' }))
+    await waitFor(() => expect(userSaves).toHaveLength(1))
+    expect(userSaves[0]).toMatchObject({ memory: { profile: 'work' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存记忆与上下文' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: '权限边界' }))
+    for (const name of ['写入', '删除', '外部访问']) fireEvent.click(await screen.findByRole('checkbox', { name: `插件权限 · ${name}` }))
+    fireEvent.click(screen.getByRole('button', { name: '保存权限边界' }))
+    await waitFor(() => expect(userSaves).toHaveLength(2))
+    expect(userSaves[1]).toMatchObject({ plugins: { permissions: ['read'] } })
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存权限边界' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: '模型与 Provider' }))
+    fireEvent.change(await screen.findByRole('combobox', { name: '密钥环境变量' }), { target: { value: 'OPENAI_API_KEY' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
+    await waitFor(() => expect(userSaves).toHaveLength(3))
+    expect(userSaves[2]).toMatchObject({ provider: { api_key_env: 'OPENAI_API_KEY' } })
+    expect(userSaves[2].provider).not.toHaveProperty('api_key')
+  })
+
+  it('高级配置从设置导航打开并只提交被修改的全局字段', async () => {
+    const saves: Record<string, unknown>[] = []
+    server.use(http.patch('/api/global-config', async ({ request }) => {
+      const { changes } = await request.json() as { changes: Record<string, unknown> }
+      saves.push(changes)
+      return HttpResponse.json({ scope: 'global', config: {}, updated: true, redacted_paths: [] })
+    }))
+    renderApp('/settings?user=kesepain')
+    fireEvent.click(await screen.findByRole('button', { name: '高级配置' }))
+    fireEvent.change(await screen.findByRole('spinbutton', { name: '媒体资源存活时间（秒）' }), { target: { value: '180' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存高级配置' }))
+    await waitFor(() => expect(saves).toEqual([{ media_assets: { ttl_seconds: 180 } }]))
   })
 
   it('运行限制展示并保存多层并发与反压配置', async () => {

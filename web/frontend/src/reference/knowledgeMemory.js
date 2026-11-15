@@ -168,7 +168,7 @@ export function renderMemoryPage(ctx) {
     }, input, clear, h('button.memory-search-submit', {
       type: 'submit', 'aria-label': tr('搜索'), title: tr('搜索'),
     }, h('span', { html: icon('search', 'icon-sm'), 'aria-hidden': 'true' })));
-    const sortSel = h('select.select', { 'aria-label': tr('记忆排序'), style: { width: 'auto' }, onchange: (e) => { sortBy = e.target.value; drawList(); } },
+    const sortSel = h('select.select.filter-select', { 'aria-label': tr('记忆排序'), onchange: (e) => { sortBy = e.target.value; drawList(); } },
       h('option', { value: 'updated_at', selected: sortBy === 'updated_at' }, tr('按更新时间')),
       h('option', { value: 'created_at', selected: sortBy === 'created_at' }, tr('按最早时间')),
       WEIGHTED_MEMORY_TIERS.has(activeTier) ? h('option', { value: 'weight', selected: sortBy === 'weight' }, tr('按权重')) : null,

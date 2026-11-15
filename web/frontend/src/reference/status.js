@@ -187,6 +187,7 @@ export function renderStatusPage(ctx) {
       vision: '视觉理解', image_generation: '图片生成', image_edit: '图片编辑',
       audio_transcription: '音频转写', speech_generation: '语音生成',
       speech_to_speech: '语音转换', video_understanding: '视频理解', video_generation: '视频生成',
+      file_understanding: '文件理解',
     };
     const modelGroup = (title, values) => h('div.runtime-api-group',
       h('div.doc-label', title),

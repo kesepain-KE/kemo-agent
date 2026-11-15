@@ -1265,6 +1265,151 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(service.settings("alice")["features"]["memory_injection"])
 
+    def test_user_memory_categories_are_persisted_isolated_and_globally_gated(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        global_path = root / "config/global_config.yaml"
+        global_path.write_text("{}", "utf-8")
+        for user in ("alice", "bob"):
+            (root / f"users/{user}/user_config.yaml").write_text("{}", "utf-8")
+        (root / "users/alice/memory_temporary_important.md").write_text("HOT", "utf-8")
+        service = WebRunService(root)
+        app = create_app(service=service)
+        for master in (False, True):
+            response = self.request(app, "PATCH", "/api/global-config", json={
+                "changes": {"memory": {"prompt_injection": master}},
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            for tiered, important in ((False, False), (True, False), (False, True), (True, True)):
+                with self.subTest(master=master, tiered=tiered, important=important):
+                    choices = {
+                        "tiered_prompt_injection": tiered,
+                        "important_prompt_injection": important,
+                        "temporary_injection_limits": {"seven_days": 9},
+                    }
+                    response = self.request(app, "PATCH", "/api/users/alice/config", json={
+                        "changes": {"memory": choices},
+                    })
+                    self.assertEqual(response.status_code, 200, response.text)
+                    saved = yaml.safe_load((root / "users/alice/user_config.yaml").read_text("utf-8"))
+                    self.assertEqual(saved["memory"], choices)
+                    settings = service.settings("alice")
+                    self.assertEqual(settings["features"]["memory_injection"], master)
+                    self.assertEqual(settings["features"]["tiered_memory_injection"], master and tiered)
+                    self.assertEqual(settings["features"]["important_memory_injection"], master and important)
+                    self.assertEqual(service.important_memory("alice")["lifecycle"]["prompt_eligible"], master and important)
+                    for field in ("tiered_prompt_injection", "important_prompt_injection"):
+                        self.assertEqual(settings["provenance"][f"memory.{field}"], "user")
+                    bob = service.settings("bob")
+                    self.assertEqual(bob["features"]["tiered_memory_injection"], master)
+                    self.assertEqual(bob["features"]["important_memory_injection"], master)
+                    self.assertEqual(bob["provenance"]["memory.tiered_prompt_injection"], "default")
+        self.assertEqual(yaml.safe_load(global_path.read_text("utf-8"))["memory"], {"prompt_injection": True})
+
+    def test_memory_category_api_rejects_wrong_scope_and_invalid_values(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        (root / "config/global_config.yaml").write_text("{}", "utf-8")
+        path = root / "users/alice/user_config.yaml"
+        path.write_text("{}", "utf-8")
+        app = create_app(service=WebRunService(root))
+        for field in ("tiered_prompt_injection", "important_prompt_injection"):
+            response = self.request(app, "PATCH", "/api/global-config", json={
+                "changes": {"memory": {field: True}},
+            })
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertIn("仅支持用户配置", response.json()["error"]["message"])
+            for invalid in ("false", 0, [], {}):
+                with self.subTest(field=field, invalid=invalid):
+                    response = self.request(app, "PATCH", "/api/users/alice/config", json={
+                        "changes": {"memory": {field: invalid}},
+                    })
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(path.read_text("utf-8"), "{}")
+
+    def test_advanced_settings_persist_nested_values_and_nullable_memory_rules(self) -> None:
+        from run.memory import memory_domain_rules, tier_rules
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        path = root / "config/global_config.yaml"
+        path.write_text((Path(__file__).resolve().parents[2] / "config/global_config.yaml").read_text("utf-8"), "utf-8")
+        app = create_app(service=WebRunService(root))
+        changes = {
+            "memory": {"profile": "work", "extraction_mode": "on_commit",
+                       "domain_rules": {"relation": {"upgrade_threshold": None}},
+                       "tiers": {"seven_days": {"days": None, "upgrade_threshold": None}}},
+            "agents": {"daily_memory_review_time": "03:15", "important_memory_review_hours": 0.5},
+            "history_summary": {"retry_delays_seconds": [2, 5], "max_attempts": 3},
+            "media_assets": {"ttl_seconds": 180},
+            "message": {"max_workers": 6},
+            "provider_security": {"allowed_hosts": ["models.example.com"]},
+        }
+        response = self.request(app, "PATCH", "/api/global-config", json={"changes": changes})
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = yaml.safe_load(path.read_text("utf-8"))
+        self.assertIsNone(saved["memory"]["domain_rules"]["relation"]["upgrade_threshold"])
+        self.assertIsNone(saved["memory"]["tiers"]["seven_days"]["days"])
+        self.assertEqual(saved["memory"]["tiers"]["seven_days"]["next"], "one_month")
+        self.assertEqual(saved["history_summary"]["retry_delays_seconds"], [2, 5])
+        self.assertEqual(saved["media_assets"]["ttl_seconds"], 180)
+        self.assertEqual(tier_rules(saved)["seven_days"].days, None)
+        saved["memory"]["profile"] = "companion"
+        self.assertIsNone(memory_domain_rules(saved)["relation"]["upgrade_threshold"])
+        self.assertEqual(saved["agents"]["token_limit"], 1000000)
+
+    def test_advanced_settings_reject_invalid_values_without_writing(self) -> None:
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        path = root / "config/global_config.yaml"
+        path.write_text("{}", "utf-8")
+        app = create_app(service=WebRunService(root))
+        cases = [
+            {"memory": {"profile": "unknown"}},
+            {"memory": {"extraction_mode": "unknown"}},
+            {"memory": {"extraction_input_tokens": 12}},
+            {"memory": {"domain_rules": {"relation": {"upgrade_threshold": -1}}}},
+            {"agents": {"daily_memory_review_time": "24:01"}},
+            {"agents": {"important_memory_review_hours": 0.001}},
+            {"history_summary": {"retry_delays_seconds": []}},
+            {"history_summary": {"retry_delays_seconds": [1, "2"]}},
+            {"message": {"max_workers": True}},
+            {"message": {"max_workers": 1.5}},
+            {"tools": {"enabled": "false"}},
+            {"runtime_host": {"enable_background_scheduler": 1}},
+            {"provider_security": {"allowed_hosts": ["https://example.com/path"]}},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                response = self.request(app, "PATCH", "/api/global-config", json={"changes": changes})
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(path.read_text("utf-8"), "{}")
+
+    def test_user_memory_profile_and_plugin_permissions_preserve_user_scope(self) -> None:
+        from run.memory import memory_profile
+        _, root = self.make_root()
+        (root / "config").mkdir()
+        global_path = root / "config/global_config.yaml"
+        global_path.write_text("memory:\n  profile: companion\n", "utf-8")
+        app = create_app(service=WebRunService(root))
+        for changes in (
+            {"memory": {"profile": "work"}, "plugins": {"permissions": ["read"]}},
+            {"plugins": {"permissions": []}},
+        ):
+            response = self.request(app, "PATCH", "/api/users/alice/config", json={"changes": changes})
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(memory_profile(load_config("alice", root)), "work")
+        self.assertEqual(memory_profile(load_config("bob", root)), "companion")
+        self.assertEqual(load_config("alice", root)["plugins"]["permissions"], [])
+        response = self.request(app, "PATCH", "/api/users/alice/config", json={"changes": {"memory": {"profile": None}}})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(memory_profile(load_config("alice", root)), "companion")
+        before = (root / "users/alice/user_config.yaml").read_bytes()
+        for changes in ({"plugins": {"permissions": ["admin"]}}, {"provider_security": {"allowed_hosts": ["example.com"]}}):
+            response = self.request(app, "PATCH", "/api/users/alice/config", json={"changes": changes})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual((root / "users/alice/user_config.yaml").read_bytes(), before)
+        self.assertEqual(global_path.read_text("utf-8"), "memory:\n  profile: companion\n")
+
     def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
