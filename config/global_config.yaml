@@ -10,6 +10,8 @@ tools:
   timeout: 240
   consecutive_identical_call_limit: 3
   invalid_tool_arguments_retries: 2
+media_assets:
+  ttl_seconds: 120
 history:
   consecutive_tool_fail_limit: 5
 prompt:
@@ -23,6 +25,7 @@ prompt:
     plugin_prompts: 80000
 memory:
   storage_schema_version: 3
+  # 自动注入总开关；分类开关由各用户 user_config.yaml 单独控制。
   prompt_injection: true
   profile: companion
   domain_rules:

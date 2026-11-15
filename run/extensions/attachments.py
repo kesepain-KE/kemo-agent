@@ -9,14 +9,16 @@ import mimetypes
 import os
 import stat
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from PIL import Image, ImageSequence, UnidentifiedImageError
 
 from provider.adapters.image_content import CHAT_IMAGE_MAX_BYTES, image_content_type
 from provider.protocol.assets import ResolvedAsset
 from provider.protocol.models import (
+    AssetDescriptor,
     AudioContent,
     FileContent,
     ImageContent,
@@ -73,6 +75,38 @@ _MEDIA_LIMITS = {
 
 class AttachmentError(RuntimeError):
     """An uploaded attachment is missing, unsafe, or unsupported."""
+
+
+def gateway_asset_content(
+    descriptor: AssetDescriptor,
+    *,
+    expected_kind: str | None = None,
+    detail: Literal["auto", "low", "high"] = "auto",
+) -> ImageContent | AudioContent | VideoContent | FileContent:
+    """Use authenticated gateway metadata without downloading or reuploading."""
+    if descriptor.expires_at <= datetime.now(timezone.utc):
+        raise AttachmentError(f"网关资产已过期，请重新取得：{descriptor.id}")
+    mime = str(descriptor.mime_type or "").casefold()
+    kind = next(
+        (value for value in ("image", "audio", "video") if mime.startswith(value + "/")),
+        "file",
+    )
+    if expected_kind is not None and kind != expected_kind:
+        raise AttachmentError(f"附件类型不匹配：期望 {expected_kind}，实际为 {kind}")
+    if descriptor.size is not None and descriptor.size > _MEDIA_LIMITS[kind]:
+        raise AttachmentError(f"{kind} 附件超过请求上限")
+    common = {
+        "asset_id": descriptor.id,
+        "mime_type": descriptor.mime_type,
+        "checksum_sha256": descriptor.checksum_sha256,
+    }
+    if kind == "image":
+        return ImageContent(detail=detail, **common)
+    if kind == "audio":
+        return AudioContent(**common)
+    if kind == "video":
+        return VideoContent(**common)
+    return FileContent(filename=descriptor.filename, **common)
 
 
 def _upload_root(root: Path, user: str) -> Path:
@@ -259,7 +293,7 @@ def _media_kind_and_mime(path: Path) -> tuple[str, str]:
 
 
 def _signature_matches(path: Path, media_kind: str, data: bytes) -> bool:
-    """Reject renamed media while leaving ordinary documents to the file tool."""
+    """Reject renamed media while retaining ordinary documents' detected MIME."""
 
     suffix = path.suffix.casefold()
     if media_kind == "image":
@@ -495,6 +529,12 @@ class RunAssetResolver:
         if origin == "web_upload":
             verified = describe_uploaded_asset(self.root, self.user, descriptor)
             path, _ = _safe_uploaded_path(self.root, self.user, verified["path"])
+        elif origin == "message_snapshot":
+            _, _, source = _message_files_root(self.root, self.user, descriptor.get("source"))
+            verified = describe_uploaded_asset(self.root, self.user, descriptor)
+            path, _ = _safe_uploaded_path(self.root, self.user, verified["path"])
+            verified.update(origin="message_snapshot", source=source,
+                            name=str(descriptor.get("name") or verified["name"]))
         elif origin == "message_attachment":
             verified = describe_message_asset(self.root, self.user, descriptor)
             path, _, _ = _safe_message_path(
@@ -574,6 +614,7 @@ class RunAssetResolver:
         asset_id: str,
         *,
         remote_asset_id: str,
+        detail: Literal["auto", "low", "high"] = "auto",
     ) -> ImageContent | AudioContent | VideoContent | FileContent:
         verified, _, mime_type, _ = self._validated(asset_id)
         common = {
@@ -583,7 +624,7 @@ class RunAssetResolver:
         }
         media_kind = str(verified.get("media_kind") or "file")
         if media_kind == "image":
-            return ImageContent(**common)
+            return ImageContent(detail=detail, **common)
         if media_kind == "audio":
             return AudioContent(**common)
         if media_kind == "video":

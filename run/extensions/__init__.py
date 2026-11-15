@@ -3,6 +3,7 @@
 _DOMAIN_MODULES = (
     "attachments",
     "media_input_request",
+    "media_asset_cache",
     "media_input_queue",
     "media_input_host",
     "media_input_metadata",

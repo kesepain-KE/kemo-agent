@@ -11,7 +11,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 import yaml
 from run.infra import cached_read_text, record_runtime_event
@@ -47,6 +47,7 @@ MULTIMODAL_CAPABILITIES = frozenset(
         "speech_to_speech",
         "video_understanding",
         "video_generation",
+        "file_understanding",
     }
 )
 AGENT_MODEL_PROFILES = frozenset({"default", "cheap", "reasoning"})
@@ -331,14 +332,17 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return result
 
 
-def memory_prompt_injection(config: dict[str, Any]) -> bool:
+def memory_prompt_injection(
+    config: dict[str, Any], *, kind: Literal["tiered", "important"] | None = None,
+) -> bool:
     memory = config.get("memory") or {}
     if not isinstance(memory, dict):
         raise ConfigError("memory 必须是对象")
-    value = memory.get("prompt_injection", True)
+    field = "prompt_injection" if kind is None else f"{kind}_prompt_injection"
+    value = memory.get(field, True)
     if not isinstance(value, bool):
-        raise ConfigError("memory.prompt_injection 必须是布尔值")
-    return value
+        raise ConfigError(f"memory.{field} 必须是布尔值")
+    return value if kind is None else memory_prompt_injection(config) and value
 
 
 def merge_user_config(
@@ -367,6 +371,11 @@ def merge_user_config(
     if not isinstance(memory, dict):
         raise ConfigError("memory 必须是对象")
     memory["prompt_injection"] = memory_prompt_injection(global_config)
+    # Category switches belong to the user; global copies never become defaults.
+    for kind in ("tiered", "important"):
+        field = f"{kind}_prompt_injection"
+        memory[field] = (user_config.get("memory") or {}).get(field, True)
+        memory_prompt_injection(merged, kind=kind)
     retention_days = cron_history_retention_days(global_config)
     idle_close_seconds = cron_session_idle_close_seconds(global_config)
     if isinstance(merged.get("cron", {}), dict):
@@ -399,6 +408,16 @@ def validate_cardstream_settings(config: dict[str, Any]) -> None:
     retries = runtime.get("max_retries", 5) if isinstance(runtime, dict) else None
     if type(retries) is not int or not 0 <= retries <= 5:
         raise ValueError("provider_runtime.max_retries 必须是 0..5 的整数")
+
+
+def media_asset_ttl_seconds(config: dict[str, Any]) -> int:
+    section = config.get("media_assets", {})
+    if not isinstance(section, dict):
+        raise ConfigError("media_assets 必须是对象")
+    value = section.get("ttl_seconds", 120)
+    if type(value) is not int or value <= 0:
+        raise ConfigError("media_assets.ttl_seconds 必须是正整数，单位为秒")
+    return value
 
 
 def interactive_decisions_enabled(config: dict[str, Any]) -> bool:
@@ -450,6 +469,7 @@ def load_config(user: str, root: Path | None = None) -> dict[str, Any]:
     from run.extensions import validate_multimodal_config
 
     validate_multimodal_config(merged)
+    media_asset_ttl_seconds(merged)
     from run.config.web_ui import web_background, web_language
 
     try:
