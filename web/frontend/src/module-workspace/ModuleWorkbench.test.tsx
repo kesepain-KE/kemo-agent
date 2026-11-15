@@ -8,6 +8,7 @@ import type { ModulePanelResponse } from '../types/api'
 import { server } from '../test/server'
 import { ModuleWorkbench } from './ModuleWorkbench'
 import { PluginWebHost } from './PluginWebHost'
+import { EmbedHost } from './EmbedHost'
 import type { WorkspaceItem } from './types'
 
 const item: WorkspaceItem = {
@@ -151,6 +152,42 @@ describe('module workbench', () => {
     expect(input).toHaveValue('draft')
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
     await waitFor(() => expect(save).toHaveBeenCalledWith({ host: 'draft' }, [], 'config-1'))
+  })
+  it('embeds a local console and preserves it across inventory refresh and expansion', async () => {
+    const page = { id: 'console', label: '本机控制台', type: 'embed' as const, action: 'console_link' }
+    const overrides = { default_page: 'console', pages: [page] }
+    const calls: unknown[] = []
+    handlers('expand', overrides)
+    server.use(http.post('/api/users/alice/module-workspaces/expand/global/sample/action', async ({ request }) => {
+      calls.push(await request.json())
+      return HttpResponse.json({ result: { result: { console_url: 'http://127.0.0.1:54321/console?token=private-token' } } })
+    }))
+    const view = renderWorkbench()
+    try {
+      const iframe = await screen.findByTitle(`${item.title} · ${page.label}`)
+      expect(iframe).toHaveAttribute('src', 'http://127.0.0.1:54321/console?token=private-token')
+      expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer')
+      expect(calls).toEqual([{ action: 'console_link', params: {} }])
+      expect(screen.queryByText(/private-token/)).toBeNull()
+      fireEvent.load(iframe)
+      handlers('expand', { ...overrides, health: 'updated', updated_at: 123 })
+      await act(async () => { await view.client.invalidateQueries({ queryKey: ['module-workspaces', 'alice', 'expand'] }) })
+      expect(screen.getByTitle(`${item.title} · ${page.label}`)).toBe(iframe)
+      expect(calls).toHaveLength(1)
+      fireEvent.click(screen.getByRole('button', { name: '放大工作区' }))
+      expect(screen.getByTitle(`${item.title} · ${page.label}`)).toBe(iframe)
+      fireEvent.click(screen.getByRole('button', { name: '重新打开' }))
+      await waitFor(() => expect(calls).toHaveLength(2))
+      await waitFor(() => expect(screen.getByTitle(`${item.title} · ${page.label}`)).not.toBe(iframe))
+    } finally { view.unmount(); view.router.dispose(); view.client.clear() }
+  })
+  it.each(['https://example.com/console', 'javascript:alert(1)', 'not a URL'])('rejects a console address outside the local HTTP boundary: %s', async url => {
+    const page = { id: 'console', label: '本机控制台', type: 'embed' as const, action: 'console_link' }
+    server.use(http.post('/api/users/alice/module-workspaces/expand/global/sample/action', () => HttpResponse.json({ result: { console_url: url } })))
+    render(<EmbedHost user="alice" item={item} page={page} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('动作没有返回可用的本机地址')
+    expect(screen.queryByTitle(`${item.title} · ${page.label}`)).toBeNull()
+    expect(screen.getByRole('button', { name: '重新打开' })).toBeEnabled()
   })
   it('validates iframe source and nonce before forwarding capability requests', async () => {
     const calls: string[] = []

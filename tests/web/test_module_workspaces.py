@@ -181,6 +181,48 @@ def test_bridge_authorizes_real_actions_and_masks_config(service: ModuleWorkspac
         }})
 
 
+@pytest.mark.parametrize("kind", ["expand", "sense"])
+def test_embed_page_uses_declared_action_without_static_assets(service: ModuleWorkspaceService, kind: str):
+    target = make_module(service.root, kind=kind, web=False)
+    manifest = yaml.safe_load((target / "module.yaml").read_text("utf-8"))
+    manifest["ui"] = {"workspace": "module/workspace.json"}
+    if kind == "sense":
+        manifest["ui"]["action_entry"] = "control.py"
+    (target / "module.yaml").write_text(yaml.safe_dump(manifest), "utf-8")
+    page = {"id": "console", "label": "本机控制台", "type": "embed", "action": "console_link"}
+    (target / "module/workspace.json").write_text(json.dumps({
+        "schema_version": 1, "default_page": "console", "pages": [page],
+        "actions": [{"id": "console_link", "label": "控制台地址", "handler": "console_link",
+                     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}}],
+    }), "utf-8")
+    (target / "control.py").write_text(
+        "def execute(command, params, context=None):\n"
+        " return {'console_url':'http://127.0.0.1:54321/console', 'user':context['user']}\n", "utf-8",
+    )
+    inventory = service.inventory("alice", kind)
+    item = inventory["items"][0]
+    assert inventory["summary"]["invalid"] == 0
+    assert item["default_page"] == "console" and page in item["pages"]
+    result = service.action("alice", kind, "global", "demo", "console_link", {})
+    if kind == "expand":
+        result = result["result"]
+    assert result == {"console_url": "http://127.0.0.1:54321/console", "user": "alice"}
+    with pytest.raises(InvalidRequestError):
+        service.action("alice", kind, "global", "demo", "console_link", {"extra": "invalid"})
+
+
+@pytest.mark.parametrize("action", [None, "missing", "invalid/action"])
+def test_embed_page_requires_a_declared_action(service: ModuleWorkspaceService, action):
+    target = make_module(service.root)
+    path = target / "module/workspace.json"
+    declaration = json.loads(path.read_text("utf-8"))
+    declaration["pages"] = [{"id": "console", "label": "控制台", "type": "embed", "action": action}]
+    path.write_text(json.dumps(declaration), "utf-8")
+    item = service.inventory("alice", "expand")["items"][0]
+    assert item["valid"] and item["ui_error"]
+    assert all(page["type"] != "embed" for page in item["pages"])
+
+
 def test_health_updates_keep_ui_but_asset_change_and_revoke_invalidate(service: ModuleWorkspaceService):
     target = make_module(service.root)
     token = grant(service)["nonce"]

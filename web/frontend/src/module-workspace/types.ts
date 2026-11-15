@@ -5,10 +5,11 @@ export type Scope = 'global' | 'shared' | 'user'
 export interface WorkspacePage {
   id: string
   label: string
-  type: 'builtin' | 'panel' | 'markdown' | 'web'
+  type: 'builtin' | 'panel' | 'markdown' | 'web' | 'embed'
   view?: 'overview' | 'collection' | 'injection' | 'docs' | 'logs'
   source?: string
   entry?: string
+  action?: string
   permissions?: string[]
 }
 export interface WorkspaceAction {

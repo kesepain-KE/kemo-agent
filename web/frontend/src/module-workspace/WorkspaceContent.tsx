@@ -6,6 +6,7 @@ import { ModulePanel } from '../components/ModulePanel'
 import { t, useLanguage } from '../i18n'
 import * as api from './api'
 import { PluginWebHost } from './PluginWebHost'
+import { EmbedHost } from './EmbedHost'
 import type { WorkspaceItem, WorkspacePage } from './types'
 import styles from './Workbench.module.css'
 
@@ -26,6 +27,7 @@ export function WorkspaceContent({ user, item, page, refresh, onDirtyChange, onE
     enabled: page.type === 'markdown' || page.view === 'docs',
   })
   if (page.type === 'web') return <PluginWebHost user={user} item={item} page={page} onDirtyChange={onDirtyChange} onExpand={onExpand} />
+  if (page.type === 'embed') return <EmbedHost user={user} item={item} page={page} />
   if (page.type === 'panel') return <div className={styles.scrollContent}><ModulePanel
     kind={item.kind} data={panel.data} loading={panel.isLoading} error={panel.error instanceof Error ? panel.error.message : ''}
     busy={busy} emptyText={t('此模块没有声明配置面板')} onDirtyChange={onDirtyChange}

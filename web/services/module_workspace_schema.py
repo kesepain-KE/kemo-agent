@@ -136,8 +136,11 @@ def workspace_declaration(spec: ModuleSpec | MessageWorkspaceSpec) -> dict[str, 
                 if not isinstance(permissions, list) or any(not isinstance(p, str) or p not in PERMISSIONS for p in permissions):
                     raise InvalidRequestError("页面请求了未知权限")
                 current.update(entry=entry, permissions=sorted(set(permissions)))
+            elif mode == "embed":
+                allowed.add("action")
+                current["action"] = _id(page.get("action"), "page.action")
             else:
-                raise InvalidRequestError("页面 type 只支持 builtin、panel、markdown、web")
+                raise InvalidRequestError("页面 type 只支持 builtin、panel、markdown、web、embed")
             if set(page) - allowed:
                 raise InvalidRequestError(f"页面 {page_id} 包含未知字段")
             pages.append(current)
@@ -169,6 +172,10 @@ def workspace_declaration(spec: ModuleSpec | MessageWorkspaceSpec) -> dict[str, 
                 "input_schema": schema, "handler": handler,
                 "permission": "module.action.invoke",
             })
+        declared_ids = {action["id"] for action in actions}
+        for page in pages:
+            if page["type"] == "embed" and page["action"] not in declared_ids:
+                raise InvalidRequestError(f"embed 页面 {page['id']} 引用了未声明的动作 {page['action']}")
         if any(page["type"] == "web" for page in pages):
             assets = asset_files(root)
     defaults = [{"id": "overview", "label": "总览", "type": "builtin", "view": "overview"}]

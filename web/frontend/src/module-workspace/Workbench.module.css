@@ -79,6 +79,10 @@
 .webHost { display: flex; flex-direction: column; width: 100%; height: 100%; position: relative; min-height: 0; }
 .webHost .loading { position: absolute; left: 0; right: 0; top: 0; pointer-events: none; }
 .webHost .notice, .webHost .error { margin: 8px; }
+.embedBar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 12px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.embedBar strong { min-width: 0; overflow-wrap: anywhere; font-size: var(--t-sm); }
+.embedBar button { margin-left: auto; padding: 6px 10px; white-space: nowrap; }
+.embedLoading { padding: 12px; color: var(--muted); text-align: center; font-size: var(--t-sm); }
 .webFrame { border: 0; width: 100%; flex: 1; min-height: 0; background: var(--surface); color-scheme: normal; }
 .code { white-space: pre-wrap; overflow-wrap: anywhere; padding: 15px; background: var(--surface-2); border-radius: 8px; border: 1px solid var(--line); max-height: 400px; overflow: auto; font-size: var(--t-xs); }
 .importArea { border: 1px solid var(--line); background: var(--surface-2); border-radius: 12px; padding: 18px; flex-shrink: 0; }
