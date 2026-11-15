@@ -13,7 +13,7 @@ from provider.protocol.models import ToolCallItem, ToolResultItem
 from provider.schema import ChatResponse, ToolCall
 from run.agents import AgentRunner
 from run.engine import handle_request
-from run.extensions import AttachmentError
+from run.extensions import AttachmentError, describe_local_asset
 from tests.media_input_support import PNG, PROJECT, MediaProvider, make_root
 
 
@@ -97,6 +97,20 @@ def test_parent_junction_rejected_even_with_user_mention(tmp_path, monkeypatch, 
         tool.run("analyze_image", paths=[str(image)], instruction="inspect",
                  context=context(tmp_path, user_text=str(image)))
     factory.assert_not_called()
+
+
+@pytest.mark.parametrize("provider_type", ["chat", "kemo"])
+def test_registered_local_id_cannot_bypass_other_user_boundary(tmp_path, monkeypatch, provider_type):
+    _, _, dedicated, factory = setup_media(tmp_path, monkeypatch, provider_type=provider_type)
+    image = tmp_path / "users/bob/download/private.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(PNG)
+    descriptor = describe_local_asset(tmp_path, "alice", {"path": str(image)})
+    with pytest.raises(AttachmentError, match="其他用户"):
+        tool.run("analyze_image", asset_ids=[descriptor["asset_id"]], instruction="inspect",
+                 context=context(tmp_path, uploaded_files=[descriptor]))
+    factory.assert_not_called()
+    assert not dedicated.requests and not dedicated.uploads
 
 
 def vision_call(image):
