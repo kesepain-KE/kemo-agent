@@ -237,17 +237,21 @@ class CardStore:
 
     def close(self, source: str, session_id: str, *, deleted: bool = False) -> None:
         with self.db(write=True) as db:
-            self.require_idle(db, session_key(source, session_id))
+            self.require_idle(db, session_key(source, session_id), allow_detached_tools=not deleted)
             db.execute("UPDATE card_sessions SET lifecycle=?,updated_at=? WHERE session_key=? "
                        "AND lifecycle!='deleted'",
                        ("deleted" if deleted else "closed", utc_now(), session_key(source, session_id)))
 
     @staticmethod
-    def require_idle(db, key: str) -> None:
+    def require_idle(db, key: str, *, allow_detached_tools: bool = False) -> None:
+        # Non-destructive lifecycle changes may retain recovered unknown tools in RAW.
         active = db.execute(
             "SELECT 1 FROM card_integrations i WHERE i.session_key=? AND "
             "(i.response_closed=0 OR EXISTS(SELECT 1 FROM card_tool_executions t "
-            "WHERE t.integration_id=i.integration_id AND t.execution_live=1))", (key,),
+            "WHERE t.integration_id=i.integration_id AND t.execution_live=1 AND NOT "
+            "(? AND t.status='interrupted_unknown' AND "
+            "coalesce(json_extract(i.record_json,'$.recovery.tools_detached'),0)=1)))",
+            (key, allow_detached_tools),
         ).fetchone()
         if active:
             raise CardConflictError("会话仍有活动整合或未确认退出的工具，不能关闭、删除或重置")

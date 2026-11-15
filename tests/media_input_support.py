@@ -21,6 +21,11 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 class MediaProvider:
+    # Gateway lookups are only meaningful for `provider.type=kemo`; declaring the
+    # attribute lets gateway tests install their own double without changing the
+    # default local-asset behaviour.
+    get_asset: Any
+
     def __init__(self, responses=None, *, modalities=None, max_images=16, max_input_tokens=None):
         self.responses = list(responses or [])
         self.requests: list[Any] = []

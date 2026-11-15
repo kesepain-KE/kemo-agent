@@ -115,6 +115,9 @@ class RuntimeFeatureTests(unittest.TestCase):
         self,
     ) -> None:
         _, root = self.make_root()
+        upload = root / "users" / "alice" / "file_upload" / "note.md"
+        upload.parent.mkdir(parents=True, exist_ok=True)
+        upload.write_text("note body", "utf-8")
         provider = ScriptedProvider(
             responses=[ChatResponse(text="attachment received")]
         )
@@ -142,7 +145,10 @@ class RuntimeFeatureTests(unittest.TestCase):
             if message.get("role") == "user"
         )
         self.assertIn("users/alice/file_upload/note.md", current_user["content"])
-        self.assertIn("可按需使用 file 工具读取", current_user["content"])
+        # Path-only descriptors carry no asset id, so the shared preamble tells
+        # the model which tool route to use instead of a per-item hint.
+        self.assertIn("multimodal", current_user["content"])
+        self.assertIn("file 工具", current_user["content"])
         window = require_present(session_history(root, 'alice', 'web', 'uploaded-file')).refresh()
         self.assertEqual(window.messages[0]['content'], '请读取附件')
 

@@ -52,7 +52,9 @@ def write_record(db, row, record: dict, *, updated_at: str = "") -> None:
         raise CardConflictError("Stale metadata snapshot; reread before updating session metadata")
     lifecycle = record.get("lifecycle", row["lifecycle"])
     if lifecycle != row["lifecycle"]:
-        CardStore.require_idle(db, row["session_key"])
+        CardStore.require_idle(
+            db, row["session_key"], allow_detached_tools=lifecycle in {"open", "closed"},
+        )
         if row["lifecycle"] == "deleted":
             raise CardConflictError("Deleted sessions cannot be revived")
     metadata = {key: value for key, value in record.items() if key not in {

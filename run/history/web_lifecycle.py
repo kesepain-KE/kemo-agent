@@ -73,7 +73,8 @@ def _candidates(root, user, *, now, idle_seconds, limit, after=None, empty_only=
     empty_cutoff = datetime.fromtimestamp(now - WEB_EMPTY_GRACE_SECONDS, timezone.utc).isoformat()
     clauses, args = [
         "source='web'",
-        "(lifecycle='open' OR lifecycle='closed' AND json_extract(record_json,'$.offline_inspection_pending')=1)",
+        "(lifecycle='open' OR lifecycle='closed' AND "
+        "(last_seq=0 OR json_extract(record_json,'$.offline_inspection_pending')=1))",
         "((last_seq=0 AND updated_at<=?) OR (last_seq>0 AND updated_at<=?))",
         "NOT EXISTS(SELECT 1 FROM card_leases l WHERE l.session_key=s.session_key "
         "AND l.expires_at>? AND l.released=0)",
@@ -106,7 +107,7 @@ def _retire(root, user, candidate, *, now, protected, empty_only=False):
                           (key, now)).fetchone():
                 return "busy"
             try:
-                CardStore.require_idle(db, key)
+                CardStore.require_idle(db, key, allow_detached_tools=bool(row["last_seq"]))
             except CardConflictError:
                 return "busy"
             record = session_record(db, row)

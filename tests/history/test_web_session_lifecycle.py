@@ -12,15 +12,16 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from run.cards import CardStore, IntegrationStore, session_key
+from run.cards import CardConflictError, CardStore, IntegrationStore, session_key
 from run.conversation import session_lock
 from run.history import (cleanup_empty_web_sessions, close_session, delete_session, find_record,
                          inspect_stale_web_sessions, mutate_registry_record, reopen_session,
                          reserve_session, touch_web_session_lease)
 from run.history import web_lifecycle
 from run.history.lease_presence import update_presence
-from run.scheduler import MaintenanceScheduler
+from run.scheduler import MaintenanceScheduler, sweep_idle_sessions
 from tests.card_history_support import seed_history
+from tests.type_assertions import require_present
 from web.app import create_app
 from web.errors import NotFoundError
 from web.service import WebRunService
@@ -99,6 +100,72 @@ def test_empty_grace_is_independent_of_data_idle_threshold(root):
     found_record = find_record(root, "alice", "web", "data")
     assert found_record is not None
     assert found_record["lifecycle"] == "open"
+
+
+@pytest.mark.parametrize("inspect", [cleanup_empty_web_sessions, inspect_stale_web_sessions])
+def test_closed_empty_sessions_are_recycled_after_grace(root, inspect):
+    seed(root, "closed-empty")
+    close_session(root, "alice", "web", "closed-empty")
+    seed(root, "closed-data", data=True)
+    close_session(root, "alice", "web", "closed-data")
+    now = time.time()
+
+    assert inspect(root, "alice", now=now)["deleted_sessions"] == []
+    result = inspect(root, "alice", now=now + 91)
+
+    assert result["deleted_sessions"] == ["closed-empty"]
+    assert find_record(root, "alice", "web", "closed-empty") is None
+    record = find_record(root, "alice", "web", "closed-data")
+    assert record is not None and record["last_seq"] == 2
+
+
+@pytest.mark.parametrize("inspect", [inspect_stale_web_sessions, sweep_idle_sessions])
+def test_recovered_orphan_can_archive_and_queue_missing_title_without_erasing_unknown_tool(root, inspect):
+    from run.history import claim_pending_memory, finish_memory_claim
+
+    history = seed(root, "orphan", data=True)
+    assert history is not None
+    store = history.store
+    integration = IntegrationStore(store, "web", "orphan", "lost-owner")
+    integration.start()
+    execution, _ = integration.register_tool("unfinished-call", {"name": "shell", "arguments": {}})
+    integration.finish("cancelled")
+    with store.db(write=True) as db:
+        db.execute("UPDATE card_integrations SET owner_pid=987654321,owner_token='lost' "
+                   "WHERE integration_id='lost-owner'")
+    with patch("run.infra.process_identity_matches", return_value=False):
+        assert integration.recover_interrupted() == ["lost-owner"]
+
+    claim = claim_pending_memory(root, "alice", source="web", session_id="orphan")
+    assert claim is not None
+    finish_memory_claim(root, "alice", "web", "orphan", claim_id=claim["memory_claim_id"])
+    stamp = datetime.fromtimestamp(time.time() - 4000, timezone.utc).isoformat()
+    mutate_registry_record(root, "alice", "web", "orphan", lambda r: r, updated_at=stamp)
+    before = store.raw_page("web", "orphan")
+
+    result = inspect(root, "alice", idle_seconds=3600)
+
+    assert not result["errors"]
+    record = require_present(find_record(root, "alice", "web", "orphan"))
+    assert record["lifecycle"] == "closed"
+    assert record["memory_processed_seq"] == record["last_seq"]
+    assert record["memory_status"] == "completed"
+    assert record["summary_status"] == "queued"
+    assert record["summary_target_seq"] == record["last_seq"]
+    assert store.raw_page("web", "orphan") == before
+    reopened = require_present(reopen_session(root, "alice", "web", "orphan"))
+    assert reopened["lifecycle"] == "open"
+    store.close("web", "orphan")
+    assert require_present(find_record(root, "alice", "web", "orphan"))["lifecycle"] == "closed"
+    with pytest.raises(CardConflictError):
+        store.close("web", "orphan", deleted=True)
+    with pytest.raises(CardConflictError):
+        delete_session(root, "alice", "web", "orphan")
+    assert store.raw_page("web", "orphan") == before
+    with store.db() as db:
+        tool = db.execute("SELECT status,execution_live FROM card_tool_executions WHERE execution_id=?",
+                          (execution["execution_id"],)).fetchone()
+    assert tool["status"] == "interrupted_unknown" and tool["execution_live"] == 1
 
 
 def test_active_integration_and_maintenance_claim_are_protected(root):
@@ -207,6 +274,7 @@ def test_disabled_memory_and_bounded_result_samples(root):
     result = inspect_stale_web_sessions(root, "alice", batch_size=3)
     assert result["deleted_count"] == 25 and len(result["deleted_sessions"]) == 20
     assert result["queued_memory_count"] == 0
+    assert result["queued_summary_count"] == 1
     assert {"session_id": "data", "reason": "memory_extraction_disabled"} in result["preserved_sessions"]
 
 

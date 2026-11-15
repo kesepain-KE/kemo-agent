@@ -201,7 +201,7 @@ def test_expand_allows_normal_command_but_rejects_declared_agent_bridge(workspac
 
     def invoke(**kwargs):
         calls.append(kwargs)
-        return {"result": {"ok": True}}
+        return {"result": {"ok": True}, "artifacts": []}
 
     monkeypatch.setattr("plugins.expand_call.tool.invoke_expand", invoke)
     context = {"root": str(root), "user": "alice", "caller": "subagent", "tool_timeout": 3}
