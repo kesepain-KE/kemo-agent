@@ -2,7 +2,7 @@ import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, ChevronDown, Cloud, Copy, LockKeyhole, Play, Power, RefreshCw, Trash2, Upload } from 'lucide-react'
+import { AlertTriangle, Check, Cloud, Copy, LockKeyhole, Play, Power, RefreshCw, Trash2, Upload } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
@@ -44,6 +44,7 @@ import { ReferenceIcon } from '../reference/ReferenceIcon'
 import { scheduleRestartReturn } from './restartReturn'
 import { LanguageSetting } from './LanguageSetting'
 import { BackgroundSetting } from './BackgroundSetting'
+import { AdvancedSettings } from './AdvancedSettings'
 
 import {
   SettingsTab,
@@ -214,11 +215,11 @@ export function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    if (!userConfigQuery.data) return
-    const next = buildUserDraft(userConfigQuery.data.config)
+    if (!userConfigQuery.data || !globalConfigQuery.data) return
+    const next = buildUserDraft(userConfigQuery.data.config, globalConfigQuery.data.config)
     setUserDraft(next)
     setInitialApiKey(next.provider.api_key)
-  }, [userConfigQuery.data])
+  }, [userConfigQuery.data, globalConfigQuery.data])
 
   useEffect(() => {
     setProviderModels([])
@@ -451,6 +452,9 @@ export function SettingsPage() {
       input_modalities: inputModalities,
     }
     if (userDraft.provider.api_key !== initialApiKey) provider.api_key = userDraft.provider.api_key
+    if (userDraft.provider.api_key_env !== (record(userConfigQuery.data?.config.provider).api_key_env || '')) {
+      provider.api_key_env = userDraft.provider.api_key_env
+    }
     submit({
       label: '保存模型与 Provider',
       providerDiscovery: userDraft.provider.type,
@@ -464,16 +468,23 @@ export function SettingsPage() {
   }
 
   const saveMemory = () => {
-    if (!globalDraft) return
+    if (!globalDraft || !userDraft) return
     const { agents } = globalDraft
-    const memoryLimits = globalDraft.memory.temporary_injection_limits
+    const memoryLimits = userDraft.memory.temporary_injection_limits
     const integers = [agents.token_limit, agents.output_reserve, memoryLimits.seven_days, memoryLimits.one_month, memoryLimits.half_year]
     let validation = integers.every(Number.isInteger) ? '' : 'Token、输出预留和记忆上限必须为整数。'
     if (!validation && agents.token_limit <= 0) validation = 'Token 上限必须大于 0。'
     if (!validation && (agents.token_compression_ratio <= 0 || agents.token_compression_ratio >= 1)) validation = '历史压缩比例必须大于 0 且小于 1。'
     if (!validation && (agents.output_reserve <= 0 || agents.output_reserve >= agents.token_limit)) validation = '输出预留必须大于 0 且小于总 Token 上限。'
     if (!validation && Object.values(memoryLimits).some((value) => value < 0)) validation = '记忆注入上限不能小于 0。'
-    submit({ label: '保存记忆与上下文', globalChanges: { agents, memory: globalDraft.memory } }, validation)
+    submit({
+      label: '保存记忆与上下文',
+      globalChanges: { agents, memory: globalDraft.memory },
+      userChanges: { memory: {
+        ...userDraft.memory,
+        ...(record(userConfigQuery.data?.config.memory).profile && !userDraft.memory.profile ? { profile: null } : {}),
+      } },
+    }, validation)
   }
 
   const savePermissions = () => {
@@ -602,7 +613,7 @@ export function SettingsPage() {
     <div className="settings-layout">
       <nav className="settings-nav" aria-label={tr("配置分类")}>
         {settingsTabs.map((item) => <button key={item.id} className={`settings-nav-item ${tab === item.id ? 'active is-active' : ''}`} onClick={() => switchTab(item.id)}>
-          <ReferenceIcon name={{ appearance: 'palette', provider: 'cpu', users: 'users', memory: 'memory', permissions: 'shieldCheck', runtime: 'sliders', version: 'package' }[item.id]} /><span>{tr(item.label)}</span></button>)}
+          <ReferenceIcon name={{ appearance: 'palette', provider: 'cpu', users: 'users', memory: 'memory', permissions: 'shieldCheck', runtime: 'sliders', advanced: 'sliders', version: 'package' }[item.id]} /><span>{tr(item.label)}</span></button>)}
       </nav>
 
       <div className="settings-content">
@@ -702,6 +713,10 @@ export function SettingsPage() {
             {userDraft.provider.type === 'kemo' && providerDiscovery.status !== 'idle' ? <SettingRow title="Kemo 模型目录" description={providerDiscovery.message} control={<StatusChip status={providerDiscovery.status === 'valid' ? 'configured' : 'error'}>{providerDiscovery.status === 'valid' ? 'API 有效' : '未拉取'}</StatusChip>} /> : null}
             <SettingRow title="Base URL" description="chat 模式自动补全 /v1；kemo 模式使用协议根地址" source="user" control={<input className="config-field" aria-label="Base URL" value={userDraft.provider.base_url} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, base_url: event.target.value } })} />} />
             <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder={tr("未配置")} value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
+            <SettingRow title="密钥环境变量" description="指定密钥读取来源；已填写的 API Key 优先。留空使用协议默认环境变量。" source="user" control={<select className="config-field settings-choice" aria-label={tr('密钥环境变量')} value={userDraft.provider.api_key_env} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key_env: event.target.value } })}>
+              <option value="">{tr('使用默认环境变量')}</option>
+              {['KEMO_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY', 'ANTHROPIC_API_KEY'].map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>} />
             <SettingRow title="流式输出" description="控制 Provider 原生流式；Web 消息通道仍使用 SSE" source="user" control={<Toggle checked={userDraft.provider.stream} label="流式输出" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, stream: value } })} />} />
             <SettingRow
               title="思考强度"
@@ -724,11 +739,11 @@ export function SettingsPage() {
             {userDraft.provider.type === 'kemo' ? <>
               <SettingRow title="主模型支持音频输入" description="仅 Kemo 模式；仍以网关能力声明为最终依据" source="user" control={<Toggle checked={userDraft.provider.supports_audio_input} label="主模型支持音频输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_audio_input: value } })} />} />
               <SettingRow title="主模型支持视频输入" description="仅 Kemo 模式；未开启时由视频理解专用模型处理" source="user" control={<Toggle checked={userDraft.provider.supports_video_input} label="主模型支持视频输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_video_input: value } })} />} />
-              <SettingRow title="主模型支持普通文件输入" description="仅 Kemo 模式；未开启时普通文件继续使用 file 工具" source="user" control={<Toggle checked={userDraft.provider.supports_file_input} label="主模型支持普通文件输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_file_input: value } })} />} />
+              <SettingRow title="主模型支持普通文件输入" description="仅 Kemo 模式；未直传时可用文件理解专用模型，未配置则使用 file 工具" source="user" control={<Toggle checked={userDraft.provider.supports_file_input} label="主模型支持普通文件输入" onChange={(value) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, supports_file_input: value } })} />} />
             </> : null}
           </article>
-          <details className="setting-section settings-disclosure" open>
-            <summary><span><strong>{tr("子智能体模型")}</strong><small>按任务档位指定专用模型；留空时使用主对话模型。</small></span><ChevronDown size={16} /></summary>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>{tr("子智能体模型")}</strong><span>{tr("按任务档位指定专用模型；留空时使用主对话模型。")}</span></div>
             <div>{agentModelFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<ModelSelectField
               label={field.label}
               value={userDraft.agent_models[field.key]}
@@ -737,9 +752,9 @@ export function SettingsPage() {
               enabled={modelPickerEnabled}
               onChange={(model) => setUserDraft({ ...userDraft, agent_models: { ...userDraft.agent_models, [field.key]: model } })}
             />} />)}</div>
-          </details>
-          <details className="setting-section settings-disclosure" open>
-            <summary><span><strong>{tr("多模态模型")}</strong><small>为不同能力指定专用模型；留空表示不指定专用模型。</small></span><ChevronDown size={16} /></summary>
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>{tr("多模态模型")}</strong><span>{tr("为不同能力指定专用模型；留空表示不指定专用模型。")}</span></div>
             <div>
               <SettingRow title="图片路由" description="自动模式优先主模型，不支持图片时改用专用视觉模型" source="user" control={<VisionRoutingSelect value={userDraft.multimodal_routing.vision} onChange={(vision) => setUserDraft({ ...userDraft, multimodal_routing: { vision } })} />} />
               {multimodalFields.map((field) => <SettingRow key={field.key} title={field.label} description={field.description} source="user" control={<ModelSelectField
@@ -751,7 +766,7 @@ export function SettingsPage() {
                 onChange={(model) => setUserDraft({ ...userDraft, multimodal_models: { ...userDraft.multimodal_models, [field.key]: model } })}
               />} />)}
             </div>
-          </details>
+          </article>
         </> : null}
 
         {tab === 'users' ? <>
@@ -780,8 +795,8 @@ export function SettingsPage() {
           </article>
         </> : null}
 
-        {tab === 'memory' && globalDraft ? <>
-          <ConfigSaveBar label="保存记忆与上下文" description="记忆注入开关对所有用户生效；其余参数为全局默认值。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
+        {tab === 'memory' && globalDraft && userDraft ? <>
+          <ConfigSaveBar label="保存记忆与上下文" description="自动注入总开关与上下文参数保存到全局；分类开关和各层注入上限保存到当前用户。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>CardStream 上下文</strong><span>每次主请求前检查容量；超过有效输入上限的 80% 时压缩历史，RAW 始终保留。</span></div>
             <SettingRow title="Token 上限" description="界面显示的窗口容量；模型未声明最大输入和上下文窗口时，也作为压缩容量兜底" source="global" control={<NumberInput label="Token 上限" value={globalDraft.agents.token_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_limit: value } })} />} />
@@ -790,10 +805,21 @@ export function SettingsPage() {
           </article>
           <article className="setting-section">
             <div className="setting-section-head"><strong>{tr('记忆注入')}</strong><span>按文件数量截断单次 Prompt，不限制磁盘中的记忆库存。</span></div>
-            <SettingRow title="自动注入记忆" description="控制永久记忆、热画像和临时记忆的自动注入；关闭后仍可通过工具检索，不影响记忆存储和后台整理。" source="global" control={<Toggle checked={globalDraft.memory.prompt_injection} label="自动注入记忆" onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, prompt_injection: value } })} />} />
-            <SettingRow title="周记忆上限" description="seven_days 层单次最多注入的文件数量" source="global" control={<NumberInput label="周记忆上限" value={globalDraft.memory.temporary_injection_limits.seven_days} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, seven_days: value } } })} />} />
-            <SettingRow title="月记忆上限" description="one_month 层单次最多注入的文件数量" source="global" control={<NumberInput label="月记忆上限" value={globalDraft.memory.temporary_injection_limits.one_month} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, one_month: value } } })} />} />
-            <SettingRow title="半年记忆上限" description="half_year 层单次最多注入的文件数量" source="global" control={<NumberInput label="半年记忆上限" value={globalDraft.memory.temporary_injection_limits.half_year} onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, temporary_injection_limits: { ...globalDraft.memory.temporary_injection_limits, half_year: value } } })} />} />
+            <SettingRow title="记忆模式" description="仅影响当前用户；可继承全局默认，或单独选择陪伴模式和工作模式。" source="user" control={<select className="config-field settings-choice" aria-label={tr('记忆模式')} value={userDraft.memory.profile || ''} onChange={(event) => setUserDraft({ ...userDraft, memory: { ...userDraft.memory, profile: event.target.value || undefined } })}>
+              <option value="">{tr('继承全局默认')} · {record(globalConfigQuery.data?.config.memory).profile === 'work' ? tr('工作模式') : tr('陪伴模式')}</option>
+              <option value="companion">{tr('陪伴模式')}</option><option value="work">{tr('工作模式')}</option>
+            </select>} />
+            <div className="memory-injection-card">
+              <SettingRow title="自动注入记忆" description="关闭后仍可通过工具检索记忆。" source="global" control={<Toggle checked={globalDraft.memory.prompt_injection} label="自动注入记忆" onChange={(value) => setGlobalDraft({ ...globalDraft, memory: { ...globalDraft.memory, prompt_injection: value } })} />} />
+              {!globalDraft.memory.prompt_injection ? <p className="settings-injection-status" role="status">{tr('总开关已关闭，用户选择将在开启后生效。')}</p> : null}
+              <div className="memory-injection-options" role="group" aria-label={tr('记忆注入')}>
+                <SettingRow title="注入层级记忆" description="周、月、半年及永久记忆。" source="user" control={<Toggle checked={userDraft.memory.tiered_prompt_injection} label="注入层级记忆" onChange={(value) => setUserDraft({ ...userDraft, memory: { ...userDraft.memory, tiered_prompt_injection: value } })} />} />
+                <SettingRow title="注入临时重要记忆" description="仅注入有效内容，失效时不注入。" source="user" control={<Toggle checked={userDraft.memory.important_prompt_injection} label="注入临时重要记忆" onChange={(value) => setUserDraft({ ...userDraft, memory: { ...userDraft.memory, important_prompt_injection: value } })} />} />
+              </div>
+            </div>
+            <SettingRow title="周记忆上限" description="seven_days 层单次最多注入的文件数量" source="user" control={<NumberInput label="周记忆上限" value={userDraft.memory.temporary_injection_limits.seven_days} onChange={(value) => setUserDraft({ ...userDraft, memory: { ...userDraft.memory, temporary_injection_limits: { ...userDraft.memory.temporary_injection_limits, seven_days: value } } })} />} />
+            <SettingRow title="月记忆上限" description="one_month 层单次最多注入的文件数量" source="user" control={<NumberInput label="月记忆上限" value={userDraft.memory.temporary_injection_limits.one_month} onChange={(value) => setUserDraft({ ...userDraft, memory: { ...userDraft.memory, temporary_injection_limits: { ...userDraft.memory.temporary_injection_limits, one_month: value } } })} />} />
+            <SettingRow title="半年记忆上限" description="half_year 层单次最多注入的文件数量" source="user" control={<NumberInput label="半年记忆上限" value={userDraft.memory.temporary_injection_limits.half_year} onChange={(value) => setUserDraft({ ...userDraft, memory: { ...userDraft.memory, temporary_injection_limits: { ...userDraft.memory.temporary_injection_limits, half_year: value } } })} />} />
           </article>
         </> : null}
 
@@ -813,6 +839,12 @@ export function SettingsPage() {
             <SettingRow title="全局拓展白名单" description="expand/global 中允许加载的模块" source="user" control={<TagInput label="全局拓展白名单" value={userDraft.expand.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, expand: { ...userDraft.expand, global_whitelist: value } })} />} />
             <SettingRow title="全局感知白名单" description="sense 中允许注入的模块" source="user" control={<TagInput label="全局感知白名单" value={userDraft.perception.global_whitelist} onChange={(value) => setUserDraft({ ...userDraft, perception: { ...userDraft.perception, global_whitelist: value } })} />} />
             <SettingRow title="插件白名单" description="控制 Provider 工具 Schema 与插件 Prompt 清单" source="user" control={<TagInput label="插件白名单" value={userDraft.plugins.whitelist} onChange={(value) => setUserDraft({ ...userDraft, plugins: { ...userDraft.plugins, whitelist: value } })} />} />
+          </article>
+          <article className="setting-section">
+            <div className="setting-section-head"><strong>{tr('插件操作权限')}</strong><span>{tr('仅允许勾选的操作类型；全部关闭时不授予插件操作权限。')}</span></div>
+            <SettingRow title="允许的插件操作" description="控制插件工具的读取、写入、删除和外部访问；与模块网页的授权分开设置。" source="user" control={<div className="settings-permission-options" role="group" aria-label={tr('允许的插件操作')}>
+              {([['read', '读取'], ['write', '写入'], ['delete', '删除'], ['external', '外部访问']] as const).map(([key, label]) => <label key={key}><input type="checkbox" aria-label={`${tr('插件权限')} · ${tr(label)}`} checked={userDraft.plugins.permissions.includes(key)} onChange={(event) => setUserDraft({ ...userDraft, plugins: { ...userDraft.plugins, permissions: event.target.checked ? [...userDraft.plugins.permissions, key] : userDraft.plugins.permissions.filter((value) => value !== key) } })} />{tr(label)}</label>)}
+            </div>} />
           </article>
         </> : null}
 
@@ -886,6 +918,8 @@ export function SettingsPage() {
             </section>
           </div>, document.body) : null}
         </> : null}
+
+        {tab === 'advanced' && globalConfigQuery.data ? <AdvancedSettings key={user} config={globalConfigQuery.data.config} pending={saveMutation.isPending} saved={savedLabel === '保存高级配置'} onSave={submit} /> : null}
 
         {tab === 'version' && versionQuery.data ? <>
           <article className="setting-section version-overview-section">

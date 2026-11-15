@@ -694,6 +694,8 @@ export interface SettingsResponse {
     knowledge: boolean
     history_read: boolean
     memory_injection: boolean
+    tiered_memory_injection: boolean
+    important_memory_injection: boolean
     task_plan_auto_accept: boolean
     cron: boolean
     background_scheduler: boolean
