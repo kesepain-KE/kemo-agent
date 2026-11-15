@@ -80,13 +80,13 @@ describe('顶部模型思考强度弹层', () => {
   it('矮屏改向上展开，滚动后跟随按钮，卸载时移除portal', () => {
     const { trigger, popup, unmount } = openCompact(500)
     expect(popup).toHaveStyle({ bottom: '108px', maxHeight: '360px' })
-    expect(popup.style.top).toBe('')
+    expect(popup.style.top).toBe('auto')
     vi.mocked(trigger.getBoundingClientRect).mockReturnValue({
       width: 200, left: 30, right: 230, top: 100, bottom: 132, height: 32,
     } as DOMRect)
     act(() => window.dispatchEvent(new Event('scroll')))
     expect(popup).toHaveStyle({ left: '12px', width: '280px', top: '140px' })
-    expect(popup.style.bottom).toBe('')
+    expect(popup.style.bottom).toBe('auto')
     vi.stubGlobal('innerWidth', 240)
     act(() => window.dispatchEvent(new Event('resize')))
     expect(popup).toHaveStyle({ left: '12px', width: '216px' })
@@ -102,5 +102,24 @@ describe('顶部模型思考强度弹层', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     expect(onChange).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('设置页思考强度弹层', () => {
+  it('滚动到底部时挂到 body 并向上展开，外部点击关闭', () => {
+    vi.stubGlobal('innerWidth', 390)
+    vi.stubGlobal('innerHeight', 600)
+    render(<ReasoningEffortSelect value="medium" onChange={vi.fn()} ariaLabel="设置思考强度" />)
+    const trigger = screen.getByRole('combobox', { name: '设置思考强度' })
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      left: 220, right: 300, width: 80, top: 520, bottom: 552, height: 32,
+    } as DOMRect)
+    fireEvent.click(trigger)
+    const popup = screen.getByRole('listbox')
+    expect(popup.parentElement).toBe(document.body)
+    expect(popup).toHaveStyle({ position: 'fixed', top: 'auto', bottom: '88px', width: '260px', maxHeight: '360px' })
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
 })

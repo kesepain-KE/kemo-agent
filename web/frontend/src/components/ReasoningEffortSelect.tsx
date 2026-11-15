@@ -1,6 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown, Gauge } from 'lucide-react'
+import { useAnchoredPopover } from '../hooks/useAnchoredPopover'
 import {
   reasoningEffortOptions,
   type ReasoningEffort,
@@ -28,11 +29,14 @@ export function ReasoningEffortSelect({
 }: ReasoningEffortSelectProps) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
-  const [position, setPosition] = useState({
-    left: 12, bottom: 12 as number | undefined, top: undefined as number | undefined, width: 260, maxHeight: 320,
+  const position = useAnchoredPopover(open, triggerRef, {
+    minWidth: variant === 'composer' ? 0 : variant === 'compact' ? 280 : 260,
+    maxHeight: 360,
+    preferAbove: variant === 'composer',
+    align: variant === 'composer' ? 'start' : 'end',
   })
-  const floating = variant === 'composer' || variant === 'compact'
   const listboxId = useId()
   const selected = options.find((option) => option.value === value)
     ?? options.find((option) => option.value === 'medium')
@@ -48,7 +52,7 @@ export function ReasoningEffortSelect({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpen(false)
-        rootRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+        triggerRef.current?.focus({ preventScroll: true })
       }
     }
     document.addEventListener('pointerdown', closeOnPointerDown)
@@ -63,56 +67,9 @@ export function ReasoningEffortSelect({
     if (disabled || unavailable) setOpen(false)
   }, [disabled, unavailable])
 
-  useLayoutEffect(() => {
-    if (!open || !floating) return
-    // 挂到 body、测量锚点并约束视口，避免窄屏和附件/长草稿改变输入坞高度后裁切。
-    const updatePosition = () => {
-      const rect = rootRef.current?.querySelector('button')?.getBoundingClientRect()
-      if (!rect) return
-      if (variant === 'compact') {
-        // 顶栏选项独立浮在 body 上，至少 280px 宽，右对齐按钮并保留视口边距。
-        const width = Math.min(Math.max(280, rect.width), window.innerWidth - 24)
-        const below = Math.max(0, window.innerHeight - rect.bottom - 20)
-        const above = Math.max(0, rect.top - 20)
-        const upward = below < 180 && above > below
-        setPosition({
-          left: Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12)),
-          top: upward ? undefined : rect.bottom + 8,
-          bottom: upward ? window.innerHeight - rect.top + 8 : undefined,
-          width,
-          maxHeight: Math.min(360, upward ? above : below),
-        })
-        return
-      }
-      const width = Math.min(rect.width, window.innerWidth - 24)
-      const top = Math.max(64, Math.min(rect.top, window.innerHeight - 12))
-      setPosition({
-        left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
-        top: undefined,
-        bottom: window.innerHeight - top + 8,
-        width,
-        maxHeight: Math.min(360, top - 20),
-      })
-    }
-    updatePosition()
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(updatePosition)
-    if (rootRef.current) observer?.observe(rootRef.current)
-    const composer = rootRef.current?.closest('.composer-inner')
-    if (composer) observer?.observe(composer)
-    const modelMenu = rootRef.current?.closest('.reference-model-menu')
-    if (modelMenu) observer?.observe(modelMenu)
-    window.addEventListener('resize', updatePosition)
-    window.addEventListener('scroll', updatePosition, true)
-    return () => {
-      observer?.disconnect()
-      window.removeEventListener('resize', updatePosition)
-      window.removeEventListener('scroll', updatePosition, true)
-    }
-  }, [open, variant, floating])
-
   const popover = open ? <div ref={popoverRef}
     className={`reasoning-effort-popover${variant === 'composer' ? ' composer-reasoning-popover' : variant === 'compact' ? ' model-reasoning-popover' : ''}`}
-    style={floating ? position : undefined}
+    style={position}
     id={listboxId} role="listbox" aria-label={`${ariaLabel}选项`}
     onKeyDown={(event) => {
       if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
@@ -129,7 +86,7 @@ export function ReasoningEffortSelect({
       onClick={() => {
         onChange(option.value)
         setOpen(false)
-        rootRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+        triggerRef.current?.focus({ preventScroll: true })
       }}>
       <span><strong>{option.title}</strong><small>{option.description}</small></span>
       {option.value === value ? <Check size={15} /> : <i aria-hidden="true" />}
@@ -138,6 +95,7 @@ export function ReasoningEffortSelect({
 
   return <div className={`reasoning-effort-select ${variant === 'composer' ? 'reasoning-effort-composer' : variant} ${open ? 'open' : ''}`} ref={rootRef}>
     <button
+      ref={triggerRef}
       type="button"
       className={`reasoning-effort-trigger${variant === 'composer' ? ' model-pill' : ''}`}
       role="combobox"
@@ -158,6 +116,6 @@ export function ReasoningEffortSelect({
       <span>{variant === 'composer' ? '思考档位 · ' : ''}{selected ? (variant === 'settings' ? selected.settingsLabel : selected.label) : emptyLabel}</span>
       <ChevronDown size={16} />
     </button>
-    {floating && popover ? createPortal(popover, document.body) : popover}
+    {popover ? createPortal(popover, document.body) : null}
   </div>
 }

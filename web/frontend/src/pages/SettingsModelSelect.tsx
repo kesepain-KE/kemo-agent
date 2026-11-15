@@ -3,6 +3,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown, Search } from 'lucide-react'
 import type { SettingsModelOption } from './settingsSupport'
+import { useAnchoredPopover } from '../hooks/useAnchoredPopover'
 
 export function ModelSelectField({
   label,
@@ -26,10 +27,7 @@ export function ModelSelectField({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
-  const [position, setPosition] = useState({
-    left: 12, top: 12 as number | undefined, bottom: undefined as number | undefined,
-    width: 360, maxHeight: 430,
-  })
+  const position = useAnchoredPopover(open, rootRef, { minWidth: 360, maxHeight: 430 })
   const listboxId = useId()
   const pickerLabel = label === '模型' ? tr('主模型') : label
   const availableModels = models
@@ -41,37 +39,11 @@ export function ModelSelectField({
 
   const close = () => {
     setOpen(false)
-    triggerRef.current?.focus()
+    triggerRef.current?.focus({ preventScroll: true })
   }
 
   useLayoutEffect(() => {
-    if (!open) return
-    const update = () => {
-      const rect = rootRef.current?.getBoundingClientRect()
-      if (!rect) return
-      const width = Math.min(Math.max(rect.width, 360), window.innerWidth - 24)
-      const above = rect.top - 20
-      const below = window.innerHeight - rect.bottom - 20
-      const upward = below < 300 && above > below
-      setPosition({
-        left: Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12)),
-        width,
-        top: upward ? undefined : rect.bottom + 8,
-        bottom: upward ? window.innerHeight - rect.top + 8 : undefined,
-        maxHeight: Math.max(80, Math.min(430, upward ? above : below)),
-      })
-    }
-    update()
-    searchRef.current?.focus()
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(update)
-    if (rootRef.current) observer?.observe(rootRef.current)
-    window.addEventListener('resize', update)
-    window.addEventListener('scroll', update, true)
-    return () => {
-      observer?.disconnect()
-      window.removeEventListener('resize', update)
-      window.removeEventListener('scroll', update, true)
-    }
+    if (open) searchRef.current?.focus({ preventScroll: true })
   }, [open])
 
   useEffect(() => {
@@ -84,7 +56,7 @@ export function ModelSelectField({
       if (event.key === 'Escape') {
         event.preventDefault()
         setOpen(false)
-        triggerRef.current?.focus()
+        triggerRef.current?.focus({ preventScroll: true })
       }
     }
     document.addEventListener('pointerdown', closeOnPointerDown)

@@ -1,14 +1,16 @@
 import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Save } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { useAnchoredPopover } from '../hooks/useAnchoredPopover'
 import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
 import { normalizeKemoReasoningEffort, normalizeReasoningEffort, type ReasoningEffort } from '../reasoningEffort'
 import { useUiStore } from '../store/ui'
 
-export type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'version'
+export type SettingsTab = 'appearance' | 'provider' | 'users' | 'memory' | 'permissions' | 'runtime' | 'advanced' | 'version'
 export type ProviderType = 'chat' | 'kemo'
 export type VisionRoutingMode = 'auto' | 'main' | 'dedicated'
-export type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_understanding' | 'video_generation'
+export type MultimodalKey = 'vision' | 'image_generation' | 'image_edit' | 'audio_transcription' | 'speech_generation' | 'speech_to_speech' | 'video_understanding' | 'video_generation' | 'file_understanding'
 export type AgentModelProfile = 'default' | 'cheap' | 'reasoning'
 export type RestartState = 'idle' | 'confirming' | 'confirming-force' | 'restarting' | 'waiting' | 'failed'
 
@@ -21,10 +23,11 @@ export interface SettingsModelOption {
 }
 
 export interface UserConfigDraft {
-  provider: { type: ProviderType; model: string; base_url: string; api_key: string; stream: boolean; reasoning_effort: ReasoningEffort; supports_image_input: boolean; supports_audio_input: boolean; supports_video_input: boolean; supports_file_input: boolean }
+  provider: { type: ProviderType; model: string; base_url: string; api_key: string; api_key_env: string; stream: boolean; reasoning_effort: ReasoningEffort; supports_image_input: boolean; supports_audio_input: boolean; supports_video_input: boolean; supports_file_input: boolean }
   agent_models: Record<AgentModelProfile, string>
   multimodal_models: Record<MultimodalKey, string>
   multimodal_routing: { vision: VisionRoutingMode }
+  memory: { profile?: string; tiered_prompt_injection: boolean; important_prompt_injection: boolean; temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
   knowledge: { use_shared: boolean; use_global: boolean }
   skills: { shared_whitelist: string[] }
   expand: { shared_whitelist: string[]; global_whitelist: string[]; prompt_injection: boolean }
@@ -36,7 +39,7 @@ export interface UserConfigDraft {
 
 export interface GlobalConfigDraft {
   agents: { token_limit: number; token_compression_ratio: number; output_reserve: number }
-  memory: { prompt_injection: boolean; temporary_injection_limits: { seven_days: number; one_month: number; half_year: number } }
+  memory: { prompt_injection: boolean }
   tools: { timeout: number; consecutive_identical_call_limit: number; invalid_tool_arguments_retries: number }
   history: { consecutive_tool_fail_limit: number }
   task_plan: { max_steps: number }
@@ -66,6 +69,7 @@ export const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
   { id: 'memory', label: '记忆与上下文' },
   { id: 'permissions', label: '权限边界' },
   { id: 'runtime', label: '运行限制' },
+  { id: 'advanced', label: '高级配置' },
   { id: 'version', label: '版本查看' },
 ]
 
@@ -80,6 +84,7 @@ export const multimodalFields: Array<{ key: MultimodalKey; label: string; descri
   { key: 'speech_to_speech', label: '语音生语音', description: '语音到语音的转换模型' },
   { key: 'video_understanding', label: '视频理解', description: '视频分析、时间轴摘要与内容理解模型' },
   { key: 'video_generation', label: '视频生成', description: '文本或素材生成视频的模型' },
+  { key: 'file_understanding', label: '文件理解', description: '仅 Kemo：文档理解、摘要与问答；实际格式以模型支持为准' },
 ]
 
 export const agentModelFields: Array<{ key: AgentModelProfile; label: string; description: string }> = [
@@ -139,7 +144,9 @@ function stringList(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
-export function buildUserDraft(config: Record<string, unknown>): UserConfigDraft {
+export function buildUserDraft(config: Record<string, unknown>, defaults: Record<string, unknown> = {}): UserConfigDraft {
+  const memory = record(config.memory)
+  const memoryLimits = { ...record(record(defaults.memory).temporary_injection_limits), ...record(memory.temporary_injection_limits) }
   const provider = record(config.provider)
   const providerType: ProviderType = provider.type === 'kemo' ? 'kemo' : 'chat'
   const agentModels = record(config.agent_models)
@@ -157,6 +164,7 @@ export function buildUserDraft(config: Record<string, unknown>): UserConfigDraft
       model: stringValue(provider.model),
       base_url: stringValue(provider.base_url),
       api_key: stringValue(provider.api_key),
+      api_key_env: stringValue(provider.api_key_env),
       stream: booleanValue(provider.stream, true),
       reasoning_effort: providerType === 'kemo'
         ? normalizeKemoReasoningEffort(provider.reasoning_effort)
@@ -180,11 +188,22 @@ export function buildUserDraft(config: Record<string, unknown>): UserConfigDraft
       speech_to_speech: stringValue(multimodal.speech_to_speech),
       video_understanding: stringValue(multimodal.video_understanding),
       video_generation: stringValue(multimodal.video_generation),
+      file_understanding: stringValue(multimodal.file_understanding),
     },
     multimodal_routing: {
       vision: ['main', 'dedicated'].includes(stringValue(multimodalRouting.vision))
         ? stringValue(multimodalRouting.vision) as VisionRoutingMode
         : 'auto',
+    },
+    memory: {
+      profile: stringValue(memory.profile) || undefined,
+      tiered_prompt_injection: booleanValue(memory.tiered_prompt_injection, true),
+      important_prompt_injection: booleanValue(memory.important_prompt_injection, true),
+      temporary_injection_limits: {
+        seven_days: numberValue(memoryLimits.seven_days, 100),
+        one_month: numberValue(memoryLimits.one_month, 200),
+        half_year: numberValue(memoryLimits.half_year, 300),
+      },
     },
     knowledge: {
       use_shared: booleanValue(knowledge.use_shared, true),
@@ -214,7 +233,6 @@ export function buildUserDraft(config: Record<string, unknown>): UserConfigDraft
 export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigDraft {
   const agents = record(config.agents)
   const memory = record(config.memory)
-  const memoryLimits = record(memory.temporary_injection_limits)
   const tools = record(config.tools)
   const history = record(config.history)
   const taskPlan = record(config.task_plan)
@@ -231,11 +249,6 @@ export function buildGlobalDraft(config: Record<string, unknown>): GlobalConfigD
     },
     memory: {
       prompt_injection: booleanValue(memory.prompt_injection, true),
-      temporary_injection_limits: {
-        seven_days: numberValue(memoryLimits.seven_days, 100),
-        one_month: numberValue(memoryLimits.one_month, 200),
-        half_year: numberValue(memoryLimits.half_year, 300),
-      },
     },
     tools: {
       timeout: numberValue(tools.timeout, 240),
@@ -288,6 +301,8 @@ export function ProviderSelect({ value, onChange }: { value: ProviderType; onCha
   useLanguage()
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const position = useAnchoredPopover(open, rootRef, { minWidth: 260, maxHeight: 360 })
   const options: Array<{ value: ProviderType; label: string; description: string }> = [
     { value: 'chat', label: 'chat', description: '兼容 /v1/chat/completions' },
     { value: 'kemo', label: 'kemo', description: '完整 Kemo Provider 协议' },
@@ -295,7 +310,8 @@ export function ProviderSelect({ value, onChange }: { value: ProviderType; onCha
 
   useEffect(() => {
     const closeOnPointerDown = (event: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+      if (!rootRef.current?.contains(event.target as Node)
+        && !popoverRef.current?.contains(event.target as Node)) setOpen(false)
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setOpen(false)
@@ -321,7 +337,7 @@ export function ProviderSelect({ value, onChange }: { value: ProviderType; onCha
     >
       <span><strong>{value}</strong><small>{value === 'chat' ? 'OpenAI Chat 兼容' : 'Kemo 原生协议'}</small></span><ChevronDown size={16} />
     </button>
-    {open && <div className="config-select-popover" id="provider-type-options" role="listbox" aria-label="Provider 类型选项">
+    {open && createPortal(<div ref={popoverRef} style={{ ...position, zIndex: 85 }} className="config-select-popover" id="provider-type-options" role="listbox" aria-label="Provider 类型选项">
       {options.map((option) => <button
         type="button"
         role="option"
@@ -332,7 +348,7 @@ export function ProviderSelect({ value, onChange }: { value: ProviderType; onCha
       >
         <span><strong>{option.label}</strong><small>{option.description}</small></span>{value === option.value ? <Check size={16} /> : <i />}
       </button>)}
-    </div>}
+    </div>, document.body)}
   </div>
 }
 
@@ -346,13 +362,16 @@ export function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingM
   useLanguage()
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const position = useAnchoredPopover(open, rootRef, { minWidth: 260, maxHeight: 360 })
   const listboxId = useId()
   const selected = visionRoutingOptions.find((option) => option.value === value) ?? visionRoutingOptions[0]
 
   useEffect(() => {
     if (!open) return
     const closeOnPointerDown = (event: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+      if (!rootRef.current?.contains(event.target as Node)
+        && !popoverRef.current?.contains(event.target as Node)) setOpen(false)
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setOpen(false)
@@ -384,7 +403,7 @@ export function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingM
     >
       <span><strong>{selected.label}</strong><small>{selected.description}</small></span><ChevronDown size={16} />
     </button>
-    {open ? <div className="config-select-popover vision-routing-popover" id={listboxId} role="listbox" aria-label="图片路由选项">
+    {open ? createPortal(<div ref={popoverRef} style={{ ...position, zIndex: 85 }} className="config-select-popover vision-routing-popover" id={listboxId} role="listbox" aria-label="图片路由选项">
       {visionRoutingOptions.map((option) => <button
         type="button"
         role="option"
@@ -399,7 +418,7 @@ export function VisionRoutingSelect({ value, onChange }: { value: VisionRoutingM
         <span><strong>{option.label}</strong><small>{option.description}</small></span>
         {value === option.value ? <Check size={16} /> : <i aria-hidden="true" />}
       </button>)}
-    </div> : null}
+    </div>, document.body) : null}
   </div>
 }
 
