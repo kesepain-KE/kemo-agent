@@ -95,8 +95,9 @@ class MemoryLifecycleTests(unittest.TestCase):
             normalize_memory_filename("  用户喜欢川菜.md "), "用户喜欢川菜.md"
         )
         self.assertEqual(normalize_memory_filename("a/b:c"), "abc.md")
-        filename = normalize_memory_filename("超长记忆文件标题" * 5)
-        self.assertLessEqual(len(Path(filename).stem), FILENAME_MAX_CHARS)
+        filename = normalize_memory_filename("超长记忆文件标题" * 20)
+        self.assertEqual(len(Path(filename).stem), 100)
+        self.assertEqual(FILENAME_MAX_CHARS, 100)
         with self.assertRaises(MemoryError):
             normalize_memory_filename("***")
         self.assertEqual(tier_rules(CONFIG)["seven_days"].next, "one_month")
@@ -397,7 +398,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(definition.trigger_file, "trigger.md")
         self.assertIn("candidates", definition.trigger_content)
-        self.assertIn("最长 20 字符", definition.trigger_content)
+        self.assertIn("最长 40 字符", definition.trigger_content)
         self.assertIn("整合相关偏好、原因、例子与近况", definition.trigger_content)
         self.assertIn("不按轮数、句子或属性标签折算", definition.trigger_content)
         self.assertNotIn("任一项可独立处理就必须拆开", definition.trigger_content)

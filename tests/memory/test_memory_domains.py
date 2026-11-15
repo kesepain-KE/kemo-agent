@@ -62,6 +62,33 @@ def run_executor(store, candidates, user="这周正在准备考试。", assistan
     return execute(context, payload), seen
 
 
+@pytest.mark.parametrize("domain,memory_type,limit", [
+    ("fact", "A", 2000), ("relation", "A", 2000),
+    ("fact", "B", 300), ("state", "B", 300),
+])
+def test_candidate_writes_accept_doubled_limits_and_reject_overflow(personal, domain, memory_type, limit):
+    name = f"{domain}-{memory_type}"
+    source = {"session_id": "limits", "round": 1}
+    result = personal.upsert_candidates([
+        candidate(name, domain, content="甲" * limit, memory_type=memory_type),
+        candidate(f"{name}-overflow", domain, content="甲" * (limit + 1), memory_type=memory_type),
+    ], source=source, now=NOW)
+    assert result["created"] == [f"{name}.md"]
+    assert result["rejected"] == 1
+    ref = f"seven_days:{name}.md"
+    revised = personal.upsert_candidates([
+        candidate(name, domain, action="revise", memory_ref=ref,
+                  content="乙" * limit, memory_type=memory_type),
+    ], source=source, now=NOW)
+    assert revised["updated"] == [f"{name}.md"]
+    overflow = personal.upsert_candidates([
+        candidate(name, domain, action="revise", memory_ref=ref,
+                  content="丙" * (limit + 1), memory_type=memory_type),
+    ], source=source, now=NOW)
+    assert overflow["rejected"] == 1
+    assert personal.get_entry("seven_days", f"{name}.md")["content"] == "乙" * limit
+
+
 def test_default_profile_and_domain_rules_are_independent_copies():
     assert memory_profile({}) == "companion"
     assert memory_domains_for_profile({}) == ("fact", "relation", "state")
@@ -213,7 +240,7 @@ def test_state_same_body_reinforcement_and_disabled_refresh_do_not_extend(person
 def test_state_remains_short_and_temporary_even_when_explicit(personal):
     result = personal.upsert_candidates([
         candidate("短近况", "state", explicit=True),
-        candidate("长近况", "state", content="字" * 151, memory_type="A"),
+        candidate("长近况", "state", content="字" * 301, memory_type="A"),
     ], now=NOW)
     assert result["created"] == ["短近况.md"]
     assert result["rejected"] == 1
@@ -221,7 +248,7 @@ def test_state_remains_short_and_temporary_even_when_explicit(personal):
     with pytest.raises(MemoryError):
         personal.create_fragment("permanent", "错层", "近况", domain="state")
     with pytest.raises(MemoryError):
-        personal.edit_fragment("seven_days", "短近况", "字" * 151)
+        personal.edit_fragment("seven_days", "短近况", "字" * 301)
 
 
 def test_relation_promotes_after_second_evidence_day_state_always_archives(personal):

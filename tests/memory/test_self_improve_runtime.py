@@ -374,7 +374,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         source = self._seed(
             "one_month",
             "oversized-profile",
-            content="甲" * 1500,
+            content="甲" * 3000,
             weight=10,
             expires_at=now,
         )
@@ -405,8 +405,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
                             "memory_type": "A",
                             "merged_with": "ignored-because-split.md",
                             "split_into": [
-                                {"filename": "用户身份与背景", "content": "甲" * 800},
-                                {"filename": "用户审美与偏好", "content": "乙" * 700},
+                                {"filename": "用户身份与背景", "content": "甲" * 1600},
+                                {"filename": "用户审美与偏好", "content": "乙" * 1400},
                             ],
                         }
                     ]
@@ -500,7 +500,7 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         source = self._seed(
             "one_month",
             "oversized-unsplit",
-            content="甲" * 151,
+            content="甲" * 301,
             weight=10,
             expires_at=now,
         )
@@ -550,8 +550,8 @@ class SelfImproveRuntimeTests(unittest.TestCase):
         location = store.locate_in_tier("one_month", source)
 
         for memory_type, length, expected in (
-            ("B", 151, "B 类内容超过 150 字"),
-            ("A", 1001, "A 类内容超过 1000 字"),
+            ("B", 301, "B 类内容超过 300 字"),
+            ("A", 2001, "A 类内容超过 2000 字"),
         ):
             with self.subTest(memory_type=memory_type), self.assertRaisesRegex(
                 Exception, expected
@@ -570,35 +570,38 @@ class SelfImproveRuntimeTests(unittest.TestCase):
             self.assertEqual(store.get_entry("one_month", source), before)
             self.assertEqual(store.load_tier("half_year"), [])
 
-    def test_merged_promotion_rejects_content_above_declared_type_limit(self) -> None:
+    def test_merged_promotion_enforces_declared_type_limit(self) -> None:
         now = datetime(2026, 9, 25, tzinfo=timezone.utc)
-        source = self._seed(
-            "seven_days", "merge-source-limit", content="source", weight=3, expires_at=now
-        )
-        target = self._seed(
-            "one_month",
-            "merge-target-limit",
-            content="target",
-            weight=2,
-            expires_at=now + timedelta(days=1),
-        )
-        store = MemoryStore(self.root, "alice", CONFIG)
-        source_before = store.get_entry("seven_days", source)
-        target_before = store.get_entry("one_month", target)
-        location = store.locate_in_tier("seven_days", source)
+        for memory_type, limit in (("A", 2000), ("B", 300)):
+            with self.subTest(memory_type=memory_type):
+                source = self._seed(
+                    "seven_days", f"merge-source-{memory_type}", content="source", weight=3, expires_at=now
+                )
+                target = self._seed(
+                    "one_month", f"merge-target-{memory_type}", content="target", weight=2,
+                    expires_at=now + timedelta(days=1),
+                )
+                store = MemoryStore(self.root, "alice", CONFIG)
+                source_before = store.get_entry("seven_days", source)
+                target_before = store.get_entry("one_month", target)
+                location = store.locate_in_tier("seven_days", source)
 
-        with self.assertRaisesRegex(Exception, "B 类内容超过 150 字"):
-            store._promote_location(
-                location,
-                "one_month",
-                now,
-                merged_content="丙" * 151,
-                target_filename=target,
-                memory_type="B",
-            )
+                with self.assertRaisesRegex(Exception, f"{memory_type} 类内容超过 {limit} 字"):
+                    store._promote_location(
+                        location, "one_month", now, merged_content="丙" * (limit + 1),
+                        target_filename=target, memory_type=memory_type,
+                    )
+                self.assertEqual(store.get_entry("seven_days", source), source_before)
+                self.assertEqual(store.get_entry("one_month", target), target_before)
 
-        self.assertEqual(store.get_entry("seven_days", source), source_before)
-        self.assertEqual(store.get_entry("one_month", target), target_before)
+                store._promote_location(
+                    location, "one_month", now, merged_content="丁" * limit,
+                    target_filename=target, memory_type=memory_type,
+                )
+                self.assertIsNone(store.get_entry("seven_days", source))
+                self.assertEqual(
+                    require_present(store.get_entry("one_month", target))["content"], "丁" * limit
+                )
 
     def test_promotion_system_task_registration_is_idempotent(self) -> None:
         first = ensure_memory_promotion_task(self.root)

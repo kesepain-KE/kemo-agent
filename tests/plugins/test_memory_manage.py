@@ -311,7 +311,7 @@ class MemoryManageTests(unittest.TestCase):
 
     def test_manual_writes_enforce_fragment_granularity_and_important_is_read_only(self) -> None:
         context = {"root": str(self.root), "user": "alice", "caller": "main_agent"}
-        oversized_fact = "独立事实" * 40
+        oversized_fact = "独立事实" * 80
         with self.assertRaisesRegex(RuntimeMemoryError, "memory_type=A"):
             run_memory_manage(
                 "add",
@@ -320,7 +320,7 @@ class MemoryManageTests(unittest.TestCase):
                 content=oversized_fact,
                 context=context,
             )
-        with self.assertRaisesRegex(RuntimeMemoryError, "B 类内容超过 150 字"):
+        with self.assertRaisesRegex(RuntimeMemoryError, "B 类内容超过 300 字"):
             run_memory_manage(
                 "add",
                 "seven_days",
@@ -359,6 +359,37 @@ class MemoryManageTests(unittest.TestCase):
                     arguments["content"] = "禁止直接写入"
                 with self.assertRaisesRegex(PermissionError, "只读热画像"):
                     run_memory_manage(action, "important", **arguments)
+
+    def test_manual_writes_accept_doubled_limits_and_preserve_content_on_overflow(self) -> None:
+        context = {"root": str(self.root), "user": "alice", "caller": "main_agent"}
+        for memory_type, limit in (("A", 2000), ("B", 300)):
+            with self.subTest(memory_type=memory_type):
+                created = run_memory_manage(
+                    "add", "seven_days", filename=f"boundary-{memory_type}",
+                    content="甲" * limit, memory_type=memory_type, context=context,
+                )
+                filename = created["filename"]
+                self.assertEqual(
+                    get_fragment(self.root, "alice", self.config, "seven_days", filename)["content"],
+                    "甲" * limit,
+                )
+                run_memory_manage(
+                    "edit", "seven_days", filename=filename, content="乙" * limit,
+                    memory_type=memory_type, context=context,
+                )
+                for action in ("add", "edit"):
+                    with self.subTest(action=action), self.assertRaisesRegex(
+                        RuntimeMemoryError, f"{memory_type} 类内容超过 {limit} 字"
+                    ):
+                        run_memory_manage(
+                            action, "seven_days",
+                            filename=filename if action == "edit" else f"overflow-{memory_type}",
+                            content="丙" * (limit + 1), memory_type=memory_type, context=context,
+                        )
+                self.assertEqual(
+                    get_fragment(self.root, "alice", self.config, "seven_days", filename)["content"],
+                    "乙" * limit,
+                )
 
     def test_important_memory_agent_can_read_but_cannot_mutate_directly(self) -> None:
         add_fragment(
