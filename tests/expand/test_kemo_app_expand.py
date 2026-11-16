@@ -208,15 +208,24 @@ class KemoAppExpandTests(unittest.TestCase):
                 configured,
             )
 
-    def test_bridge_rejects_non_local_runtime_endpoint(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {"KEMO_AGENT_WEB_BASE_URL": "https://remote.example.invalid:24680"},
-        ):
-            self.assertEqual(
-                bridge_upstream.resolve_upstream_base_url({}),
-                "http://127.0.0.1:1357",
-            )
+    def test_bridge_accepts_remote_runtime_endpoint_without_a_host_list(self) -> None:
+        for endpoint in ("https://remote.example.invalid:24680", "http://10.66.0.2:1357",
+                         "http://[2001:db8::1]:1357/agent"):
+            with self.subTest(endpoint=endpoint), mock.patch.dict(
+                os.environ, {"KEMO_AGENT_WEB_BASE_URL": endpoint},
+            ):
+                self.assertEqual(bridge_upstream.resolve_upstream_base_url({}), endpoint)
+                self.assertEqual(
+                    bridge_upstream.resolve_upstream_base_url({"upstream": "http://127.0.0.1:1357"}),
+                    endpoint,
+                )
+        for endpoint in ("ftp://remote.example.invalid", "http://user:secret@remote.example.invalid",
+                         "http://remote.example.invalid:0", "http://remote.example.invalid:70000",
+                         "https://remote.example.invalid?token=secret"):
+            with self.subTest(endpoint=endpoint), mock.patch.dict(
+                os.environ, {"KEMO_AGENT_WEB_BASE_URL": endpoint},
+            ):
+                self.assertEqual(bridge_upstream.resolve_upstream_base_url({}), "http://127.0.0.1:1357")
 
     def test_test_loader_does_not_leak_generic_expand_module_aliases(self) -> None:
         self.assertIsNot(sys.modules.get("start_expand"), bridge_start)

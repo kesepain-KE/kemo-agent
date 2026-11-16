@@ -180,25 +180,33 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertEqual(panel_status["backend_status"], "在线")
         self.assertEqual(panel_status["graph_port"], 8765)
 
-    def test_panel_endpoint_keeps_remote_transport_rules_and_admin_acl(self) -> None:
+    def test_panel_endpoint_supports_remote_http_and_ipv6_and_keeps_admin_acl(self) -> None:
         graph.save_config(graph.config_from_mapping(self.portable_mapping()))
         with self.assertRaises(PermissionError):
             start_expand.execute(
                 "panel_configure_endpoint",
-                {"scheme": "http", "graph_ip": "127.0.0.1", "graph_port": 8765},
+                {"scheme": "http", "graph_ip": "graph.example.test", "graph_port": 8765},
                 context={"user": "bob"},
             )
-        with self.assertRaisesRegex(graph.GraphExpandError, "https"):
-            start_expand.execute(
-                "panel_configure_endpoint",
-                {
-                    "scheme": "http",
-                    "graph_ip": "graph.example.test",
-                    "graph_port": 8765,
-                    "allow_remote": True,
-                },
-                context={"user": "alice"},
-            )
+        for host, authority in (("graph.example.test", "graph.example.test"),
+                                ("10.66.0.3", "10.66.0.3"),
+                                ("2001:db8::1", "[2001:db8::1]"),
+                                ("[2001:db8::1]", "[2001:db8::1]")):
+            with (
+                self.subTest(host=host),
+                patch.object(start_expand, "verify_service", return_value={"status": "ok"}),
+                patch.object(start_expand, "refresh_catalog", return_value={"ok": True}),
+            ):
+                result = start_expand.execute(
+                    "panel_configure_endpoint",
+                    {"scheme": "http", "graph_ip": host, "graph_port": 8765},
+                    context={"user": "alice"},
+                )
+                self.assertTrue(result["backend_online"])
+                saved = require_present(graph.load_config())
+                self.assertEqual(saved.base_url, f"http://{authority}:8765/api/v1")
+                self.assertEqual(saved.admin_users, ("alice",))
+                self.assertEqual(saved.libraries[0].id, "project_docs")
 
     def test_panel_backend_failure_is_persisted_without_leaking_response_data(self) -> None:
         graph.save_config(graph.config_from_mapping(self.portable_mapping()))
@@ -222,22 +230,24 @@ class KemoGraphExpandTests(unittest.TestCase):
         self.assertEqual(changed_status["last_checked"], "")
         self.assertEqual(changed_status["last_error"], "")
 
+    def test_registry_accepts_remote_addresses_without_a_remote_gate(self) -> None:
+        for url in ("http://graph.example.test:8000", "https://graph.example.test/proxy",
+                    "http://10.66.0.3:8000", "http://[2001:db8::1]:8000"):
+            for legacy in ({}, {"allow_remote": False}, {"allow_remote": True}):
+                with self.subTest(url=url, legacy=legacy):
+                    config = graph.config_from_mapping({
+                        "schema_version": 2, "base_url": url, "admin_users": ["alice"],
+                        "libraries": [], **legacy,
+                    })
+                    self.assertEqual(config.base_url, url + "/api/v1")
+                    self.assertNotIn("allow_remote", registry.config_payload(config))
+        for url in ("ftp://graph.example.test", "http://user:secret@graph.example.test",
+                    "http://graph.example.test:invalid", "http://graph.example.test:0",
+                    "http://graph.example.test:70000", "http://[invalid]", "http://graph.example.test?token=secret"):
+            with self.subTest(url=url), self.assertRaises(graph.GraphExpandError):
+                graph.config_from_mapping({"base_url": url, "admin_users": ["alice"], "libraries": []})
+
     def test_registry_requires_stable_ids_and_separate_absolute_paths(self) -> None:
-        with self.assertRaisesRegex(graph.GraphExpandError, "allow_remote"):
-            graph.config_from_mapping({
-                "schema_version": 2,
-                "base_url": "http://graph.example.test:8000",
-                "admin_users": ["alice"],
-                "libraries": [],
-            })
-        with self.assertRaisesRegex(graph.GraphExpandError, "https"):
-            graph.config_from_mapping({
-                "schema_version": 2,
-                "base_url": "http://graph.example.test:8000",
-                "admin_users": ["alice"],
-                "allow_remote": True,
-                "libraries": [],
-            })
         invalid = self.portable_mapping()
         invalid["libraries"][0]["id"] = "Project Docs"
         with self.assertRaisesRegex(graph.GraphExpandError, "必须匹配"):

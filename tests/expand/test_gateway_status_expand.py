@@ -297,6 +297,18 @@ class GatewayStatusExpandTests(unittest.TestCase):
         config = json.loads((self.module / "gateway_config.json").read_text("utf-8"))
         self.assertEqual(config["status_token"], "status-secret-token")
 
+    def test_panel_endpoint_accepts_remote_ipv6_without_a_host_gate(self) -> None:
+        for host, authority in (("10.66.0.3", "10.66.0.3"),
+                                ("gateway.example.test", "gateway.example.test"),
+                                ("2001:db8::1", "[2001:db8::1]"),
+                                ("[2001:db8::1]", "[2001:db8::1]")):
+            with self.subTest(host=host):
+                result = gateway.configure_endpoint({
+                    "scheme": "http", "gateway_ip": host, "gateway_port": 9753,
+                })
+                self.assertEqual(result["status"], "pending_token")
+                self.assertEqual(result["base_url"], f"http://{authority}:9753")
+
     def test_panel_endpoint_change_preserves_token_and_failed_probe_keeps_old_config(self) -> None:
         gateway._atomic_json(  # noqa: SLF001 - fixture for panel reconfiguration
             self.module / "gateway_config.json",
