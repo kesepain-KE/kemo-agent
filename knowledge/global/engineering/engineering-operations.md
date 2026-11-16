@@ -51,7 +51,7 @@ Web 是实例管理员认证模型，不把 WEB_USERNAME 当作 users 目录账�
 
 免认证不默认信任代理头或未知客户端；对外反代须启用实例认证。Provider 可选项只能走声明的正式字段或已授权 vendor 白名单，不用私有键另开透传通道。
 
-[机制 / L1] Provider 密钥环境变量仅允许 KEMO_API_KEY、OPENAI_API_KEY、DEEPSEEK_API_KEY、ANTHROPIC_API_KEY；自定义别名须迁移，不借 api_key_env 读取其他服务密钥。地址须 HTTPS（仅 localhost/127.0.0.1 可 HTTP），自建网关 host 只能由实例管理员在 config/global_config.yaml 的 provider_security.allowed_hosts 追加精确主机名；用户同名节不生效。用户 provider 覆盖产生不含配置值的进程内审计事件，细则见配置专题。
+[机制 / L1] Provider 密钥环境变量仅允许 KEMO_API_KEY、OPENAI_API_KEY、DEEPSEEK_API_KEY、ANTHROPIC_API_KEY；自定义别名须迁移，不借 api_key_env 读取其他服务密钥。Provider 地址支持 HTTP/HTTPS 的公网域名和局域网 IP，不设主机白名单；仍校验 URL 格式并禁止 URL 用户凭据，Kemo 目录声明的能力接口保持网关同源。用户 provider 覆盖产生不含配置值的进程内审计事件，细则见配置专题。
 
 ### 指令与资料边界
 
@@ -328,7 +328,7 @@ Web 服务确认宿主已退出、原会话代际有效且无状态未知的外�
 [机制] CardStream 配置基线：`agents.token_limit=1000000`、`agents.output_reserve=10000`、`agents.token_compression_ratio=0.3`；主请求前占用超过有效输入上限的80%时自动压缩。比例是软目标，实际容量/缩减与原子提交是硬门槛；明确超限才原整合压缩恢复，不重跑工具。预防压缩失败而请求仍可用时保留原 VIEW 继续，详见架构专题。
 来源：`config/global_config.yaml`，用户覆盖后以有效配置为准。对话历史由每用户 `cards.sqlite3` 管理，RAW 追加后不可变；VIEW 可压缩。目标是有效历史Token乘比例，固定上下文、动态尾部与工具Schema另行计量；所有历史卡片均可压缩，候选验证后原子提交，失败不改变已提交VIEW。上游上下文超限恢复只在请求实际缩小后播报重试，容量不可缩小时保留原超限诊断结束，见 `provider/retry.py` 与 `run/conversation/provider_exchange.py`。旧window、轮数配置与context_manage退出运行，不读取、迁移或删除旧历史文件。
 主请求与子智能体的上下文预留独立于模型生成上限：缺省预留10000，生成上限取显式配置或模型声明；上限未知时省略，不按预留量强制截断正文、思考或工具参数。实际生成上限低于预留量时才减少预留；摘要请求仍按自身输出额度计算容量。历史目标还受剩余容量限制。
-有效输入容量依次采用当前用户所选模型的 max_input_tokens、context_window、配置 token_limit；最大输入直接使用，后两项扣除实际输出预留。网页窗口显示配置 token_limit，自动压缩仍按有效输入容量的80%触发，历史保留目标使用配置压缩比例。
+有效输入容量优先采用当前用户所选模型的 max_input_tokens；同时声明总窗口时还受 context_window 减输出预留约束。仅声明最大输入时直接使用，仅有总窗口或仅配置兜底时扣除预留。已知生成上限逐请求按声明总窗口减完整输入占用收紧，包含子智能体参数纠错请求；输出上限未知时仍交上游决定。网页窗口显示配置 token_limit，自动压缩仍按有效输入容量的80%触发，历史保留目标使用配置压缩比例。
 摘要请求将工具调用与结果作为带调用标识的历史资料，允许选批或分片边界拆开两者，不伪造回执；正常对话仍使用原生工具事件。
 过大的前缀先按完整卡片分片；单张超大卡片仅拆只读摘要输入并保留来源偏移，RAW 不截断，临时摘要不提前提交，全部片段共用压缩时限与额外重试额度；
 提交前检查完整请求容量，失败保留原VIEW及独立新到卡片。原生媒体载荷不按文字Token计量，用量统计仍以实际回执为准。
