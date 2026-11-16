@@ -55,10 +55,6 @@ SYSTEM_UPDATE_RATE_KEYS = frozenset({"sense_update_rate", "expand_update_rate"})
 PROVIDER_API_KEY_ENVS = frozenset({
     "KEMO_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY",
 })
-PROVIDER_BUILTIN_HOSTS = frozenset({
-    "localhost", "127.0.0.1", "api.openai.com", "api.deepseek.com", "api.anthropic.com",
-})
-_PROVIDER_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 class ConfigError(RuntimeError):
@@ -92,25 +88,7 @@ def _parse_yaml_mapping(text: str, path: Path, *, allow_empty: bool = False) -> 
 
 
 def validate_provider_security(config: dict[str, Any]) -> None:
-    """Validate only routing/credential selectors, even before keys/models exist.
-
-    ``config`` must be instance-merged: merge_user_config drops user host policy.
-    This boundary does not resolve DNS or replace transport/network isolation.
-    """
-    policy = config.get("provider_security", {})
-    if not isinstance(policy, dict) or not isinstance(policy.get("allowed_hosts", []), list):
-        raise ConfigError("provider_security.allowed_hosts 必须是实例级精确主机名数组")
-    hosts = set(PROVIDER_BUILTIN_HOSTS)
-    for host in policy.get("allowed_hosts", []):
-        if (
-            not isinstance(host, str) or len(host) > 253
-            or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
-                       for label in host.casefold().split("."))
-        ):
-            raise ConfigError(
-                "provider_security.allowed_hosts 只接受精确主机名；不含协议、端口、路径或通配符"
-            )
-        hosts.add(host.casefold())
+    """Validate Provider URLs and credential selectors without a host policy."""
     provider = config.get("provider") or {}
     if not isinstance(provider, dict):
         raise ConfigError("provider 必须是对象")
@@ -132,17 +110,12 @@ def validate_provider_security(config: dict[str, Any]) -> None:
             not any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in url)
             and "\\" not in url and parts.username is None and parts.password is None
             and bool(host) and (port is None or 1 <= port <= 65535)
-            and (parts.scheme == "https" or (parts.scheme == "http" and host in _PROVIDER_HTTP_HOSTS))
+            and parts.scheme in {"http", "https"}
         )
     except ValueError:
         valid = False
     if not valid:
-        raise ConfigError("provider.base_url 必须是有效 https 地址（仅 localhost/127.0.0.1 允许 http），不得含用户凭据")
-    if host not in hosts:
-        raise ConfigError(
-            "provider.base_url 的 host 未获实例授权；请由管理员在 config/global_config.yaml 的 "
-            "provider_security.allowed_hosts 追加精确主机名，不可在用户配置中放行"
-        )
+        raise ConfigError("provider.base_url 必须是有效 HTTP 或 HTTPS 地址，不得含用户凭据")
 
 
 def cron_history_retention_days(config: dict[str, Any]) -> int:
@@ -361,10 +334,8 @@ def merge_user_config(
         if key not in USER_ONLY_SECTIONS
     }
     merged = deep_merge(global_defaults, user_config)
-    # The user owns provider routing, never the instance destination allowlist.
+    # Retired host policies do not affect user-owned Provider routes.
     merged.pop("provider_security", None)
-    if "provider_security" in global_config:
-        merged["provider_security"] = copy.deepcopy(global_config["provider_security"])
     memory = merged.get("memory")
     if memory is None:
         memory = merged["memory"] = {}

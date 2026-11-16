@@ -1,4 +1,4 @@
-"""R1 3.4: deny credential aliases and destinations outside instance policy."""
+"""Provider URLs accept remote hosts while credential selectors remain bounded."""
 from __future__ import annotations
 
 import copy
@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from run.config import ConfigError, load_config, merge_user_config, provider_runtime_config
+from run.config import ConfigError, load_config, provider_runtime_config
 from run.infra import runtime_event_snapshot
 
 
@@ -47,14 +47,13 @@ def test_explicit_provider_env_allowlist_is_usable(monkeypatch, env_name):
 
 
 @pytest.mark.parametrize("url", [
-    "http://api.openai.com/v1", "http://api.deepseek.com", "ftp://localhost/data",
-    "https://unapproved.test/v1", "https://api.openai.com.unapproved.test",
+    "ftp://localhost/data",
     "https://api.openai.com@unapproved.test/v1", "https://user:secret@api.openai.com/v1",
     "//api.openai.com/v1", "https:///v1", "https://api.openai.com:99999/v1",
     "https://api.openai.com\\@unapproved.test/v1", "https://api.openai.com\n/v1",
-    "http://localhost.unapproved.test/v1", "http://127.0.0.2/v1",
+    "https://api.openai.com:0/v1", "https://[broken",
 ])
-def test_insecure_or_unapproved_provider_url_is_rejected(url):
+def test_malformed_or_credential_bearing_provider_url_is_rejected(url):
     with pytest.raises(ConfigError) as caught:
         provider_runtime_config(config(base_url=url))
     assert "secret" not in str(caught.value)
@@ -67,17 +66,21 @@ def test_insecure_or_unapproved_provider_url_is_rejected(url):
     ("http://localhost:8741/proxy", "http://localhost:8741/proxy"),
     ("http://127.0.0.1:8741", "http://127.0.0.1:8741/v1"),
     ("https://API.OPENAI.COM:443/v1", "https://API.OPENAI.COM:443/v1"),
+    ("https://gateway.example.com/proxy?region=a", "https://gateway.example.com/proxy?region=a"),
+    ("http://gateway.example.com:8741", "http://gateway.example.com:8741/v1"),
+    ("http://10.66.0.1:8741/proxy", "http://10.66.0.1:8741/proxy"),
+    ("http://[fd00::1]:8741", "http://[fd00::1]:8741/v1"),
+    ("https://203.0.113.9/api", "https://203.0.113.9/api"),
 ])
-def test_builtin_destinations_keep_routes_and_local_http_exception(url, expected):
+def test_provider_accepts_public_and_private_hosts_without_an_allowlist(url, expected):
     assert provider_runtime_config(config(base_url=url))["base_url"] == expected
 
 
 @pytest.mark.parametrize("provider_type,env_name", [("chat", "OPENAI_BASE_URL"), ("kemo", "KEMO_BASE_URL")])
-def test_environment_url_fallback_cannot_bypass_host_policy(monkeypatch, provider_type, env_name):
-    monkeypatch.setenv(env_name, "https://unapproved.test/private?token=do-not-log")
-    with pytest.raises(ConfigError) as caught:
-        provider_runtime_config(config(type=provider_type))
-    assert "do-not-log" not in str(caught.value)
+def test_environment_url_fallback_supports_remote_hosts(monkeypatch, provider_type, env_name):
+    url = "http://relay.test:8741/proxy?region=a"
+    monkeypatch.setenv(env_name, url)
+    assert provider_runtime_config(config(type=provider_type))["base_url"] == url
 
 
 @pytest.mark.parametrize("url", ["https://[broken", "https://api.openai.com:bad"])
@@ -87,49 +90,20 @@ def test_malformed_environment_url_is_a_config_error(monkeypatch, url):
         provider_runtime_config(config())
 
 
-def test_only_instance_config_can_extend_hosts_and_user_cannot_replace_it(tmp_path):
-    global_config = {"provider_security": {"allowed_hosts": ["relay.test"]},
+def test_legacy_host_policy_is_ignored_without_changing_source_documents(tmp_path):
+    global_config = {"provider_security": {"allowed_hosts": []},
                      "provider_runtime": {"max_concurrent_requests": 7}}
-    user_config = {**config(base_url="https://relay.test/proxy?region=a"),
-                   "provider_security": {"allowed_hosts": ["unapproved.test"]}}
+    user_config = {**config(base_url="http://relay.test:8741/proxy?region=a"),
+                   "provider_security": {"allowed_hosts": ["unrelated.test"]}}
     before = copy.deepcopy((global_config, user_config))
     path = write_config(tmp_path, global_config, user_config)
     original = path.read_bytes()
     merged = load_config("alice", tmp_path)
-    assert merged["provider_security"] == global_config["provider_security"]
+    assert "provider_security" not in merged
     assert merged["provider_runtime"] == global_config["provider_runtime"]
-    assert provider_runtime_config(merged)["base_url"] == "https://relay.test/proxy?region=a"
-    merged["provider"]["base_url"] = "https://unapproved.test/v1"
-    with pytest.raises(ConfigError):
-        provider_runtime_config(merged)
+    assert provider_runtime_config(merged)["base_url"] == "http://relay.test:8741/proxy?region=a"
     assert (global_config, user_config) == before
     assert path.read_bytes() == original
-
-
-def test_absent_instance_policy_discards_user_injection():
-    merged = merge_user_config({}, {**config(), "provider_security": {"allowed_hosts": ["unapproved.test"]}})
-    assert "unapproved.test" not in json.dumps(merged.get("provider_security", {}))
-    merged["provider"]["base_url"] = "https://unapproved.test"
-    with pytest.raises(ConfigError):
-        provider_runtime_config(merged)
-
-
-@pytest.mark.parametrize("policy", [
-    None, [], {"allowed_hosts": None}, {"allowed_hosts": "relay.test"},
-    {"allowed_hosts": ["*"]}, {"allowed_hosts": ["*.relay.test"]},
-    {"allowed_hosts": ["https://relay.test"]}, {"allowed_hosts": ["relay.test:443"]},
-    {"allowed_hosts": ["relay.test/path"]}, {"allowed_hosts": ["relay.test?key=private"]},
-    {"allowed_hosts": [" relay.test "]}, {"allowed_hosts": [1]},
-])
-def test_malformed_instance_host_policy_fails_closed(policy):
-    with pytest.raises(ConfigError):
-        provider_runtime_config({**config(), "provider_security": policy})
-
-
-def test_added_host_does_not_allow_plain_http():
-    with pytest.raises(ConfigError, match="https"):
-        provider_runtime_config({**config(base_url="http://relay.test"),
-                                 "provider_security": {"allowed_hosts": ["relay.test"]}})
 
 
 def test_load_config_rejects_alias_at_startup_without_model_or_secret(tmp_path, monkeypatch):
@@ -157,11 +131,10 @@ def test_user_provider_override_has_value_free_audit_event(tmp_path):
 
 @pytest.mark.parametrize("changes", [
     {"provider": {"api_key_env": "HF_TOKEN"}},
-    {"provider": {"base_url": "http://api.openai.com/v1"}},
-    {"provider": {"base_url": "https://unapproved.test/v1"},
-     "provider_security": {"allowed_hosts": ["unapproved.test"]}},
+    {"provider": {"base_url": "ftp://relay.test/v1"}},
+    {"provider_security": {"allowed_hosts": ["relay.test"]}},
 ])
-def test_web_user_patch_cannot_persist_invalid_selector_or_authorize_own_host(tmp_path, monkeypatch, changes):
+def test_web_user_patch_cannot_persist_invalid_selector_or_retired_policy(tmp_path, monkeypatch, changes):
     from web.service import WebRunService
     from web.errors import InvalidRequestError
 
@@ -175,7 +148,7 @@ def test_web_user_patch_cannot_persist_invalid_selector_or_authorize_own_host(tm
     network.assert_not_called()
 
 
-def test_web_instance_addition_then_user_destination_change_is_explicit_and_preserves_other_settings(tmp_path, monkeypatch):
+def test_web_user_destination_change_needs_no_global_policy_and_preserves_other_settings(tmp_path, monkeypatch):
     from web.service import WebRunService
 
     runtime = {"max_concurrent_requests": 7, "request_semaphore_timeout": 19}
@@ -183,11 +156,10 @@ def test_web_instance_addition_then_user_destination_change_is_explicit_and_pres
     service = WebRunService(tmp_path)
     network = Mock(side_effect=AssertionError("configuration editing must not access the gateway"))
     monkeypatch.setattr("urllib.request.urlopen", network)
-    service.patch_global_config({"provider_security": {"allowed_hosts": ["relay.test"]}})
-    service.patch_user_config("alice", {"provider": {"base_url": "https://relay.test/proxy?region=a"}})
+    service.patch_user_config("alice", {"provider": {"base_url": "http://relay.test:8741/proxy?region=a"}})
     merged = load_config("alice", tmp_path)
     provider = provider_runtime_config(merged)
-    assert provider["base_url"] == "https://relay.test/proxy?region=a"
+    assert provider["base_url"] == "http://relay.test:8741/proxy?region=a"
     assert provider["timeout"] == 37 and provider["stream"] is False
     assert provider["api_key"] == "offline-key" and provider["model"] == "offline"
     assert merged["provider_runtime"] == runtime
