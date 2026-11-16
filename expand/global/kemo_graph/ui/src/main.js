@@ -44,7 +44,6 @@ function render(status) {
     $('#endpoint-form [name=scheme]').value = url.protocol.slice(0, -1)
     $('#endpoint-form [name=host]').value = url.hostname
     $('#endpoint-form [name=port]').value = url.port || (url.protocol === 'https:' ? 443 : 80)
-    $('#endpoint-form [name=remote]').checked = configuration.allow_remote
   }
 }
 async function load() {
@@ -98,15 +97,16 @@ $('#save-endpoint').addEventListener('click', () => {
   const form = $('#endpoint-form')
   if (!form.reportValidity()) return
   void run(async () => {
+    const rawHost = form.elements.host.value.trim()
+    const host = rawHost.includes(':') && !rawHost.startsWith('[') ? `[${rawHost}]` : rawHost
     if (configuration.active) {
       await action('configure_endpoint', {
         scheme: form.elements.scheme.value, graph_ip: form.elements.host.value.trim(),
-        graph_port: Number(form.elements.port.value), allow_remote: form.elements.remote.checked,
+        graph_port: Number(form.elements.port.value),
       })
     } else {
       await action('initialize_config', {
-        base_url: `${form.elements.scheme.value}://${form.elements.host.value.trim()}:${Number(form.elements.port.value)}/api/v1`,
-        allow_remote: form.elements.remote.checked,
+        base_url: `${form.elements.scheme.value}://${host}:${Number(form.elements.port.value)}/api/v1`,
       })
     }
     delete form.dataset.dirty

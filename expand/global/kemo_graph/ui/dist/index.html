@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kemo Graph 图谱控制台</title>  <script type="module" crossorigin src="./assets/index-OXaYbRqb.js"></script>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kemo Graph 图谱控制台</title>  <script type="module" crossorigin src="./assets/index-CmnvR2Ca.js"></script>
   <link rel="stylesheet" crossorigin href="./assets/index-DjOH4jXA.css">
 </head>
 <body>
@@ -19,11 +19,10 @@
   <article><h2>检索结果</h2><pre id="query-result">尚未执行检索。</pre></article>
 </section>
 <section data-section="settings" hidden>
-  <article><h2>图谱连接</h2><p>连接修改沿用图谱模块的管理员权限与远程地址校验。</p><form id="endpoint-form">
+  <article><h2>图谱连接</h2><p>支持本机、局域网和公网的 HTTP/HTTPS 地址。</p><form id="endpoint-form">
     <label>协议<select name="scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
     <label>主机<input name="host" required maxlength="253" value="127.0.0.1"></label>
     <label>端口<input name="port" type="number" required min="1" max="65535" value="8000"></label>
-    <label class="check"><input name="remote" type="checkbox">允许远程地址</label>
     <button type="button" id="save-endpoint" data-admin>保存连接地址</button>
   </form><p id="admin-note"></p></article>
 </section>
