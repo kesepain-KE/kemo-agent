@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from provider.protocol.models import ImageContent, KemoResponse, MessageItem, ModelCapabilities
+from provider.protocol.models import ImageContent, KemoResponse, MessageItem, ModelCapabilities, ToolCallItem
 from provider.retry import RetryManager
 from provider.schema import ProviderError
 from run.cards import (
@@ -18,8 +18,9 @@ from run.cards import (
 from run.context import CompressionBudgetExhausted
 from run.engine import iter_request_events
 from run.extensions import context_input_budget
+from run.tools import ToolRegistry
 from tests.cards.test_store import add, store, summary
-from tests.cards.test_runtime import root
+from tests.cards.test_runtime import definition, root
 from tests.media_input_support import PNG
 
 
@@ -41,7 +42,8 @@ def test_output_reservation_respects_model_maximum_before_subtracting_context():
     )
     budget = context_input_budget(10000, capabilities, output_reserve=8192)
     assert budget["output_reserve"] == 512
-    assert budget["effective_token_limit"] == 7000
+    assert budget["effective_token_limit"] == 5488
+    assert budget["provider_declared_input_limit"] == 7000
 
 
 def test_summary_output_fits_the_same_model_as_the_main_request(store):
@@ -623,7 +625,11 @@ def test_single_oversized_card_splits_only_readonly_input_and_preserves_raw(stor
 
 @pytest.mark.parametrize(("limits", "extension_limits", "max_tokens", "expected_output", "expected_input", "expected_window"), [
     ({"max_input_tokens": 7000, "context_window": 6000, "max_output_tokens": 512},
-     {}, None, 512, 7000, 6000),
+     {}, None, 512, 5488, 6000),
+    ({"max_input_tokens": 1000000, "context_window": 1000000, "max_output_tokens": 384000},
+     {}, None, 384000, 990000, 1000000),
+    ({}, {"max_input_tokens": 1000000, "context_window": 1000000, "max_output_tokens": 384000},
+     None, 384000, 990000, 1000000),
     ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, None, 384000, 1000000, 1000000),
     ({}, {"max_input_tokens": 1000000, "max_output_tokens": 384000}, 16384, 16384, 1000000, 1000000),
     ({"context_window": 2000000, "max_input_tokens": 1500000}, {}, None, None, 1500000, 2000000),
@@ -665,6 +671,8 @@ def test_main_runtime_uses_the_effective_output_reservation(
     assert snapshot["capacity_tokens"] == 1000000
     assert snapshot["input_limit_tokens"] == expected_input
     assert snapshot["compression_threshold"] == int(expected_input * .8)
+    assert snapshot["request_output_limit_tokens"] == expected_output
+    assert snapshot["capability_unknown"] is (not limits and not extension_limits)
     assert len(requests) == 1 and requests[0].generation.max_output_tokens == expected_output
     assert estimate_request_tokens(requests[0].system_prompt, requests[0].input, requests[0].tools) <= expected_input
     from run.context.service import context_status
@@ -680,6 +688,56 @@ def test_main_runtime_uses_the_effective_output_reservation(
     assert isolated["context"]["capability_unknown"] is True
     assert isolated["context"]["effective_token_limit"] == 1000000 - min(max_tokens or 10000, 10000)
     assert len(requests) == 1, "reading diagnostics must not make model requests"
+
+
+def test_main_runtime_rebudgets_output_for_complete_input_and_argument_repair(root):
+    path = root / "config/global_config.yaml"
+    config = json.loads(path.read_text("utf-8"))
+    config["agents"].update(token_limit=1000000, output_reserve=1000)
+    path.write_text(json.dumps(config), "utf-8")
+    requests = []
+
+    class Provider:
+        def capabilities(self, model):
+            return ModelCapabilities.model_validate({
+                "protocol_version": "2.0", "model": model, "provider_id": "fake",
+                "provider_model": model,
+                "limits": {"context_window": 20000, "max_input_tokens": 20000,
+                           "max_output_tokens": 12000},
+            })
+
+        def create(self, request):
+            requests.append(request)
+            if len(requests) == 1:
+                return KemoResponse(
+                    request_id=request.request_id, model=request.model,
+                    status=ResponseStatus.REQUIRES_ACTION,
+                    output=[ToolCallItem(id="call_invalid", call_id="callid_invalid",
+                                         name="check", arguments={"unknown": True})],
+                )
+            return reply(request)
+
+    tool = definition(root, lambda **_: pytest.fail("invalid call must not execute"),
+                      name="check", schema={"type": "object", "additionalProperties": False})
+    events = list(iter_request_events(
+        {"user": "alice", "source": "web", "session_id": "output-cap",
+         "prompt": "payload " * 11000},
+        root=root, provider_factory=lambda _: Provider(),
+        tool_registry_factory=lambda *_: ToolRegistry({"check": tool}),
+    ))
+    assert events[-1].type == "done", events[-1].error
+    snapshots = [event.metadata["context_snapshot"] for event in events if event.type == "context_window"]
+    assert len(requests) == len(snapshots) == 2
+    for request, snapshot in zip(requests, snapshots):
+        measured = estimate_request_tokens(request.system_prompt, request.input, request.tools)
+        output = request.generation.max_output_tokens
+        assert 1000 < output < 12000
+        assert measured + output <= 20000
+        assert output == 20000 - max(measured, snapshot["total_tokens"])
+        assert snapshot["request_output_limit_tokens"] == output
+        assert snapshot["input_limit_tokens"] == 19000
+        assert snapshot["compression_threshold"] == 15200
+    assert requests[1].generation.max_output_tokens < requests[0].generation.max_output_tokens
 
 
 def test_switching_models_updates_compression_capacity_without_changing_display_window(root):

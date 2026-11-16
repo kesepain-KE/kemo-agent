@@ -388,7 +388,7 @@ class WebBackendTests(unittest.TestCase):
         _, root = self.make_root()
         (root / "config").mkdir()
         (root / "config" / "global_config.yaml").write_text(
-            json.dumps({"schema_version": 1, "provider_security": {"allowed_hosts": ["capabilities-gateway.test"]}}), "utf-8"
+            json.dumps({"schema_version": 1}), "utf-8"
         )
         (root / "users" / "alice" / "user_config.yaml").write_text(
             json.dumps(
@@ -447,19 +447,24 @@ class WebBackendTests(unittest.TestCase):
         with (
             patch(
                 "web.services.settings.KemoGatewayAdapter.models",
-                return_value=catalog,
+                side_effect=[catalog, catalog.model_copy(update={"data": [
+                    catalog.data[0].model_copy(update={"capabilities_url": "/model/refreshed/mapped-model/capabilities"}),
+                ]})],
             ) as discover,
             patch(
                 "web.services.settings.KemoGatewayAdapter.capabilities",
-                return_value=capabilities,
+                side_effect=[capabilities, capabilities.model_copy(update={"limits":
+                    capabilities.limits.model_copy(update={"max_input_tokens": 1400000})})],
             ) as read_capabilities,
         ):
             response = self.request(
                 app,
                 "GET",
-                "/api/users/alice/provider/model-capabilities?model=mapped-model&refresh=true",
+                "/api/users/alice/provider/model-capabilities?model=mapped-model",
             )
             overview = self.request(app, "GET", "/api/users/alice/overview")
+            refreshed = self.request(app, "GET", "/api/users/alice/provider/model-capabilities?model=mapped-model&refresh=true")
+            refreshed_overview = self.request(app, "GET", "/api/users/alice/overview")
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(overview.status_code, 200, overview.text)
@@ -471,6 +476,9 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(snapshot["context_window_tokens"], 2000000)
         self.assertEqual(snapshot["context_window_source"], "model")
         self.assertEqual(snapshot["output_reserve_tokens"], 10000)
+        self.assertFalse(snapshot["capability_unknown"])
+        self.assertIsNone(snapshot["request_output_limit_tokens"])
+        self.assertFalse(overview.json()["context_window"]["tokens"]["capability_unknown"])
         self.assertEqual(snapshot["compression_ratio"], .3)
         self.assertEqual(snapshot["compression_target_tokens"], 0)
         self.assertEqual(response.headers["cache-control"], "no-store")
@@ -483,18 +491,22 @@ class WebBackendTests(unittest.TestCase):
             payload["capabilities"]["extensions"]["reasoning_policy"]["collapsed"]
         )
         self.assertNotIn("gateway-secret-never-expose", response.text)
-        discover.assert_called_once_with(task="llm")
-        read_capabilities.assert_called_once_with(
-            "mapped-model",
-            capabilities_url="/model/models/mapped-model/capabilities",
-        )
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertEqual(refreshed_overview.status_code, 200, refreshed_overview.text)
+        self.assertEqual(refreshed_overview.json()["context_snapshot"]["input_limit_tokens"], 1400000)
+        self.assertEqual(discover.call_count, 2)
+        self.assertEqual([call.kwargs for call in discover.call_args_list], [{"task": "llm"}] * 2)
+        self.assertEqual([call.kwargs["capabilities_url"] for call in read_capabilities.call_args_list], [
+            "/model/models/mapped-model/capabilities", "/model/refreshed/mapped-model/capabilities",
+        ])
 
         for status in (401, 403, 404, 502):
             with self.subTest(status=status):
                 clear_model_capability_cache()
-                with patch(
-                    "web.services.settings.KemoGatewayAdapter.capabilities",
-                    side_effect=ProviderError("failed", status_code=status),
+                with (
+                    patch("web.services.settings.KemoGatewayAdapter.models", return_value=catalog),
+                    patch("web.services.settings.KemoGatewayAdapter.capabilities",
+                          side_effect=ProviderError("failed", status_code=status)),
                 ):
                     failed = self.request(
                         app,
@@ -1342,7 +1354,6 @@ class WebBackendTests(unittest.TestCase):
             "history_summary": {"retry_delays_seconds": [2, 5], "max_attempts": 3},
             "media_assets": {"ttl_seconds": 180},
             "message": {"max_workers": 6},
-            "provider_security": {"allowed_hosts": ["models.example.com"]},
         }
         response = self.request(app, "PATCH", "/api/global-config", json={"changes": changes})
         self.assertEqual(response.status_code, 200, response.text)
@@ -5687,6 +5698,13 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(token_payload["tokens"]["request_count"], 1)
         self.assertEqual(token_payload["prompt"]["content"], "")
         self.assertEqual(token_payload["runtime_host"]["state"], "not_requested")
+        tokens_only = self.request(
+            app, "GET",
+            "/api/users/alice/runtime/status?session_id=observer-session&sections=tokens",
+        )
+        self.assertEqual(tokens_only.status_code, 200, tokens_only.text)
+        self.assertFalse(tokens_only.json()["context"]["available"])
+        self.assertIsNone(tokens_only.json()["context"]["compression_threshold"])
 
         store = CardStore(root, "alice")
         with store.db(write=True) as db:

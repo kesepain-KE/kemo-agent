@@ -1489,6 +1489,10 @@ class UnifiedProtocolTests(unittest.TestCase):
             capability_requests[0].full_url,
             f"https://gateway.test/model/models/{request.model}/capabilities",
         )
+        default_port_url = f"https://gateway.test:443/model/models/{request.model}/capabilities"
+        same_origin = adapter.capabilities(request.model, capabilities_url=default_port_url)
+        self.assertEqual(same_origin.model, request.model)
+        self.assertEqual(capability_requests[-1].full_url, default_port_url)
         with self.assertRaises(ProviderError):
             adapter.capabilities(
                 request.model,

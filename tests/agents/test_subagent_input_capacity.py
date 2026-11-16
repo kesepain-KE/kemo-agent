@@ -82,3 +82,26 @@ def test_argument_repair_is_rechecked_against_the_full_input_limit(workspace):
     with pytest.raises(AgentProviderError, match="完整请求超过输入预算"):
         runner.run("general_worker", {"task": "check"}, input_token_limit=measured + 16)
     assert len(provider.requests) == 1
+
+
+def test_subagent_output_shrinks_with_complete_input_including_argument_repair(workspace):
+    root, config = workspace
+    config["agents"] = {"token_limit": 1000000, "output_reserve": 1000}
+    plugin(root, "check")
+
+    class SharedWindowProvider(Provider):
+        def capabilities(self, model, **kwargs):
+            declaration = super().capabilities(model)
+            return declaration.model_copy(update={"limits": declaration.limits.model_copy(
+                update={"context_window": 20000, "max_output_tokens": 12000})})
+
+    provider = SharedWindowProvider(invalid_first=True)
+    runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
+    assert runner.run("general_worker", {"task": "payload " * 10000}).data == OUTPUT
+    assert len(provider.requests) == 2
+    for request in provider.requests:
+        measured = estimate_request_tokens(request.system_prompt, request.input, request.tools)
+        output = request.generation.max_output_tokens
+        assert 1000 < output < 12000
+        assert measured + output == 20000
+    assert provider.requests[1].generation.max_output_tokens < provider.requests[0].generation.max_output_tokens

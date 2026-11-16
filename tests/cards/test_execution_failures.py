@@ -88,7 +88,7 @@ def test_summary_deadline_retains_old_views_and_the_slot_until_real_exit(store):
 
 
 @pytest.mark.parametrize(("window", "input_limit", "configured", "reserve", "expected", "expected_window"), [
-    (10000, 8000, 20000, 3000, 8000, 10000),
+    (10000, 8000, 20000, 3000, 7000, 10000),
     (10000, 8000, 20000, 1000, 8000, 10000),
     (2000000, 1500000, 1000000, 10000, 1500000, 2000000),
     (2000000, None, 1000000, 10000, 1990000, 2000000),
@@ -97,7 +97,7 @@ def test_summary_deadline_retains_old_views_and_the_slot_until_real_exit(store):
     (None, 128000, 1000000, 10000, 128000, 1000000),
     (None, None, 20000, 1000, 19000, 20000),
 ])
-def test_input_declaration_precedes_window_and_configuration(
+def test_input_declaration_obeys_shared_window_but_not_configuration(
     window, input_limit, configured, reserve, expected, expected_window,
 ):
     capabilities = SimpleNamespace(
