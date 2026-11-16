@@ -181,13 +181,20 @@ describe('module workbench', () => {
       await waitFor(() => expect(screen.getByTitle(`${item.title} · ${page.label}`)).not.toBe(iframe))
     } finally { view.unmount(); view.router.dispose(); view.client.clear() }
   })
-  it.each(['https://example.com/console', 'javascript:alert(1)', 'not a URL'])('rejects a console address outside the local HTTP boundary: %s', async url => {
+  it.each(['javascript:alert(1)', 'file:///console.html', 'https://user:secret@example.com/console', 'not a URL'])('rejects an invalid console address: %s', async url => {
     const page = { id: 'console', label: '本机控制台', type: 'embed' as const, action: 'console_link' }
     server.use(http.post('/api/users/alice/module-workspaces/expand/global/sample/action', () => HttpResponse.json({ result: { console_url: url } })))
     render(<EmbedHost user="alice" item={item} page={page} />)
-    expect(await screen.findByRole('alert')).toHaveTextContent('动作没有返回可用的本机地址')
+    expect(await screen.findByRole('alert')).toHaveTextContent('动作没有返回可用的 HTTP/HTTPS 控制台地址')
     expect(screen.queryByTitle(`${item.title} · ${page.label}`)).toBeNull()
     expect(screen.getByRole('button', { name: '重新打开' })).toBeEnabled()
+  })
+  it.each(['http://10.66.0.2:54321/console', 'https://console.example.com/path?token=private-token', 'http://[2001:db8::1]:54321/console'])('embeds a remote console without an address allowlist: %s', async url => {
+    const page = { id: 'console', label: '控制台', type: 'embed' as const, action: 'console_link' }
+    server.use(http.post('/api/users/alice/module-workspaces/expand/global/sample/action', () => HttpResponse.json({ result: { console_url: url } })))
+    render(<EmbedHost user="alice" item={item} page={page} />)
+    expect(await screen.findByTitle(`${item.title} · ${page.label}`)).toHaveAttribute('src', url)
+    expect(screen.queryByRole('alert')).toBeNull()
   })
   it('validates iframe source and nonce before forwarding capability requests', async () => {
     const calls: string[] = []

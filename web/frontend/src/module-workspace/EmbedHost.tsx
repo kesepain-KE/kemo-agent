@@ -4,13 +4,11 @@ import * as api from './api'
 import type { WorkspaceItem, WorkspacePage } from './types'
 import styles from './Workbench.module.css'
 
-const loopbackHosts = new Set(['127.0.0.1', 'localhost', '[::1]'])
-
-function loopbackUrl(value: unknown): string {
+function consoleHttpUrl(value: unknown): string {
   if (typeof value !== 'string') return ''
   try {
     const url = new URL(value)
-    return ['http:', 'https:'].includes(url.protocol) && loopbackHosts.has(url.hostname) ? url.toString() : ''
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.toString() : ''
   } catch {
     return ''
   }
@@ -21,7 +19,7 @@ function consoleUrlOf(payload: unknown): string {
   const inner = (outer as { result?: unknown } | null)?.result ?? outer
   for (const candidate of [inner, outer]) {
     const value = candidate as { console_url?: unknown; url?: unknown } | null
-    const url = loopbackUrl(value?.console_url ?? value?.url)
+    const url = consoleHttpUrl(value?.console_url ?? value?.url)
     if (url) return url
   }
   return ''
@@ -48,7 +46,7 @@ export function EmbedHost({ user, item, page }: {
     void api.invokeAction(user, item, page.action, {}).then(payload => {
       if (disposed) return
       const next = consoleUrlOf(payload)
-      if (!next) throw new Error(t('动作没有返回可用的本机地址'))
+      if (!next) throw new Error(t('动作没有返回可用的 HTTP/HTTPS 控制台地址'))
       setUrl(next)
     }).catch(cause => {
       if (!disposed) {
