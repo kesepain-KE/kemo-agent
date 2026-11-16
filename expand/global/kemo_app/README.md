@@ -197,8 +197,10 @@ selected local Web API endpoint through the process-only
 endpoint whenever `config.json` has an empty or loopback `upstream`, so a
 fallback Web port such as `24680` cannot leave the bridge pointing at the old
 `1357` port. A deliberately configured non-loopback gateway remains
-authoritative. If the bridge is started independently, configure its local
-`upstream` explicitly or restart it after the Web port changes.
+authoritative. `KEMO_AGENT_WEB_BASE_URL` also accepts a remote HTTP/HTTPS
+framework endpoint when the bridge runs on a separate host; no host allowlist
+is required. If the bridge is started independently, configure its `upstream`
+explicitly or restart it after the Web port changes.
 
 Verify the service with:
 

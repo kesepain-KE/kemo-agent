@@ -17,18 +17,18 @@ _LOCAL_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _valid_runtime_endpoint(value: object) -> str:
-    """Accept only a plain HTTP(S) endpoint published by the local launcher."""
+    """Accept a plain local or remote HTTP(S) framework endpoint."""
 
     candidate = str(value or "").strip().rstrip("/")
     if not candidate:
+        return ""
+    if "\\" in candidate or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in candidate):
         return ""
     try:
         parsed = urlsplit(candidate)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return ""
-        if parsed.username or parsed.password:
-            return ""
-        if parsed.hostname.casefold() not in _LOCAL_UPSTREAM_HOSTS:
+        if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
             return ""
         port = parsed.port
     except ValueError:
