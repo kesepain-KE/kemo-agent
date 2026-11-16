@@ -40,7 +40,7 @@ export function renderStatusPage(ctx) {
   const cardDefs = [
     { label: tr('API 配置'), value: R.api.model, foot: `${R.api.type} · ${R.api.configured ? tr('已配置') : tr('待配置')}`, icon: 'cpu', tab: 'api', smallValue: true },
     { label: tr('上下文占用'), value: `${Number(R.context.percent).toFixed(1)}%`, foot: `${fmtNum(R.context.used_tokens)} / ${fmtNum(R.context.max_tokens)} tokens`, icon: 'gauge', tab: 'tokens' },
-    { label: tr('上下文卡片'), value: `${R.context.cards_active} / ${R.context.last_seq}`, foot: `压缩阈值 ${fmtNum(R.context.compression_threshold)} tokens`, icon: 'chat', tab: 'prompt' },
+    { label: tr('上下文卡片'), value: `${R.context.cards_active} / ${R.context.last_seq}`, foot: R.context.available && R.context.compression_threshold != null ? `压缩阈值 ${fmtNum(R.context.compression_threshold)} tokens` : '压缩阈值暂不可用', icon: 'chat', tab: 'prompt' },
     { label: tr('消息路由'), value: `${R.message_routes.summary.connected_transports} / ${R.message_routes.summary.total_transports}`, foot: R.message_routes.summary.error_transports ? tr('部分异常') : tr('无错误通道'), icon: 'route', tab: 'external' },
   ];
   cardDefs.forEach((c) => {
@@ -181,7 +181,9 @@ export function renderStatusPage(ctx) {
   /* ---- API 配置 ---- */
   function drawApiTab() {
     const capability = LIVE_CAPABILITIES.capabilities;
-    const hasCapabilities = Boolean(capability.metadata.context_window || capability.input_modalities?.length);
+    const limits = Object.fromEntries(['context_window', 'max_input_tokens', 'max_output_tokens'].map(key =>
+      [key, capability.limits?.[key] ?? capability.extensions?.limits?.[key]]));
+    const hasCapabilities = Boolean(limits.context_window || limits.max_input_tokens || limits.max_output_tokens || capability.input_modalities?.length);
     const modelLabels = {
       default: '默认子智能体', cheap: '轻量子智能体', reasoning: '推理子智能体',
       vision: '视觉理解', image_generation: '图片生成', image_edit: '图片编辑',
@@ -244,7 +246,8 @@ export function renderStatusPage(ctx) {
               : tr('不支持'))),
           h('div.desc-row', h('span.desc-key', tr('工具能力')), h('span.desc-val',
             `并行调用 ${LIVE_CAPABILITIES.capabilities.tools.parallel_calls ? tr('支持') : tr('不支持')} · 多模态结果 ${LIVE_CAPABILITIES.capabilities.tools.multimodal_results ? tr('支持') : tr('不支持')}`)),
-          h('div.desc-row', h('span.desc-key', tr('模型上下文窗口')), h('span.desc-val.tnum', capability.metadata.context_window ? fmtThousands(capability.metadata.context_window) + ' tokens' : tr('模型未声明'))),
+          ...[['模型上下文窗口', 'context_window'], ['模型最大输入', 'max_input_tokens'], ['模型最大输出', 'max_output_tokens']].map(([label, key]) =>
+            h('div.desc-row', h('span.desc-key', tr(label)), h('span.desc-val.tnum', limits[key] ? fmtThousands(limits[key]) + ' tokens' : tr('模型未声明')))),
         ) : null,
       ),
     );

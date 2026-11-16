@@ -4,7 +4,7 @@ import { ConfigSaveBar, record, SettingRow, Toggle, type SaveRequest } from './s
 
 type Field = {
   path: string; title: string; description: string
-  kind: 'number' | 'boolean' | 'select' | 'time' | 'hosts' | 'delays' | 'readonly'
+  kind: 'number' | 'boolean' | 'select' | 'time' | 'delays' | 'readonly'
   fallback: string | number | boolean | null
   min?: number; max?: number; step?: number; nullable?: boolean
   options?: Array<[string, string]>
@@ -61,9 +61,6 @@ const groups: Array<{ title: string; description: string; fields: Field[] }> = [
     { path: 'message.max_workers', title: '消息工作线程数', description: '外部消息路由允许同时处理的工作线程数量。', kind: 'number', fallback: 8, min: 1 },
     { path: 'web.sse_heartbeat_seconds', title: '网页连接心跳间隔（秒）', description: 'SSE 长连接发送心跳的间隔。', kind: 'number', fallback: 15, min: 1 },
   ] },
-  { title: 'Provider 访问范围', description: '实例级访问策略，仅配置额外允许的精确主机名。', fields: [
-    { path: 'provider_security.allowed_hosts', title: '额外允许的 Provider 主机', description: '每行一个主机名，不含协议、端口、路径或通配符；留空仅允许内置主机。', kind: 'hosts', fallback: '' },
-  ] },
 ]
 
 function readField(config: Record<string, unknown>, field: Field): string | boolean {
@@ -72,7 +69,7 @@ function readField(config: Record<string, unknown>, field: Field): string | bool
   for (const key of field.path.split('.')) value = record(value)[key]
   if (value === undefined) value = field.fallback
   if (field.kind === 'boolean') return value as boolean
-  if (Array.isArray(value)) return value.join(field.kind === 'hosts' ? '\n' : ', ')
+  if (Array.isArray(value)) return value.join(', ')
   return value === null ? '' : String(value)
 }
 
@@ -94,10 +91,10 @@ export function AdvancedSettings({ config, pending, saved, onSave }: {
       if (field.kind === 'number') {
         value = String(raw).trim() === '' && field.nullable ? null : Number(raw)
         valid = value === null || (String(raw).trim() !== '' && Number.isFinite(value as number) && (field.step !== undefined || Number.isInteger(value)) && (field.min === undefined || (value as number) >= field.min) && (field.max === undefined || (value as number) <= field.max))
-      } else if (field.kind === 'delays' || field.kind === 'hosts') {
+      } else if (field.kind === 'delays') {
         const items = String(raw).split(/[,，\n]/).map((item) => item.trim()).filter(Boolean)
-        value = field.kind === 'delays' ? items.map(Number) : Array.from(new Set(items))
-        valid = field.kind !== 'delays' || ((value as number[]).length > 0 && (value as number[]).every((item) => Number.isInteger(item) && item >= 1))
+        value = items.map(Number)
+        valid = (value as number[]).length > 0 && (value as number[]).every((item) => Number.isInteger(item) && item >= 1)
       } else if (field.kind === 'time') valid = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(raw))
       if (!valid) {
         onSave({ label: '保存高级配置' }, `${tr(field.title)}：${tr('请输入有效的配置值。')}`)
@@ -123,8 +120,7 @@ export function AdvancedSettings({ config, pending, saved, onSave }: {
           field.kind === 'readonly' ? <span className="settings-version-value">{tr(String(value))}</span>
             : field.kind === 'boolean' ? <Toggle label={field.title} checked={Boolean(value)} onChange={(next) => update(field.path, next)} />
               : field.kind === 'select' ? <select className="config-field settings-choice" aria-label={tr(field.title)} value={String(value)} onChange={(event) => update(field.path, event.target.value)}>{field.options!.map(([key, label]) => <option key={key} value={key}>{tr(label)}</option>)}</select>
-                : field.kind === 'hosts' ? <textarea className="config-field settings-hosts" aria-label={tr(field.title)} value={String(value)} rows={3} onChange={(event) => update(field.path, event.target.value)} />
-                  : <input className={`config-field ${field.kind === 'number' ? 'config-number' : 'settings-choice'}`} aria-label={tr(field.title)} type={field.kind === 'number' ? 'number' : field.kind === 'time' ? 'time' : 'text'} value={String(value)} min={field.min} max={field.max} step={field.step ?? 1} placeholder={field.nullable ? tr('留空') : undefined} onChange={(event) => update(field.path, event.target.value)} />
+                : <input className={`config-field ${field.kind === 'number' ? 'config-number' : 'settings-choice'}`} aria-label={tr(field.title)} type={field.kind === 'number' ? 'number' : field.kind === 'time' ? 'time' : 'text'} value={String(value)} min={field.min} max={field.max} step={field.step ?? 1} placeholder={field.nullable ? tr('留空') : undefined} onChange={(event) => update(field.path, event.target.value)} />
         } />
       })}
     </article>)}

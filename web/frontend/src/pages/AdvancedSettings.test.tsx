@@ -10,14 +10,13 @@ describe('AdvancedSettings', () => {
     fireEvent.change(screen.getByRole('spinbutton', { name: '关系记忆晋升阈值' }), { target: { value: '' } })
     fireEvent.change(screen.getByRole('spinbutton', { name: '媒体资源存活时间（秒）' }), { target: { value: '180' } })
     fireEvent.change(screen.getByRole('textbox', { name: '标题摘要重试间隔（秒）' }), { target: { value: '2, 5, 10' } })
-    fireEvent.change(screen.getByRole('textbox', { name: '额外允许的 Provider 主机' }), { target: { value: 'models.example.com\napi.example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '保存高级配置' }))
     expect(onSave).toHaveBeenCalledExactlyOnceWith({ label: '保存高级配置', globalChanges: {
       memory: { profile: 'work', domain_rules: { relation: { upgrade_threshold: null } } },
       media_assets: { ttl_seconds: 180 }, history_summary: { retry_delays_seconds: [2, 5, 10] },
-      provider_security: { allowed_hosts: ['models.example.com', 'api.example.com'] },
     } })
     expect(screen.queryByRole('spinbutton', { name: '周记忆下一层' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Provider 访问范围')).not.toBeInTheDocument()
   })
 
   it('rejects invalid numeric input before issuing a patch', () => {

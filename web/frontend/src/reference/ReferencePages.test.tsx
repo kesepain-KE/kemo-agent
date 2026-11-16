@@ -84,6 +84,28 @@ describe('样例替换后的生产路由', () => {
     expect(screen.queryByText('不支持')).not.toBeInTheDocument()
   })
 
+  it.each(['limits', 'extensions'] as const)('运行诊断从 %s 展示真实模型容量，而非 metadata', async (location) => {
+    const data = await loadReferenceData('/status', 'kesepain', 's1')
+    data.runtime.api.type = 'kemo'
+    const limits = { context_window: 1000000, max_input_tokens: 1000000, max_output_tokens: 384000 }
+    const capability = {
+      ...data.capabilities.capabilities, input_modalities: ['text'], metadata: {},
+      limits: location === 'limits' ? limits : { context_window: null },
+      extensions: location === 'extensions' ? { limits } : {},
+    }
+    server.use(
+      http.get('/api/users/kesepain/runtime/status', () => HttpResponse.json(data.runtime)),
+      http.get('/api/users/kesepain/provider/model-capabilities', () => HttpResponse.json({
+        ...data.capabilities, capabilities: capability,
+      })),
+    )
+    renderPage('/status?tab=api')
+    const windowLabel = await screen.findByText('模型上下文窗口')
+    expect(windowLabel.closest('.desc-row')).toHaveTextContent('1,000,000 tokens')
+    expect(screen.getByText('模型最大输入').closest('.desc-row')).toHaveTextContent('1,000,000 tokens')
+    expect(screen.getByText('模型最大输出').closest('.desc-row')).toHaveTextContent('384,000 tokens')
+  })
+
   it('终端显示实际输出，消息日志保留完整输入输出正文', async () => {
     let terminalReads = 0
     const writeText = vi.fn().mockResolvedValue(undefined)

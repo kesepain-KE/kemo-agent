@@ -658,12 +658,13 @@ export interface KemoModelCapabilities {
   }
   structured_output: boolean
   limits?: {
-    context_window?: number
-    max_input_tokens?: number
-    max_output_tokens?: number
+    context_window?: number | null
+    max_input_tokens?: number | null
+    max_output_tokens?: number | null
   }
   metadata: Record<string, unknown>
   extensions: {
+    limits?: KemoModelCapabilities['limits']
     reasoning_effort_map?: Partial<Record<ReasoningEffort, string>>
     reasoning_policy?: KemoReasoningPolicy
     [key: string]: unknown
@@ -913,6 +914,8 @@ export interface OverviewResponse {
       context_window_tokens?: number
       context_window_source?: 'model' | 'configuration'
       output_reserve_tokens?: number
+      request_output_limit_tokens?: number | null
+      capability_unknown?: boolean
       compression_ratio?: number
       compression_target_tokens?: number
       percent: number
@@ -969,6 +972,8 @@ export interface OverviewResponse {
     context_window_tokens?: number
     context_window_source?: 'model' | 'configuration'
     output_reserve_tokens?: number
+    request_output_limit_tokens?: number | null
+    capability_unknown?: boolean
     compression_ratio?: number
     compression_target_tokens?: number
     percent: number

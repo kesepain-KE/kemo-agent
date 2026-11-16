@@ -1841,7 +1841,6 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 
 .settings-choice { width: 260px; max-width: 100%; min-width: 0; }
-.settings-hosts { width: 320px; max-width: 100%; min-width: 0; resize: vertical; }
 .settings-injection-status { margin: 0; padding: 0 2px 12px; color: var(--text-tertiary); font-size: var(--t-xs); line-height: 1.6; }
 .settings-permission-options { display: flex; flex-wrap: wrap; gap: 12px; width: 320px; max-width: 100%; }
 .settings-permission-options label { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
@@ -1849,5 +1848,5 @@ input[type="checkbox"] { accent-color: var(--accent); }
 @media (max-width: 600px) {
   .memory-injection-card { margin-inline: 12px; padding: 12px; }
   .memory-injection-options { padding-inline: 12px; }
-  .settings-choice, .settings-hosts, .settings-permission-options { width: 100%; }
+  .settings-choice, .settings-permission-options { width: 100%; }
 }
