@@ -147,9 +147,11 @@ $('#save-endpoint').addEventListener('click', () => {
 $('#activate').addEventListener('click', () => {
   if (!$('#endpoint-form').reportValidity() || !$('#activate-form').reportValidity()) return
   void run(async () => {
+    const rawHost = $('#host').value.trim()
+    const host = rawHost.includes(':') && !rawHost.startsWith('[') ? `[${rawHost}]` : rawHost
     const config = state.configuration
     await action('activate', {
-      base_url: `${$('#scheme').value}://${$('#host').value.trim()}:${Number($('#port').value)}`,
+      base_url: `${$('#scheme').value}://${host}:${Number($('#port').value)}`,
       status_token: $('#status-token').value,
       timeout_seconds: config.timeout_seconds, ranking_limit: config.ranking_limit, log_limit: config.log_limit,
       period: $('#period').value,

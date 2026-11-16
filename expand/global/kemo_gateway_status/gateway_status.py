@@ -313,6 +313,8 @@ def configure_endpoint(params: dict[str, Any]) -> dict[str, Any]:
     scheme = str(params.get("scheme") or "http").strip().casefold()
     host = str(params.get("gateway_ip") or "").strip()
     port = _integer(params.get("gateway_port"), name="gateway_port", default=7531, minimum=1, maximum=65535)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
     candidate_url = _normalized_base_url(f"{scheme}://{host}:{port}")
     current = load_config()
     if current is None:
