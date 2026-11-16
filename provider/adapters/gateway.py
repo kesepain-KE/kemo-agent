@@ -238,12 +238,12 @@ class KemoGatewayAdapter:
         configured_origin = (
             configured.scheme.casefold(),
             (configured.hostname or "").casefold(),
-            configured.port,
+            configured.port or (443 if configured.scheme.casefold() == "https" else 80),
         )
         target_origin = (
             target.scheme.casefold(),
             (target.hostname or "").casefold(),
-            target.port,
+            target.port or (443 if target.scheme.casefold() == "https" else 80),
         )
         if (
             target.scheme not in {"http", "https"}
