@@ -2,7 +2,6 @@
   "schema_version": 2,
   "base_url": "http://127.0.0.1:8000/api/v1",
   "admin_users": ["kesepain"],
-  "allow_remote": false,
   "timeout_seconds": 15,
   "ingest_timeout_seconds": 1800,
   "libraries": [

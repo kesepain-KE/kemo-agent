@@ -14,7 +14,6 @@
         { "key": "graph_port", "label": "知识图谱端口", "type": "text" },
         { "key": "scheme", "label": "协议", "type": "text" },
         { "key": "base_url", "label": "当前 API 地址", "type": "text" },
-        { "key": "allow_remote", "label": "允许远程地址", "type": "badge" },
         { "key": "backend_status", "label": "后端状态", "type": "badge" },
         { "key": "last_checked", "label": "最近检测", "type": "text" },
         { "key": "last_error", "label": "最近错误", "type": "text" }
@@ -36,8 +35,7 @@
               { "value": "https", "label": "HTTPS" }
             ], "required": true },
             { "key": "graph_ip", "label": "知识图谱 IP / 主机", "type": "string", "required": true, "placeholder": "127.0.0.1" },
-            { "key": "graph_port", "label": "知识图谱端口", "type": "number", "min": 1, "max": 65535, "default": 8000, "required": true },
-            { "key": "allow_remote", "label": "允许远程地址", "type": "boolean" }
+            { "key": "graph_port", "label": "知识图谱端口", "type": "number", "min": 1, "max": 65535, "default": 8000, "required": true }
           ]
         }
       ]

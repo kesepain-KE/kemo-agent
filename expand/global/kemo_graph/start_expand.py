@@ -86,7 +86,6 @@ def write_panel_status(
             "graph_port": "—",
             "scheme": "http",
             "base_url": "—",
-            "allow_remote": False,
             "backend_status": "未检测",
             "last_checked": checked_at,
             "last_error": error,
@@ -99,14 +98,13 @@ def write_panel_status(
             "graph_port": port or "—",
             "scheme": scheme,
             "base_url": config.base_url,
-            "allow_remote": config.allow_remote,
             "backend_status": "在线" if online is True else "离线" if online is False else "未检测",
             "last_checked": checked_at,
             "last_error": error,
         }
         if online is None and not checked_at and not error and status_path.is_file():
             previous = json.loads(status_path.read_text("utf-8"))
-            if previous.get("base_url") == config.base_url and previous.get("allow_remote") == config.allow_remote:
+            if previous.get("base_url") == config.base_url:
                 for field in ("backend_status", "last_checked", "last_error"):
                     payload[field] = previous[field]
     atomic_json(status_path, payload)
@@ -145,7 +143,8 @@ def _configure_panel_endpoint(arguments: dict[str, Any], caller_user: str | None
     if not 1 <= port <= 65535:
         raise GraphExpandError("graph_port 必须在 1～65535 之间")
     payload = config_payload(current)
-    payload["allow_remote"] = bool(arguments.get("allow_remote", current.allow_remote))
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
     payload["base_url"] = f"{scheme}://{host}:{port}/api/v1"
     candidate = config_from_mapping(payload, require_source_roots_exist=False)
     save_config(candidate)
@@ -155,7 +154,6 @@ def _configure_panel_endpoint(arguments: dict[str, Any], caller_user: str | None
         "ok": True,
         "configured": True,
         "base_url": candidate.base_url,
-        "allow_remote": candidate.allow_remote,
         "catalog_updated": bool(catalog.get("ok")),
         "backend_online": bool(check.get("online")),
         "backend_error": str(check.get("error") or ""),
@@ -173,7 +171,6 @@ def _initialize_config(arguments: dict[str, Any], caller_user: str | None) -> di
         current = config_from_mapping({
             "schema_version": 2,
             "base_url": arguments.get("base_url", "http://127.0.0.1:8000/api/v1"),
-            "allow_remote": arguments.get("allow_remote", False),
             "admin_users": [caller_user],
             "libraries": [{
                 "id": "kemo_graph_builtin", "kind": "service_default",

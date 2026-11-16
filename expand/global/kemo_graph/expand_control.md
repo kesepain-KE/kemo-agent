@@ -41,19 +41,20 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 `scan` / `sync` 不计算删除、不访问 Store、也不推进同步游标，必须由管理员恢复目录或
 提交完整新配置显式移除该来源，框架不会自动删除注册项。
 
-远程服务只有在 `allow_remote=true` 时允许，并且非回环地址必须使用 HTTPS。kemo-graph
-当前没有由本拓展管理的应用层凭据，跨主机部署仍必须由操作者提供外层鉴权、TLS 和审计。
+连接地址统一支持 HTTP/HTTPS 的本机、局域网、公网域名和 IPv6，不设主机白名单或远程开关。
+URL 仍校验格式、端口及凭据；旧配置的 `allow_remote` 字段只读兼容并忽略，保存时移除。
+kemo-graph 的服务访问控制由部署侧管理，模块管理员与文档库权限仍按原规则生效。
 
 ## 操作层
 
 ### 用户配置组件命令
 
-- `panel_configure_endpoint`：仅管理员可用，设置 `scheme`、`graph_ip`、`graph_port` 和
-  `allow_remote`；保留完整 Library 注册、ACL、来源目录和 Store 配置。
+- `panel_configure_endpoint`：仅管理员可用，设置 `scheme`、`graph_ip`、`graph_port`；
+  保留完整 Library 注册、ACL、来源目录和 Store 配置。
 - `panel_check_backend`：仅管理员可用，检测当前 `/api/v1/status`，把在线/离线、检查时间和
   脱敏错误写入 `module/status.json`，不保存完整响应。
 
-两个命令都继续执行远程地址安全合同：非回环地址必须显式允许远程且使用 HTTPS；它们不改变
+两个命令都支持配置的本机或远程地址；它们不改变
 `module.yaml`、Prompt 注入开关或数据注入正文。
 
 ### 本地操作
@@ -85,7 +86,7 @@ Library ID、绝对 Store 位置、文档来源和最近一次手动检查状态
 ### 显式写操作
 
 - `initialize_config`：初始化本地配置，首次以调用用户作为管理员，仅注册该用户可访问的
-  内置文档库；可传 `base_url`、`allow_remote`。已有配置仅允许原管理员调用并完整保留，
+  内置文档库；可传 `base_url`。已有配置仅允许原管理员调用并完整保留，
   不联网、不创建 Store、不同步或构建。首次调用必须带框架用户上下文。
 - `activate`：保存完整 schema v2 注册表并激活拓展；不初始化、同步或构建。
 - `initialize`：幂等初始化选定 portable Store；内置库由 kemo-graph 自身管理。

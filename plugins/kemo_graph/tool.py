@@ -183,7 +183,6 @@ def _configuration(root: Path, user: str) -> dict[str, Any]:
         "valid": True,
         "module": "global:kemo_graph",
         "base_url": str(value.get("base_url") or ""),
-        "allow_remote": value.get("allow_remote") is True,
         "caller_is_admin": user in normalized_admins,
         "libraries": rows,
     }
@@ -437,7 +436,6 @@ def _operation_guide(
             "schema_version": 2,
             "base_url": "http://127.0.0.1:8000/api/v1",
             "admin_users": [caller_user],
-            "allow_remote": False,
             "timeout_seconds": 15,
             "ingest_timeout_seconds": 1800,
             "libraries": [{

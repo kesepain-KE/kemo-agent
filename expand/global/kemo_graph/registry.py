@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import hashlib
 import json
 import os
@@ -80,7 +79,6 @@ class GraphLibrary:
 class GraphConfig:
     base_url: str
     admin_users: tuple[str, ...]
-    allow_remote: bool = False
     timeout_seconds: int = 15
     ingest_timeout_seconds: int = 1800
     libraries: tuple[GraphLibrary, ...] = ()
@@ -162,16 +160,7 @@ def _user_list(
     return tuple(users)
 
 
-def _is_loopback(hostname: str) -> bool:
-    if hostname.casefold() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return False
-
-
-def normalized_base_url(value: Any, *, allow_remote: bool) -> str:
+def normalized_base_url(value: Any) -> str:
     raw = str(value or "").strip().rstrip("/")
     if not raw:
         raise GraphExpandError("缺少 kemo-graph base_url")
@@ -180,15 +169,17 @@ def normalized_base_url(value: Any, *, allow_remote: bool) -> str:
         for character in raw
     ):
         raise GraphExpandError("base_url 不允许包含空白符或控制字符")
-    parsed = urllib.parse.urlsplit(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+        valid = (parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                 and "\\" not in raw and (port is None or 1 <= port <= 65535))
+    except ValueError as exc:
+        raise GraphExpandError("base_url 必须是有效的 http 或 https 地址") from exc
+    if not valid:
         raise GraphExpandError("base_url 必须是有效的 http 或 https 地址")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         raise GraphExpandError("base_url 不允许包含凭据、查询参数或片段")
-    if not allow_remote and not _is_loopback(parsed.hostname):
-        raise GraphExpandError("非回环地址必须显式设置 allow_remote=true")
-    if allow_remote and not _is_loopback(parsed.hostname) and parsed.scheme != "https":
-        raise GraphExpandError("远程 kemo-graph 地址必须使用 https")
     path = parsed.path.rstrip("/")
     if not path:
         path = "/api/v1"
@@ -409,9 +400,6 @@ def config_from_mapping(
         raise GraphExpandError("graph_config.json 包含未知字段：" + ", ".join(unknown))
     if value.get("schema_version", 2) != 2:
         raise GraphExpandError("graph_config.json 必须使用 schema_version=2 注册表结构")
-    allow_remote = value.get("allow_remote", False)
-    if not isinstance(allow_remote, bool):
-        raise GraphExpandError("allow_remote 必须是布尔值")
     admin_users = _user_list(
         value.get("admin_users"),
         field="admin_users",
@@ -438,9 +426,8 @@ def config_from_mapping(
     if default_count > 1:
         raise GraphExpandError("service_default 库最多只能注册一个")
     return GraphConfig(
-        base_url=normalized_base_url(value.get("base_url"), allow_remote=allow_remote),
+        base_url=normalized_base_url(value.get("base_url")),
         admin_users=admin_users,
-        allow_remote=allow_remote,
         timeout_seconds=integer(
             value.get("timeout_seconds"),
             field="timeout_seconds",
@@ -464,7 +451,6 @@ def config_payload(config: GraphConfig) -> dict[str, Any]:
         "schema_version": 2,
         "base_url": config.base_url,
         "admin_users": list(config.admin_users),
-        "allow_remote": config.allow_remote,
         "timeout_seconds": config.timeout_seconds,
         "ingest_timeout_seconds": config.ingest_timeout_seconds,
         "libraries": [library.public_dict() for library in config.libraries],
@@ -562,7 +548,6 @@ def configuration_status(caller_user: str | None = None) -> dict[str, Any]:
         "active": True,
         "base_url": config.base_url,
         "caller_is_admin": config.is_admin(caller_user),
-        "allow_remote": config.allow_remote,
         "timeout_seconds": config.timeout_seconds,
         "ingest_timeout_seconds": config.ingest_timeout_seconds,
         "libraries": [
