@@ -175,7 +175,7 @@ export function AppShell() {
   const overviewProvider = overviewQuery.data?.provider
   const providerCapabilitiesQuery = useQuery({
     queryKey: ['provider-model-capabilities', user, overviewProvider?.model || ''],
-    queryFn: () => getKemoModelCapabilities(user, overviewProvider?.model || ''),
+    queryFn: () => getKemoModelCapabilities(user, overviewProvider?.model || '', true),
     enabled: Boolean(
       user
         && overviewProvider?.type === 'kemo'
@@ -183,26 +183,21 @@ export function AppShell() {
         && overviewProvider.model,
     ),
     staleTime: 300_000,
+    refetchInterval: 240_000,
     retry: false,
   })
   useEffect(() => {
-    // The status page reuses the gateway capability cache, so a read that
-    // declares limits makes the already-fetched overview stale. Refresh only
-    // the bound conversation, only while its snapshot still lacks a declared
-    // source, and never during a save/close handover whose old binding is
-    // already gone.
+    // Capability reads update the server's budget cache. Refresh the bound
+    // overview once per read, including when it already has a fallback value.
     if (!sessionId || sessionTransitioning) return
     const declared = providerCapabilitiesQuery.data
     if (!declared || declared.model !== overviewProvider?.model) return
-    const limits = declared.capabilities?.limits
-    const declaresLimits = Boolean(limits)
-      && (typeof limits?.max_input_tokens === 'number' || typeof limits?.context_window === 'number')
+    const declaresLimits = [declared.capabilities?.limits, declared.capabilities?.extensions.limits]
+      .some(limits => typeof limits?.max_input_tokens === 'number' || typeof limits?.context_window === 'number')
     if (!declaresLimits) return
-    const snapshot = overviewQuery.data?.context_snapshot
-    if (!snapshot?.available || snapshot.input_limit_source) return
     void queryClient.invalidateQueries({ queryKey: ['overview', user, sessionId] })
   }, [queryClient, user, sessionId, sessionTransitioning, overviewProvider?.model,
-    providerCapabilitiesQuery.data, overviewQuery.data?.context_snapshot])
+    providerCapabilitiesQuery.data, providerCapabilitiesQuery.dataUpdatedAt])
   const preferencesQuery = useQuery({
     queryKey: ['preferences', user],
     queryFn: () => getPreferences(user),
@@ -738,9 +733,10 @@ export function AppShell() {
     ? undefined : contextTokens.compression_ratio * 100
   const runtimeLimitSource = !contextAvailable ? '暂不可用' : contextTokens?.input_limit_source === 'max_input_tokens'
     ? '模型最大输入' : contextTokens?.input_limit_source === 'context_window'
-      ? '模型上下文窗口' : contextTokens?.input_limit_source === 'configuration' ? '配置兜底' : '暂不可用'
-  const formatRuntimeTokens = (value: number | undefined) => (
-    contextAvailable && value !== undefined ? value.toLocaleString(ui.language) : '—'
+      ? '模型上下文窗口' : contextTokens?.input_limit_source === 'configuration'
+        ? contextTokens.capability_unknown ? '模型容量未知 · 配置兜底' : '配置兜底' : '暂不可用'
+  const formatRuntimeTokens = (value: number | null | undefined) => (
+    contextAvailable && value != null ? value.toLocaleString(ui.language) : '—'
   )
   const cacheHitRateValue = overview?.context.usage.cache_hit_rate
   const cacheHitRate = typeof cacheHitRateValue === 'number'
@@ -907,7 +903,8 @@ export function AppShell() {
                   </div> : <p className={modelStyles.notice}>上下文参数暂不可用</p>}
                   <dl className={modelStyles.details}>
                     <div><dt>模型声明窗口</dt><dd>{contextAvailable && contextTokens?.context_window_source === 'model' ? formatRuntimeTokens(contextTokens.context_window_tokens) : '未声明'}</dd></div>
-                    <div><dt>输出预留</dt><dd>{formatRuntimeTokens(contextTokens?.output_reserve_tokens)}</dd></div>
+                    <div><dt>最低输出预留</dt><dd>{formatRuntimeTokens(contextTokens?.output_reserve_tokens)}</dd></div>
+                    <div title="已知生成上限按完整输入占用和模型总窗口动态收紧；未声明输出上限时交由上游决定。"><dt>可用输出上限</dt><dd>{formatRuntimeTokens(contextTokens?.request_output_limit_tokens)}</dd></div>
                   </dl>
                   <p className={modelStyles.note}>仅压缩历史，固定提示词、工具定义和动态状态另计。目标随当前历史变化，实际摘要可能略高于目标。</p>
                 </section>

@@ -1559,6 +1559,7 @@ describe('AppShell navigation', () => {
       context_window_source: modelWindow ? 'model' as const : 'configuration' as const,
       compression_threshold: inputLimit * .8, compression_ratio: .3,
       compression_target_tokens: 9000, output_reserve_tokens: 10000,
+      request_output_limit_tokens: 384000, capability_unknown: source === 'configuration',
     }
     server.use(http.get('/api/users/kesepain/overview', () => HttpResponse.json({
       ...original, context_snapshot: snapshot,
@@ -1575,7 +1576,9 @@ describe('AppShell navigation', () => {
     expect(metric('历史压缩目标')).toHaveTextContent('9,000')
     expect(metric('历史压缩目标')).toHaveTextContent('30%')
     expect(metric('模型声明窗口')).toHaveTextContent(modelWindow ? modelWindow.toLocaleString('zh-CN') : '未声明')
-    expect(metric('输出预留')).toHaveTextContent('10,000')
+    expect(metric('最低输出预留')).toHaveTextContent('10,000')
+    expect(metric('可用输出上限')).toHaveTextContent('384,000')
+    if (source === 'configuration') expect(dialog).toHaveTextContent('模型容量未知')
     expect(within(dialog).getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(Math.round(30000 * 100 / inputLimit)))
 
     snapshot.total_tokens = inputLimit * .9
@@ -1629,6 +1632,46 @@ describe('AppShell navigation', () => {
     expect(screen.getByRole('combobox', { name: '顶部模型思考强度' })).toBeInTheDocument()
     fireEvent.click(option)
     await waitFor(() => expect(savedChanges).toEqual({ provider: { reasoning_effort: 'high' } }))
+  })
+
+  it('模型能力晚于概览返回时刷新配置兜底，后续声明更新也会刷新且不会循环请求', async () => {
+    const original = await fetch('/api/users/kesepain/overview?session_id=s1').then(response => response.json()) as OverviewResponse
+    const declared = await fetch('/api/users/kesepain/provider/model-capabilities?model=test-model').then(response => response.json())
+    let inputLimit = 600000
+    let capabilityReady = false
+    let overviewRequests = 0
+    server.use(
+      http.get('/api/users/kesepain/overview', () => {
+        overviewRequests += 1
+        return HttpResponse.json({
+          ...original,
+          context_snapshot: {
+            ...original.context_snapshot, available: true,
+            input_limit_source: capabilityReady ? 'max_input_tokens' : 'configuration',
+            input_limit_tokens: capabilityReady ? inputLimit : 990000,
+            compression_threshold: Math.floor((capabilityReady ? inputLimit : 990000) * .8),
+          },
+        })
+      }),
+      http.get('/api/users/kesepain/provider/model-capabilities', async () => {
+        await delay(30)
+        capabilityReady = true
+        return HttpResponse.json({
+          ...declared,
+          capabilities: { ...declared.capabilities, limits: { context_window: 1000000, max_input_tokens: inputLimit } },
+        })
+      }),
+    )
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    const snapshot = () => app.client.getQueryData<OverviewResponse>(['overview', 'kesepain', 's1'])?.context_snapshot
+    await waitFor(() => expect(snapshot()?.input_limit_tokens).toBe(600000))
+    expect(snapshot()?.input_limit_source).toBe('max_input_tokens')
+    expect(overviewRequests).toBe(2)
+    inputLimit = 400000
+    await act(async () => { await app.client.refetchQueries({ queryKey: ['provider-model-capabilities', 'kesepain', 'test-model'] }) })
+    await waitFor(() => expect(snapshot()?.input_limit_tokens).toBe(400000))
+    await act(async () => { await delay(50) })
+    expect(overviewRequests).toBe(3)
   })
 
   it('Kemo 顶部模型气泡完全按能力声明展示新档位、排除 none 并原样保存', async () => {
@@ -3043,6 +3086,9 @@ describe('AppShell navigation', () => {
             tool_schema_tokens: 5000, conversation_tokens: 20000, summary_tokens: 4000,
             other_tokens: 1000, total_tokens: 60000, capacity_tokens: 200000,
             input_limit_tokens: 120000, compression_threshold: 96000, input_limit_source: 'max_input_tokens',
+            context_window_tokens: 200000, context_window_source: 'model',
+            output_reserve_tokens: 10000, request_output_limit_tokens: 140000,
+            capability_unknown: false, compression_ratio: .3, compression_target_tokens: 7200,
             percent: 30, cards_active: 5, last_seq: 12,
           } },
         })}\n\n`))
@@ -3065,9 +3111,16 @@ describe('AppShell navigation', () => {
       }).catch(() => undefined)
       await emitContextWindow()
       expect(app.client.getQueryData(overviewKey)).toMatchObject({
-        context_snapshot: { total_tokens: 60000, percent: 30, input_limit_tokens: 120000 },
+        context_snapshot: {
+          total_tokens: 60000, percent: 30, input_limit_tokens: 120000,
+          request_output_limit_tokens: 140000, capability_unknown: false,
+          output_reserve_tokens: 10000, context_window_tokens: 200000,
+        },
         context_window: {
-          tokens: { total_tokens: 60000, percent: 30, system_prompt_tokens: 30000, compression_threshold: 96000 },
+          tokens: {
+            total_tokens: 60000, percent: 30, system_prompt_tokens: 30000, compression_threshold: 96000,
+            request_output_limit_tokens: 140000, capability_unknown: false, compression_ratio: .3,
+          },
           conversation: { cards_active: 5, last_seq: 12 },
         },
       })

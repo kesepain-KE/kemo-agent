@@ -245,6 +245,8 @@ return async (
                   context_window_tokens: snapshot.context_window_tokens,
                   context_window_source: snapshot.context_window_source,
                   output_reserve_tokens: snapshot.output_reserve_tokens,
+                  request_output_limit_tokens: snapshot.request_output_limit_tokens,
+                  capability_unknown: snapshot.capability_unknown,
                   compression_ratio: snapshot.compression_ratio,
                   compression_target_tokens: snapshot.compression_target_tokens,
                   percent: snapshot.percent,
