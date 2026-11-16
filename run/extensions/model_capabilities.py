@@ -97,8 +97,9 @@ def declared_input_token_limit(
 
 def model_output_token_limit(
     capabilities: ModelCapabilities | None, *, configured: int | None = None,
+    input_tokens: int | None = None,
 ) -> int | None:
-    """Use an explicit request limit or the model maximum; unknown stays unset."""
+    """Bound a known generation limit by the remaining declared shared window."""
     if configured is not None and (type(configured) is not int or configured < 1):
         raise ValueError("Configured output capacity must be a positive integer")
     limits = getattr(capabilities, "limits", None)
@@ -109,6 +110,14 @@ def model_output_token_limit(
         configured, getattr(limits, "max_output_tokens", None),
         extension_limits.get("max_output_tokens"),
     ) if type(value) is int and value > 0]
+    windows = [value for value in (
+        getattr(limits, "context_window", None), extension_limits.get("context_window"),
+    ) if type(value) is int and value > 0]
+    if candidates and windows and input_tokens is not None:
+        remaining = min(windows) - input_tokens
+        if remaining < 1:
+            raise ValueError("完整输入已占满模型上下文窗口")
+        candidates.append(remaining)
     return min(candidates) if candidates else None
 
 
@@ -116,7 +125,7 @@ def context_input_budget(
     configured_limit: int, capabilities: ModelCapabilities | None,
     *, output_reserve: int = 0,
 ) -> dict[str, Any]:
-    """Prefer an input declaration, then a model window, then configuration."""
+    """Honor input declarations and reserve output inside a declared shared window."""
     if type(configured_limit) is not int or configured_limit < 1:
         raise ValueError("Configured context capacity must be a positive integer")
     if type(output_reserve) is not int or output_reserve < 0:
@@ -131,16 +140,17 @@ def context_input_budget(
     for value in (getattr(limits, "max_input_tokens", None),
                   extension_limits.get("max_input_tokens")):
         if type(value) is int and value > 0:
-            input_limits.append(value)  # Already input-only; do not subtract again.
+            input_limits.append(value)
     windows = []
     for value in (getattr(limits, "context_window", None),
                   extension_limits.get("context_window")):
         if type(value) is int and value > 0:
             windows.append(value)
     window = min(windows) if windows else configured_limit
-    declared = (min(input_limits) if input_limits
-                else max(0, window - output_reserve) if windows else None)
-    effective = declared if declared is not None else max(0, configured_limit - output_reserve)
+    declared = min(input_limits) if input_limits else min(windows) if windows else None
+    effective = min(input_limits) if input_limits else configured_limit - output_reserve
+    if windows:
+        effective = min(effective, window - output_reserve) if input_limits else window - output_reserve
     if effective < 1:
         raise ValueError("输出预留已占满上下文容量")
     return {

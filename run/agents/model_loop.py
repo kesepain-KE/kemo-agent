@@ -257,9 +257,15 @@ def run_model(
                 else system
             )
             try:
-                validate_input_budget(context, request_system, items, tool_definitions,
-                                      input_limit=request_input_limit)
+                input_tokens = validate_input_budget(
+                    context, request_system, items, tool_definitions,
+                    input_limit=request_input_limit,
+                )
                 media_inputs.validate_items(items, request_system, tool_definitions)
+                output_limit = model_output_token_limit(
+                    reasoning_selection.capabilities, configured=request_max_tokens,
+                    input_tokens=input_tokens,
+                )
                 progress("model_request", iteration=iteration)
                 with provider_request_slot(
                     agent_runner.config,
@@ -275,7 +281,7 @@ def run_model(
                             system_prompt=request_system,
                             input=list(items),
                             tools=tool_definitions,
-                            generation={"max_output_tokens": request_max_tokens},
+                            generation={"max_output_tokens": output_limit},
                             reasoning=(
                                 ReasoningConfig.model_validate({
                                     "enabled": True,

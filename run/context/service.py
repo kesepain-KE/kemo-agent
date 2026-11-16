@@ -4,7 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from run.cards import CardStore, DynamicTail, RequestOccupancy, estimate_tokens, json_text
+from run.cards import (
+    CardMeter, CardStore, DynamicTail, RequestOccupancy, estimate_request_tokens,
+    estimate_tokens, json_text, protocol_items,
+)
 from run.config import (
     ConfigError, build_prompt_bundle, load_config, project_root,
     provider_runtime_config, read_dynamic_tail,
@@ -25,13 +28,14 @@ def context_status(request: dict[str, Any], *, root: Path | None = None,
     bundle = prompt_bundle or build_prompt_bundle(
         base, user, config, plugin_manifests=registry.plugin_manifests,
         source=source, session_id=session_id)
-    store = CardStore(base, user)
+    provider = config.get("provider") or {}
+    store = CardStore(base, user, meter=CardMeter.for_model(
+        str(provider.get("type") or ""), str(provider.get("model") or "")))
     state = store.session(source, session_id) if store.path.is_file() else None
     snapshot = store.snapshot(source, session_id) if state else None
     dynamic = read_dynamic_tail(base, user, config, source=source, session_id=session_id)
     tail_items = DynamicTail(json_text(dynamic)).items()
     output_reserve = int(agents.get("output_reserve", 10000))
-    provider = config.get("provider") or {}
     configured = int(agents.get("token_limit", 1000000))
     try:
         capabilities = cached_model_capabilities(provider_runtime_config(config))
@@ -52,6 +56,17 @@ def context_status(request: dict[str, Any], *, root: Path | None = None,
         estimate_tokens(tail_items[0].model_dump(mode="json")) if tail_items else 0,
         estimate_tokens(tools) if tools else 0, limit,
     )
+    request_output_limit = max_output_tokens
+    if max_output_tokens is not None and capacity["context_window_source"] == "model":
+        items = [*protocol_items(snapshot.cards, model=str(provider.get("model") or "")),
+                 *tail_items] if snapshot else tail_items
+        input_tokens = estimate_request_tokens(bundle.text, items, tools)
+        if state:
+            input_tokens = store.calibrated_tokens(input_tokens, items=items)
+        input_tokens = max(occupancy.total, input_tokens)
+        request_output_limit = model_output_token_limit(
+            capabilities, configured=max_output_tokens, input_tokens=input_tokens,
+        ) if input_tokens < capacity["context_window_tokens"] else None
     summary = next((card for card in snapshot.cards if card.view_kind == "summary"), None) if snapshot else None
     return {
         "user": user, "source": source, "session_id": session_id,
@@ -65,6 +80,7 @@ def context_status(request: dict[str, Any], *, root: Path | None = None,
             "context_window_tokens": capacity["context_window_tokens"],
             "context_window_source": capacity["context_window_source"],
             "input_limit_source": capacity["input_limit_source"],
+            "request_output_limit_tokens": request_output_limit,
             "cards_active": len(snapshot.cards) if snapshot else 0,
             "last_seq": snapshot.last_seq if snapshot else 0,
             "view_epoch": snapshot.view_epoch if snapshot else 0,

@@ -536,9 +536,13 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 return
             items = barrier.snapshot.items()
             media.validate_items(items, request_system_prompt, native_tools)
+            request_output_limit = model_output_token_limit(
+                reasoning.capabilities, configured=max_output_tokens,
+                input_tokens=max(barrier.wire_tokens, barrier.occupancy.total),
+            )
             native_request = build_conversation_request(
                 runtime=runtime, system_prompt=request_system_prompt, items=items, tools=request_tools,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=request_output_limit,
                 stream=bool(request.get("stream", runtime.get("stream", False))),
                 reasoning_enabled=reasoning.enabled, reasoning_effort=reasoning.effort,
                 user=user, source=source, session_id=session_id, run_id=run_id,
@@ -548,7 +552,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 raise RetryCancelled("用户停止了当前整合")
             yield RunEvent(type="context_window", metadata={
                 "context_snapshot": request_context_snapshot(
-                    barrier, capacity=capacity, compression_ratio=ratio),
+                    barrier, capacity=capacity, compression_ratio=ratio,
+                    request_output_limit=request_output_limit),
             })
             integration.request_started()
             request_inflight = True

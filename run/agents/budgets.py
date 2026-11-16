@@ -27,6 +27,7 @@ def validate_input_budget(context, system, items, tools, *, input_limit=None):
             "子代理完整请求超过输入预算", category="context_length_exceeded",
             code="summary_input_budget_exceeded", retryable=False,
         )
+    return measured
 
 
 def legacy_tool_stop(record):
