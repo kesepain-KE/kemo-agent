@@ -83,7 +83,7 @@ def runtime_status(
         "percent": 0.0,
         "engine": "cardstream", "cards_active": 0, "last_seq": 0,
         "integration_count": 0, "active_integrations": 0, "view_epoch": 0,
-        "compression_threshold": max(0, round(token_limit * .8)),
+        "compression_threshold": None,
         "source": "not_requested",
     }
     tokens = {

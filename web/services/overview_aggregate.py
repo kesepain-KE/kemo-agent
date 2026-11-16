@@ -237,6 +237,8 @@ def build_overview(
                 "context_window_tokens": context_snapshot.get("context_window_tokens"),
                 "context_window_source": context_snapshot.get("context_window_source"),
                 "output_reserve_tokens": context_snapshot.get("output_reserve_tokens"),
+                "request_output_limit_tokens": context_snapshot.get("request_output_limit_tokens"),
+                "capability_unknown": context_snapshot.get("capability_unknown"),
                 "compression_ratio": context_snapshot.get("compression_ratio"),
                 "compression_target_tokens": context_snapshot.get("compression_target_tokens"),
                 "percent": min(

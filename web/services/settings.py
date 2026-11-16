@@ -11,10 +11,6 @@ from web.services.artifact_resolver import DownloadArtifactResolver
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from web.service import ActiveRun
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
     from web.service import WebRunService
 
 from datetime import datetime
@@ -138,6 +134,7 @@ class SettingsServiceMixin:
     if TYPE_CHECKING:
         _kemo_catalog_cache: dict[tuple[str, str, str], tuple[float, Any]]
         _kemo_catalog_lock: threading.RLock
+        _overview_cache: BoundedReadCache
         _version_check_lock: threading.Lock
         require_user = WebRunService.require_user
         root: Path
@@ -252,9 +249,10 @@ class SettingsServiceMixin:
             "tiered_prompt_injection", "important_prompt_injection",
         }.intersection(changes["memory"]):
             raise InvalidRequestError("记忆分类注入开关仅支持用户配置")
-        if user is not None and "provider_security" in changes:
-            raise InvalidRequestError("Provider 访问范围仅支持全局配置")
+        if "provider_security" in changes:
+            raise InvalidRequestError("Provider 主机白名单已移除；请直接设置 provider.base_url")
         current = read_yaml_object(path, allow_empty=user is not None)
+        current.pop("provider_security", None)
         updated = _merge_patch(current, changes)
         from run.config import merge_user_config
         from run.memory import MemoryConfigError
@@ -459,7 +457,7 @@ class SettingsServiceMixin:
         try:
             config, runtime_provider, adapter, catalog = self._kemo_catalog(
                 name,
-                refresh=False,
+                refresh=bool(refresh),
             )
         except InvalidRequestError:
             raise
@@ -491,6 +489,10 @@ class SettingsServiceMixin:
         if lookup.capabilities is None:
             self._raise_capability_lookup_error(lookup.error)
             raise AssertionError("unreachable")
+        if selected_model == runtime_provider["model"]:
+            self._overview_cache.invalidate(
+                lambda key: isinstance(key, tuple) and bool(key) and key[0] == name
+            )
         return {
             "user": name,
             "protocol": "kemo",

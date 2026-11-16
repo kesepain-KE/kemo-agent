@@ -210,7 +210,7 @@ def validate_settings_patch(config: dict[str, Any], changes: dict[str, Any]) -> 
         memory_extraction_input_tokens(config)
         memory_extraction_candidate_limit(config, 1)
         tier_rules(config)
-    if "provider" in changes or "provider_security" in changes:
+    if "provider" in changes:
         validate_provider_security(config)
 
 

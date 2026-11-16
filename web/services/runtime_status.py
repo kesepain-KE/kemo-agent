@@ -141,6 +141,8 @@ class RuntimeStatusServiceMixin:
             "context_window_tokens": value["context_window_tokens"],
             "context_window_source": value["context_window_source"],
             "output_reserve_tokens": status["policy"]["output_reserve"],
+            "request_output_limit_tokens": value["request_output_limit_tokens"],
+            "capability_unknown": value["capability_unknown"],
             "compression_ratio": status["policy"]["compression_ratio"],
             "compression_target_tokens": value["compression_target_tokens"],
             "percent": round(100 * used / window, 4), "cards_active": value["cards_active"],
