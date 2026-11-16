@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -160,6 +161,34 @@ def _user_list(
     return tuple(users)
 
 
+def _bracketed_host(netloc: str) -> str | None:
+    """Return the host inside brackets, or None when the netloc uses none.
+
+    ``urlsplit`` only started rejecting malformed bracketed hosts in recent
+    patch releases, so the check cannot rely on it: an accepted address must
+    be validated here regardless of the interpreter version.
+    """
+
+    if "[" not in netloc and "]" not in netloc:
+        return None
+    if netloc.count("[") != 1 or netloc.count("]") != 1:
+        raise GraphExpandError("base_url 必须是有效的 http 或 https 地址")
+    start = netloc.index("[")
+    end = netloc.index("]")
+    if end < start:
+        raise GraphExpandError("base_url 必须是有效的 http 或 https 地址")
+    return netloc[start + 1:end]
+
+
+def _valid_bracketed_host(host: str) -> bool:
+    if host.startswith("v"):
+        return bool(re.fullmatch(r"v[a-fA-F0-9]+\..+", host))
+    try:
+        return isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+    except ValueError:
+        return False
+
+
 def normalized_base_url(value: Any) -> str:
     raw = str(value or "").strip().rstrip("/")
     if not raw:
@@ -177,6 +206,9 @@ def normalized_base_url(value: Any) -> str:
     except ValueError as exc:
         raise GraphExpandError("base_url 必须是有效的 http 或 https 地址") from exc
     if not valid:
+        raise GraphExpandError("base_url 必须是有效的 http 或 https 地址")
+    bracketed = _bracketed_host(parsed.netloc)
+    if bracketed is not None and not _valid_bracketed_host(bracketed):
         raise GraphExpandError("base_url 必须是有效的 http 或 https 地址")
     if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         raise GraphExpandError("base_url 不允许包含凭据、查询参数或片段")
