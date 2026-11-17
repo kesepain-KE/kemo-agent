@@ -11,8 +11,22 @@ from run.config import ConfigError, cron_history_retention_days, merge_user_conf
 from run.conversation import session_lock
 from run.history import (cleanup_cron_history, close_session, find_record,
                          mutate_registry_record)
+from run.infra import replace_with_retry
 from run.scheduler import MaintenanceScheduler
 from tests.card_history_support import seed_history
+
+
+def write_global_config(root, text):
+    """Rewrite the global config through the path production actually uses.
+
+    Atomic replacement also drops the read cache. A bare in-place rewrite can
+    keep an identical size and stat stamp on coarse filesystems, so a cached
+    document would still answer the next read.
+    """
+    target = root / "config/global_config.yaml"
+    staged = target.with_name("global_config.staged.yaml")
+    staged.write_text(text, encoding="utf-8")
+    replace_with_retry(staged, target)
 
 
 @pytest.fixture
@@ -132,12 +146,11 @@ def test_hide_transaction_rolls_back_on_error(root):
 
 def test_maintenance_throttle_reads_hot_global_setting(root):
     seed(root)
-    config = root / "config/global_config.yaml"
-    config.write_text('{"cron":{"history_retention_days":0}}')
+    write_global_config(root, '{"cron":{"history_retention_days":0}}')
     scheduler = MaintenanceScheduler(root, history_summary_enabled=False)
     with patch.object(scheduler, "_recover_pending_memory", return_value={}):
         scheduler.scan_once(now=NOW)
-        config.write_text('{"cron":{"history_retention_days":7}}')
+        write_global_config(root, '{"cron":{"history_retention_days":7}}')
         assert "cron_history_cleanup" not in scheduler.scan_once(now=NOW + timedelta(minutes=1))["alice"]
         result = scheduler.scan_once(now=NOW + timedelta(minutes=5))
     assert result["alice"]["cron_history_cleanup"]["deleted_sessions"] == 1
