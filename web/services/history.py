@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from run.cards import CardStore, session_key
+from run.cards import CardStore, card_read_connection, session_key
 from run.history import find_record
 from run.extensions import public_media_assets
 from web.errors import NotFoundError, WebServiceError
@@ -88,15 +88,20 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
     store, key = CardStore(service.root, name), session_key(source, identity)
     size = max(1, min(500, int(limit or 100)))
     before_seq = max(1, int(before)) if before is not None else record["last_seq"] + 1
-    with store.db() as db:
+    with card_read_connection(service.root, name) as db:
+        if db is None:
+            raise NotFoundError(f"会话不存在：{identity}")
         rows = db.execute("SELECT * FROM context_cards WHERE session_key=? AND seq<? "
                           "ORDER BY seq DESC LIMIT ?", (key, before_seq, size)).fetchall()[::-1]
         integrations = {row["integration_id"]: dict(row) for row in db.execute(
-            "SELECT i.*,row_number() OVER(ORDER BY created_at,integration_id) AS ordinal,"
+            "SELECT i.integration_id,i.status,i.response_closed,i.acknowledged_seq,"
+            "m.value_json AS record_json,row_number() OVER(ORDER BY i.created_at,i.integration_id) AS ordinal,"
             "(SELECT max(seq) FROM context_cards c WHERE c.session_key=i.session_key "
             "AND c.integration_id=i.integration_id) AS last_seq "
-            "FROM card_integrations i WHERE session_key=?", (key,))}
-        saved_records = {iid: json.loads(integration["record_json"])
+            "FROM card_integrations i JOIN card_integration_metadata m USING(integration_id) "
+            "WHERE session_key=?", (key,))}
+        saved_records = {iid: {key: value for key, value in json.loads(integration["record_json"]).items()
+                              if value is not None}
                          for iid, integration in integrations.items()}
         user_messages = []
         if before is None:
