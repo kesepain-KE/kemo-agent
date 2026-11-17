@@ -168,7 +168,7 @@ export function AppShell() {
   })
   const overviewQuery = useQuery({
     queryKey: ['overview', user, sessionId],
-    queryFn: () => getOverview(user, sessionId),
+    queryFn: ({ signal }) => getOverview(user, sessionId, signal),
     enabled: Boolean(user && sessionId),
     refetchInterval: 30_000,
   })
@@ -244,7 +244,7 @@ export function AppShell() {
   const {
     userRef, sessionIdRef, chatRuns, chatRunning, chatStopping, chatRunId, chatRunSessionId, chatRunToken,
     beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus,
-    removeNextTurnMessage, finishChatRun, reorderNextTurnMessages, clearChatRun,
+    removeNextTurnMessage, finishChatRun, reorderNextTurnMessages, clearChatRun, restoreChatRun,
     setChatRunning, setChatRunId, setChatAbortController, setChatStopping, abortChatRun,
   } = useChatRunRegistry(user, sessionId)
 
@@ -513,7 +513,7 @@ export function AppShell() {
   const refreshSessions = async () => (await sessionsQuery.refetch()).data
 
   const createNewSession = (): Promise<string | undefined> => {
-    if (!user || chatRunning) return Promise.resolve(undefined)
+    if (!user) return Promise.resolve(undefined)
     const requestedUser = user
     const requestedSession = sessionIdRef.current
     const pending = creatingSessionRef.current
@@ -573,7 +573,7 @@ export function AppShell() {
   }
 
   const selectHistorySession = async (targetSessionId: string) => {
-    if (!user || chatRunning || historySwitchingSessionId) return
+    if (!user || historySwitchingSessionId) return
     if (targetSessionId === sessionId) {
       setHistoryDrawerOpen(false)
       navigate(withContext('/chat', targetSessionId))
@@ -585,7 +585,7 @@ export function AppShell() {
       const currentSession = sessionsQuery.data?.sessions.find(
         (session) => (session.source || 'web') === 'web' && session.session_id === sessionId,
       )
-      if (sessionId && currentSession?.state !== 'closed') {
+      if (sessionId && !chatRunning && currentSession?.state !== 'closed') {
         await closeSession(user, sessionId, clientId)
       }
       const targetSession = [...(historySessionsData?.sessions ?? []), ...(sessionsQuery.data?.sessions ?? [])].find(
@@ -594,9 +594,9 @@ export function AppShell() {
       if (targetSession?.state === 'closed') {
         await reopenSession(user, targetSessionId, clientId)
       }
-      await sessionsQuery.refetch()
       setHistoryDrawerOpen(false)
       navigate(withContext('/chat', targetSessionId))
+      void sessionsQuery.refetch()
     } catch (error) {
       setHistorySwitchError(error instanceof Error ? error.message : '保存当前对话或切换历史对话失败')
     } finally {
@@ -823,7 +823,7 @@ export function AppShell() {
             <div className="sidebar-session">
               <div className="sidebar-session-list">
                 <RecentSessionList sessions={webSessions} activeSessionId={sessionId}
-                  switching={Boolean(historySwitchingSessionId)} running={chatRunning}
+                  switching={Boolean(historySwitchingSessionId)} running={false}
                   onOpen={(target) => { void selectHistorySession(target) }}
                   onMark={markHistorySession} onRename={renameHistorySession} onDelete={deleteHistorySession} />
               </div>
@@ -935,7 +935,7 @@ export function AppShell() {
             && (activeSessionQuery.isPending || activeSessionQuery.isFetching || activeSessionQuery.isError
               || Boolean(activeSessionQuery.data?.session?.session_id))) ? <div className={lifecycleStyles.pending} role={activeSessionQuery.isError ? 'alert' : 'status'}>
             {activeSessionQuery.isError ? <>{newUserTab ? '创建独立对话失败，请重试。' : '恢复对话失败，请重试。'}<button onClick={() => { void activeSessionQuery.refetch() }}>{newUserTab ? '重试创建对话' : '重试恢复对话'}</button></> : newUserTab ? '正在为此用户创建独立对话…' : '正在恢复最近的对话…'}
-          </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady: Boolean(sessionId && leasedConversation === chatRunKey(user, sessionId)), clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview: () => { void overviewQuery.refetch() } } satisfies ShellOutletContext} />}
+          </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady: Boolean(sessionId && leasedConversation === chatRunKey(user, sessionId)), clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, restoreChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview: () => { void overviewQuery.refetch() } } satisfies ShellOutletContext} />}
         </main></WorkspaceLayout>
       </div>
 

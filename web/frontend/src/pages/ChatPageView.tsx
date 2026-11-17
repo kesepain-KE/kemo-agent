@@ -339,7 +339,7 @@ export function ChatPageView(props: ChatPageViewProps) {
     recentTasks, tokenTotal, tokenCacheRate, outputTokens, liveItems, items, historyData, conversationBlocks, userAvatarUrl,
     editedSources, running, lastUserMessage, editAndResend, conversationBusy, conversationFeedback, setConversationFeedback, copyMessage, copiedItem,
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
-    navigatingMessage, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
+    navigatingMessage, jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice, connectionNotice,
     taskPlanDockRef, collapsedPlans,
     planActions, guidancePreviewItem, followUpQueue, queueFollowUp, guideDraft, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
     setNextTurnMessageStatus, draft, stopping, pendingUploads, uploading,
@@ -523,6 +523,7 @@ return (
     </div>
     <div className="composer-dock composer-zone">
       <div className="composer-auxiliary">
+      {connectionNotice ? <div className="run-retry-bubble" role="status"><span>{connectionNotice}</span></div> : null}
       {conversationFeedback?.tone === 'error' ? (
         <div className="run-error-bubble" role="alert">
           <span>{conversationFeedback.text}</span>

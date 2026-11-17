@@ -124,7 +124,7 @@ const MarkdownMessage = lazy(async () => ({
 export function ChatPage() {
   useLanguage()
   const { reasoningControl, sessionReady } = useOutletContext<ShellOutletContext>()
-  const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, chatStopping: stopping, setChatRunning: setRunning, setChatStopping: setStopping, chatRunId: activeRunId, chatRunSessionId, chatRunToken, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview } = useOutletContext<ShellOutletContext>()
+  const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, chatStopping: stopping, setChatRunning: setRunning, setChatStopping: setStopping, chatRunId: activeRunId, chatRunSessionId, chatRunToken, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, restoreChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview } = useOutletContext<ShellOutletContext>()
   // AppShell resolves controls for the displayed conversation.  Keep the
   // session check as a defensive guard for an in-flight route transition.
   const running = Boolean(
@@ -181,6 +181,8 @@ export function ChatPage() {
   const taskPlanDockRef = useRef<HTMLDivElement | null>(null)
   const followOutputRef = useRef(true)
   const lastScrollTopRef = useRef(0)
+  const readingPositionsRef = useRef(new Map<string, { top: number; follow: boolean }>())
+  const restorePositionRef = useRef<{ top: number; follow: boolean } | undefined>(undefined)
   const loadingEarlierRef = useRef(false)
   const [navigationTarget, setNavigationTarget] = useState<{ id: string; scope: string } | null>(null)
   const navigationTargetRef = useRef(navigationTarget)
@@ -249,6 +251,7 @@ export function ChatPage() {
   }, [sessionId, sessionReady, sessions])
   const historyQuery = useChatHistory(
     user, sessionId, Boolean(user && sessionId && (hasCommitted || sessionReady)),
+    liveRun?.historyBefore,
   )
   const tasksQuery = useQuery({
     queryKey: ['tasks', user, sessionId],
@@ -257,8 +260,8 @@ export function ChatPage() {
     refetchInterval: (query) => query.state.data?.plans.some((plan) => ['approved', 'running'].includes(plan.status)) ? 1200 : false,
   })
   const runtimeTokensQuery = useQuery({
-    queryKey: ['runtime-welcome-tokens', user, sessionId],
-    queryFn: ({ signal }) => getRuntimeStatus(user, sessionId, ['tokens'], signal),
+    queryKey: ['runtime-welcome-tokens', user, new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })],
+    queryFn: ({ signal }) => getRuntimeStatus(user, '', ['tokens'], signal),
     enabled: Boolean(user && sessionId),
     staleTime: 30_000,
   })
@@ -302,31 +305,41 @@ export function ChatPage() {
   const persistedUserMessages = historyData?.pagination?.integration_count
     ?? historyData?.messages.filter((message) => message.role === 'user').length
     ?? 0
-  const handoffReady = liveRun?.phase === 'awaiting_history' && persistedUserMessages > liveRun.historyUserMessages
+  const handoffReady = liveRun?.phase === 'awaiting_history'
+    && (!liveRun.recovered || historyQuery.dataUpdatedAt >= (liveRun.historyUpdatedAfter || 0))
+    && persistedUserMessages > liveRun.historyUserMessages
   const visibleLiveItems = handoffReady ? EMPTY_CHAT_ITEMS : liveItems
-  const liveIntegrationNumbers = useMemo(() => new Set(visibleLiveItems.flatMap((item) => (
+  const liveIntegrationNumbers = useMemo(() => new Set(liveRun?.recovered ? [] : visibleLiveItems.flatMap((item) => (
     (item.kind === 'execution_marker' || item.kind === 'message' && item.role === 'user')
       && item.integrationNumber !== undefined
       ? [item.integrationNumber] : []
-  ))), [visibleLiveItems])
+  ))), [visibleLiveItems, liveRun?.recovered])
   const historyItems = useMemo<ChatItem[]>(
     () => buildHistoryItems(historyData, liveIntegrationNumbers),
     [historyData, liveIntegrationNumbers],
   )
   const conversationIntegrationCount = Math.max(persistedUserMessages, ...liveIntegrationNumbers)
-  const items = useMemo(() => [...historyItems, ...visibleLiveItems], [historyItems, visibleLiveItems])
-  useEffect(() => {
+  const items = useMemo(() => {
+    const liveCalls = new Set(visibleLiveItems.flatMap(item => item.kind === 'tool' ? [item.callId] : []))
+    return [...historyItems.filter(item => item.kind !== 'tool' || !liveCalls.has(item.callId)), ...visibleLiveItems]
+  }, [historyItems, visibleLiveItems])
+  useLayoutEffect(() => {
     const conversationKey = `${user}\u0000${sessionId}`
     if (conversationKeyRef.current === conversationKey) return
+    const positions = readingPositionsRef.current
+    positions.delete(conversationKeyRef.current)
+    positions.set(conversationKeyRef.current, { top: lastScrollTopRef.current, follow: followOutputRef.current })
+    if (positions.size > 6) positions.delete(positions.keys().next().value!)
+    restorePositionRef.current = positions.get(conversationKey)
     conversationKeyRef.current = conversationKey
     if (!running) lastAttemptSessionRef.current = sessionId
-    followOutputRef.current = true
-    lastScrollTopRef.current = 0
+    followOutputRef.current = restorePositionRef.current?.follow ?? true
+    lastScrollTopRef.current = restorePositionRef.current?.top ?? 0
     loadingEarlierRef.current = false
     prependSnapshotRef.current = null
     navigationTargetRef.current = null
     setNavigationTarget(null)
-    setShowFollowOutput(false)
+    setShowFollowOutput(!followOutputRef.current)
     setEditingSource(null)
     undoneRoundBaselineRef.current = null
     setEditedSources(new Set())
@@ -347,8 +360,22 @@ export function ChatPage() {
     setRunErrorNotice(null)
   }, [abortChatRun, user, sessionId])
 
+  useLayoutEffect(() => {
+    const position = restorePositionRef.current
+    const element = scrollRef.current
+    if (!position || !element || !historyQuery.data) return
+    element.scrollTop = position.follow ? element.scrollHeight : position.top
+    lastScrollTopRef.current = element.scrollTop
+    restorePositionRef.current = undefined
+  }, [sessionId, historyQuery.data])
+
   useEffect(() => {
-    if (!runErrorNotice) return
+    if (liveRun?.phase !== 'awaiting_history' || !liveRun.recovered) return
+    void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId], exact: true })
+  }, [queryClient, user, sessionId, liveRun?.phase, liveRun?.runId, liveRun?.recovered])
+
+  useEffect(() => {
+    if (!runErrorNotice || runErrorNotice.id === 'connection') return
     const timer = window.setTimeout(() => setRunErrorNotice(null), 10_000)
     return () => window.clearTimeout(timer)
   }, [runErrorNotice])
@@ -393,7 +420,7 @@ export function ChatPage() {
     draft, user, running, stopping, uploading, sessionId, draftKey, clientId,
     persistedUserMessages, editingSource, lastAttemptSessionRef, currentUserRef,
     currentLiveSessionRef, submittedUploadsRef, undoneRoundBaselineRef,
-    followOutputRef, locallyCommittedSessionRef, queryClient, beginChatRun,
+    followOutputRef, locallyCommittedSessionRef, queryClient, beginChatRun, restoreChatRun,
     setRunRetryNoticeFor, setRunErrorNoticeFor, setConversationBusy, setDraft, setPendingUploads,
     setRunning, setActiveRunId, setShowFollowOutput,
     setEditedSources, updateChatRunItems, setEditingSource, setChatAbortController,
@@ -878,7 +905,7 @@ export function ChatPage() {
     user, running, sessionId, clientId, persistedUserMessages, planMutationNotices,
     lastAttemptSessionRef, currentUserRef, currentLiveSessionRef, followOutputRef,
     locallyCommittedSessionRef, queryClient, setLiveItems, setPlanOverrides,
-    setPlanMutationNotices, beginChatRun, setRunRetryNoticeFor, setRunErrorNoticeFor,
+    setPlanMutationNotices, beginChatRun, restoreChatRun, setRunRetryNoticeFor, setRunErrorNoticeFor,
     updateChatRunItems, setRunning, setActiveRunId, setShowFollowOutput,
     setChatAbortController, playCompletionSoundOnce, playFailureSoundOnce,
     refreshSessions, isCurrentConversation, setSessionId, refreshOverview,
@@ -923,19 +950,11 @@ export function ChatPage() {
     const accepted = await executeStopRequest(
       () => cancelRun(targetUser, targetRunId, targetSession, 'web', cancelSubagents),
       (error) => {
-        abortChatRun(targetUser, targetSession, targetRunId, chatRunToken)
         const message = error instanceof Error
           ? `紧急停止请求失败：${error.message}`
-          : '紧急停止请求失败，已断开当前响应'
+          : '紧急停止请求失败，运行可能仍在继续，请重试停止。'
         if (!isCurrentConversation(targetUser, targetSession)) return
-        setLiveItems((current) => [
-          ...finalizeCurrentRoundItems(current, {
-            message: '紧急停止请求失败，当前响应已在前端断开',
-            exception_type: 'StopRequestFailed',
-            cancelled: true,
-          }),
-          { id: eventId('error'), kind: 'error', content: message },
-        ])
+        setRunErrorNotice({ id: eventId('stop-error'), message })
       },
     )
     if (!accepted) setStopping(false, targetUser, targetSession, targetRunId, chatRunToken)
@@ -1149,6 +1168,7 @@ export function ChatPage() {
     editedSources, running, lastUserMessage, editAndResend, conversationBusy, conversationFeedback, setConversationFeedback, copyMessage, copiedItem,
     resolvePlan, revealPlan, showFollowOutput, resumeFollowingOutput, userMessageMarkers, totalRounds,
     navigatingMessage: Boolean(navigationTarget), jumpToUserMessage, runRetryNotice, setRunErrorNotice, runErrorNotice,
+    connectionNotice: liveRun?.connectionNotice,
     taskPlanDockRef, collapsedPlans,
     planActions, guidancePreviewItem, followUpQueue, queueFollowUp, guideDraft, reorderNextTurnMessages, liveSessionId, removeNextTurnMessage,
     setNextTurnMessageStatus, draft, stopping, pendingUploads, uploading,

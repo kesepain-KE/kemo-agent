@@ -5,6 +5,8 @@ import type { ChatItem, OverviewResponse, PlanSummary, RunEvent } from '../types
 import { chatDraftKey, type PendingUploadedFile } from '../store/chatDrafts'
 import { useCompressionStatus } from '../store/compressionStatus'
 import { randomUUID } from '../randomId'
+import type { ShellOutletContext } from '../components/appShellTypes'
+import { restoreRunSnapshot } from './runRecovery'
 import {
   createDeltaEventBatcher,
   dropLastLiveRound,
@@ -52,6 +54,7 @@ export interface SendWorkflowDependencies {
   locallyCommittedSessionRef: MutableValue<string>
   queryClient: QueryClient
   beginChatRun: AnyFn
+  restoreChatRun: ShellOutletContext['restoreChatRun']
   setRunRetryNoticeFor: (user: string, sessionId: string, value: RunRetryNotice | null) => void
   setRunErrorNoticeFor: (user: string, sessionId: string, value: RunErrorNotice | null) => void
   setConversationBusy: AnyFn
@@ -84,7 +87,7 @@ export function createSendHandler(dependencies: SendWorkflowDependencies) {
     draft, user, running, stopping, uploading, sessionId, draftKey, clientId,
     persistedUserMessages, editingSource, lastAttemptSessionRef, currentUserRef,
     currentLiveSessionRef, submittedUploadsRef, undoneRoundBaselineRef,
-    followOutputRef, locallyCommittedSessionRef, queryClient, beginChatRun,
+    followOutputRef, locallyCommittedSessionRef, queryClient, beginChatRun, restoreChatRun,
     setRunRetryNoticeFor, setRunErrorNoticeFor, setConversationBusy, setDraft, setPendingUploads,
     setRunning, setActiveRunId, setShowFollowOutput,
     setEditedSources, updateChatRunItems, setEditingSource, setChatAbortController,
@@ -217,6 +220,12 @@ return async (
       uploadedFiles: uploadedFiles.map((file) => file.path),
       runId,
       signal: controller.signal,
+      onReset: async snapshot => {
+        deltaBatcher.flush()
+        await restoreRunSnapshot(queryClient, snapshot, restoreChatRun, controller.signal)
+      },
+      onConnectionChange: connected => setRunErrorNoticeFor(targetUser, activeSession, connected
+        ? null : { id: 'connection', message: '连接已断开，正在恢复后台运行进度…' }),
       onEvent: (event) => {
         if (event.type === 'context_window') {
           const value = event.metadata?.context_snapshot
@@ -380,6 +389,7 @@ return async (
       && undoneRoundBaselineRef.current?.sessionId === activeSession
     ) undoneRoundBaselineRef.current = null
     if (committed) await queryClient.invalidateQueries({ queryKey: ['history', user, activeSession] })
+    void queryClient.invalidateQueries({ queryKey: ['runtime-welcome-tokens', user] })
     await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
     refreshOverview()
   } catch (error) {
@@ -451,6 +461,7 @@ export interface PlanWorkflowDependencies {
   setPlanOverrides: AnyFn
   setPlanMutationNotices: AnyFn
   beginChatRun: AnyFn
+  restoreChatRun: ShellOutletContext['restoreChatRun']
   setRunRetryNoticeFor: AnyFn
   setRunErrorNoticeFor: AnyFn
   updateChatRunItems: AnyFn
@@ -475,7 +486,7 @@ export function createPlanWorkflow(dependencies: PlanWorkflowDependencies) {
     user, running, sessionId, clientId, persistedUserMessages, planMutationNotices,
     lastAttemptSessionRef, currentUserRef, currentLiveSessionRef, followOutputRef,
     locallyCommittedSessionRef, queryClient, setLiveItems, setPlanOverrides,
-    setPlanMutationNotices, beginChatRun, setRunRetryNoticeFor, setRunErrorNoticeFor,
+    setPlanMutationNotices, beginChatRun, restoreChatRun, setRunRetryNoticeFor, setRunErrorNoticeFor,
     updateChatRunItems, setRunning, setActiveRunId, setShowFollowOutput,
     setChatAbortController, playCompletionSoundOnce, playFailureSoundOnce,
     refreshSessions, isCurrentConversation, setSessionId, refreshOverview,
@@ -563,6 +574,12 @@ const executePlan = async (plan: PlanSummary) => {
       planId: plan.plan_id,
       runId,
       signal: controller.signal,
+      onReset: async snapshot => {
+        deltaBatcher.flush()
+        await restoreRunSnapshot(queryClient, snapshot, restoreChatRun, controller.signal)
+      },
+      onConnectionChange: connected => setRunErrorNoticeFor(targetUser, activeSession, connected
+        ? null : { id: 'connection', message: '连接已断开，正在恢复后台运行进度…' }),
       onEvent: (event) => {
         if (event.type === 'context_compression') {
           const status = String(event.metadata?.status || 'started')
@@ -653,6 +670,7 @@ const executePlan = async (plan: PlanSummary) => {
       setSessionId(activeSession)
     }
     if (committed) await queryClient.invalidateQueries({ queryKey: ['history', user, activeSession] })
+    void queryClient.invalidateQueries({ queryKey: ['runtime-welcome-tokens', user] })
     await queryClient.invalidateQueries({ queryKey: ['tasks', user] })
     refreshOverview()
   } catch (error) {

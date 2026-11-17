@@ -403,7 +403,7 @@ function renderApp(path = '/chat', chatPage = <ChatPage />) {
     return null
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  render(
+  const view = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
         <LocationProbe />
@@ -418,6 +418,7 @@ function renderApp(path = '/chat', chatPage = <ChatPage />) {
     </QueryClientProvider>,
   )
   return {
+    unmount: view.unmount,
     getSearch: () => currentSearch,
     getPathname: () => currentPathname,
     navigate: (target: string) => {
@@ -436,6 +437,103 @@ function conversationCommand(name: RegExp) {
   }
   return within(dialog).getByRole('button', { name })
 }
+
+it('刷新页面发现同一个后台运行，恢复历史与实时进度后仍可明确停止，不重发任务', async () => {
+  let completed = false
+  let released!: () => void
+  let discoveries = 0
+  const finished = new Promise<void>(resolve => { released = resolve })
+  const submissions: unknown[] = []
+  const cancellations: Array<Record<string, unknown>> = []
+  const snapshot = {
+    run_id: 'run_recovery_existing', user: 'kesepain', source: 'web', session_id: 's1',
+    cursor: 4, history_seq: 2, finished: false, stopping: false, snapshot_incomplete: false,
+    events: [{ type: 'text_delta', content: '后台实时片段', metadata: { web_event_seq: 4 } }],
+    terminal: null,
+  }
+  server.use(
+    http.get('/api/users/kesepain/sessions/s1/run', () => {
+      discoveries++
+      return HttpResponse.json({ run: completed ? null : snapshot })
+    }),
+    http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json(cardHistory({
+      user: 'kesepain', session_id: 's1',
+      messages: [{ role: 'user', content: '原始任务不应再次提交' },
+        { role: 'assistant', content: completed ? '已确认停止并保存' : '已保存的历史片段' }],
+      pagination: { integration_count: 1 },
+    }))),
+    http.get('/api/runs/run_recovery_existing/events', async () => {
+      await finished
+      return HttpResponse.json({
+        reset: false, cursor: 5, finished: true,
+        events: [{ type: 'done', metadata: { status: 'cancelled', committed: true, cancelled: true, web_event_seq: 5 } }],
+      })
+    }),
+    http.post('/api/chat', async ({ request }) => {
+      submissions.push(await request.json())
+      return new HttpResponse(null, { status: 500 })
+    }),
+    http.post('/api/runs/run_recovery_existing/cancel', async ({ request }) => {
+      cancellations.push(await request.json() as Record<string, unknown>)
+      completed = true
+      released()
+      return HttpResponse.json({ run_id: snapshot.run_id, user: 'kesepain', session_id: 's1', status: 'stopping' })
+    }),
+  )
+  const first = renderApp('/chat?user=kesepain&session=s1')
+  try {
+    await screen.findByText('后台实时片段')
+    first.unmount()
+    renderApp('/chat?user=kesepain&session=s1')
+    await screen.findByText('后台实时片段')
+    expect(screen.getAllByText('原始任务不应再次提交')).toHaveLength(1)
+    expect(discoveries).toBeGreaterThanOrEqual(2)
+    fireEvent.click(screen.getByRole('button', { name: '停止生成' }))
+    await screen.findByText('已确认停止并保存')
+    await screen.findByRole('button', { name: '发送' })
+    expect(cancellations).toEqual([expect.objectContaining({ user: 'kesepain', source: 'web', session_id: 's1' })])
+    expect(submissions).toHaveLength(0)
+    expect(screen.queryByText('后台实时片段')).not.toBeInTheDocument()
+  } finally { released() }
+})
+
+it('离开恢复中的会话后释放实时快照，超过后台恢复保留期再返回仍读取最终历史', async () => {
+  let completed = false
+  let release!: () => void
+  const finished = new Promise<void>(resolve => { release = resolve })
+  server.use(
+    http.get('/api/users/kesepain/sessions/s1/run', () => HttpResponse.json({ run: completed ? null : {
+      run_id: 'run_recovery_expired', user: 'kesepain', source: 'web', session_id: 's1',
+      cursor: 4, history_seq: 2, finished: false, stopping: false, snapshot_incomplete: false,
+      events: [{ type: 'text_delta', content: '离开前的临时进度', metadata: { web_event_seq: 4 } }],
+      terminal: null,
+    } })),
+    http.get('/api/users/kesepain/sessions/:sessionId/history', ({ params }) => HttpResponse.json(cardHistory({
+      user: 'kesepain', session_id: params.sessionId,
+      messages: params.sessionId === 's1' ? [{ role: 'user', content: '原任务' },
+        { role: 'assistant', content: completed ? '缓冲过期后的最终历史' : '已保存片段' }] : [],
+    }))),
+    http.get('/api/runs/run_recovery_expired/events', async () => {
+      await finished
+      return HttpResponse.json({ reset: false, events: [], cursor: 4, finished: false })
+    }),
+  )
+  const app = renderApp('/chat?user=kesepain&session=s1')
+  try {
+    await screen.findByText('离开前的临时进度')
+    app.navigate('/chat?user=kesepain&session=s2')
+    await screen.findByRole('button', { name: '发送' })
+    completed = true
+    release()
+    await act(async () => {
+      await app.client.invalidateQueries({ queryKey: ['history', 'kesepain', 's1'] })
+    })
+    app.navigate('/chat?user=kesepain&session=s1')
+    await screen.findByText('缓冲过期后的最终历史')
+    expect(screen.queryByText('离开前的临时进度')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '停止生成' })).not.toBeInTheDocument()
+  } finally { release() }
+})
 
 function runConversationCommand(name: RegExp) {
   fireEvent.click(conversationCommand(name))

@@ -1,4 +1,7 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { followRun, getCurrentRun } from '../api/streamClient'
+import { reduceRecoveredRunEvent, restoreRunSnapshot } from '../pages/runRecovery'
 
 import { reorderFollowUps } from './followUpQueue'
 import { chatRunKey } from './appShellConfig'
@@ -15,9 +18,11 @@ interface ChatRunControl {
 }
 
 export function useChatRunRegistry(user: string, sessionId: string) {
+  const queryClient = useQueryClient()
   const [, setChatControlRevision] = useState(0)
   const chatRunControlsRef = useRef(new Map<string, ChatRunControl>())
   const chatDraftRunKeysRef = useRef(new Map<string, string>())
+  const observedFinishedRunsRef = useRef(new Map<string, string>())
   const [chatRuns, setChatRuns] = useState<Record<string, ChatRunSnapshot>>({})
   const userRef = useRef(user)
   const sessionIdRef = useRef(sessionId)
@@ -106,13 +111,20 @@ export function useChatRunRegistry(user: string, sessionId: string) {
 
   const finishChatRun = useCallback((runUser: string, runSessionId: string, committed: boolean, expectedRunId = '') => {
     const key = chatRunKey(runUser, runSessionId)
+    if (committed && expectedRunId) {
+      const seen = observedFinishedRunsRef.current
+      seen.delete(key)
+      seen.set(key, expectedRunId)
+      if (seen.size > 64) seen.delete(seen.keys().next().value!)
+    }
     setChatRuns((current) => {
       const existing = current[key]
       if (!existing) return current
       // A late terminal callback from an older Run must not seal the
       // snapshot that a continuation or a newer send has already claimed.
       if (expectedRunId && existing.runId !== expectedRunId) return current
-      return { ...current, [key]: { ...existing, phase: committed ? 'awaiting_history' : 'idle' } }
+      return { ...current, [key]: { ...existing, historyBefore: undefined,
+        historyUpdatedAfter: Date.now(), connectionNotice: '', phase: committed ? 'awaiting_history' : 'idle' } }
     })
   }, [])
 
@@ -139,6 +151,75 @@ export function useChatRunRegistry(user: string, sessionId: string) {
       return next
     })
   }, [])
+
+  const restoreChatRun = useCallback((runUser: string, runSessionId: string, value: ChatRunSnapshot) => {
+    const key = chatRunKey(runUser, runSessionId)
+    const control = chatRunControlsRef.current.get(key)
+    if (control && control.runId !== value.runId) return
+    setChatRuns(current => ({
+      ...current, [key]: { ...value, nextTurnQueue: current[key]?.nextTurnQueue ?? [] },
+    }))
+  }, [])
+
+  useEffect(() => {
+    if (!user || !sessionId) return
+    const controller = new AbortController()
+    const key = chatRunKey(user, sessionId)
+    let timer: ReturnType<typeof setTimeout>
+    let ownedRunId = ''
+    const notice = (message: string) => setChatRuns(current => current[key] ? {
+      ...current, [key]: { ...current[key], connectionNotice: message },
+    } : current)
+    const discover = async () => {
+      try {
+        if (chatRunControlsRef.current.get(key)?.running) return
+        const snapshot = await getCurrentRun(user, sessionId, controller.signal)
+        if (controller.signal.aborted || !snapshot || chatRunControlsRef.current.get(key)?.running) return
+        if (snapshot.finished && observedFinishedRunsRef.current.get(key) === snapshot.run_id) return
+        ownedRunId = snapshot.run_id
+        chatRunControlsRef.current.set(key, {
+          user, sessionId, runId: ownedRunId, logicalRunId: ownedRunId,
+          running: true, stopping: snapshot.stopping, controller,
+        })
+        bumpChatControlRevision()
+        await followRun({
+          user, sessionId, runId: ownedRunId, signal: controller.signal,
+          onReset: value => restoreRunSnapshot(queryClient, value, restoreChatRun, controller.signal),
+          onConnectionChange: connected => notice(connected ? '' : '连接已断开，正在恢复后台运行进度…'),
+          onEvent: event => updateChatRunItems(user, sessionId, current => reduceRecoveredRunEvent(current, event)),
+        }, snapshot)
+        finishChatRun(user, sessionId, true, ownedRunId)
+        await queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
+        void queryClient.invalidateQueries({ queryKey: ['overview', user, sessionId] })
+        void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+        void queryClient.invalidateQueries({ queryKey: ['runtime-welcome-tokens', user] })
+      } catch (error) {
+        if (!controller.signal.aborted && ownedRunId) {
+          finishChatRun(user, sessionId, false, ownedRunId)
+          notice(error instanceof Error ? error.message : '运行进度恢复失败，请重新连接。')
+          void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
+        }
+      } finally {
+        const control = chatRunControlsRef.current.get(key)
+        if (ownedRunId && control?.controller === controller) {
+          chatRunControlsRef.current.delete(key)
+          bumpChatControlRevision()
+        }
+        if (!controller.signal.aborted) timer = setTimeout(discover, 5000)
+      }
+    }
+    void discover()
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+      if (ownedRunId) setChatRuns(current => {
+        const existing = current[key]
+        if (!existing?.recovered || existing.runId !== ownedRunId) return current
+        return { ...current, [key]: { ...existing, items: [], phase: 'idle', recovered: false,
+          historyBefore: undefined, connectionNotice: '' } }
+      })
+    }
+  }, [user, sessionId, queryClient, restoreChatRun, updateChatRunItems, finishChatRun])
 
   const resolveRunScope = (runUser?: string, runSessionId?: string, runId = '') => ({
     user: runUser ?? userRef.current,
@@ -258,7 +339,7 @@ export function useChatRunRegistry(user: string, sessionId: string) {
   return {
     userRef, sessionIdRef, chatRuns, chatRunning, chatStopping, chatRunId, chatRunSessionId, chatRunToken,
     beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus,
-    removeNextTurnMessage, finishChatRun, reorderNextTurnMessages, clearChatRun,
+    removeNextTurnMessage, finishChatRun, reorderNextTurnMessages, clearChatRun, restoreChatRun,
     setChatRunning, setChatRunId, setChatAbortController, setChatStopping, abortChatRun,
   }
 }

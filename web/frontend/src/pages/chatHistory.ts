@@ -4,6 +4,9 @@ import { extractPlanSummary } from './planSummary'
 const HISTORY_PAGE_SIZE = 20
 const PLAN_EXECUTION_PROMPT_PREFIX = '【任务计划连续执行】'
 
+export const chatHistoryKey = (user: string, sessionId: string, before?: number) =>
+  before === undefined ? ['history', user, sessionId] : ['history', user, sessionId, 'at', before]
+
 export function shouldPrefetchEarlierHistory(
   activeRound: number,
   firstLoadedRound: number,

@@ -50,6 +50,10 @@ function pagedFiles(request: Request, entries: typeof userFileEntries, summary: 
 }
 
 export const handlers = [
+  http.get('/api/users/:user/sessions/:sessionId/run', () => HttpResponse.json({ run: null })),
+  http.get('/api/runs/:runId', () => HttpResponse.json({
+    error: { code: 'not_found', message: '运行已不可订阅，请核对已保存的对话记录' },
+  }, { status: 404 })),
   http.get('/api/users/:user/sessions/:sessionId/decisions', ({ params }) => HttpResponse.json({
     user: params.user, source: 'web', session_id: params.sessionId,
     enabled: false, revision: 0, decisions: [],

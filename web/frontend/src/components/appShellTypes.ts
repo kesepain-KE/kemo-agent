@@ -37,6 +37,7 @@ export interface ShellOutletContext {
   reorderNextTurnMessages: (user: string, sessionId: string, messageId: string, targetId: string) => void
   finishChatRun: (user: string, sessionId: string, committed: boolean, expectedRunId?: string) => void
   clearChatRun: (user: string, sessionId: string) => void
+  restoreChatRun: (user: string, sessionId: string, value: ChatRunSnapshot) => void
   setSessionId: (sessionId: string) => void
   detachSession: () => void
   notifySessionDeleted: (sessionId: string) => void
@@ -65,4 +66,8 @@ export interface ChatRunSnapshot {
   runId: string
   historyUserMessages: number
   nextTurnQueue: PendingNextTurnMessage[]
+  recovered?: boolean
+  historyBefore?: number
+  connectionNotice?: string
+  historyUpdatedAfter?: number
 }
