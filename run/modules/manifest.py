@@ -43,7 +43,7 @@ _REQUIRED = {
 }
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
+class _UniqueKeyLoader(getattr(yaml, "CSafeLoader", yaml.SafeLoader)):  # pyright: ignore[reportGeneralTypeIssues]
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict:
         self.flatten_mapping(node)
         result = {}

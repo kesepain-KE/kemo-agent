@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
+from run.infra import BoundedReadCache
 
 from run.config import (
     PromptRegistrationError,
@@ -17,6 +18,7 @@ from run.config import (
 )
 
 PLUGIN_META_FILENAME = "plugin.yaml"
+_manifest_cache = BoundedReadCache(max_entries=256, max_bytes=8 * 1024 * 1024, per_owner=128)
 
 
 class PluginManifestError(RuntimeError):
@@ -35,7 +37,7 @@ class PluginManifest:
 
 def _load_plugin_yaml(path: Path) -> dict[str, Any]:
     try:
-        raw = yaml.safe_load(path.read_text("utf-8-sig"))
+        raw = yaml.load(path.read_text("utf-8-sig"), Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise PluginManifestError(f"无法读取插件元数据：{path}（{exc}）") from exc
     if not isinstance(raw, dict):
@@ -138,4 +140,17 @@ def discover_plugin_manifests(root: Path) -> tuple[PluginManifest, ...]:
         and (path / PLUGIN_META_FILENAME).is_file()
     ]
     paths.sort(key=lambda item: natural_path_key(item.relative_to(base)))
-    return tuple(parse_plugin_manifest(path, root=root) for path in paths)
+    result = []
+    for path in paths:
+        meta = path.parent / PLUGIN_META_FILENAME
+        version = tuple(
+            (str(item.resolve()), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+            for item in (path, meta)
+            for stat in (item.stat(),)
+        )
+        manifest, _ = _manifest_cache.get_or_load(
+            (str(root), str(path)), lambda: parse_plugin_manifest(path, root=root),
+            owner=str(root), ttl=300, version=version,
+        )
+        result.append(manifest)
+    return tuple(result)

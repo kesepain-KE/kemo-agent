@@ -61,7 +61,7 @@ class ConfigError(RuntimeError):
     """Configuration is missing or malformed."""
 
 
-class _ConfigYamlLoader(yaml.SafeLoader):
+class _ConfigYamlLoader(getattr(yaml, "CSafeLoader", yaml.SafeLoader)):  # pyright: ignore[reportGeneralTypeIssues]
     def construct_mapping(self, node, deep=False):
         self.flatten_mapping(node)
         result = {}
