@@ -280,3 +280,50 @@ def test_schema_five_upgrade_indexes_absorption_and_preserves_compressed_history
     with store.db():
         pass
     assert list(store.path.parent.glob("cards.sqlite3.bak.v5.*")) == backups
+
+
+def test_metadata_upgrade_backfills_and_tracks_writers_transactionally(store):
+    from run.cards import IntegrationStore
+    integration = IntegrationStore(store, "web", "s1", "metadata-upgrade")
+    integration.start()
+    integration.finish("partial", metadata={
+        "usage": {"total_tokens": 123}, "provider_request_diagnostics": ["large-private-detail"],
+    })
+    raw = store.raw_page("web", "s1")
+    with closing(sqlite3.connect(store.path)) as db, db:
+        db.execute("DROP TRIGGER integration_metadata_insert")
+        db.execute("DROP TRIGGER integration_metadata_update")
+        db.execute("DROP TABLE card_integration_metadata")
+        db.execute("PRAGMA user_version=6")
+    with store.db() as db:
+        saved = json.loads(db.execute("SELECT value_json FROM card_integration_metadata").fetchone()[0])
+        assert saved["usage"]["total_tokens"] == 123
+        assert "provider_request_diagnostics" not in saved
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert store.raw_page("web", "s1") == raw
+    assert len(list(store.path.parent.glob("cards.sqlite3.bak.v6.*"))) == 1
+    with pytest.raises(RuntimeError), store.db(write=True) as db:
+        db.execute("UPDATE card_integrations SET record_json=json_set(record_json,'$.withdrawn',1)")
+        assert json.loads(db.execute("SELECT value_json FROM card_integration_metadata").fetchone()[0])["withdrawn"] == 1
+        raise RuntimeError("rollback")
+    with store.db(write=True) as db:
+        assert not json.loads(db.execute("SELECT value_json FROM card_integration_metadata").fetchone()[0])["withdrawn"]
+        db.execute("UPDATE card_integrations SET record_json=json_set(record_json,'$.withdrawn',1)")
+    with store.db() as db:
+        assert json.loads(db.execute("SELECT value_json FROM card_integration_metadata").fetchone()[0])["withdrawn"] == 1
+
+
+def test_usage_snapshot_does_not_hold_user_write_lock_between_rows(store):
+    from run.cards import IntegrationStore
+    from run.history.session_api import integration_usage_rows
+    integration = IntegrationStore(store, "web", "s1", "usage")
+    integration.start()
+    integration.finish("partial", metadata={"usage": {"total_tokens": 123}})
+    rows = integration_usage_rows(store.root, store.user)
+    assert next(rows)["usage"]["total_tokens"] == 123
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(store.ensure_session, "web", "other-space")
+        try:
+            assert future.result(timeout=1)["session_id"] == "other-space"
+        finally:
+            rows.close()

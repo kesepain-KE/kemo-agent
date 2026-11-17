@@ -17,7 +17,8 @@ def session_record(db, row) -> dict[str, Any]:
         "(response_closed=0 OR EXISTS(SELECT 1 FROM card_tool_executions t WHERE "
         "t.integration_id=i.integration_id AND t.execution_live=1 AND NOT "
         "(t.status='interrupted_unknown' AND "
-        "coalesce(json_extract(i.record_json,'$.recovery.tools_detached'),0)=1)))",
+         "coalesce((SELECT json_extract(m.value_json,'$.recovery.tools_detached') "
+         "FROM card_integration_metadata m WHERE m.integration_id=i.integration_id),0)=1)))",
         (row["session_key"],),
     ).fetchone()[0]
     integrations = db.execute("SELECT count(*) FROM card_integrations WHERE session_key=?",

@@ -14,7 +14,7 @@ from run.infra import (
 )
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCK_GUARD = threading.Lock()
 
@@ -152,6 +152,37 @@ CREATE TABLE IF NOT EXISTS message_processed_messages (
 );
 """
 
+# Read models exclude per-request fingerprints and accumulated response text.
+# Triggers cover all writers, including withdrawal, recovery and old importers.
+_METADATA_FIELDS = (
+    "usage", "elapsed_ms", "tool_calls", "guidance_details", "media_inputs",
+    "withdrawn", "recovery", "owner_identity", "run_id",
+)
+
+
+def _metadata_projection(column: str) -> str:
+    return "json_object(" + ",".join(
+        f"'{field}',json_extract({column},'$.{field}')" for field in _METADATA_FIELDS
+    ) + ")"
+
+
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS card_integration_metadata (
+    integration_id TEXT PRIMARY KEY REFERENCES card_integrations(integration_id) ON DELETE CASCADE,
+    value_json TEXT NOT NULL CHECK(json_valid(value_json))
+);
+CREATE INDEX IF NOT EXISTS idx_integrations_updated ON card_integrations(updated_at);
+"""
+for _operation in ("INSERT", "UPDATE OF record_json"):
+    _trigger = "insert" if _operation == "INSERT" else "update"
+    SCHEMA += f"""
+CREATE TRIGGER IF NOT EXISTS integration_metadata_{_trigger} AFTER {_operation} ON card_integrations
+BEGIN
+    INSERT INTO card_integration_metadata VALUES(NEW.integration_id,{_metadata_projection('NEW.record_json')})
+    ON CONFLICT(integration_id) DO UPDATE SET value_json=excluded.value_json;
+END;
+"""
+
 REQUIRED = {
     "card_text_fts": ("text",),
     "card_sessions": (
@@ -167,6 +198,7 @@ REQUIRED = {
         "integration_id", "session_key", "generation", "status", "acknowledged_seq",
         "model_request_inflight", "continuation_required", "response_closed",
         "owner_pid", "owner_token", "record_json", "created_at", "updated_at"),
+    "card_integration_metadata": ("integration_id", "value_json"),
     "card_tool_executions": (
         "execution_id", "integration_id", "tool_call_id", "original_call", "status",
         "execution_live", "last_result_seq", "started_at", "finished_at"),
@@ -232,6 +264,12 @@ def connection(root: Path, user: str, *, write: bool = False) -> Iterator[sqlite
                             db.execute("DROP TABLE card_integrations")
                             db.execute("ALTER TABLE card_integrations_new RENAME TO card_integrations")
                         execute_schema(db, SCHEMA)
+                        if current < 7:
+                            db.execute(
+                                "INSERT OR REPLACE INTO card_integration_metadata "
+                                "SELECT integration_id," + _metadata_projection("record_json") +
+                                " FROM card_integrations"
+                            )
                         if current < 5:
                             db.execute("INSERT INTO card_text_fts(card_text_fts) VALUES('rebuild')")
                         db.execute(

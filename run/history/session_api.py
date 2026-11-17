@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
-from run.cards import CardConflictError, CardStore, json_text, session_key
+from run.cards import CardConflictError, CardStore, card_read_connection, json_text, session_key
 from run.config import load_config
 from run.history.index_core import find_record, new_conversation_id, reserve_session, _now
 from run.history.registry_store import mutate_registry_record
@@ -166,25 +166,41 @@ def session_statistics(root, user, source, session_id):
     if not store.path.is_file():
         return {"integration_count": 0, "tool_calls": 0, "usage": new_usage_total()}
     key, usage = session_key(source, session_id), new_usage_total()
-    with store.db() as db:
-        integrations = db.execute("SELECT record_json FROM card_integrations WHERE session_key=?",
+    with card_read_connection(root, user) as db:
+        if db is None:
+            return {"integration_count": 0, "tool_calls": 0, "usage": usage}
+        integrations = db.execute(
+            "SELECT m.value_json FROM card_integrations i "
+            "JOIN card_integration_metadata m USING(integration_id) WHERE session_key=?",
                                   (key,)).fetchall()
         for row in integrations:
-            merge_usage_dict(usage, json.loads(row[0]).get("usage", {}))
+            merge_usage_dict(usage, json.loads(row[0]).get("usage") or {})
         calls = db.execute("SELECT count(*) FROM card_tool_executions t JOIN card_integrations i "
                            "USING(integration_id) WHERE i.session_key=?", (key,)).fetchone()[0]
     return {"integration_count": len(integrations), "tool_calls": calls, "usage": usage}
 
 
-def integration_usage_rows(root, user):
+def integration_usage_rows(root, user, *, start="", end=""):
     """Aggregates retain their integration timestamp; callers mark daily estimates."""
     store = CardStore(root, user)
     if not store.path.is_file():
         return
-    with store.db() as db:
-        for row in db.execute("SELECT i.updated_at,i.record_json FROM card_integrations i "
-                              "JOIN card_sessions s USING(session_key) WHERE s.lifecycle!='deleted'"):
-            yield {"occurred_at": row["updated_at"], "usage": json.loads(row["record_json"]).get("usage", {})}
+    with card_read_connection(root, user) as db:
+        if db is None:
+            return
+        sql = ("SELECT i.updated_at,m.value_json FROM card_integrations i "
+               "JOIN card_integration_metadata m USING(integration_id) "
+               "JOIN card_sessions s USING(session_key) WHERE s.lifecycle!='deleted'")
+        args = []
+        if start:
+            sql += " AND i.updated_at>=?"
+            args.append(start)
+        if end:
+            sql += " AND i.updated_at<?"
+            args.append(end)
+        rows = db.execute(sql, args).fetchall()
+    for row in rows:
+        yield {"occurred_at": row["updated_at"], "usage": json.loads(row["value_json"]).get("usage") or {}}
 
 
 def withdraw_last_integration(root, user, source, session_id, *, expected_integration_count, expected_prompt):
