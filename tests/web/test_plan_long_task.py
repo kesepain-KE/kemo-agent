@@ -19,7 +19,7 @@ from web.service import WebRunService
 
 
 class PlanLongTaskTests(unittest.TestCase):
-    def test_plan_close_before_first_next_releases_slot_and_pauses_plan(self):
+    def test_plan_disconnect_before_first_next_preserves_execution_until_finish(self):
         root, store, plan = self.make_plan()
         entered = threading.Event()
         release = threading.Event()
@@ -44,8 +44,8 @@ class PlanLongTaskTests(unittest.TestCase):
             self.assertTrue(entered.wait(1))
             events.close()
             events.close()
-            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
-            self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
+            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 1)
+            self.assertEqual(store.read(plan["plan_id"])["status"], "running")
             self.assertFalse(finished.is_set())
             self.assertEqual(list(events), [])
         finally:
@@ -55,6 +55,8 @@ class PlanLongTaskTests(unittest.TestCase):
             while service._active_runs and time.monotonic() < deadline:
                 time.sleep(0.005)
             self.assertFalse(service._active_runs)
+        self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+        self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
         self.assertEqual(len(thread_ids), 2)
         self.assertEqual(thread_ids[0], thread_ids[1])
         self.assertNotEqual(thread_ids[0], threading.get_ident())
@@ -83,8 +85,8 @@ class PlanLongTaskTests(unittest.TestCase):
             self.assertFalse(reader.is_alive())
             self.assertFalse(release.is_set())
             self.assertEqual(result, [])
-            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
-            self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
+            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 1)
+            self.assertEqual(store.read(plan["plan_id"])["status"], "running")
         finally:
             release.set()
             reader.join(2)
@@ -92,6 +94,8 @@ class PlanLongTaskTests(unittest.TestCase):
             while service._active_runs and time.monotonic() < deadline:
                 time.sleep(0.005)
             self.assertFalse(service._active_runs)
+        self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+        self.assertEqual(store.read(plan["plan_id"])["status"], "paused")
 
     def make_plan(self, *, source="web", auto_accept=False):
         temporary = tempfile.TemporaryDirectory()

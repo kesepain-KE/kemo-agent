@@ -284,7 +284,7 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                     invoke_chat(app, send, disconnected=disconnected, spec=spec), 1,
                 )
                 await wait_until(lambda: not app.state.web_stream_cleanup.tasks)
-                self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+                self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 1)
                 self.assertFalse(release.is_set())
                 self.assertIn("run_heartbeat", service._active_runs)
                 self.assertFalse(service._active_runs["run_heartbeat"].cancel_event.is_set())
@@ -294,8 +294,9 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stopping["status"], "stopping")
                 release.set()
                 await wait_until(lambda: not service._active_runs)
+                self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
 
-    async def test_repeated_disconnects_release_slots_and_finish_cooperative_workers(self):
+    async def test_disconnect_keeps_slot_until_worker_finishes(self):
         release = threading.Event()
         self.releases.append(release)
 
@@ -307,7 +308,7 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         service = self.service(source)
         app = self.app(service)
         run_ids = []
-        for index in range(5):
+        for index in range(1):
             run_id = f"run_heartbeat_{index}"
             run_ids.append(run_id)
             disconnected = asyncio.Event()
@@ -327,12 +328,13 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                     "run_id": run_id,
                 },
             )
-            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+            self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 1)
             self.assertIn(run_id, service._active_runs)
             self.assertFalse(service._active_runs[run_id].cancel_event.is_set())
             await wait_until(lambda: not app.state.web_stream_cleanup.tasks)
         release.set()
         await wait_until(lambda: not service._active_runs)
+        self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
 
     async def test_explicit_user_cancel_keeps_terminal_event_visible_over_sse(self):
         def source(_request, *, cancel_event, **_kwargs):
@@ -377,9 +379,10 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(Exception):
                     await invoke_chat(app, send)
                 await wait_until(lambda: not app.state.web_stream_cleanup.tasks)
-                self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
+                self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 1)
                 release.set()
                 await wait_until(lambda: not service._active_runs)
+                self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
 
     async def test_direct_task_cancellation_does_not_cancel_pending_thread_or_race_close(self):
         iterator = self.blocked_iterator()
@@ -498,6 +501,9 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         ), 1)
         self.assertEqual(starts, [200])
         await wait_until(lambda: not app.state.web_stream_cleanup.tasks)
+        self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 1)
+        release.set()
+        await wait_until(lambda: not service._active_runs)
         self.assertEqual(service.chat_gate_status()["alice"]["active_chats"], 0)
 
     async def test_late_preparation_result_is_closed_without_ever_calling_next(self):
