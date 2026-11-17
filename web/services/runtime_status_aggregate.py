@@ -155,6 +155,7 @@ def runtime_status(
     }
 
     bundle = None
+    registry = None
     if requested_sections & {"summary", "prompt"}:
         registry = (
             apply_runtime_tool_policy(discover_tools(service.root, name), config)
@@ -224,6 +225,7 @@ def runtime_status(
             configured_ratio=compression_ratio,
             source=normalized_source,
             prompt_bundle=bundle,
+            tool_registry=registry,
         )
 
     if "prompt" in requested_sections and bundle is not None:

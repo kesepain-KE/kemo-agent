@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 from pathlib import Path
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from run.context import context_status
@@ -115,10 +115,11 @@ class RuntimeStatusServiceMixin:
                             page_size=page_size, refresh=refresh)
 
     def _current_context_status(self, user, session_id, *, config, token_limit,
-                                configured_ratio=.3, source="web", prompt_bundle=None):
+                                configured_ratio=.3, source="web", prompt_bundle=None,
+                                tool_registry=None):
         status = context_status({"user": user, "source": source,
                                  "session_id": session_id or "__new_session__"}, root=self.root,
-                                prompt_bundle=prompt_bundle)
+                                prompt_bundle=prompt_bundle, tool_registry=tool_registry)
         value = status["context"]
         record = find_record(self.root, user, source, session_id) if session_id else None
         store = CardStore(self.root, user)
@@ -162,7 +163,11 @@ class RuntimeStatusServiceMixin:
         sent = received = cached = requests = 0
         trend = [0] * 24
         estimated = False
-        for row in integration_usage_rows(self.root, user):
+        start = datetime.combine(today, datetime.min.time(), tzinfo=_BEIJING)
+        for row in integration_usage_rows(
+            self.root, user, start=start.astimezone(timezone.utc).isoformat(),
+            end=(start + timedelta(days=1)).astimezone(timezone.utc).isoformat(),
+        ):
             stamp = _parse_datetime(row["occurred_at"])
             if stamp is None or stamp.astimezone(_BEIJING).date() != today:
                 continue

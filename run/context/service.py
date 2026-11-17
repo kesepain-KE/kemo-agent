@@ -18,13 +18,16 @@ from run.extensions import cached_model_capabilities, context_input_budget, mode
 
 
 def context_status(request: dict[str, Any], *, root: Path | None = None,
-                   tool_registry_factory=discover_tools, prompt_bundle=None) -> dict[str, Any]:
+                   tool_registry_factory=discover_tools, prompt_bundle=None,
+                   tool_registry=None) -> dict[str, Any]:
     user, source, session_id = (required_text(request, key) for key in ("user", "source", "session_id"))
     base = (root or project_root()).resolve()
     config = load_config(user, base)
     agents = config.get("agents") or {}
-    registry = (apply_runtime_tool_policy(tool_registry_factory(base, user), config)
-                if (config.get("tools") or {}).get("enabled", True) else ToolRegistry({}))
+    registry = tool_registry
+    if registry is None:
+        registry = (apply_runtime_tool_policy(tool_registry_factory(base, user), config)
+                    if (config.get("tools") or {}).get("enabled", True) else ToolRegistry({}))
     bundle = prompt_bundle or build_prompt_bundle(
         base, user, config, plugin_manifests=registry.plugin_manifests,
         source=source, session_id=session_id)
