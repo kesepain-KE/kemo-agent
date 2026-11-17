@@ -147,6 +147,11 @@ class BoundedReadCache:
 
 _source_cache = BoundedReadCache(max_entries=512, max_bytes=16 * 1024 * 1024, per_owner=64)
 _MAX_SOURCE_BYTES = 512 * 1024
+# A write can hide from stat while the filesystem clock has not advanced past
+# it; Windows advances timestamps on a tick, so equal-length rewrites inside
+# one tick keep mtime, ctime and size. Reads inside this window bypass the
+# cache instead of trusting a stamp that cannot prove freshness.
+_RACY_SECONDS = 2.0
 
 
 def _source_owner(path: Path) -> str:
@@ -160,6 +165,11 @@ def _source_owner(path: Path) -> str:
 def _stamp(path: Path) -> tuple[int, ...]:
     s = path.stat()
     return (s.st_mtime_ns, s.st_ctime_ns, s.st_size, s.st_ino, s.st_dev, s.st_mode)
+
+
+def _is_racy(stamp: tuple[int, ...]) -> bool:
+    """A stamp cannot prove freshness while the filesystem clock is behind it."""
+    return time.time() - stamp[0] / 1_000_000_000 < _RACY_SECONDS
 
 
 class _SourceChanged(Exception):
@@ -184,6 +194,11 @@ def cached_read_text(path: Path, encoding: str = "utf-8") -> str:
             _source_cache.invalidate(lambda k: isinstance(k, tuple) and bool(k) and k[0] == key[0])
             raise
         if stamp[2] > _MAX_SOURCE_BYTES or not path.is_file():
+            _source_cache.invalidate(lambda k: isinstance(k, tuple) and bool(k) and k[0] == key[0])
+            return path.read_text(encoding)
+        if _is_racy(stamp):
+            # The stamp may mask an in-place rewrite; read from disk and leave
+            # no cached entry that a later call could trust.
             _source_cache.invalidate(lambda k: isinstance(k, tuple) and bool(k) and k[0] == key[0])
             return path.read_text(encoding)
 

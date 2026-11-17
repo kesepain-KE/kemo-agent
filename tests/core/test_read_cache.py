@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -11,6 +12,12 @@ from run.infra import read_cache
 from run.config import read_json_object
 from run.scheduler import CronStore, normalize_task
 from run.scheduler.runtime_state import update_cron_runtime, clear_cron_runtime
+
+
+def age(path, seconds=60):
+    """Move mtime past the racy window so later reads may reuse an entry."""
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
 
 
 class ReadCacheTests(unittest.TestCase):
@@ -83,6 +90,7 @@ class ReadCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'config.json'
             path.write_text('{"nested": [1]}', encoding='utf-8')
+            age(path)
             original = Path.read_text
             with patch.object(Path, 'read_text', autospec=True, side_effect=original) as read:
                 self.assertEqual(read_json_object(path), {'nested': [1]})
@@ -100,12 +108,31 @@ class ReadCacheTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     cached_read_text(path)
                 path.write_text('new', encoding='utf-8')
+                age(path)
                 self.assertEqual(cached_read_text(path), 'new')
-                invalidate_source_cache(path)
                 before = read.call_count
+                self.assertEqual(cached_read_text(path), 'new')
+                self.assertEqual(read.call_count, before)
+                invalidate_source_cache(path)
                 self.assertEqual(cached_read_text(path), 'new')
                 self.assertEqual(read.call_count, before + 1)
             invalidate_source_cache(path)
+
+    def test_recent_write_is_read_from_disk_not_a_stale_stamp(self):
+        """A same-tick rewrite can keep mtime, ctime and size unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'config.json'
+            path.write_text('{"cron": {"history_retention_days": 0}}', encoding='utf-8')
+            self.assertEqual(read_json_object(path)['cron']['history_retention_days'], 0)
+            before = path.stat()
+            path.write_text('{"cron": {"history_retention_days": 7}}', encoding='utf-8')
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = path.stat()
+            self.assertEqual(
+                (before.st_mtime_ns, before.st_ctime_ns, before.st_size),
+                (after.st_mtime_ns, after.st_ctime_ns, after.st_size),
+            )
+            self.assertEqual(read_json_object(path)['cron']['history_retention_days'], 7)
 
     def test_env_is_not_cached(self):
         with tempfile.TemporaryDirectory() as tmp:
