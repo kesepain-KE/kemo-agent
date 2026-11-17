@@ -18,6 +18,12 @@ from run.tools import ToolRuntime
 from tests.cards.test_runtime import call, definition, history, response, root, run
 
 
+# A worker thread may start noticeably later than the caller's first
+# assertion on a busy shared runner; this is scheduling headroom, not a
+# behaviour bound. Negative expectations keep their own short window.
+EVENT_WAIT = 15
+
+
 def eventually(predicate, seconds=4):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -57,7 +63,7 @@ def test_sync_tool_finishes_before_task_plan_boundary_closes_turn(root, monkeypa
     def work():
         executions.append(1)
         entered.set()
-        assert release.wait(6)
+        assert release.wait(EVENT_WAIT)
         return {"ok": True, "data": "work-result"}
 
     class Provider:
@@ -71,12 +77,12 @@ def test_sync_tool_finishes_before_task_plan_boundary_closes_turn(root, monkeypa
         future = pool.submit(lambda: list(run(root, Provider(), tools=[
             definition(root, work), definition(root, lambda: {"ok": True}, name="checkpoint")])))
         try:
-            assert entered.wait(3)
+            assert entered.wait(EVENT_WAIT)
             time.sleep(.1)
             assert len(requests) == 1 and not future.done()
         finally:
             release.set()
-        events = future.result(5)
+        events = future.result(EVENT_WAIT)
     terminal = events[-1]
     assert terminal.type == "done" and terminal.metadata["status"] == "limited"
     assert terminal.metadata["requested_stop_reason"] == "task_plan_created"
@@ -99,9 +105,9 @@ def test_mixed_plan_batch_preserves_prior_work_and_defers_following_effects(root
     def dispatch(*, agent, **_):
         if agent == "general_worker":
             return work(value="before")
-        assert prior_done.wait(3)
+        assert prior_done.wait(EVENT_WAIT)
         plan_entered.set()
-        assert release_plan.wait(4)
+        assert release_plan.wait(EVENT_WAIT)
         if plan_status == "failed":
             return {"ok": False, "error": {"message": "计划未创建"}}
         return {
@@ -136,11 +142,11 @@ def test_mixed_plan_batch_preserves_prior_work_and_defers_following_effects(root
             definition(root, dispatch, name="subagent_dispatch"),
         ])))
         try:
-            assert plan_entered.wait(3)
+            assert plan_entered.wait(EVENT_WAIT)
             assert not next_request.wait(.3)
         finally:
             release_plan.set()
-        events = future.result(5)
+        events = future.result(EVENT_WAIT)
     terminal = events[-1]
     assert terminal.type == "done", terminal.to_dict()
     assert executed == (["before", "after"] if plan_status == "failed" else ["before"])
@@ -519,7 +525,7 @@ def test_runtime_waits_for_sync_tool_before_requesting_final(root):
 
     def work():
         entered.set()
-        assert release.wait(5)
+        assert release.wait(EVENT_WAIT)
         return {"ok": True, "data": "finished"}
 
     class Provider:
@@ -534,12 +540,12 @@ def test_runtime_waits_for_sync_tool_before_requesting_final(root):
             root, Provider(), tools=[definition(root, work)],
         )))
         try:
-            assert entered.wait(3)
+            assert entered.wait(EVENT_WAIT)
             time.sleep(.1)
             assert len(requests) == 1 and not future.done()
         finally:
             release.set()
-        events = future.result(5)
+        events = future.result(EVENT_WAIT)
 
     assert events[-1].type == "done" and events[-1].metadata["status"] == "completed"
     assert len(requests) == 2
@@ -593,7 +599,7 @@ def test_sync_tool_result_precedes_the_final_request(root):
 
     def work():
         entered.set()
-        assert release.wait(6)
+        assert release.wait(EVENT_WAIT)
         return {"ok": True, "data": "required-result"}
 
     class Provider:
@@ -607,7 +613,7 @@ def test_sync_tool_result_precedes_the_final_request(root):
     with ThreadPoolExecutor(1) as pool:
         future = pool.submit(lambda: list(run(root, Provider(), tools=[definition(root, work)])))
         try:
-            assert entered.wait(3)
+            assert entered.wait(EVENT_WAIT)
             time.sleep(.1)
             assert len(requests) == 1
             assert not future.done()
