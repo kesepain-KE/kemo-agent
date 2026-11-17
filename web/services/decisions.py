@@ -98,6 +98,8 @@ class DecisionServiceMixin:
                         for event in self.event_source(
                             request, root=self.root, cancel_event=active.cancel_event,
                         ):
+                            from web.services.run_events import publish_run_event
+                            publish_run_event(self, active, event)
                             if event.type == "error":
                                 logging.getLogger(__name__).error(
                                     "决策等待恢复失败：%s", active.run_id,
@@ -105,8 +107,8 @@ class DecisionServiceMixin:
                     except Exception:
                         logging.getLogger(__name__).exception("决策等待恢复失败")
                     finally:
-                        with self._active_runs_lock:
-                            self._active_runs.pop(active.run_id, None)
+                        from web.services.run_events import retire_run
+                        retire_run(self, active)
 
                 try:
                     threading.Thread(target=resume, name="decision-resume", daemon=True).start()

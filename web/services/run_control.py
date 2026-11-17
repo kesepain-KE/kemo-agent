@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+import time
+from collections import OrderedDict
 from typing import Callable, Iterator
 from events import RunEvent
 from run.infra import BoundedReadCache
@@ -44,6 +46,7 @@ class RunControlServiceMixin:
     if TYPE_CHECKING:
         _active_runs: dict[str, ActiveRun]
         _active_runs_lock: threading.RLock
+        _finished_runs: OrderedDict[str, ActiveRun]
         _index_session_payload = WebRunService._index_session_payload
         _new_agent_runner = WebRunService._new_agent_runner
         _other_durable_session_clients_locked = WebRunService._other_durable_session_clients_locked
@@ -62,6 +65,47 @@ class RunControlServiceMixin:
         root: Path
         summary_waker: Callable[[], None] | None
         memory_waker: Callable[[], None] | None
+
+    def current_run(self, user, session_id, *, source="web"):
+        name = self.require_user(user)
+        source = self.require_source(source)
+        session_id = self.require_session_id(session_id)
+        with self._active_runs_lock:
+            active = next((run for run in self._active_runs.values()
+                           if (run.user, run.source, run.session_id) == (name, source, session_id)), None)
+            if active is None:
+                active = next((run for run in reversed(self._finished_runs.values())
+                               if (run.user, run.source, run.session_id) == (name, source, session_id)
+                               and time.monotonic() - run.journal.finished_at <= 120), None)
+        return {"run": self._run_snapshot(active) if active else None}
+
+    @staticmethod
+    def _run_snapshot(active):
+        return {**active.journal.snapshot(), "run_id": active.run_id, "user": active.user,
+                "source": active.source, "session_id": active.session_id,
+                "stopping": active.cancel_event.is_set()}
+
+    def run_events(self, user, run_id, *, session_id, source="web", after=0, history_seq=0):
+        active = self._find_run(user, run_id, session_id=session_id, source=source)
+        result = active.journal.read(after, history_seq=history_seq)
+        if result["reset"]:
+            result["snapshot"] = self._run_snapshot(active)
+        return result
+
+    def run_snapshot(self, user, run_id, *, session_id, source="web"):
+        return self._run_snapshot(self._find_run(user, run_id, session_id=session_id, source=source))
+
+    def _find_run(self, user, run_id, *, session_id, source):
+        name, source = self.require_user(user), self.require_source(source)
+        session_id, run_id = self.require_session_id(session_id), self.require_run_id(run_id)
+        with self._active_runs_lock:
+            active = self._active_runs.get(run_id) or self._finished_runs.get(run_id)
+            if active and active.journal.closed and time.monotonic() - active.journal.finished_at > 120:
+                self._finished_runs.pop(run_id, None)
+                active = None
+            if active is None or (active.user, active.source, active.session_id) != (name, source, session_id):
+                raise NotFoundError("运行已不可订阅，请核对已保存的对话记录")
+        return active
 
     def submit_guidance(
         self,

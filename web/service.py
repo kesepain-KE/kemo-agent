@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import copy
+from collections import OrderedDict
 import re
 from pathlib import Path
 import threading
@@ -78,7 +79,7 @@ from web.errors import (
 from web.services.artifact_resolver import DownloadArtifactResolver
 from web.services.chat_stream import ActiveRun, stream_chat as _stream_chat
 from web.services.chat_gate import _UserChatGate
-from web.services.event_stream import FinalizingEventStream, QueueEventStream
+from web.services.event_stream import QueueEventStream
 from web.services.files import FileServiceMixin
 from web.services.backgrounds import BackgroundServiceMixin
 from web.services.identity import IdentityServiceMixin
@@ -166,6 +167,7 @@ class WebRunService(
         self._router_ref = router_ref
         self.version_manifest_fetcher = version_manifest_fetcher
         self._active_runs: dict[str, ActiveRun] = {}
+        self._finished_runs: OrderedDict[str, ActiveRun] = OrderedDict()
         self._active_runs_lock = threading.RLock()
         self._session_leases: dict[tuple[str, str, str], dict[str, float]] = {}
         self._chat_gates: dict[str, _UserChatGate] = {}
@@ -584,6 +586,7 @@ class WebRunService(
         task_plan_mode: str = "",
         source: Any = "web",
         client_id: Any = "",
+        on_finish: Callable[[], None] | None = None,
     ) -> QueueEventStream:
         """Compatibility entry point delegated to the chat stream service."""
 
@@ -600,6 +603,7 @@ class WebRunService(
             task_plan_mode=task_plan_mode,
             source=source,
             client_id=client_id,
+            on_finish=on_finish,
         )
     def stream_plan(
         self,
@@ -611,7 +615,7 @@ class WebRunService(
         run_id: Any = "",
         source: Any = "web",
         client_id: Any = "",
-    ) -> FinalizingEventStream:
+    ) -> QueueEventStream:
         name = self.require_user(user)
         normalized_session = self.require_session_id(session_id)
         normalized_source = self.require_source(source)
@@ -674,24 +678,6 @@ class WebRunService(
             "当返回 completed、paused、failed 或 cancelled，或 next_step 为空时停止执行并给出最终总结。"
             "不得创建或编辑新的任务计划。"
         )
-        try:
-            source_events = self.stream_chat(
-                name,
-                normalized_session,
-                control_prompt,
-                cancel_event=cancel_event,
-                run_id=run_id,
-                task_plan_id=normalized_plan_id,
-                task_plan_mode="agent_managed",
-                source=normalized_source,
-                client_id=client_id,
-            )
-        except BaseException:
-            current = store.read(normalized_plan_id)
-            if current.get("status") == "running":
-                store.update(normalized_plan_id, lambda value: {**value, "status": "paused"})
-            raise
-
         def finish_plan() -> None:
             try:
                 current = store.read(normalized_plan_id)
@@ -706,4 +692,23 @@ class WebRunService(
             except PlanError:
                 pass
 
-        return FinalizingEventStream(source_events, finish_plan)
+        try:
+            source_events = self.stream_chat(
+                name,
+                normalized_session,
+                control_prompt,
+                cancel_event=cancel_event,
+                run_id=run_id,
+                task_plan_id=normalized_plan_id,
+                task_plan_mode="agent_managed",
+                source=normalized_source,
+                client_id=client_id,
+                on_finish=finish_plan,
+            )
+        except BaseException:
+            current = store.read(normalized_plan_id)
+            if current.get("status") == "running":
+                store.update(normalized_plan_id, lambda value: {**value, "status": "paused"})
+            raise
+
+        return source_events

@@ -13,6 +13,7 @@ def run_source(
     service: Any, *, request: dict[str, Any], active: Any,
     normalized_run_id: str, normalized_source: str, normalized_session: str,
     name: str, cancel_event: Any, put: Callable[[Any], bool],
+    release_slot: Callable[[], None],
 ) -> None:
     request["_agent_root_task_id"] = f"main-task-{uuid4().hex}"
     iterator = None
@@ -62,7 +63,13 @@ def run_source(
                     close()
                 except BaseException:
                     pass
-        with service._active_runs_lock:
-            active.guidance.close()
-            service._active_runs.pop(normalized_run_id, None)
-        put(_WORKER_DONE)
+        from web.services.run_events import retire_run
+        try:
+            if active.on_finish:
+                active.on_finish()
+        finally:
+            try:
+                retire_run(service, active)
+            finally:
+                release_slot()
+                put(_WORKER_DONE)

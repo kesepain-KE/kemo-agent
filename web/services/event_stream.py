@@ -54,7 +54,8 @@ class QueueEventStream(Iterator[RunEvent]):
     def close(self) -> None:
         # A Python generator's close() cannot interrupt a running next(). This
         # consumer has no suspended generator frame and never joins the Run
-        # worker: queue waits and Web slots can end even if a tool is still busy.
+        # worker: queue waits end even if a tool is still busy; its execution
+        # slot remains owned by the worker until real completion.
         with self._close_lock:
             if self._closed.is_set():
                 return

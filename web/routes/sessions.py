@@ -248,6 +248,25 @@ def register_session_routes(app: FastAPI, backend: WebRunService) -> None:
     ) -> dict[str, Any]:
         return await asyncio.to_thread(backend.overview, user, session_id=session_id, source=source)
 
+    @app.get("/api/users/{user}/sessions/{session_id}/run")
+    async def current_run(user: str, session_id: str, source: str = "web"):
+        return await asyncio.to_thread(backend.current_run, user, session_id, source=source)
+
+    @app.get("/api/runs/{run_id}/events")
+    async def run_events(run_id: str, user: str, session_id: str, source: str = "web",
+                         after: int = Query(default=0, ge=0),
+                         history_seq: int = Query(default=0, ge=0)):
+        return await asyncio.to_thread(
+            backend.run_events, user, run_id, source=source, session_id=session_id,
+            after=after, history_seq=history_seq,
+        )
+
+    @app.get("/api/runs/{run_id}")
+    async def run_snapshot(run_id: str, user: str, session_id: str, source: str = "web"):
+        return await asyncio.to_thread(
+            backend.run_snapshot, user, run_id, session_id=session_id, source=source,
+        )
+
     @app.get("/api/users/{user}/runtime/logs")
     async def runtime_logs(
         user: str,

@@ -46,10 +46,13 @@ class SubagentProgressTests(unittest.TestCase):
                 progress = next(stream)
                 self.assertEqual(progress.type, "subagent_progress")
                 self.assertEqual(progress.tool_call_id, "call-a")
+                # Replay metadata also carries the owning user and its stream
+                # cursor; the request scope still wins over event-supplied ids.
                 self.assertEqual(progress.metadata, {
                     "phase": "subagent", "agent": "task_plan", "task_id": "task-a",
                     "status": "tool_running", "tool_name": "file", "iteration": 2,
                     "source": "web", "session_id": "session-a", "run_id": "run_test_a",
+                    "user": "alice", "web_event_seq": 2,
                 })
                 self.assertNotIn("private", str(progress.to_dict()))
                 self.assertEqual(RunEvent.from_dict(progress.to_dict()).type, "subagent_progress")

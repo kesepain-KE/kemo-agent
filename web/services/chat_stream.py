@@ -8,8 +8,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 from events import RunEvent
+from web.services.run_events import RunEventJournal, publish_run_event
 from run.conversation import GuidanceMailbox, guidance_failure_details
 from web.constants import _WORKER_DONE
 from web.errors import ConflictError, InvalidRequestError, TooManyChatsError
@@ -28,6 +29,8 @@ class ActiveRun:
     cancel_subagents_event: threading.Event = field(default_factory=threading.Event)
     guidance: GuidanceMailbox = field(default_factory=lambda: GuidanceMailbox(maxsize=8))
     started_at: float = field(default_factory=time.monotonic)
+    journal: RunEventJournal = field(default_factory=RunEventJournal)
+    on_finish: Callable[[], None] | None = None
 
 
 def stream_chat(
@@ -44,6 +47,7 @@ def stream_chat(
     task_plan_mode: str = "",
     source: Any = "web",
     client_id: Any = "",
+    on_finish: Callable[[], None] | None = None,
 ) -> QueueEventStream:
     name = service.require_user(user)
     normalized_source = service.require_source(source)
@@ -73,9 +77,10 @@ def stream_chat(
         normalized_session,
         source=normalized_source,
         cancel_event=cancel_event,
+        on_finish=on_finish,
     )
     with service._active_runs_lock:
-        if normalized_run_id in service._active_runs:
+        if normalized_run_id in service._active_runs or normalized_run_id in service._finished_runs:
             gate.release()
             raise ConflictError(f"run_id 已在使用：{normalized_run_id}")
         service._active_runs[normalized_run_id] = active
@@ -112,20 +117,6 @@ def stream_chat(
     progress_closed = threading.Event()
 
     def put(value: RunEvent | BaseException | object) -> bool:
-        if isinstance(value, RunEvent):
-            # The request scope is authoritative.  Provider/tool metadata
-            # is diagnostic input and must not be able to redirect a
-            # streamed event into another user's conversation space.
-            scoped = copy.copy(value)
-            scoped.metadata = {
-                **dict(value.metadata or {}),
-                "source": normalized_source,
-                "session_id": normalized_session,
-                # Provider/tool metadata is diagnostic input as well; the
-                # run object owns the identifier used by the stream.
-                "run_id": active.run_id,
-            }
-            value = scoped
         provisional_error = (
             isinstance(value, RunEvent)
             and value.type == "error"
@@ -154,13 +145,14 @@ def stream_chat(
                     *value.metadata.get("guidance_details", []),
                     *guidance_failure_details(pending, "web_run_ended"),
                 ]
+        if isinstance(value, RunEvent):
+            # Scope and replay include the final mailbox disposition.
+            value = publish_run_event(service, active, value)
         while True:
             if consumer_closed.is_set():
                 # A detached HTTP consumer does not cancel the Run. Drain
                 # the source so its normal terminal and persistence logic runs.
                 return True
-            if cancel_event.is_set() and not terminal_value:
-                return False
             try:
                 output.put(value, timeout=0.1)
                 return True
@@ -168,7 +160,7 @@ def stream_chat(
                 continue
 
     def subagent_event(event: RunEvent) -> None:
-        if progress_closed.is_set() or consumer_closed.is_set():
+        if progress_closed.is_set():
             return
         metadata = event.metadata or {}
         if metadata.get("parent_run_id") and metadata["parent_run_id"] != active.run_id:
@@ -201,6 +193,7 @@ def stream_chat(
             "name": name,
             "cancel_event": cancel_event,
             "put": put,
+            "release_slot": gate.release,
         },
         name=f"web-run-{name}-{normalized_session}",
         daemon=True,
@@ -214,13 +207,9 @@ def stream_chat(
         raise
 
     def release_consumer() -> None:
-        try:
-            with service._active_runs_lock:
-                active.guidance.close()
-        finally:
-            # Keep ActiveRun scoped and cancellable until the dedicated worker
-            # actually exits, but do not let a disconnected consumer hold a slot.
-            gate.release()
+        # Run ownership, guidance and execution quota survive HTTP disconnects.
+        # The worker releases them when its execution actually ends.
+        pass
 
     return QueueEventStream(
         output, _WORKER_DONE, consumer_closed, cancel_event, release_consumer,
