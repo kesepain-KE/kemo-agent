@@ -20,9 +20,9 @@ const documents = [
   { scope: 'user', relative_path: 'projects/design/drafts/notes.md', title: '笔记', size: 20, updated_at: 1, active_for_main_agent: true },
   { scope: 'shared', relative_path: 'notes.md', title: '共享笔记', size: 20, updated_at: 1, active_for_main_agent: true },
 ]
-function renderPage(files = documents) {
+function renderPage(files = documents, folders = directories) {
   server.use(http.get('/api/users/kesepain/knowledge', () => HttpResponse.json({ user: 'kesepain', enabled: true,
-    retrieval: { mode: 'index_only', full_index: true }, roots, directories, documents: files,
+    retrieval: { mode: 'index_only', full_index: true }, roots, directories: folders, documents: files,
     summary: { documents: files.length, user_documents: 1, shared_documents: 1, global_documents: 0 }, source_policy: {},
   })))
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -118,6 +118,90 @@ describe('真实路径知识库', () => {
     expect(within(menu).getByRole('menuitem', { name: '剪切' })).toBeEnabled()
     fireEvent.keyDown(menu, { key: 'Escape' })
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  it('新建文件夹在当前目录原位命名，输入法确认不提交，Enter 创建后选中新目录', async () => {
+    const folders = [...directories]
+    const requests: Array<{ path: string; body: unknown }> = []
+    let finishCreate!: () => void
+    const responseGate = new Promise<void>(resolve => { finishCreate = resolve })
+    server.use(http.post('/api/users/kesepain/knowledge/user/entry', async ({ request }) => {
+      const path = new URL(request.url).searchParams.get('path')!
+      requests.push({ path, body: await request.json() })
+      await responseGate
+      folders.push({ scope: 'user', relative_path: path, name: '任务资料', updated_at: 2 })
+      return HttpResponse.json({ created: true })
+    }))
+    renderPage(documents, folders); await openFolder()
+    fireEvent.click(screen.getByRole('button', { name: '新建' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '新建文件夹' }))
+    const input = await screen.findByRole('textbox', { name: '文件夹名称' }) as HTMLInputElement
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(input).toHaveFocus()
+    expect(input).toHaveValue('新建文件夹')
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length])
+    fireEvent.input(input, { target: { value: '任务资料' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(requests).toHaveLength(0)
+    fireEvent.keyDown(input, { key: 'Enter' })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(requests).toEqual([{ path: 'projects/design/drafts/任务资料', body: { kind: 'directory' } }]))
+    expect(screen.getByRole('textbox', { name: '文件夹名称' })).toBeDisabled()
+    finishCreate()
+    const created = await screen.findByRole('option', { name: '任务资料', selected: true })
+    expect(created).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'drafts' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: '文件夹名称' })).not.toBeInTheDocument()
+    expect(requests).toHaveLength(1)
+  })
+
+  it('右键选择的父目录决定新建位置，默认名避开重名，Escape 取消不落盘', async () => {
+    const create = vi.fn()
+    server.use(http.post('/api/users/kesepain/knowledge/user/entry', () => {
+      create(); return HttpResponse.json({ created: true })
+    }))
+    const folders = [...directories, { scope: 'user', relative_path: 'projects/design/新建文件夹', name: '新建文件夹', updated_at: 1 }]
+    renderPage(documents, folders); await openFolder()
+    fireEvent.contextMenu(screen.getByRole('treeitem', { name: 'design' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '新建文件夹' }))
+    const input = await screen.findByRole('textbox', { name: '文件夹名称' })
+    expect(input).toHaveValue('新建文件夹 (2)')
+    expect(screen.getByRole('option', { name: 'drafts' })).toBeInTheDocument()
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(screen.queryByRole('textbox', { name: '文件夹名称' })).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '新建文件夹' })).toBeInTheDocument()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('拒绝路径输入，重名失败在原位保留名称并支持修改后重新创建', async () => {
+    const folders = [...directories]
+    const requests: string[] = []
+    server.use(http.post('/api/users/kesepain/knowledge/shared/entry', async ({ request }) => {
+      const path = new URL(request.url).searchParams.get('path')!
+      requests.push(path)
+      if (requests.length === 1) return HttpResponse.json({ error: { code: 'conflict', message: '目标已存在：archive/资料' } }, { status: 409 })
+      folders.push({ scope: 'shared', relative_path: path, name: '资料二', updated_at: 2 })
+      return HttpResponse.json({ created: true })
+    }))
+    renderPage(documents, folders)
+    fireEvent.click(await screen.findByRole('treeitem', { name: '共享' }))
+    fireEvent.contextMenu(await screen.findByRole('treeitem', { name: 'archive' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '新建文件夹' }))
+    fireEvent.input(await screen.findByRole('textbox', { name: '文件夹名称' }), { target: { value: '../其他目录' } })
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '文件夹名称' }), { key: 'Enter' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('请输入文件夹名称，不要包含路径')
+    expect(requests).toHaveLength(0)
+    fireEvent.input(screen.getByRole('textbox', { name: '文件夹名称' }), { target: { value: '资料' } })
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '文件夹名称' }), { key: 'Enter' })
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '文件夹名称' })).toBeEnabled())
+    const input = screen.getByRole('textbox', { name: '文件夹名称' })
+    expect(input).toHaveValue('资料')
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(within(screen.getByRole('listbox')).getByRole('alert')).toHaveTextContent('目标已存在：archive/资料')
+    fireEvent.input(input, { target: { value: '资料二' } })
+    fireEvent.click(within(screen.getByRole('listbox')).getByRole('button', { name: '确认' }))
+    expect(await screen.findByRole('option', { name: '资料二', selected: true })).toBeInTheDocument()
+    expect(requests).toEqual(['archive/资料', 'archive/资料二'])
   })
 
   it('复制后不发请求，在进入目标目录粘贴时提交 JSON 文件操作', async () => {

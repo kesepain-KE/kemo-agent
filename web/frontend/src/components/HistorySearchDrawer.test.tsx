@@ -300,11 +300,14 @@ describe('HistorySearchDrawer', () => {
     expect(onSelectSession).toHaveBeenCalledWith('s2')
   })
 
-  it('对话运行时显示提示并禁止切换', () => {
-    render(<HistorySearchDrawer open sessions={sessions} activeSessionId="s1" chatRunning onClose={() => undefined} onSelectSession={() => undefined} onDeleteSession={() => undefined} onDeleteAllSessions={() => undefined} onRetrySummary={() => undefined} />)
+  it('对话运行时允许切换，删除当前运行仍然受限', () => {
+    const onSelectSession = vi.fn()
+    render(<HistorySearchDrawer open sessions={sessions} activeSessionId="s1" chatRunning onClose={() => undefined} onSelectSession={onSelectSession} onDeleteSession={() => undefined} onDeleteAllSessions={() => undefined} onRetrySummary={() => undefined} />)
 
-    expect(screen.getByText(/当前对话正在运行/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '打开对话 项目复盘' })).toBeDisabled()
+    expect(screen.getByText(/当前对话会在后台继续运行/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '打开对话 项目复盘' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认切换' }))
+    expect(onSelectSession).toHaveBeenCalledWith('s2')
   })
 
   it('置顶收藏对话可以直接删除，单条和全部删除均确认且不触发会话切换', async () => {

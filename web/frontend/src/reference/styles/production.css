@@ -1800,6 +1800,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .knowledge-entry-copy > strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-sm); font-weight: 520; }
 .knowledge-entry-copy > small { display: block; color: var(--text-faint); font-size: var(--t-2xs); margin-top: 4px; overflow-wrap: anywhere; }
 .knowledge-directory-entry > .icon-btn { margin-right: 4px; flex-shrink: 0; }
+.knowledge-folder-draft .knowledge-entry-open { padding-block: 8px; }
+.knowledge-folder-draft .knowledge-folder-name { width: 100%; min-width: 0; padding: 5px 7px; font-size: var(--t-sm); border-radius: var(--r-sm); }
+.knowledge-folder-draft .knowledge-folder-error { color: var(--danger); }
+.knowledge-folder-error[hidden] { display: none; }
 .knowledge-preview-title { flex: 1; min-width: 0; }
 .knowledge-preview-title > strong { display: block; font-size: var(--t-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-preview-title > small { display: block; color: var(--text-faint); font-size: var(--t-2xs); overflow-wrap: anywhere; margin-top: 3px; }
@@ -1830,6 +1834,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
 @media (max-width: 1250px) {
   .knowledge-workspace { grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); gap: var(--s-3); }
   .knowledge-directory-panel, .knowledge-pane-resizer { display: none; }
+  .knowledge-workspace.is-creating-directory { grid-template-rows: minmax(0, 1fr) minmax(130px, 1fr); }
+  .knowledge-workspace.is-creating-directory .knowledge-directory-panel { display: flex; grid-area: 2 / 1; }
+  .knowledge-workspace.is-creating-directory .knowledge-preview-panel { grid-area: 1 / 2 / span 2; }
 }
 @media (max-width: 700px) {
   .knowledge-workspace { display: flex; flex-direction: column; height: auto; }
@@ -1837,6 +1844,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   .knowledge-page .page-head-actions > .search-box { flex: 1 1 100%; max-width: none; }
   .knowledge-tree-panel { max-height: 300px; }
   .knowledge-tree { min-height: 100px; }
+  .knowledge-workspace.is-creating-directory .knowledge-directory-panel { min-height: 150px; max-height: 300px; }
   .knowledge-preview-panel { min-height: 480px; height: 65dvh; }
 }
 

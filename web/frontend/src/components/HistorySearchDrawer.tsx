@@ -305,7 +305,7 @@ export function HistorySearchDrawer({
     dateToggleRef.current?.focus()
   }
   const confirmSwitch = () => {
-    if (!pendingSessionId || chatRunning || switchingSessionId) return
+    if (!pendingSessionId || switchingSessionId) return
     const targetSessionId = pendingSessionId
     setPendingSessionId('')
     onSelectSession(targetSessionId)
@@ -447,7 +447,7 @@ export function HistorySearchDrawer({
           </button>
         </div>
 
-        {chatRunning && <div className={styles.notice}>当前对话正在运行，结束或停止后才能切换历史对话。</div>}
+        {chatRunning && <div className={styles.notice}>当前对话会在后台继续运行，可以切换到其他对话。</div>}
         {switchingSessionId && <div className={styles.progressNotice}><LoaderCircle size={15} />正在保存当前对话并切换…</div>}
         {actionError && <div className={styles.errorNotice}>{actionError}</div>}
         {mutationError && !deleteTarget && !deleteAllOpen && <div className={styles.errorNotice}>{mutationError}</div>}
@@ -485,7 +485,7 @@ export function HistorySearchDrawer({
             return <SessionActions key={`${source}:${session.session_id}`} session={session}
               onMark={onMarkSession} onRename={onRenameSession} onDelete={onDeleteSession}
               onOpen={() => { setSummaryPreview(null); if (!mutable) setReadOnlySession(session); else if (!active) setPendingSessionId(session.session_id); else onSelectSession(session.session_id) }}
-              openDisabled={mutable && (chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction))}
+              openDisabled={mutable && (Boolean(switchingSessionId) || Boolean(pendingAction))}
               deleteDisabled={Boolean(switchingSessionId) || Boolean(pendingAction) || (chatRunning && active)}>
               {(menuTrigger, onContextMenu) => <article onContextMenu={onContextMenu}
               className={`${styles.sessionCard} ${!mutable ? styles.readOnlyCard : ''} ${active ? styles.activeCard : ''}`}
@@ -493,7 +493,7 @@ export function HistorySearchDrawer({
               <button
                 type="button"
                 className={styles.sessionSelect}
-                disabled={mutable && (chatRunning || Boolean(switchingSessionId) || Boolean(pendingAction))}
+                disabled={mutable && (Boolean(switchingSessionId) || Boolean(pendingAction))}
                 aria-label={`${mutable ? t('打开') : '只读查看'}对话 ${displayName}`}
                 onFocus={(event) => {
                   if (session.summary?.trim()) showSummaryPreview(session.summary, event.currentTarget)

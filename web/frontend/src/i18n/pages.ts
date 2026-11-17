@@ -189,6 +189,8 @@ Token 合计|Total tokens|Tokens totales|Total des tokens|Tokens gesamt|Total de
 导入文件|Import file|Importar archivo|Importer un fichier|Datei importieren|Importar arquivo|Импортировать файл|ファイルをインポート|파일 가져오기
 新建文件|New file|Nuevo archivo|Nouveau fichier|Neue Datei|Novo arquivo|Новый файл|新しいファイル|새 파일
 新建文件夹|New folder|Nueva carpeta|Nouveau dossier|Neuer Ordner|Nova pasta|Новая папка|新しいフォルダー|새 폴더
+文件夹名称|Folder name|Nombre de la carpeta|Nom du dossier|Ordnername|Nome da pasta|Имя папки|フォルダー名|폴더 이름
+请输入文件夹名称，不要包含路径|Enter a folder name without a path|Introduce un nombre de carpeta sin ruta|Saisissez un nom de dossier sans chemin|Einen Ordnernamen ohne Pfad eingeben|Digite um nome de pasta sem caminho|Введите имя папки без пути|パスを含めずフォルダー名を入力してください|경로 없이 폴더 이름을 입력하세요
 复制相对路径|Copy relative path|Copiar ruta relativa|Copier le chemin relatif|Relativen Pfad kopieren|Copiar caminho relativo|Копировать относительный путь|相対パスをコピー|상대 경로 복사
 复制绝对路径|Copy absolute path|Copiar ruta absoluta|Copier le chemin absolu|Absoluten Pfad kopieren|Copiar caminho absoluto|Копировать абсолютный путь|絶対パスをコピー|절대 경로 복사
 移动|Move|Mover|Déplacer|Verschieben|Mover|Переместить|移動|이동

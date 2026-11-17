@@ -39,6 +39,7 @@ export function renderKnowledgePage(ctx) {
   let marked = new Set(state.knowledgeMarked || []);
   let anchor = '';
   let focusedEntry = state.knowledgeFocused || '';
+  let folderDraft = null;
   const treeHost = h('nav.knowledge-tree', { role: 'tree', 'aria-label': tr('知识目录') });
   const listHost = h('section.knowledge-directory-panel');
   const clipboardHost = h('div.knowledge-clipboard-status', { role: 'status', hidden: true });
@@ -170,18 +171,25 @@ export function renderKnowledgePage(ctx) {
         h('span', { html: icon('close', 'icon-sm') })));
   }
   function drawNavigation() {
+    const input = listHost.querySelector('.knowledge-folder-name');
+    const editingFolder = input && document.activeElement === input;
+    const selection = editingFolder ? [input.selectionStart, input.selectionEnd] : null;
     const focused = document.activeElement?.closest('[data-entry]');
     const host = focused && (treeHost.contains(focused) ? treeHost : listHost.contains(focused) ? listHost : null);
     const entry = focused?.dataset.entry;
     drawTree(); drawList(); drawClipboard();
-    if (host && entry) host.querySelector(`[data-entry="${CSS.escape(entry)}"]`)?.focus({ preventScroll: true });
+    if (editingFolder) {
+      const next = focusFolderName();
+      next?.setSelectionRange(...selection);
+    } else if (host && entry) host.querySelector(`[data-entry="${CSS.escape(entry)}"]`)?.focus({ preventScroll: true });
   }
   async function canLeave() {
     return draft === savedContent || await Overlay.confirm({ title: tr('放弃未保存的修改？'),
       description: tr('离开后将丢弃当前文件的未保存修改。'), confirmLabel: tr('放弃修改') });
   }
   async function browse(entry, expand = true) {
-    if (!await canLeave() || !ctx.active) return;
+    if (!await canLeave() || !ctx.active) return false;
+    folderDraft = null;
     activeScope = entry.scope;
     directoryPath = entry.kind === 'directory' ? entry.relative_path : parentPath(entry.relative_path);
     focusedEntry = key(entry);
@@ -202,6 +210,7 @@ export function renderKnowledgePage(ctx) {
     draft = savedContent;
     remember();
     draw();
+    return true;
   }
   async function loadDocument(entry) {
     if (!isEditableKnowledgeDocument(entry.relative_path)) return;
@@ -274,11 +283,12 @@ export function renderKnowledgePage(ctx) {
   }
   function drawList() {
     fill(listHost);
+    workspace.classList.toggle('is-creating-directory', Boolean(folderDraft));
     const directory = currentDirectory();
     const breadcrumb = h('div.knowledge-breadcrumb',
       h('button.btn.btn-ghost.btn-sm', { onclick: async () => {
         if (!await canLeave()) return;
-        activeScope = 'all'; directoryPath = ''; draft = savedContent; remember(); draw();
+        activeScope = 'all'; directoryPath = ''; folderDraft = null; draft = savedContent; remember(); draw();
       } }, tr('全部')),
     );
     if (directory) {
@@ -297,6 +307,7 @@ export function renderKnowledgePage(ctx) {
     const list = h('div.knowledge-directory-list', { role: 'listbox', tabindex: '0',
       'aria-multiselectable': 'true', 'aria-label': tr('当前目录'),
       oncontextmenu: event => { if (directory) showContextMenu(event, directory); } });
+    if (folderDraft) list.appendChild(folderDraftRow());
     rows.forEach(entry => {
       if (query && entry.root && !branchMatches(entry)) return;
       list.appendChild(h('div.knowledge-directory-entry' + (marked.has(key(entry)) ? '.is-selected' : '') + (isCutEntry(clipboard(), entry) ? '.is-cut' : ''),
@@ -324,8 +335,89 @@ export function renderKnowledgePage(ctx) {
         h('button.icon-btn', { title: tr('更多操作'), 'aria-label': tr('操作 {name}', { name: entry.name }), onclick: event => showContextMenu(event, entry) }, h('span', { html: icon('moreH', 'icon-sm') })),
       ));
     });
-    if (!rows.length) list.appendChild(emptyState({ title: tr(query ? '没有匹配的知识文件' : '此文件夹为空'), icon: 'folder' }));
+    if (!rows.length && !folderDraft) list.appendChild(emptyState({ title: tr(query ? '没有匹配的知识文件' : '此文件夹为空'), icon: 'folder' }));
     listHost.appendChild(list);
+  }
+  function focusFolderName(select = false) {
+    const input = listHost.querySelector('.knowledge-folder-name');
+    input?.focus({ preventScroll: true });
+    if (select) input?.select();
+    return input;
+  }
+  async function newFolder(entry) {
+    if (pending()) return;
+    const directory = pasteDirectory(entry);
+    if (folderDraft?.scope === directory.scope && folderDraft.parent === directory.relative_path) {
+      focusFolderName(true); return;
+    }
+    if (!await browse(directory) || !ctx.active) return;
+    query = '';
+    searchInput.value = '';
+    const names = new Set(children(directory).map(item => item.name.toLocaleLowerCase()));
+    const base = tr('新建文件夹');
+    let name = base;
+    for (let number = 2; names.has(name.toLocaleLowerCase()); number++) name = `${base} (${number})`;
+    folderDraft = { scope: directory.scope, parent: directory.relative_path, name, error: '', submitting: false };
+    remember(); drawNavigation(); focusFolderName(true);
+  }
+  function cancelFolder() {
+    if (folderDraft?.submitting) return;
+    folderDraft = null;
+    drawList();
+    listHost.querySelector('.knowledge-directory-list')?.focus();
+  }
+  function folderDraftRow() {
+    const creating = folderDraft;
+    const input = h('input.input.knowledge-folder-name', {
+      value: creating.name, 'aria-label': tr('文件夹名称'), autocomplete: 'off', disabled: creating.submitting,
+      'aria-invalid': String(Boolean(creating.error)), 'aria-describedby': creating.error ? 'knowledge-folder-error' : null,
+      oninput: event => {
+        creating.name = event.target.value; creating.error = '';
+        input.setAttribute('aria-invalid', 'false'); input.removeAttribute('aria-describedby'); error.hidden = true;
+      },
+      onkeydown: event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          if (!event.isComposing && event.keyCode !== 229) void createFolder();
+          return;
+        }
+        if (event.isComposing || event.keyCode === 229) return;
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelFolder(); }
+      },
+    });
+    const error = h('small.knowledge-folder-error#knowledge-folder-error', { role: 'alert', hidden: !creating.error }, creating.error);
+    async function createFolder() {
+      if (creating !== folderDraft || creating.submitting || pending()) return;
+      const name = creating.name.trim();
+      if (!name || name === '.' || name === '..' || /[/\\]/.test(name)) {
+        creating.error = tr('请输入文件夹名称，不要包含路径');
+        drawList(); focusFolderName(); return;
+      }
+      const path = joinPath(creating.parent, name);
+      creating.submitting = true; creating.error = '';
+      drawList();
+      await mutate(async () => {
+        try { await Api.createKnowledgeEntry(user, creating.scope, path, 'directory'); }
+        catch (cause) { creating.error = cause instanceof Error ? cause.message : tr('操作失败'); throw cause; }
+      }, tr('知识目录已更新'), () => {
+        if (folderDraft !== creating) return;
+        folderDraft = null;
+        marked = new Set([`${creating.scope}:${path}`]);
+        focusedEntry = `${creating.scope}:${path}`;
+        remember();
+      });
+      if (ctx.active && folderDraft === creating) {
+        creating.submitting = false; drawList(); focusFolderName();
+      }
+    }
+    return h('form.knowledge-directory-entry.is-selected.knowledge-folder-draft', {
+      role: 'option', 'aria-label': tr('新建文件夹'), 'aria-selected': 'true', 'aria-busy': String(creating.submitting),
+      onsubmit: event => { event.preventDefault(); void createFolder(); },
+    }, h('div.knowledge-entry-open',
+      h('span.knowledge-entry-icon', { html: icon('folder') }),
+      h('div.knowledge-entry-copy', input, error)),
+    h('button.icon-btn', { type: 'submit', 'aria-label': tr('确认'), disabled: creating.submitting }, h('span', { html: icon('check', 'icon-sm') })),
+    h('button.icon-btn', { type: 'button', 'aria-label': tr('取消'), disabled: creating.submitting, onclick: cancelFolder }, h('span', { html: icon('close', 'icon-sm') })));
   }
   function drawEditor() {
     fill(editorHost);
@@ -407,10 +499,10 @@ export function renderKnowledgePage(ctx) {
   treeHost.addEventListener('keydown', handleClipboardKey);
   listHost.addEventListener('keydown', handleClipboardKey);
   function pathDialog(title, entry, mode) {
-    const creating = mode === 'file' || mode === 'directory';
+    const creating = mode === 'file';
     const renaming = mode === 'rename';
     const parent = entry.kind === 'directory' ? entry.relative_path : parentPath(entry.relative_path);
-    const initial = creating ? joinPath(parent, mode === 'file' ? 'untitled.md' : tr('新建文件夹')) : entry.relative_path;
+    const initial = creating ? joinPath(parent, 'untitled.md') : entry.relative_path;
     const input = h('input.input', { value: initial, 'aria-label': tr(renaming ? '名称' : '相对路径'), required: true });
     if (renaming) input.value = entry.name;
     const form = h('form.knowledge-path-form', { onsubmit: async event => {
@@ -428,9 +520,9 @@ export function renderKnowledgePage(ctx) {
       tr('知识目录已更新'), () => {
         if (renaming) useKnowledgeClipboard.getState().discard(entry.scope, entry.relative_path);
         if (wasSelected && renaming) state.knowledgeSelected = `${targetScope}:${targetPath}${selected.relative_path.slice(entry.relative_path.length)}`;
-        if (creating && mode === 'file') state.knowledgeSelected = `${targetScope}:${targetPath}`;
+        if (creating) state.knowledgeSelected = `${targetScope}:${targetPath}`;
         state.knowledgeScope = targetScope;
-        state.knowledgeDirectory = creating && mode === 'directory' ? targetPath : parentPath(targetPath);
+        state.knowledgeDirectory = parentPath(targetPath);
         expanded.add(`${targetScope}:`);
         const parts = state.knowledgeDirectory.split('/').filter(Boolean);
         parts.forEach((_, index) => expanded.add(`${targetScope}:${parts.slice(0, index + 1).join('/')}`));
@@ -478,7 +570,7 @@ export function renderKnowledgePage(ctx) {
       ['复制相对路径', 'link', () => void copyText(joinPath(root.relative_path, entry.relative_path))],
       ['复制绝对路径', 'link', () => void copyText(absolute)],
       ['新建文件', 'fileText', () => pathDialog('新建文件', entry, 'file')],
-      ['新建文件夹', 'folder', () => pathDialog('新建文件夹', entry, 'directory')],
+      ['新建文件夹', 'folder', () => void newFolder(entry), pending()],
     ];
     actions.forEach(([label, symbol, action, disabled]) => menu.appendChild(h('button.menu-item', { role: 'menuitem', disabled: Boolean(disabled), onclick: () => { closeContextMenu(); action(); } },
       h('span', { html: icon(symbol, 'icon-sm') }), tr(label))));
@@ -505,7 +597,7 @@ export function renderKnowledgePage(ctx) {
     menu.querySelector('button:not(:disabled)')?.focus();
   }
 
-  const search = makeSearchBox({ placeholder: tr('按名称或路径搜索…'), value: query, onInput: value => { query = value; remember(); drawTree(); drawList(); } });
+  const search = makeSearchBox({ placeholder: tr('按名称或路径搜索…'), value: query, onInput: value => { query = value; folderDraft = null; remember(); drawTree(); drawList(); } });
   const searchInput = search.querySelector('input');
   searchInput.value = query;
   inner.append(pageHead({ title: tr('知识库'), actions: [
