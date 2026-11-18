@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         cancellable_subprocess_kwargs as cancellable_subprocess_kwargs,
         detached_subprocess_kwargs as detached_subprocess_kwargs,
         hashlib as hashlib,
+        os as os,
         hidden_subprocess_kwargs as hidden_subprocess_kwargs,
         prepare_background_job as prepare_background_job,
         process_snapshot as process_snapshot,
@@ -87,10 +88,18 @@ def _process_command(
         ]
     elif resolved_shell_type == "sh":
         process_command = [executable, "-c", command]
-    elif resolved_shell_type == "bash":
-        process_command = [executable, "--noprofile", "--norc", "-c", command]
-    elif resolved_shell_type == "bash_login":
-        process_command = [executable, "-l", "-c", command]
+    elif resolved_shell_type in {"bash", "bash_login"}:
+        launch = [executable]
+        if _is_windows() and (system_root := os.environ.get("SystemRoot")):
+            legacy_launcher = Path(system_root) / "System32" / "bash.exe"
+            if Path(executable) == legacy_launcher:
+                # The WSL bash.exe shim reparses the payload in the default
+                # Linux shell. --exec passes the intact command to Bash.
+                launch = [str(legacy_launcher.with_name("wsl.exe")), "--exec", "bash"]
+        options = (
+            ["-l"] if resolved_shell_type == "bash_login" else ["--noprofile", "--norc"]
+        )
+        process_command = [*launch, *options, "-c", command]
     elif resolved_shell_type == "zsh":
         process_command = [executable, "-f", "-c", command]
     elif resolved_shell_type == "zsh_login":

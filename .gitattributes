@@ -1,3 +1,8 @@
+# Use LF for detected text files; Windows batch scripts use CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 # Kemo 共享契约 Fixture 按字节比对 SHA-256，必须排除跨平台换行转换。
 tests/contracts/kemo_v1/fixtures/*.json text eol=lf
 provider/protocol/spec/*.json text eol=lf

@@ -37,6 +37,7 @@ from plugins.shell.tool import (
     _find_shell_executable,
     _looks_like_powershell,
     _merged_shell_environment,
+    _process_command,
     _shell_environment,
 )
 from plugins.shell.tool import run as run_shell
@@ -1823,6 +1824,31 @@ class ShellPluginTests(unittest.TestCase):
                 else:
                     self.assertEqual(actual_command, expected_command)
                 self.assertEqual(spawned.call_args.kwargs["shell"], expected_shell)
+
+    def test_windows_legacy_wsl_launcher_passes_bash_command_directly(self) -> None:
+        system_root = PROJECT_ROOT / "test-windows"
+        legacy_launcher = system_root / "System32" / "bash.exe"
+        native_bash = PROJECT_ROOT / "git" / "bin" / "bash.exe"
+        wsl_launch = [str(legacy_launcher.with_name("wsl.exe")), "--exec", "bash"]
+        command = """A=ok; echo "[$A]"; echo '$A'"""
+        cases = (
+            ("bash", legacy_launcher, [*wsl_launch, "--noprofile", "--norc"]),
+            ("bash_login", legacy_launcher, [*wsl_launch, "-l"]),
+            ("bash", native_bash, [str(native_bash), "--noprofile", "--norc"]),
+        )
+        with (
+            patch("plugins.shell.tool._is_windows", return_value=True),
+            patch.dict(os.environ, {"SystemRoot": str(system_root)}),
+        ):
+            for shell_type, executable, launch in cases:
+                with (
+                    self.subTest(shell_type=shell_type, executable=executable),
+                    patch("plugins.shell.tool._find_shell_executable", return_value=str(executable)),
+                ):
+                    self.assertEqual(
+                        _process_command(command, shell_type, environment={}, cwd=PROJECT_ROOT),
+                        ([*launch, "-c", command], False, shell_type),
+                    )
 
     def test_auto_shell_uses_command_aware_windows_priority(self) -> None:
         completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)

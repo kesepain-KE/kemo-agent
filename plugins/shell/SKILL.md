@@ -48,4 +48,6 @@ cat / type、ls / dir、mkdir、echo、rm / del 的简单字面量形式也以�
 - 自动模式只选非登录解释器。`cmd` 禁用 AutoRun，PowerShell 禁用 Profile，`bash` / `zsh` / `fish` 禁用个人启动配置；只有显式选择 `bash_login`、`zsh_login`、`fish_login` 才加载登录环境。
 - 显式指定但系统未安装的解释器会立即返回清晰错误，不会静默换成另一种语法。`shell_type` 指命令解释器，不是 Windows Terminal、GNOME Terminal 等可见终端程序。
 
+Windows 下显式选择 `bash` / `bash_login` 命中系统自带的 WSL `bash.exe` 时，使用 `wsl.exe --exec` 将内联命令直接交给 Bash，不经过 WSL 默认 Shell 的预展开。Git Bash 等原生解释器不变。
+
 框架内置命令组成的简单链仍由框架执行，并可使用 `chain_timeout_mode`。外部命令或脚本的 `timeout` 始终约束整个单进程脚本；如需在一个持久会话中切换目录，建议单独调用一次 `cd`，再用相同 `session_id` 执行后续命令。
