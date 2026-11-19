@@ -119,7 +119,7 @@ class ReadCacheTests(unittest.TestCase):
             invalidate_source_cache(path)
 
     def test_recent_write_is_read_from_disk_not_a_stale_stamp(self):
-        """A same-tick rewrite can keep mtime, ctime and size unchanged."""
+        """A same-tick rewrite can keep mtime and size unchanged."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'config.json'
             path.write_text('{"cron": {"history_retention_days": 0}}', encoding='utf-8')
@@ -128,10 +128,17 @@ class ReadCacheTests(unittest.TestCase):
             path.write_text('{"cron": {"history_retention_days": 7}}', encoding='utf-8')
             os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
             after = path.stat()
+            # st_ctime is the creation time on Windows, where an equal-length
+            # in-place rewrite inside one tick keeps it. On POSIX it is the
+            # metadata change time: utime cannot restore it, so only mtime and
+            # size can be pinned across platforms. Reads in the racy window must
+            # bypass the cache on both, which the value assertion below covers.
             self.assertEqual(
-                (before.st_mtime_ns, before.st_ctime_ns, before.st_size),
-                (after.st_mtime_ns, after.st_ctime_ns, after.st_size),
+                (before.st_mtime_ns, before.st_size),
+                (after.st_mtime_ns, after.st_size),
             )
+            if os.name == 'nt':
+                self.assertEqual(before.st_ctime_ns, after.st_ctime_ns)
             self.assertEqual(read_json_object(path)['cron']['history_retention_days'], 7)
 
     def test_env_is_not_cached(self):
