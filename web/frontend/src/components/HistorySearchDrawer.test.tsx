@@ -355,7 +355,7 @@ describe('HistorySearchDrawer', () => {
       },
       {
         session_id: 'conv_exhausted_999', window: 'w6', title: '', summary: '',
-        summary_status: 'failed', summary_attempt_count: 5, summary_max_attempts: 5,
+        summary_status: 'exhausted', summary_attempt_count: 5, summary_max_attempts: 5,
         summary_retry_at: '2026-07-23T09:06:00+00:00',
         state: 'closed', integration_count: 5, updated_at: '2026-07-23T09:02:00+00:00',
       },

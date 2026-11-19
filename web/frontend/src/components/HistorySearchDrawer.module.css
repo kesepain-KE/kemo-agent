@@ -211,6 +211,7 @@
   min-height: 0;
   flex: 1;
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 9px;
   overflow-y: auto;
@@ -291,7 +292,7 @@
 .cardCopy strong b { min-width: 0; overflow: hidden; text-overflow: ellipsis; font: inherit; }
 .cardCopy span { margin-top: 4px; color: var(--muted); font-size: .6875rem; }
 .cardCopy .summaryText { cursor: help; }
-.cardCopy .summaryFailed { color: var(--amber); }
+.cardCopy .summaryFailed { color: var(--amber); white-space: normal; overflow-wrap: anywhere; }
 .cardCopy small { margin-top: 5px; color: var(--muted-2); font-size: .625rem; }
 .cardCopy .memoryState { margin-top: 3px; color: var(--brand); }
 .cardCopy .memoryFailed { margin-top: 3px; color: var(--red); }
