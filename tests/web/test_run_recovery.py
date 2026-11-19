@@ -52,6 +52,20 @@ def test_finished_replay_batches_and_bounded_snapshot_keep_true_terminal():
     assert journal.snapshot()["terminal"]["metadata"]["status"] == "cancelled"
 
 
+def test_terminal_snapshot_keeps_integration_identity_without_response_body():
+    journal = RunEventJournal()
+    journal.publish(RunEvent(type="done", usage={"total_tokens": 12}, metadata={
+        "run_id": "run_one", "integration_id": "integration_one", "status": "completed",
+        "text": "private response", "reasoning": "private reasoning",
+    }))
+    terminal = journal.snapshot()["terminal"]
+    assert terminal["metadata"] == {
+        "run_id": "run_one", "integration_id": "integration_one", "status": "completed",
+        "web_event_seq": 1,
+    }
+    assert terminal["usage"] == {"total_tokens": 12}
+
+
 def test_disconnect_preserves_run_guidance_quota_and_scoped_recovery(tmp_path):
     for user in ("alice", "bob"):
         (tmp_path / "users" / user).mkdir(parents=True)

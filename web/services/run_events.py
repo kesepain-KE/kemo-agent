@@ -80,7 +80,7 @@ class RunEventJournal:
                 self.closed = True
                 self.terminal = {**value, "metadata": {
                     key: data for key, data in value.get("metadata", {}).items()
-                    if key in {"run_id", "source", "session_id", "user", "status", "cancelled",
+                    if key in {"run_id", "integration_id", "source", "session_id", "user", "status", "cancelled",
                                "committed", "stop_reason", "web_event_seq", "failure"}
                 }}
                 self.finished_at = time.monotonic()
