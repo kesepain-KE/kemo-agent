@@ -14,6 +14,10 @@ def session_payload(record: dict, *, chain_default="") -> dict:
         "updated_at", "created_at", "pinned_at", "favorite", "bound_platform",
     )
     result = {key: copy.deepcopy(record[key]) for key in fields if key in record}
+    # Older deployments could leave an exhausted summary marked queued.
+    if (result.get("summary_status") in {"failed", "retry_wait", "queued"}
+            and (result.get("summary_attempt_count") or 0) >= (result.get("summary_max_attempts") or 5)):
+        result.update(summary_status="exhausted", summary_retry_at="")
     result.setdefault("title", "")
     return {**result, "state": record["lifecycle"], "run_state": record["run_state"],
             "chain": record.get("chain", chain_default), "pinned": bool(record.get("pinned_at")),

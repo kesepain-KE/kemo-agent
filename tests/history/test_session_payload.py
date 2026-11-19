@@ -45,6 +45,14 @@ def test_session_payload_prefers_persisted_chain_over_transport_default() -> Non
     assert payload["chain"] == "message"
 
 
+def test_session_payload_exposes_legacy_exhaustion_but_not_an_inflight_final_attempt() -> None:
+    record = {"lifecycle": "closed", "run_state": "idle", "summary_status": "queued",
+              "summary_attempt_count": 5, "summary_max_attempts": 5}
+
+    assert session_payload(record)["summary_status"] == "exhausted"
+    assert session_payload({**record, "summary_status": "processing"})["summary_status"] == "processing"
+
+
 def test_session_payload_exposes_only_cardstream_metadata() -> None:
     payload = session_payload(
         {

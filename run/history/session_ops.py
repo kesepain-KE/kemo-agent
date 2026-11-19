@@ -36,27 +36,26 @@ def update_title(root, user, source, session_id, title):
                                   lambda record: {**record, "title": title, "title_source": "manual"})
 
 
-def queue_summary(root, user, source, session_id, **_):
+def queue_summary(root, user, source, session_id, *, retry=False, **_):
     def queue(record):
-        if not record["last_seq"]:
+        target = record["last_seq"]
+        if not target or record.get("summary_claim_id"):
             return None
-        if record.get("summary_claim_id") or (
-            record.get("summary_status") == "completed"
-            and record.get("summary_completed_seq", 0) >= record["last_seq"]):
+        # Lifecycle sweeps for the same RAW target must preserve backoff and exhaustion.
+        if not retry and target <= max(record.get("summary_target_seq") or 0,
+                                       record.get("summary_completed_seq") or 0):
             return None
-        return {**record, "summary_status": "queued", "summary_target_seq": record["last_seq"],
+        return {**record, "summary_status": "queued", "summary_target_seq": target,
+                "summary_attempt_count": 0,
                 "summary_retry_at": "", "summary_last_error": None}
     result = mutate_registry_record(root, user, source, session_id, queue)
-    return {**result, "status": result.get("summary_status", "none")} if result else None
+    if not result or (retry and (not result["last_seq"] or result.get("summary_claim_id"))):
+        return None
+    return {**result, "status": result.get("summary_status", "none")}
 
 
 def retry_summary(root, user, source, session_id):
-    record = find_record(root, user, source, session_id)
-    if record is None or not record["last_seq"] or record.get("summary_claim_id"):
-        return None
-    mutate_registry_record(root, user, source, session_id,
-                           lambda current: {**current, "summary_attempt_count": 0, "summary_status": "queued"})
-    return queue_summary(root, user, source, session_id)
+    return queue_summary(root, user, source, session_id, retry=True)
 
 
 def claim_pending_summary(root, user, **kwargs):

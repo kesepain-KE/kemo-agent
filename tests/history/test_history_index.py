@@ -227,7 +227,14 @@ def test_summary_failure_is_visible_and_manual_retry_resets_exhaustion(root):
         failed = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
                                       error={"message": f"failure {attempt}"})
         assert failed["summary_attempt_count"] == attempt
+        assert failed["summary_status"] == ("exhausted" if attempt == 5 else "failed")
+        assert bool(failed["summary_retry_at"]) == (attempt < 5)
+        repeated = queue_summary(root, "alice", "web", "s1")
+        assert repeated is not None
+        assert repeated["status"] == failed["summary_status"]
+        assert repeated["summary_retry_at"] == failed["summary_retry_at"]
         listed = list_sessions(root, "alice", "web")[0]
+        assert listed["summary_attempt_count"] == attempt
         assert listed["summary_last_error"] == {"message": f"failure {attempt}"}
         mutate_registry_record(root, "alice", "web", "s1", lambda value: {**value, "summary_retry_at": ""})
     assert claim_pending_summary(root, "alice") is None
@@ -239,3 +246,19 @@ def test_summary_failure_is_visible_and_manual_retry_resets_exhaustion(root):
     done = finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
                                 title="Recovered", summary="Ready")
     assert done["summary_status"] == "completed" and done["summary_last_error"] is None
+
+
+def test_new_raw_summary_target_gets_fresh_attempts(root):
+    seed(root, metadata={"summary": "Previous synopsis", "summary_completed_seq": 1})
+    queue_summary(root, "alice", "web", "s1")
+    claim = claim_pending_summary(root, "alice", max_attempts=1)
+    finish_summary_claim(root, "alice", "web", "s1", claim_id=claim["summary_claim_id"],
+                         error={"message": "failure"})
+
+    seed(root)
+    queued = queue_summary(root, "alice", "web", "s1")
+    assert queued is not None
+    assert queued["summary_target_seq"] > claim["summary_claim_end_seq"]
+    assert queued["summary"] == "Previous synopsis"
+    next_claim = claim_pending_summary(root, "alice", max_attempts=1)
+    assert next_claim["summary_attempt_count"] == 1

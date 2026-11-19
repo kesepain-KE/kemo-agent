@@ -143,11 +143,16 @@ def finish_job(root, user, source, session_id, kind, *, claim_id, error=None,
             "pending" if kind == "memory" and end < row["last_seq"] else "completed")
         if kind == "memory" and not error and not defer and end >= remaining_target:
             record.pop("memory_target_seq", None)
-        if kind == "summary" and defer:
-            record["summary_attempt_count"] = max(0, int(record.get("summary_attempt_count") or 0) - 1)
+        if kind == "summary":
+            attempt = int(record.get("summary_attempt_count") or 0)
+            if defer:
+                record["summary_attempt_count"] = max(0, attempt - 1)
+            elif error and attempt >= (record.get("summary_max_attempts") or 5):
+                record["summary_status"] = "exhausted"
         record[f"{kind}_last_error"] = error
         record[f"{kind}_retry_at"] = (
-            (datetime.now(timezone.utc) + timedelta(seconds=retry_delay)).isoformat() if error or defer else "")
+            (datetime.now(timezone.utc) + timedelta(seconds=retry_delay)).isoformat()
+            if (error or defer) and record[f"{kind}_status"] != "exhausted" else "")
         if kind == "summary" and not error and not defer:
             record["summary_completed_seq"] = end
         db.execute("UPDATE card_sessions SET record_json=? WHERE session_key=?",
