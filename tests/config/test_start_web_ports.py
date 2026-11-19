@@ -26,6 +26,9 @@ def test_runtime_web_base_url_normalizes_wildcard_hosts() -> None:
 def test_main_publishes_fallback_endpoint_for_bridge_children(tmp_path, monkeypatch) -> None:
     (tmp_path / "users" / "alice").mkdir(parents=True)
     monkeypatch.delenv(start_web._RUNTIME_WEB_ENDPOINT_ENV, raising=False)
+    # 宿主环境可能预设 WEB_HOST/WEB_PORT（实例启动时注入），这里按默认回环监听验证。
+    monkeypatch.delenv("WEB_HOST", raising=False)
+    monkeypatch.delenv("WEB_PORT", raising=False)
 
     def bind_result(_host: str, port: int) -> tuple[bool, str]:
         if port < start_web._WEB_FALLBACK_PORT:
