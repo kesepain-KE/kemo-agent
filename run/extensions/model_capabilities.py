@@ -205,7 +205,7 @@ def cached_model_capabilities(
     runtime_provider: dict[str, Any], *,
     capabilities_url: str | None = None,
 ) -> ModelCapabilities | None:
-    """Read current evidence without probing the network from a status page."""
+    """Read the same bounded evidence as runtime lookup without network I/O."""
     key = _cache_key(runtime_provider, str(runtime_provider.get("model") or ""), capabilities_url)
     with _capability_lock:
         now = time.monotonic()
@@ -214,7 +214,7 @@ def cached_model_capabilities(
         candidates = [
             cached for cache_key, cached in _capability_cache.items()
             if (cache_key == key if capabilities_url else cache_key[:4] == key[:4])
-            and cached.fresh_until > now
+            and cached.stale_until > now
         ]
         cached = max(candidates, key=lambda value: value.fresh_until, default=None)
         return cached.capabilities if cached is not None else None
