@@ -79,6 +79,22 @@ def run_model(
         model=runtime["model"],
         cancel_event=context.cancel_event,
     )
+    request_reasoning = None
+    if reasoning_selection.enabled and reasoning_selection.capabilities is not None:
+        declared = reasoning_selection.capabilities.reasoning
+        return_mode = next(
+            (mode for mode in ("content", "auto", "summary", "none") if mode in declared.returns),
+            None,
+        )
+        context_mode = next((
+            mode for mode in ("auto", "none", "current_turn", "all_turns")
+            if mode in declared.contexts and (mode != "all_turns" or declared.persisted_state)
+        ), None)
+        if return_mode is not None and context_mode is not None:
+            request_reasoning = ReasoningConfig.model_validate({
+                "enabled": True, "effort": reasoning_selection.effort,
+                "return": return_mode, "context": context_mode,
+            })
     media_inputs = MediaInputHost(
         root=agent_runner.root, user=agent_runner.user,
         scope=("subagent", context.source, context.session_id, context.task_id, definition.name),
@@ -282,17 +298,7 @@ def run_model(
                             input=list(items),
                             tools=tool_definitions,
                             generation={"max_output_tokens": output_limit},
-                            reasoning=(
-                                ReasoningConfig.model_validate({
-                                    "enabled": True,
-                                    "effort": reasoning_selection.effort,
-                                    "return": "content",
-                                    "context": "auto",
-                                })
-                                if reasoning_selection.enabled
-                                and reasoning_selection.effort
-                                else None
-                            ),
+                            reasoning=request_reasoning,
                             provider_options={},
                             metadata={
                                 "capability": "conversation",

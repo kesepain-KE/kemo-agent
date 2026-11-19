@@ -27,6 +27,7 @@ from provider.protocol.models import (
     Usage,
     text_from_content,
 )
+from provider.protocol.validation import validate_request_against_capabilities
 from provider.schema import ProviderError
 from run.agents import AgentQueueError, AgentScheduler, AgentTaskNotFoundError
 from run.agents import (
@@ -62,12 +63,16 @@ class MockProvider:
         order=None,
         reasoning_supported: bool = True,
         reasoning_efforts: list[str] | None = None,
+        reasoning_returns: list[str] | None = None,
     ) -> None:
         self.text = text if text is not None else json.dumps(SUMMARY)
         self.texts = list(texts or [])
         self.delay = delay
         self.order = order
         self.reasoning_supported = reasoning_supported
+        self.reasoning_returns = reasoning_returns if reasoning_returns is not None else (
+            ["none", "summary", "auto"] if reasoning_supported else ["none", "auto"]
+        )
         self.reasoning_efforts = list(
             reasoning_efforts
             if reasoning_efforts is not None
@@ -89,8 +94,8 @@ class MockProvider:
                 "reasoning": {
                     "supported": self.reasoning_supported,
                     "efforts": self.reasoning_efforts if self.reasoning_supported else [],
-                    "summary": self.reasoning_supported,
-                    "returns": ["none", "summary", "auto"] if self.reasoning_supported else ["none", "auto"],
+                    "summary": "summary" in self.reasoning_returns,
+                    "returns": self.reasoning_returns,
                 },
             }
         )
@@ -274,7 +279,8 @@ class SubAgentRuntimeTests(unittest.TestCase):
         self.assertEqual(request.model, "main-model")
         self.assertTrue(request.reasoning.enabled)
         self.assertEqual(request.reasoning.effort, "high")
-        self.assertEqual(request.reasoning.return_mode, "content")
+        self.assertEqual(request.reasoning.return_mode, "auto")
+        validate_request_against_capabilities(request, provider.capabilities(request.model))
         self.assertEqual(len(request.input), 1)
         self.assertIn("[agent_instruction]", request.system_prompt)
         self.assertNotIn("# 操作信息", request.system_prompt)
@@ -283,6 +289,24 @@ class SubAgentRuntimeTests(unittest.TestCase):
             json.dumps(request.model_dump(mode="json"), ensure_ascii=False),
         )
         self.assertEqual(json.loads(text_from_content(request.input[0].content))["trigger"], "manual")
+
+    def test_runner_preserves_reasoning_with_other_declared_return_modes(self) -> None:
+        for returns, expected in (
+            (["none", "auto", "content"], "content"),
+            (["none", "summary"], "summary"),
+            (["none"], "none"),
+        ):
+            with self.subTest(returns=returns), patch.dict(os.environ, {"KEMO_API_KEY": "secret"}):
+                clear_model_capability_cache()
+                provider = MockProvider(reasoning_returns=returns)
+                self.runner(provider).run(
+                    "schema_worker", {"previous_summary": None, "rounds": [], "trigger": "manual"},
+                )
+                request = provider.requests[0]
+                self.assertTrue(request.reasoning.enabled)
+                self.assertEqual(request.reasoning.effort, "high")
+                self.assertEqual(request.reasoning.return_mode, expected)
+                validate_request_against_capabilities(request, provider.capabilities(request.model))
 
     def test_runner_usage_preserves_cache_and_provider_request_diagnostics(self) -> None:
         first = AgentRunner._usage_dict(
