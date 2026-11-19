@@ -174,8 +174,8 @@ export function AppShell() {
   })
   const overviewProvider = overviewQuery.data?.provider
   const providerCapabilitiesQuery = useQuery({
-    queryKey: ['provider-model-capabilities', user, overviewProvider?.model || ''],
-    queryFn: () => getKemoModelCapabilities(user, overviewProvider?.model || '', true),
+    queryKey: ['provider-model-capabilities', user, overviewProvider?.model || '', overviewProvider?.base_url || ''],
+    queryFn: ({ signal }) => getKemoModelCapabilities(user, overviewProvider?.model || '', true, signal),
     enabled: Boolean(
       user
         && overviewProvider?.type === 'kemo'
@@ -193,10 +193,16 @@ export function AppShell() {
     const declared = providerCapabilitiesQuery.data
     if (!declared || declared.model !== overviewProvider?.model) return
     const declaresLimits = [declared.capabilities?.limits, declared.capabilities?.extensions.limits]
-      .some(limits => typeof limits?.max_input_tokens === 'number' || typeof limits?.context_window === 'number')
-    if (!declaresLimits) return
+      .some(limits => typeof limits?.max_input_tokens === 'number'
+        || typeof limits?.context_window === 'number' || typeof limits?.max_output_tokens === 'number')
+    const current = queryClient.getQueryData<OverviewResponse>(['overview', user, sessionId])
+    const tokens = current?.context_snapshot ?? current?.context_window?.tokens
+    const hadDeclaredLimits = tokens?.input_limit_source === 'max_input_tokens'
+      || tokens?.input_limit_source === 'context_window' || tokens?.context_window_source === 'model'
+      || typeof tokens?.request_output_limit_tokens === 'number'
+    if (!declaresLimits && !hadDeclaredLimits) return
     void queryClient.invalidateQueries({ queryKey: ['overview', user, sessionId] })
-  }, [queryClient, user, sessionId, sessionTransitioning, overviewProvider?.model,
+  }, [queryClient, user, sessionId, sessionTransitioning, overviewProvider?.model, overviewProvider?.base_url,
     providerCapabilitiesQuery.data, providerCapabilitiesQuery.dataUpdatedAt])
   const preferencesQuery = useQuery({
     queryKey: ['preferences', user],

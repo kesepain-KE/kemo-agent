@@ -1772,6 +1772,83 @@ describe('AppShell navigation', () => {
     expect(overviewRequests).toBe(3)
   })
 
+  it('同一模型从本地切换到 HTTPS 域名网关时重新读取能力，不复用旧网关参数', async () => {
+    const original = await fetch('/api/users/kesepain/overview?session_id=s1').then(response => response.json()) as OverviewResponse
+    const declared = await fetch('/api/users/kesepain/provider/model-capabilities?model=test-model').then(response => response.json())
+    let baseUrl = original.provider.base_url
+    let capabilityReady = false
+    const capabilityRequests: string[] = []
+    server.use(
+      http.get('/api/users/kesepain/overview', () => HttpResponse.json({
+        ...original,
+        provider: { ...original.provider, base_url: baseUrl },
+        context_snapshot: {
+          ...original.context_snapshot, available: true,
+          input_limit_tokens: capabilityReady ? baseUrl.startsWith('https:') ? 500000 : 720000 : 990000,
+        },
+      })),
+      http.get('/api/users/kesepain/provider/model-capabilities', () => {
+        capabilityRequests.push(baseUrl)
+        capabilityReady = true
+        return HttpResponse.json({
+          ...declared,
+          capabilities: {
+            ...declared.capabilities,
+            limits: { max_input_tokens: baseUrl.startsWith('https:') ? 500000 : 720000 },
+          },
+        })
+      }),
+    )
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    const key = ['overview', 'kesepain', 's1']
+    const snapshot = () => app.client.getQueryData<OverviewResponse>(key)?.context_snapshot
+    await waitFor(() => expect(snapshot()?.input_limit_tokens).toBe(720000))
+    baseUrl = 'https://gateway.example.test'
+    capabilityReady = false
+    await act(async () => { await app.client.refetchQueries({ queryKey: key }) })
+    await waitFor(() => expect(snapshot()?.input_limit_tokens).toBe(500000))
+    expect(capabilityRequests).toEqual([original.provider.base_url, baseUrl])
+    fireEvent.click(screen.getByTitle('模型与思考档位'))
+    const dialog = screen.getByRole('dialog', { name: '模型与上下文' })
+    expect(dialog).toHaveTextContent(baseUrl)
+    expect(within(dialog).getByText('有效输入上限', { selector: 'dt' }).parentElement).toHaveTextContent('500,000')
+  })
+
+  it.each([
+    { max_output_tokens: 384000 },
+    {},
+  ])('能力只声明输出上限或移除容量声明时也刷新模型面板：%j', async (limits) => {
+    const original = await fetch('/api/users/kesepain/overview?session_id=s1').then(response => response.json()) as OverviewResponse
+    const declared = await fetch('/api/users/kesepain/provider/model-capabilities?model=test-model').then(response => response.json())
+    let capabilityReady = false
+    let overviewRequests = 0
+    server.use(
+      http.get('/api/users/kesepain/overview', () => {
+        overviewRequests += 1
+        return HttpResponse.json({
+          ...original,
+          context_snapshot: {
+            ...original.context_snapshot, available: true,
+            input_limit_source: capabilityReady ? 'configuration' : 'max_input_tokens',
+            input_limit_tokens: capabilityReady ? 990000 : 500000,
+            request_output_limit_tokens: capabilityReady ? limits.max_output_tokens ?? null : 10000,
+          },
+        })
+      }),
+      http.get('/api/users/kesepain/provider/model-capabilities', async () => {
+        await delay(30)
+        capabilityReady = true
+        return HttpResponse.json({ ...declared, capabilities: { ...declared.capabilities, limits } })
+      }),
+    )
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    const snapshot = () => app.client.getQueryData<OverviewResponse>(['overview', 'kesepain', 's1'])?.context_snapshot
+    await waitFor(() => expect(snapshot()?.input_limit_tokens).toBe(990000))
+    expect(snapshot()?.request_output_limit_tokens).toBe(limits.max_output_tokens ?? null)
+    await act(async () => { await delay(50) })
+    expect(overviewRequests).toBe(2)
+  })
+
   it('Kemo 顶部模型气泡完全按能力声明展示新档位、排除 none 并原样保存', async () => {
     let savedChanges: Record<string, unknown> | undefined
     server.use(

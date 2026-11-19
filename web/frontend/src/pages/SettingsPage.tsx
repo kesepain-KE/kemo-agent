@@ -166,7 +166,7 @@ export function SettingsPage() {
       && selectedProviderModel,
   )
   const providerCapabilitiesQuery = useQuery({
-    queryKey: ['provider-model-capabilities', user, selectedProviderModel],
+    queryKey: ['provider-model-capabilities', user, selectedProviderModel, record(userConfigQuery.data?.config.provider).base_url || ''],
     queryFn: ({ signal }) => getKemoModelCapabilities(user, selectedProviderModel, undefined, signal),
     enabled: providerCapabilitiesEnabled,
     staleTime: 300_000,
