@@ -1039,7 +1039,7 @@ export type ChatItem =
       elapsedMs?: number
       mediaInputs?: NativeMediaInput[]
     }
-  | { id: string; kind: 'usage'; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
+  | { id: string; kind: 'usage'; integrationId?: string; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
   | { id: string; kind: 'task_plan'; plan: PlanSummary; presentation?: 'record' | 'reference' }
   | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'completed' | 'not_applied' | 'error'; guidanceId?: string; attachments?: InputAttachment[]; finalized?: boolean }
   | { id: string; kind: 'error'; content: string }

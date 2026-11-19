@@ -41,7 +41,7 @@ import { t , useLanguage } from '../i18n'
 import { chatDraftKey, EMPTY_CHAT_DRAFT, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
 import { useCompressionStatus } from '../store/compressionStatus'
 import { useScratchSender } from '../store/scratchNotes'
-import { shouldPrefetchEarlierHistory } from './chatHistory'
+import { mergeHistoryAndLiveItems, shouldPrefetchEarlierHistory } from './chatHistory'
 import { useChatHistory } from './useChatHistory'
 import {
   archiveTerminalPlansInConversation,
@@ -319,10 +319,10 @@ export function ChatPage() {
     [historyData, liveIntegrationNumbers],
   )
   const conversationIntegrationCount = Math.max(persistedUserMessages, ...liveIntegrationNumbers)
-  const items = useMemo(() => {
-    const liveCalls = new Set(visibleLiveItems.flatMap(item => item.kind === 'tool' ? [item.callId] : []))
-    return [...historyItems.filter(item => item.kind !== 'tool' || !liveCalls.has(item.callId)), ...visibleLiveItems]
-  }, [historyItems, visibleLiveItems])
+  const items = useMemo(
+    () => mergeHistoryAndLiveItems(historyItems, visibleLiveItems),
+    [historyItems, visibleLiveItems],
+  )
   useLayoutEffect(() => {
     const conversationKey = `${user}\u0000${sessionId}`
     if (conversationKeyRef.current === conversationKey) return

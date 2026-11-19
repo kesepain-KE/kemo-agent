@@ -5,7 +5,7 @@ import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTa
 import type { ChatItem, CronTaskSummary, HistoryResponse, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { resetProviderResponseForRetry } from './chatState'
 import { splitInlineWidgets } from '../components/Chat/inlineWidgetProtocol'
-import { shouldPrefetchEarlierHistory } from './chatHistory'
+import { mergeHistoryAndLiveItems, shouldPrefetchEarlierHistory } from './chatHistory'
 
 describe('正文内联组件消息链路', () => {
   const incompleteWidget = '分析如下：\n\n```kemo-widget\n{"schema_version":1,"id":"retry-widget"'
@@ -1159,6 +1159,74 @@ describe('reduceRunEvent', () => {
   it('done 生成可持久化的逐轮统计卡片', () => {
     const items = reduceRunEvent([], { type: 'done', usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, provider_request_count: 2 }, metadata: { elapsed_ms: 35, tool_calls: 1 } })
     expect(items[0]).toMatchObject({ kind: 'usage', elapsedMs: 35, toolCalls: 1, providerRequestCount: 2, usage: { total_tokens: 12 } })
+  })
+
+  it.each([undefined, 'integration_one'])('重复终态不会重复统计或再次修改正文（轮次 ID：%s）', (integrationId) => {
+    const terminal: RunEvent = {
+      type: 'done', usage: { total_tokens: 12 },
+      metadata: { integration_id: integrationId, status: 'completed', text: '最终回复' },
+    }
+    const once = reduceRunEvent([
+      { id: 'user', kind: 'message', role: 'user', content: '开始' },
+      { id: 'answer', kind: 'message', role: 'assistant', content: '最终回复', streaming: true },
+    ], terminal)
+    expect(reduceRunEvent(once, terminal)).toBe(once)
+    expect(once.filter(item => item.kind === 'usage')).toHaveLength(1)
+  })
+
+  it('旧轮次终态在下一轮到达后重放，不会结束新正文或重复旧统计', () => {
+    const terminal: RunEvent = {
+      type: 'done', usage: { total_tokens: 12 },
+      metadata: { integration_id: 'integration_old', status: 'completed', text: '旧回复' },
+    }
+    const previous = reduceRunEvent([], terminal)
+    const current: ChatItem[] = [
+      ...previous,
+      { id: 'next-user', kind: 'message', role: 'user', content: '继续' },
+      { id: 'next-answer', kind: 'message', role: 'assistant', content: '新回复', streaming: true },
+    ]
+    expect(reduceRunEvent(current, terminal)).toBe(current)
+    const finished = reduceRunEvent(current, {
+      type: 'done', usage: terminal.usage,
+      metadata: { integration_id: 'integration_new', status: 'completed', text: '新回复' },
+    })
+    expect(finished.filter(item => item.kind === 'usage')).toMatchObject([
+      { integrationId: 'integration_old', usage: { total_tokens: 12 } },
+      { integrationId: 'integration_new', usage: { total_tokens: 12 } },
+    ])
+  })
+
+  it('恢复态旧统计与历史交接时只保留持久统计，不误删下一轮的同值统计或工具', () => {
+    const history = cardHistory({
+      messages: [
+        { role: 'user', content: '上一轮' },
+        { role: 'assistant', content: '上一轮回复' },
+      ],
+      integrations: [{ integration_number: 1, usage: { total_tokens: 12 }, elapsed_ms: 100 }],
+      integration_traces: [{ integration_number: 1, tools: [{ call_id: 'old-tool', name: 'file' }] }],
+    })
+    const saved = buildHistoryItems(history)
+    const oldTerminal: RunEvent = {
+      type: 'done', usage: { total_tokens: 12 },
+      metadata: { integration_id: 'i_1', elapsed_ms: 0 },
+    }
+    let live = prepareRunUserMessage(reduceRunEvent([], oldTerminal), {
+      id: 'next-user', kind: 'message', role: 'user', content: '下一轮', integrationNumber: 2,
+    }, true)
+    live = reduceRunEvent(live, { type: 'tool_call_start', tool_call_id: 'new-tool', tool_name: 'shell' })
+    live = reduceRunEvent(live, { type: 'tool_call_result', tool_call_id: 'new-tool', result: { ok: true } })
+    live = reduceRunEvent(live, {
+      type: 'done', usage: { total_tokens: 12 },
+      metadata: { integration_id: 'i_2', status: 'completed', text: '下一轮回复' },
+    })
+    const merged = mergeHistoryAndLiveItems(saved, live)
+    expect(merged.filter(item => item.kind === 'usage')).toMatchObject([
+      { id: 'history_usage_i_1', integrationId: 'i_1', elapsedMs: 100 },
+      { id: 'usage_i_2', integrationId: 'i_2', usage: { total_tokens: 12 } },
+    ])
+    const replies = groupConversationItems(merged).filter(block => block.kind === 'assistant')
+    expect(replies.map(block => partitionAssistantTurnItems(block.items).usageItems.length)).toEqual([1, 1])
+    expect(merged.filter(item => item.kind === 'tool').map(item => item.callId)).toEqual(['old-tool', 'new-tool'])
   })
 
   it('媒体事件生成稳定产物卡片并按资产与路径去重', () => {

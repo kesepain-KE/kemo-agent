@@ -138,7 +138,8 @@ export function buildHistoryItems(
     if (selected?.response_closed && selected.last_seq === card.seq && lastInPage.get(card.integration_id) === card.seq) {
       appendArtifacts(selected.artifacts, `history_media_${card.integration_id}`)
       result.push({
-        id: `history_usage_${card.integration_id}`, kind: 'usage', usage: selected.usage,
+        id: `history_usage_${card.integration_id}`, kind: 'usage',
+        integrationId: card.integration_id, usage: selected.usage,
         elapsedMs: selected.elapsed_ms, toolCalls: selected.tool_calls, round,
         providerRequestCount: selected.usage.provider_request_count === undefined
           ? undefined
@@ -147,6 +148,19 @@ export function buildHistoryItems(
     }
   }
   return result
+}
+
+export function mergeHistoryAndLiveItems(historyItems: ChatItem[], liveItems: ChatItem[]): ChatItem[] {
+  const liveCalls = new Set(liveItems.flatMap(item => item.kind === 'tool' ? [item.callId] : []))
+  const savedUsage = new Set(historyItems.flatMap(item =>
+    item.kind === 'usage' && item.integrationId ? [item.integrationId] : []))
+  return [
+    ...historyItems.filter(item => item.kind !== 'tool' || !liveCalls.has(item.callId)),
+    // Completed history is authoritative even when a recovered live tail survives
+    // into the next round. Equal numbers from different integrations stay separate.
+    ...liveItems.filter(item =>
+      item.kind !== 'usage' || !item.integrationId || !savedUsage.has(item.integrationId)),
+  ]
 }
 
 export function mergeHistoryPages(pages: HistoryResponse[] | undefined): HistoryResponse | undefined {

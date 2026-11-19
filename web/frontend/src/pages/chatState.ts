@@ -269,6 +269,15 @@ function insertCurrentRoundItem(
 }
 
 export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
+  const integrationId = typeof event.metadata?.integration_id === 'string'
+    ? event.metadata.integration_id : undefined
+  if (event.type === 'done') {
+    const roundStart = currentRoundStartIndex(items)
+    // A replayed terminal must not append statistics or finalize a newer round.
+    if (items.some((item, index) => item.kind === 'usage' && (
+      integrationId ? item.integrationId === integrationId : index >= roundStart
+    ))) return items
+  }
   const mediaTerminal = event.type === 'done' || (event.type === 'error' && !isProvisionalRunError(event))
   if (event.type === 'media_input_update' || mediaTerminal) {
     const merged = reduceNativeMediaInputs(items, event, currentRoundStartIndex(items), mediaTerminal)
@@ -525,7 +534,8 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
         }
       : item)
     return event.usage ? [...finalized, {
-      id: eventId('usage'), kind: 'usage', usage: event.usage,
+      id: integrationId ? `usage_${integrationId}` : eventId('usage'),
+      kind: 'usage', integrationId, usage: event.usage,
       elapsedMs: event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms),
       toolCalls: event.metadata?.tool_calls === undefined ? undefined : Number(event.metadata.tool_calls),
       providerRequestCount: event.usage.provider_request_count === undefined ? undefined : Number(event.usage.provider_request_count),
