@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 from run.cards import CardConflictError, CardStore, IntegrationStore
 from run.config import interactive_decisions_enabled, list_users, load_config
-from run.tools import DecisionClosedError, DecisionError, DecisionStore
+from run.tools import DecisionClosedError, DecisionError, DecisionNotFoundError, DecisionStore
 from web.errors import ConflictError, InvalidRequestError, NotFoundError
 from events import RunEvent
 
@@ -47,8 +47,8 @@ class DecisionServiceMixin:
             decision = DecisionStore(CardStore(self.root, name)).settle(
                 origin, identity, decision_id, status="answered", option_id=option_id, text=text,
             )
-        except KeyError:
-            raise NotFoundError("当前会话中没有这个问题") from None
+        except DecisionNotFoundError as error:
+            raise NotFoundError(str(error)) from None
         except (DecisionClosedError, CardConflictError) as error:
             raise ConflictError(str(error)) from None
         except DecisionError as error:

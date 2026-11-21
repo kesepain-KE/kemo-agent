@@ -49,7 +49,7 @@ input_schema:
         additionalProperties: false
     decision_id:
       type: string
-      description: get/close 必需，使用 ask 返回的 decision_id
+      description: get/close 必需；使用同一会话中 ask 返回的 decision_id。get 可读旧问题终态，close 只能关闭尚未结束的问题
     resolution:
       type: string
       maxLength: 4000

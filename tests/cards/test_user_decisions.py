@@ -15,7 +15,9 @@ from run.config import load_config
 from run.engine import iter_request_events
 from run.history import delete_session
 from run.tools import ToolRegistry, apply_runtime_tool_policy, discover_tools
-from run.tools.user_decisions import DecisionClosedError, DecisionStore, TIMEOUT_SECONDS
+from run.tools.user_decisions import (
+    DecisionClosedError, DecisionNotFoundError, DecisionStore, TIMEOUT_SECONDS,
+)
 from tests.cards.test_runtime import call, definition, response, root  # noqa: F401
 from web.app import create_app
 from web.errors import ConflictError, InvalidRequestError
@@ -220,6 +222,22 @@ def test_async_decision_does_not_skip_required_tool_result(root):
     assert len([event for event in events if event.type == "tool_call_start" and event.tool_name == "work"]) == 1
 
 
+def test_new_run_can_read_cancelled_question_but_cannot_overwrite_it(root):
+    store, first, decision_id = stored_question(root, mode="async")
+    DecisionStore(store).settle("web", "s1", decision_id, status="cancelled")
+    first.finish("failed")
+
+    next_run = IntegrationStore(store, "web", "s1", "another-integration")
+    next_run.start()
+    context = {"root": str(root), "user": "alice", "source": "web",
+               "session_id": "s1", "integration_id": next_run.id}
+    result = decision_plugin.run("get", context=context, decision_id=decision_id)
+    assert result["status"] == "cancelled" and result["integration_id"] == first.id
+    with pytest.raises(DecisionClosedError, match="cancelled"):
+        decision_plugin.run("close", context=context, decision_id=decision_id, resolution="new resolution")
+    assert decision_plugin.run("get", context=context, decision_id=decision_id) == result
+
+
 def test_timeout_returns_no_answer_and_resumes_instead_of_choosing_option_one(root, monkeypatch):
     enable(root)
     monkeypatch.setattr("run.tools.user_decisions.TIMEOUT_SECONDS", .12)
@@ -290,12 +308,12 @@ def test_answer_timeout_and_agent_close_commit_one_terminal_fact(root):
     assert results.count("lost") == 2
     assert len([card for card in store.raw_page("web", "s1") if card.raw_kind == "tool_result"]) == 1
     assert integration.live_executions() == []
-    with pytest.raises(KeyError):
+    with pytest.raises(DecisionNotFoundError):
         decisions.get("app", "s1", decision_id)
-    with pytest.raises(KeyError):
+    with pytest.raises(DecisionNotFoundError):
         decisions.get("web", "other", decision_id)
     (root / "users/bob").mkdir()
-    with pytest.raises(KeyError):
+    with pytest.raises(DecisionNotFoundError):
         DecisionStore(CardStore(root, "bob")).get("web", "s1", decision_id)
 
 
@@ -356,7 +374,7 @@ def test_deleted_history_clears_question_and_answer_without_reviving_session(roo
     integration.finish("cancelled")
     assert delete_session(root, "alice", "web", "s1") == 1
     assert pending(root) == []
-    with pytest.raises(KeyError):
+    with pytest.raises(DecisionNotFoundError):
         DecisionStore(store).settle("web", "s1", decision_id, status="answered", option_id="pg")
     with store.db() as db:
         assert db.execute("SELECT count(*) FROM context_cards").fetchone()[0] == 0

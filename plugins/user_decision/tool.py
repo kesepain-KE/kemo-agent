@@ -25,12 +25,10 @@ def run(action: str, *, context: dict[str, Any], **arguments) -> dict[str, Any]:
         raise DecisionError("decision_id 必须为非空文本")
     if action == "get":
         store.refresh(source, session_id, integration_id=context["integration_id"])
-        return {"ok": True, **store.get(
-            source, session_id, decision_id, integration_id=context["integration_id"],
-        )}
+        return {"ok": True, **store.get(source, session_id, decision_id)}
     if action == "close":
         return store.settle(
             source, session_id, decision_id, status="resolved_by_agent",
-            resolution=arguments.get("resolution", ""), integration_id=context["integration_id"],
+            resolution=arguments.get("resolution", ""),
         )
     raise DecisionError("action 必须为 ask、get 或 close")

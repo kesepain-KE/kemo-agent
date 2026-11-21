@@ -20,6 +20,10 @@ class DecisionError(ValueError):
     pass
 
 
+class DecisionNotFoundError(DecisionError):
+    """The decision is absent from the current user, source, session or generation."""
+
+
 class DecisionClosedError(DecisionError):
     pass
 
@@ -105,7 +109,7 @@ class DecisionStore:
             if not rows or rows[0]["lifecycle"] != "open" or (
                 rows[0]["generation"] != rows[0]["session_generation"]
             ):
-                raise KeyError(decision_id)
+                raise DecisionNotFoundError("当前会话中没有这个问题，请核对 decision_id")
             return self.public(rows[0])
 
     def settle(self, source: str, session_id: str, decision_id: str, *, status: str,
@@ -117,13 +121,13 @@ class DecisionStore:
             rows = self._rows(db, source, session_id, decision_id=decision_id,
                               integration_id=integration_id)
             if not rows or rows[0]["lifecycle"] != "open":
-                raise KeyError(decision_id)
+                raise DecisionNotFoundError("当前会话中没有这个问题，请核对 decision_id")
             row = rows[0]
             if row["generation"] != row["session_generation"]:
-                raise KeyError(decision_id)
-            if not row["execution_live"]:
-                raise DecisionClosedError("该问题已回答、超时或关闭，请刷新后查看")
+                raise DecisionNotFoundError("当前会话中没有这个问题，请核对 decision_id")
             item = self.public(row)
+            if not row["execution_live"]:
+                raise DecisionClosedError(f"该问题已结束（{item['status']}），不能覆盖结果")
             if row["response_closed"]:
                 status = "cancelled"
             elif current >= item["expires_at"]:
