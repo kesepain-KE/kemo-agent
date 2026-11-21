@@ -285,14 +285,14 @@ def run(
             tool_records=context.get("tool_records") or [],
         )
     ]
-    descriptors = [*descriptors, *local_descriptors]
     ids.extend(str(item["asset_id"]) for item in local_descriptors)
     config = load_config(user, root)
-    retain_media_descriptors(
+    local_descriptors = retain_media_descriptors(
         root, user, local_descriptors, source=str(context.get("source") or ""),
         session_id=str(context.get("session_id") or ""),
         ttl_seconds=media_asset_ttl_seconds(config),
     )
+    descriptors = [*descriptors, *local_descriptors]
     runtime = provider_runtime_config(config)
     runtime["timeout"] = _multimodal_provider_timeout(config, runtime, context)
     provider_type = str(runtime.get("type") or "")
@@ -511,6 +511,16 @@ def run(
         "attempts": attempts,
         "usage": response.usage.model_dump(mode="json", exclude_none=True),
     }
+    expirations = {
+        item["asset_id"]: item["reference_expires_at"]
+        for item in descriptors
+        if isinstance(item, dict) and item.get("asset_id") and item.get("reference_expires_at")
+    }
+    if references := [
+        {"asset_id": asset_id, "reference_expires_at": expirations[asset_id]}
+        for asset_id in dict.fromkeys(ids) if asset_id in expirations
+    ]:
+        result["asset_references"] = references
     if action in {"analyze_image", "analyze_video", "analyze_file"}:
         result["analysis"] = text
     if action == "transcribe_audio":

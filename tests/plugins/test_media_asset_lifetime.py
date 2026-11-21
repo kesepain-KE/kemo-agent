@@ -133,6 +133,8 @@ def test_reference_expiry_uses_configured_seconds_without_read_renewal(tmp_path,
     assert lookup() == ([artifact["asset_id"]], [])
     saved = tmp_path / artifact["project_path"]
     assert saved.read_bytes() == PNG
+    with pytest.raises(AttachmentError, match="已过期.*paths"):
+        enqueue(make_host(tmp_path, config), {"asset_ids": [artifact["asset_id"]]})
     assert enqueue(make_host(tmp_path, config), {"paths": [str(saved)]})["ok"] is True
 
 
@@ -314,18 +316,25 @@ def test_explicit_local_paths_register_their_returned_ids(tmp_path, monkeypatch,
     user = json.loads(path.read_text("utf-8"))
     user["multimodal_models"] = {"vision": "analysis-model"}
     path.write_text(json.dumps(user), "utf-8")
+    started = cache.time()
+    monkeypatch.setattr(cache, "time", lambda: started)
     if loader == "native":
         host = make_host(tmp_path, config)
         result = enqueue(host, {"paths": [str(image)]})
-        asset_id = result["asset_ids"][0]
+        expires = result["assets"][0]["reference_expires_at"]
         host.refresh_messages([])
     else:
         monkeypatch.setattr(tool, "create_provider", lambda _: LoadingProvider())
         result = tool.run("analyze_image", paths=[str(image)], instruction="inspect", context={
             "root": str(tmp_path), "user": "alice", "source": "web", "session_id": "session",
         })
-        asset_id = result["asset_ids"][0]
-    assert enqueue(make_host(tmp_path, config), {"asset_ids": [asset_id]})["ok"] is True
+        expires = result["asset_references"][0]["reference_expires_at"]
+        assert result["asset_references"][0]["asset_id"] == result["asset_ids"][0]
+    assert datetime.fromisoformat(expires).timestamp() == pytest.approx(started + 120, abs=1e-6, rel=0)
+    asset_id = result["asset_ids"][0]
+    later = make_host(tmp_path, config, scope=("main", "web", "session", "run-2"))
+    reused = enqueue(later, {"asset_ids": [asset_id]})
+    assert reused["assets"][0]["reference_expires_at"] == expires
     assert enqueue(make_host(tmp_path, config), {"asset_ids": ["asset_remote_1"]})["ok"] is True
 
 

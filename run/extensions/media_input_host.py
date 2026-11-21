@@ -84,10 +84,17 @@ class MediaInputHost:
             local = [entry.descriptor for key, entry in self.queue.entries.items()
                      if key in receipt["asset_ids"] and key not in known_ids
                      and entry.descriptor.get("origin") != "gateway_asset"]
-            retain_media_descriptors(
+            registered = retain_media_descriptors(
                 self.root, self.user, local, source=self.source, session_id=self.session_id,
                 ttl_seconds=media_asset_ttl_seconds(self.config),
             )
+            expirations = {
+                item["asset_id"]: item["reference_expires_at"]
+                for item in [*self.known, *retained, *registered] if item.get("reference_expires_at")
+            }
+            for asset in receipt["assets"]:
+                if expires_at := expirations.get(asset["asset_id"]):
+                    asset["reference_expires_at"] = expires_at
             return receipt
         finally:
             self._sync()

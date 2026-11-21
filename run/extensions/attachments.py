@@ -76,6 +76,13 @@ _MEDIA_LIMITS = {
 class AttachmentError(RuntimeError):
     """An uploaded attachment is missing, unsafe, or unsupported."""
 
+    @classmethod
+    def unavailable_reference(cls, asset_id: str) -> AttachmentError:
+        return cls(
+            f"资产引用不可用（不存在、已过期或不属于当前会话/网关）：{asset_id}。"
+            "如果原文件仍在，请用已获授权的 paths 重新引用。"
+        )
+
 
 def gateway_asset_content(
     descriptor: AssetDescriptor,
@@ -524,7 +531,7 @@ class RunAssetResolver:
     ) -> tuple[dict[str, Any], Path, str, int]:
         descriptor = self._descriptors.get(str(asset_id or ""))
         if descriptor is None:
-            raise AttachmentError(f"附件不属于当前 Run 或不存在：{asset_id}")
+            raise AttachmentError.unavailable_reference(asset_id)
         origin = str(descriptor.get("origin") or "web_upload")
         if origin == "web_upload":
             verified = describe_uploaded_asset(self.root, self.user, descriptor)

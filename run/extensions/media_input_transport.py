@@ -32,13 +32,13 @@ class NativeMediaTransport:
         if str(runtime_provider.get("type") or "").casefold() != "kemo" or not all(
             callable(getattr(provider, name, None)) for name in ("get_asset", "wait_asset_ready")
         ):
-            raise AttachmentError(f"资产不属于当前 Run 或不存在：{asset_id}")
+            raise AttachmentError.unavailable_reference(asset_id)
         try:
             with provider_request_slot(config, cancel_event=cancel_event):
                 remote = provider.wait_asset_ready(provider.get_asset(asset_id), cancel_event=cancel_event)
         except ProviderError as exc:
             if exc.status_code == 404:
-                raise AttachmentError(f"资产不属于当前 Run 或不存在：{asset_id}") from exc
+                raise AttachmentError.unavailable_reference(asset_id) from exc
             raise
         block = gateway_asset_content(remote)
         identity = capability_cache_identity(runtime_provider)

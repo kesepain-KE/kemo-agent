@@ -130,12 +130,15 @@ def resolve_retained_media(
     with _registry(database) as connection:
         connection.execute("DELETE FROM media_assets WHERE expires_at <= ?", (now,))
         rows = connection.execute(
-            "SELECT asset_id, descriptor FROM media_assets "
+            "SELECT asset_id, descriptor, expires_at FROM media_assets "
             "WHERE source = ? AND session_id = ? AND asset_id IN ("
             + ",".join("?" for _ in asset_ids) + ")",
             (source, session_id, *asset_ids),
         ).fetchall()
-    descriptors = {asset_id: json.loads(value) for asset_id, value in rows}
+    descriptors = {
+        asset_id: {**json.loads(value), "reference_expires_at": datetime.fromtimestamp(expires, timezone.utc).isoformat()}
+        for asset_id, value, expires in rows
+    }
     return (
         [str(descriptors[value]["asset_id"]) if value in descriptors else value
          for value in asset_ids],

@@ -51,6 +51,6 @@
 以及 `expand_call` 成功发布的拓展产物，
 其已登记的 `asset_id` 都可供本工具或 `attach_media` 在同一来源和会话继续使用。
 本地接续引用默认存活 120 秒，
-由全局 `media_assets.ttl_seconds` 按秒配置，产物的 `reference_expires_at` 给出到期时间；
+由全局 `media_assets.ttl_seconds` 按秒配置。生成产物在 `artifacts`、已登记输入在 `asset_references` 中返回 `asset_id` 和 `reference_expires_at`；
 读取不续期，仅同一用户、来源和会话可复用。网关原 ID 失效时会使用已验证的本地文件，
 过期只清理引用，文件仍可通过获准的 `paths` 使用。
