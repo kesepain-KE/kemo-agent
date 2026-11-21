@@ -31,14 +31,13 @@ COHESIVE_LONG_MODULES = {
 
 def _production_sources():
     for path in ROOT.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
-            continue
         relative = path.relative_to(ROOT)
         if any(part in IGNORED_PARTS for part in relative.parts):
             continue
-        if ".bak" in path.name or ".test." in path.name:
+        if path.suffix.lower() not in SOURCE_SUFFIXES or ".bak" in path.name or ".test." in path.name:
             continue
-        yield path, relative.as_posix()
+        if path.is_file():
+            yield path, relative.as_posix()
 
 
 def test_multi_responsibility_implementation_modules_stay_below_800_lines() -> None:
@@ -52,6 +51,25 @@ def test_multi_responsibility_implementation_modules_stay_below_800_lines() -> N
 
 def test_deployment_test_work_is_not_production_source() -> None:
     assert ".test-work" in IGNORED_PARTS
+
+
+def test_production_sources_filter_ignored_paths_before_is_file(tmp_path, monkeypatch) -> None:
+    ignored = tmp_path / "开发临时目录" / "node_modules" / "broken.py"
+    source = tmp_path / "run" / "entry.py"
+    for path in (ignored, source):
+        path.parent.mkdir(parents=True)
+        path.touch()
+
+    is_file = Path.is_file
+
+    def is_file_with_broken_link(path: Path) -> bool:
+        if path == ignored:
+            raise OSError("WinError 1920: cannot access a dangling link")
+        return is_file(path)
+
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setattr(Path, "is_file", is_file_with_broken_link)
+    assert list(_production_sources()) == [(source, "run/entry.py")]
 
 
 def test_long_module_allowlist_names_existing_modules_and_documents_rationale() -> None:

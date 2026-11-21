@@ -95,6 +95,39 @@ class DeploymentTests(unittest.TestCase):
         record['python'] = str(python)
         (self.root / '.kemo-install.json').write_bytes(json_bytes(record))
 
+    def test_serve_windows_selects_launcher_and_creation_flags(self):
+        python = self.base / 'python.exe'
+        gui_python = python.with_name('pythonw.exe')
+        self._install_windows_web(python, b'')
+        # Stub only the process boundary, including flags unavailable on Unix.
+        windows = SimpleNamespace(
+            Popen=mock.Mock(), DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
+            DETACHED_PROCESS=0x00000008, CREATE_NO_WINDOW=0x08000000, CREATE_NEW_PROCESS_GROUP=0x00000200,
+        )
+        for executable, flags in ((python, windows.CREATE_NO_WINDOW), (gui_python, windows.DETACHED_PROCESS)):
+            with self.subTest(executable=executable.name):
+                executable.touch()
+                windows.Popen.reset_mock()
+                windows.Popen.return_value = SimpleNamespace(stdout=io.BytesIO(), wait=lambda: 0)
+                with mock.patch.object(runtime.Path, 'cwd', return_value=self.root), mock.patch.object(runtime, 'subprocess', windows):
+                    self.assertEqual(runtime.serve_windows('test-receipt', str(python), []), 0)
+                windows.Popen.assert_called_once()
+                self.assertEqual(windows.Popen.call_args.args[0][0], str(executable))
+                self.assertEqual(windows.Popen.call_args.kwargs['creationflags'], flags | windows.CREATE_NEW_PROCESS_GROUP)
+
+    def test_copy_web_log_trims_split_utf8_character(self):
+        log_path = self.base / 'web.log'
+        retained = '好' * 20 + '\n\n'
+        incoming = '新增日志\n'
+        # At 128 bytes, the tail starts at byte 64: the second byte of 中.
+        log_path.write_bytes(b'A' * 63 + ('中' + retained).encode('utf-8'))
+        with mock.patch.object(runtime, '_WEB_LOG_MAX_BYTES', 128), log_path.open('r+b') as log:
+            runtime._copy_web_log(io.BytesIO(incoming.encode('utf-8')), log)
+
+        data = log_path.read_bytes()
+        self.assertLessEqual(len(data), 128)
+        self.assertEqual(data.decode('utf-8', errors='strict'), retained + incoming)
+
     @unittest.skipUnless(os.name == 'nt', 'requires a native Windows console and venv launcher')
     def test_windows_start_detaches_and_keeps_update_lock(self):
         import psutil
