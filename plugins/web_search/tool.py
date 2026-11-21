@@ -306,13 +306,21 @@ def _research(client: SearchClient, timeout: float, **kwargs: Any) -> dict[str, 
 
 
 _ACTIONS = {"search": _search, "extract": _extract, "crawl": _crawl, "map": _map, "research": _research}
+_TAVILY_TIMEOUT_RANGES = {"extract": (1.0, 60.0), "crawl": (10.0, 150.0), "map": (10.0, 150.0)}
 
 
 def run(action: str, *, context: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     handler = _ACTIONS.get(action)
     if handler is None:
         raise ValueError(f"未知 action: {action}，可选: {', '.join(sorted(_ACTIONS))}")
-    client = _get_client()
     default = 180 if action == "research" else 150 if action in {"crawl", "map"} else 60 if action == "search" else 30
     timeout = float(context.get("tool_timeout") or default)
-    return handler(client, max(1.0, min(timeout, 3600.0)), **kwargs)
+    if action in _TAVILY_TIMEOUT_RANGES:
+        minimum, maximum = _TAVILY_TIMEOUT_RANGES[action]
+        # The SDK uses this value both in Tavily's request body and as the HTTP timeout.
+        if timeout < minimum:
+            raise ValueError(f"{action} 需要至少 {minimum:g} 秒工具超时，请调高 tools.timeout")
+        timeout = min(timeout, maximum)
+    else:
+        timeout = max(1.0, min(timeout, 3600.0))
+    return handler(_get_client(), timeout, **kwargs)

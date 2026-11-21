@@ -2756,6 +2756,20 @@ class WebSearchPluginTests(unittest.TestCase):
                     "search", query="kemo", include_answer="true", context={}
                 )
 
+    def test_crawl_extract_and_map_use_endpoint_timeout_ranges(self) -> None:
+        with patch("plugins.web_search.tool._get_client") as get_client:
+            client = get_client.return_value
+            for action, ceiling in (("extract", 60), ("crawl", 150), ("map", 150)):
+                getattr(client, action).return_value = {"results": []}
+                for budget in (15, 240, 600):
+                    run_web_search(action, urls="https://example.test", context={"tool_timeout": budget})
+                    self.assertEqual(getattr(client, action).call_args.kwargs["timeout"], min(budget, ceiling))
+
+        with patch("plugins.web_search.tool._get_client") as get_client:
+            with self.assertRaisesRegex(ValueError, "tools.timeout"):
+                run_web_search("crawl", urls="https://example.test", context={"tool_timeout": 5})
+            get_client.assert_not_called()
+
     def test_map_and_completed_research_use_current_sdk_shapes(self) -> None:
         client = _FakeTavily()
         with patch("plugins.web_search.tool._get_client", return_value=client):

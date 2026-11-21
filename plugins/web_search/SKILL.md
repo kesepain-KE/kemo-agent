@@ -22,6 +22,8 @@ Tavily 网络搜索工具，支持搜索、正文提取、整站爬取、站点�
 参数、取值和默认值以工具 schema 为准。`urls`、`include_domains`、`exclude_domains`、
 `select_paths`、`exclude_paths` 和 `select_domains` 使用逗号分隔字符串；`urls` 在
 `extract` 中可包含多个地址，在 `crawl` / `map` 中只使用第一个入口地址。
+这三个动作的接口超时分别限制在 1～60、10～150、10～150 秒内，不改变全局工具超时。
+若全局工具超时低于该动作的接口下限，调用会报错提示调整，不会擅自延长。
 
 ## 典型示例
 
