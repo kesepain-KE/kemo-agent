@@ -53,7 +53,7 @@ def run(
     normalized_operation = str(operation or "").strip().casefold()
     if normalized_operation not in _OPERATIONS:
         raise ValueError(
-            "kemo_graph_write 只接受写入 operation；写入 operations："
+            "action 固定为 operation_guide；请通过必填的 operation 指定写入操作："
             + ", ".join(sorted(_OPERATIONS))
         )
     if normalized_operation == "documents" and arguments.get("document_action", "") not in {

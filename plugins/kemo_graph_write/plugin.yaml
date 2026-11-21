@@ -23,7 +23,7 @@ input_schema:
       - maintenance
       - projects
       - deactivate
-      description: 仅允许该工具权限等级对应的操作
+      description: 必填；通过 operation 指定实际的写入操作，仅允许当前权限对应的操作
     library_ids:
       type: array
       items:
@@ -122,6 +122,7 @@ input_schema:
       maxLength: 160
   required:
   - action
+  - operation
   additionalProperties: false
 version: 1.0.0
 enabled: true

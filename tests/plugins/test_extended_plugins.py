@@ -124,6 +124,9 @@ class PluginManifestTests(unittest.TestCase):
             registry.get("kemo_graph_write").permission,
             "write",
         )
+        graph_write = Draft202012Validator(registry.get("kemo_graph_write").input_schema)
+        self.assertFalse(graph_write.is_valid({"action": "operation_guide"}))
+        self.assertTrue(graph_write.is_valid({"action": "operation_guide", "operation": "sync"}))
         self.assertNotIn(
             "permission",
             json.dumps(registry.schemas(), ensure_ascii=False),

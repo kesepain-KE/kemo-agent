@@ -37,6 +37,8 @@
 旧默认 keywords、substring/word/exact 与正则模式保持不变；`regex=true` 优先。
 索引随新增、改名、正文编辑和删除在同一事务更新，检索不加权、不改变记忆注入开关。
 
+标题搜索示例：`query="shell 终端"` 默认在同一标题内做关键词覆盖率匹配；两个词分属不同标题时不会各自返回。要找任一词命中的标题，用 `action=search_by_title, tier=all, query="shell|终端", regex=true`，无需改变默认规则。
+
 ## 返回字段
 
 | 字段 | 适用 action | 说明 |

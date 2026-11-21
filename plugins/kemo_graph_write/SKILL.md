@@ -5,6 +5,7 @@
 ## 使用原则
 
 - 仅在用户明确要求操作 Kemo Graph 文档站时调用。
+- `action` 固定传 `operation_guide`，同时用必填的 `operation` 指定写入操作，例如 `operation="sync"`。这里返回写入参数，不直接执行；读操作的引导请用 `kemo_graph_read`。
 - 只使用注册表中可见的 Library ID，不传裸 Store 路径。
 - 普通检索优先使用 `query`；数据更新按 `scan → 用户确认 → sync → ingest → status` 执行。
 - 网关不可用不影响本地知识库与对话。
