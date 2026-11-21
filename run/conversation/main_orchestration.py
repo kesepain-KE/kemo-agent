@@ -157,6 +157,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             _positive(tool_settings, "consecutive_identical_call_limit", 3))
         seen = AttemptToolDedup()
         call_iterations, live_signatures = {}, {}
+        async_execution_ids: set[str] = set()
         prior = []
         if resume_id:
             # Restore duplicate protection from execution facts, including
@@ -174,6 +175,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 seen.check(name, arguments, identical)
                 if execution["execution_live"]:
                     live_signatures[tool_call_signature(name, arguments)] = execution["execution_id"]
+                    if _call_is_explicitly_async(SimpleNamespace(name=name, arguments=arguments)):
+                        async_execution_ids.add(execution["execution_id"])
                 elif execution["raw_payload"]:
                     payload = json.loads(execution["raw_payload"])["result"]
                     seen.remember(name, arguments, payload, 0,
@@ -363,6 +366,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 capacity_limited = error.get("category") == "execution_capacity"
                 result_too_large = error.get("category") == "result_too_large"
                 if not execution_live:
+                    async_execution_ids.discard(event.metadata["execution_id"])
                     # Synthetic duplicate receipts have their own IDs; only the
                     # original execution's terminal receipt may release its fence.
                     if live_signatures.get(signature) == event.metadata.get("execution_id"):
@@ -414,19 +418,22 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             # Child and Shell notifications are runtime state in the virtual
             # tail, not invented user history or an extra persistence mechanism.
             live, unseen = integration.pending()
+            # Async executions still hold completion, but cannot unblock a required tool.
+            live_tool_waiting = bool(live) and (
+                not async_execution_ids or any(
+                    execution["id"] not in async_execution_ids
+                    for execution in integration.live_executions()
+                )
+            )
             # A result may commit after the event drain. Apply its boundary
             # before deciding whether the now-idle integration needs inference.
             if tool_runtime.has_events():
                 continue
             child_notice, shell_notice = coordinator.notifications(), shell.take()
             dependencies_pending = bool(live or coordinator.pending() or shell.pending())
-            live_tool_waiting = bool(live and not continuation)
-            needs_request = continuation or bool(
-                (new_guidance or child_notice or shell_notice) and not live_tool_waiting
-            )
-            needs_request = needs_request or (unseen and not live)
-            needs_request = needs_request or (
-                final_payload is None and not dependencies_pending
+            needs_request = not live_tool_waiting and bool(
+                continuation or new_guidance or child_notice or shell_notice or unseen
+                or (final_payload is None and not dependencies_pending)
             )
             if tool_runtime.waiting_for_decision():
                 needs_request = False
@@ -668,7 +675,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             batch_signatures: set[str] = set()
             continuation = False
             for call, plan_generation in task_plan_creation_batch(calls, record=tool_runtime.record):
-                continuation = (continuation or _call_is_explicitly_async(call)) and not plan_generation
+                explicitly_async = not plan_generation and _call_is_explicitly_async(call)
+                continuation = (continuation or explicitly_async) and not plan_generation
                 call_iterations[call.call_id] = iteration
                 signature = tool_call_signature(call.name, call.arguments)
                 if signature in batch_signatures:
@@ -744,6 +752,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 execution_id = tool_runtime.start(call, definition, context=context,
                     timeout=float(tool_settings.get("timeout", 240)), transform=transform)
                 started_executions.append(execution_id)
+                if explicitly_async:
+                    async_execution_ids.add(execution_id)
                 live_signatures[signature] = execution_id
                 dispatched += 1
             tool_runtime.handoff(started_executions)

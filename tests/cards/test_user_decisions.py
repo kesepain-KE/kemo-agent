@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from plugins.user_decision import tool as decision_plugin
+from provider.protocol.models import ToolResultItem
 from run.cards import CardConflictError, CardStore, IntegrationStore
 from run.cards.execution import _OWNER
 from run.config import load_config
@@ -160,6 +161,63 @@ def test_async_work_can_close_its_own_question_and_deliver_without_waiting(root)
     assert pending(root) == []
     with CardStore(root, "alice").db() as db:
         assert db.execute("SELECT count(*) FROM card_tool_executions WHERE execution_live=1").fetchone()[0] == 0
+
+
+def test_async_decision_does_not_skip_required_tool_result(root):
+    enable(root)
+    entered, release, next_request, cancel = (threading.Event() for _ in range(4))
+    requests = []
+
+    def analyze():
+        entered.set()
+        assert release.wait(8)
+        return {"ok": False, "error": {"message": "analysis failed"}}
+
+    class Provider:
+        def create(self, request):
+            requests.append(request)
+            if len(requests) == 1:
+                return response(request, "", calls=[
+                    call("work", "callid_analysis"),
+                    call("user_decision", **QUESTION, mode="async"),
+                ])
+            if len(requests) == 2:
+                next_request.set()
+                result = next(item for item in request.input
+                              if isinstance(item, ToolResultItem) and item.name == "work")
+                assert result.is_error
+                question = pending(root)[0]
+                return response(request, "", calls=[call(
+                    "user_decision", "callid_close", action="close",
+                    decision_id=question["decision_id"], resolution="Proceed without the failed analysis",
+                )])
+            return response(request, "done")
+
+    def execute_mixed_batch():
+        return list(iter_request_events(
+            {"user": "alice", "source": "web", "session_id": "s1", "prompt": "compare"},
+            root=root, provider_factory=lambda _: Provider(),
+            tool_registry_factory=lambda *_: ToolRegistry({
+                **registry(root).tools, "work": definition(root, analyze),
+            }),
+            cancel_event=cancel,
+        ))
+
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(execute_mixed_batch)
+        try:
+            assert entered.wait(5)
+            assert await_question(root)["mode"] == "async"
+            assert not next_request.wait(.4), "a live required tool must block the next request"
+            release.set()
+            events = future.result(8)
+        finally:
+            release.set()
+            cancel.set()
+
+    assert events[-1].metadata["status"] == "completed", events[-1].to_dict()
+    assert len(requests) == 3
+    assert len([event for event in events if event.type == "tool_call_start" and event.tool_name == "work"]) == 1
 
 
 def test_timeout_returns_no_answer_and_resumes_instead_of_choosing_option_one(root, monkeypatch):
