@@ -124,6 +124,24 @@ def test_read_pages_count_only_conversation_text_and_skip_trailing_tools(root, h
     assert store.raw_page("web", "s1") == before
 
 
+def test_read_preserves_empty_text_card_and_cursor(root):
+    store = CardStore(root, "alice")
+    store.ensure_session("web", "s1")
+    store.append("web", "s1", "mixed", "user_text", {"text": "start"}, level="initial")
+    empty = store.append("web", "s1", "mixed", "agent_text", {"text": ""}, level="interim")
+    tail = store.append("web", "s1", "mixed", "agent_text", {"text": "后续正文🙂"}, level="final")
+    archive_id = search(root, action="list")["archives"][0]["archive_id"]
+
+    first = search(root, action="read", archive_id=archive_id, limit=2)
+    assert first["total_messages"] == 3 and first["has_more"]
+    assert [(item["seq"], item["content"], item["partial"]) for item in first["messages"]] == [
+        (1, "start", False), (empty.seq, "", False),
+    ]
+    second = search(root, action="read", archive_id=archive_id, cursor=first["next_cursor"])
+    assert [(item["seq"], item["content"]) for item in second["messages"]] == [(tail.seq, "后续正文🙂")]
+    assert not second["has_more"] and second["next_cursor"] is None
+
+
 def test_limit_counts_all_matches_and_character_budget_advances_offset(root):
     seed(root, texts=tuple(f"paged hit {n} " + "x" * 300 for n in range(10)))
     result = search(root, "hit", limit=3)

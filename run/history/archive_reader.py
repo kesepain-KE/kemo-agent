@@ -47,7 +47,7 @@ def read_archive(root, user, *, archive_id, cursor="", role="any", limit=50, pag
                 break
             row = db.execute(f"SELECT c.card_id,c.integration_id,c.seq,c.raw_kind,c.raw_level,c.created_at,"
                              f"{ROLE} AS role,length(CAST({CONTENT} AS BLOB)) AS size,"
-                             f"substr(CAST({CONTENT} AS BLOB),?,?) AS chunk FROM context_cards c "
+                             f"coalesce(substr(CAST({CONTENT} AS BLOB),?,?), x'') AS chunk FROM context_cards c "
                              f"WHERE {where} ORDER BY c.seq LIMIT 1", (offset + 1, room, *args)).fetchone()
             if row is None:
                 break
