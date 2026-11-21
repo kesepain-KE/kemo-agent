@@ -6,6 +6,7 @@ from __future__ import annotations
 import subprocess
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 import threading
 from typing import Any
@@ -54,6 +55,7 @@ def run_process(
             cwd=cwd,
         )
     )
+    decode_output = partial(deps.decode_output, shell_type=resolved_shell_type)
     if cancel_event is None:
         try:
             completed = deps.subprocess.run(
@@ -71,8 +73,8 @@ def run_process(
                 ),
             )
         except deps.subprocess.TimeoutExpired as exc:
-            stdout = deps.decode_output(exc.stdout or b"")
-            stderr = deps.decode_output(exc.stderr or b"")
+            stdout = decode_output(exc.stdout or b"")
+            stderr = decode_output(exc.stderr or b"")
             output, truncated = deps.truncate(
                 "\n".join(value for value in (stdout, stderr) if value).strip()
             )
@@ -84,8 +86,8 @@ def run_process(
                 "truncated": truncated,
                 "shell_type": resolved_shell_type,
             }
-        stdout = deps.decode_output(completed.stdout).strip()
-        stderr = deps.decode_output(completed.stderr).strip()
+        stdout = decode_output(completed.stdout).strip()
+        stderr = decode_output(completed.stderr).strip()
         if stdout and stderr:
             output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
         elif stderr:
@@ -132,8 +134,8 @@ def run_process(
             input_data = None
             continue
     if cancelled or timed_out:
-        stdout = deps.decode_output(stdout_data or b"")
-        stderr = deps.decode_output(stderr_data or b"")
+        stdout = decode_output(stdout_data or b"")
+        stderr = decode_output(stderr_data or b"")
         output, truncated = deps.truncate(
             "\n".join(value for value in (stdout, stderr) if value).strip()
         )
@@ -149,8 +151,8 @@ def run_process(
             "truncated": truncated,
             "shell_type": resolved_shell_type,
         }
-    stdout = deps.decode_output(stdout_data).strip()
-    stderr = deps.decode_output(stderr_data).strip()
+    stdout = decode_output(stdout_data).strip()
+    stderr = decode_output(stderr_data).strip()
     if stdout and stderr:
         output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
     elif stderr:

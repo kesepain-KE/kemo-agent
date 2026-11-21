@@ -50,4 +50,6 @@ cat / type、ls / dir、mkdir、echo、rm / del 的简单字面量形式也以�
 
 Windows 下显式选择 `bash` / `bash_login` 命中系统自带的 WSL `bash.exe` 时，使用 `wsl.exe --exec` 将内联命令直接交给 Bash，不经过 WSL 默认 Shell 的预展开。Git Bash 等原生解释器不变。
 
+Windows CMD 的同步工具回执按行兼容 UTF-8 和系统默认编码，不改变 CMD 的代码页。同一行内混用编码或子进程已输出替换字符时，无法可靠还原。
+
 框架内置命令组成的简单链仍由框架执行，并可使用 `chain_timeout_mode`。外部命令或脚本的 `timeout` 始终约束整个单进程脚本；如需在一个持久会话中切换目录，建议单独调用一次 `cd`，再用相同 `session_id` 执行后续命令。

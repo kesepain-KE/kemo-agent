@@ -137,6 +137,14 @@ def _prepare_process_command(
         env_extra=env_extra,
         resolved_shell_type=resolved_shell_type,
     )
+    if (
+        _is_windows()
+        and (system_root := os.environ.get("SystemRoot"))
+        and isinstance(process_command, list)
+        and Path(process_command[0]) == Path(system_root) / "System32" / "wsl.exe"
+    ):
+        # WSL diagnostics and Bash output share the same stderr pipe.
+        _set_environment_value(environment, "WSL_UTF8", "1")
     return process_command, use_shell, resolved_shell_type, environment
 
 

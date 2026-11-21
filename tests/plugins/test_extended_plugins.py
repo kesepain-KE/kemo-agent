@@ -37,7 +37,7 @@ from plugins.shell.tool import (
     _find_shell_executable,
     _looks_like_powershell,
     _merged_shell_environment,
-    _process_command,
+    _prepare_process_command,
     _shell_environment,
 )
 from plugins.shell.tool import run as run_shell
@@ -1759,6 +1759,24 @@ class ShellPluginTests(unittest.TestCase):
         ):
             self.assertIn("�", _decode_output(b"\xff"))
 
+    def test_windows_cmd_decodes_mixed_stderr_lines(self) -> None:
+        completed = SimpleNamespace(
+            stdout=b"",
+            stderr="CMD=中文探针\r\n".encode("cp936") + "PY=你好\n".encode("utf-8"),
+            returncode=0,
+        )
+        with (
+            patch("plugins.shell.tool._is_windows", return_value=True),
+            patch("plugins.shell.tool._find_shell_executable", return_value="cmd-bin"),
+            patch("plugins.shell.tool.locale.getpreferredencoding", return_value="cp936"),
+            patch("plugins.shell.tool.subprocess.run", return_value=completed),
+        ):
+            result = run_shell(
+                "external-command", shell_type="cmd", context=self._context()
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["output"], "STDERR:\nCMD=中文探针\r\nPY=你好")
+
     def test_shell_type_selects_explicit_interpreter(self) -> None:
         completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)
         cases = {
@@ -1838,17 +1856,23 @@ class ShellPluginTests(unittest.TestCase):
         )
         with (
             patch("plugins.shell.tool._is_windows", return_value=True),
-            patch.dict(os.environ, {"SystemRoot": str(system_root)}),
+            patch.dict(os.environ, {"SystemRoot": str(system_root), "WSL_UTF8": "0"}),
         ):
             for shell_type, executable, launch in cases:
                 with (
                     self.subTest(shell_type=shell_type, executable=executable),
                     patch("plugins.shell.tool._find_shell_executable", return_value=str(executable)),
                 ):
-                    self.assertEqual(
-                        _process_command(command, shell_type, environment={}, cwd=PROJECT_ROOT),
-                        ([*launch, "-c", command], False, shell_type),
+                    argv, use_shell, resolved_shell, environment = _prepare_process_command(
+                        command, shell_type, env_extra={}, cwd=PROJECT_ROOT
                     )
+                    self.assertEqual(
+                        (argv, use_shell, resolved_shell), ([*launch, "-c", command], False, shell_type)
+                    )
+                    self.assertEqual(
+                        environment["WSL_UTF8"], "1" if executable == legacy_launcher else "0"
+                    )
+                    self.assertEqual(os.environ["WSL_UTF8"], "0")
 
     def test_auto_shell_uses_command_aware_windows_priority(self) -> None:
         completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)

@@ -301,20 +301,34 @@ def _now() -> float:
     return time.time()
 
 
-def _decode_output(data: bytes) -> str:
-    candidates = ["utf-8"]
+def _decode_output(data: bytes, *, shell_type: str = "") -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
     try:
         preferred = locale.getpreferredencoding(False)
-        if preferred and preferred.casefold() not in {"utf-8", "utf8"}:
-            candidates.append(preferred)
     except Exception:
-        pass
-    for encoding in candidates:
+        preferred = None
+    if not preferred or preferred.casefold() in {"utf-8", "utf8"}:
+        return data.decode("utf-8", errors="replace")
+
+    def decode_legacy(chunk: bytes) -> str:
         try:
-            return data.decode(encoding)
+            return chunk.decode(preferred)
         except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
+            return chunk.decode("utf-8", errors="replace")
+
+    if shell_type == "cmd" and _is_windows():
+        # CMD and a UTF-8 child can write separate lines to the same pipe.
+        lines: list[str] = []
+        for line in data.splitlines(keepends=True):
+            try:
+                lines.append(line.decode("utf-8"))
+            except UnicodeDecodeError:
+                lines.append(decode_legacy(line))
+        return "".join(lines)
+    return decode_legacy(data)
 
 
 def _truncate(value: str) -> tuple[str, bool]:
