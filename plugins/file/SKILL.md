@@ -10,13 +10,13 @@
 3. **批量操作先确认范围**：移动、复制或删除前先用 `list_dir`/`tree_dir` 查看范围。目录结果带 `total`、`has_more` 和 `next_offset`；存在下一页时沿 `next_offset` 分页读取，不能把当前页误当完整目录。`delete` 只删除文件，不删除目录。
 4. **搜索与浏览分工**：找文件或搜索代码使用 `search`；查看目录树使用 `tree_dir`；查看单层目录使用 `list_dir`。
 5. **目录复制须显式授权**：复制目录必须设置 `recursive=true`。文件和目录都不能复制或移动到自身子目录。
-6. **编码回退**：默认 UTF-8，解码失败时尝试 UTF-8 BOM 和操作系统首选编码；可通过 `encoding` 显式指定。
+6. **编码与追加**：读取和搜索默认识别 BOM，其余先试 UTF-8，再试系统编码；可显式指定 `encoding`。新文件默认 UTF-8；追加到现有文件时沿用已识别的编码，不重复写 BOM。无 BOM 的大文件追加时建议显式指定编码，避免为识别编码扫描全文件。
 7. **文件校验**：下载、复制或移动后可用 `hash` 计算 MD5、SHA1 或 SHA256 校验完整性。
 8. **小改动禁止整文件覆盖**：已有文件的小范围修改必须使用 `edit`，不要用 `write` 重写全文。精确文本块使用 `replace_text`，单行使用 `replace_line`，连续多行或指定列范围使用 `replace_range`，在某行某列插入时使用 `insert`；删除完整行必须使用 `delete_line`/`delete_range`，禁止用空 `replace_range` 猜测删除语义。
 9. **精确替换优先**：编辑的新内容推荐使用 `new_text`；`content` 只为兼容旧调用保留。`replace_text` 默认保持 `expected_count=1`，匹配失败后重新读取目标内容，不要直接改成 `-1`。只有用户明确要求批量替换时才使用 `expected_count=-1`。
 10. **行编辑必须带原文保护**：`replace_line`、`replace_range`、`delete_line`、`delete_range` 必须传入从最近一次读取获得的 `expected_old_text`；Tab、空格和文本必须一致。`insert` 必须传入最近一次读取返回的 `sha256` 作为 `expected_hash`。校验失败后重新读取，禁止猜行号继续修改。
 11. **不要手工补行尾**：`replace_line` 和 `replace_range` 会保留目标区域原有的行尾，`new_text` 末尾无需附加换行。编辑器会保留文件编码、BOM、LF/CRLF/CR 和末尾换行；未修改区域不会被统一改写。
-12. **新文件可直接安全续编**：`write` 成功后会返回完整文件 `sha256` 和有界的带行号 `lines` 快照。刚创建的文件可依据这些字段定位后续 `edit`；快照被截断时仍应先使用 `read_range` 获取目标区域，不能猜测行号。
+12. **新文件可直接安全续编**：`write` 保留传入的换行字节，先编码再原子替换；成功后返回完整文件 `sha256` 和有界的带行号 `lines` 快照。快照被截断时应先使用 `read_range` 获取目标区域。若 `read_range` 只返回 `line_preview`，预览不是完整行，不可直接拿来做整行编辑。
 
 ## 输出字段
 
@@ -32,7 +32,8 @@
 | `sha256_complete` | read/read_range/write | `sha256` 是否覆盖整个文件；为 false 时如需插入操作，先显式调用 `hash` |
 | `size` | read/stat | 原始文件大小（字节） |
 | `read_bytes` | read | 实际读取字节数 |
-| `truncated` | read/read_range/search | 是否因限制截断 |
+| `truncated` | read/read_range/search | 是否因字节、行数、回执大小或匹配数量等限制而截断 |
+| `line_preview` | read_range | 单行超过回执预算时的有界预览，含行号、前缀和原始字符数；不计入完整 `lines` |
 | `total_lines` | read_range | 总行数（大文件可能是估算值） |
 | `total_lines_estimated` | read_range | `total_lines` 是否为采样估算 |
 | `shown` | read_range | 实际返回行数 |
@@ -54,4 +55,4 @@
 | `recursive` | copy | 是否递归复制 |
 | `deleted` | delete | 删除确认 |
 
-任何 action 的完整 JSON 结果超过 100,000 字符时，框架都不会截取一段正文冒充完整结果，而是返回 `ToolResultTooLargeError`，包含原始字符数、限制和缩小范围提示。该受控拒绝不会计入同名工具连续失败次数。
+行号范围和尾读都受 `max_lines` 限制。`read_range` 也会提前限制完整行回执大小；框架仍保留 100,000 字符的统一限制。超限省略内联正文不代表操作失败，应先看回执中的状态，不要因为正文被省略就重试写入或移动。

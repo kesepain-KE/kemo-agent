@@ -1,10 +1,12 @@
 """文件操作工具 — 读写、编辑、搜索、校验和目录操作。kemo-agent 原生插件。"""
 
+import errno
 import fnmatch
 import hashlib
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -366,7 +368,7 @@ def _run_search(
                     continue
                 raw = candidate.read_bytes()
                 text, _ = _read_with_encoding_bytes(
-                    raw, encoding or "utf-8", replace=False
+                    raw, encoding, replace=False
                 )
             except (OSError, ValueError):
                 continue
@@ -444,6 +446,41 @@ def _run_copy(
     return _result(True, path=path, dst_path=dst_path, type="file", recursive=False)
 
 
+def _move_with_backup(source: Path, destination: Path) -> str:
+    # Windows cannot atomically replace an existing directory. Cross-volume
+    # file moves likewise need a recoverable destination until the move succeeds.
+    work = Path(tempfile.mkdtemp(prefix=".kemo-move-", dir=destination.parent))
+    backup = work / "previous"
+    try:
+        os.replace(destination, backup)
+    except OSError:
+        work.rmdir()
+        raise
+
+    try:
+        shutil.move(str(source), str(destination))
+    except OSError as error:
+        partial = work / "incomplete"
+        try:
+            if destination.exists():
+                os.replace(destination, partial)
+            os.replace(backup, destination)
+        except OSError as restore_error:
+            raise OSError(
+                f"移动失败且无法恢复原目标：{error}；{restore_error}。原目标备份：{backup}"
+            ) from restore_error
+        if partial.exists():
+            raise OSError(f"移动失败，原目标已恢复；未完成的数据保留在 {partial}：{error}") from error
+        work.rmdir()
+        raise
+
+    try:
+        shutil.rmtree(work)
+    except OSError as error:
+        return f"移动已完成，但无法清理原目标备份 {work}：{error}"
+    return ""
+
+
 def _run_move(
     path: str, dst_path: str = "", overwrite: bool = False, **_kw: Any
 ) -> dict[str, Any]:
@@ -473,15 +510,23 @@ def _run_move(
     ):
         raise ValueError("不能覆盖源目录的父目录")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        if destination.is_dir():
-            shutil.rmtree(destination)
-        else:
-            destination.unlink()
-    shutil.move(str(source), str(destination))
-    return _result(
+    response = _result(
         True, path=path, dst_path=dst_path, type="dir" if source_is_dir else "file"
     )
+    if not destination.exists():
+        shutil.move(str(source), str(destination))
+        return response
+    if not source_is_dir:
+        try:
+            os.replace(source, destination)
+            return response
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+    warning = _move_with_backup(source, destination)
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 # ── 创建/删除 ─────────────────────────────────────────────────────

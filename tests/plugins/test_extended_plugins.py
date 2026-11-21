@@ -343,6 +343,42 @@ class FilePluginTests(unittest.TestCase):
                     context=context,
                 )
 
+    def test_write_preserves_original_on_failure_and_keeps_supplied_newlines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": directory}
+            path = root / "original.txt"
+            path.write_bytes(b"original\r\n")
+            with self.assertRaises(UnicodeEncodeError):
+                run_file("write", path.name, encoding="ascii", content="中文", context=context)
+            with patch("plugins.file.tool.os.replace", side_effect=PermissionError("locked")):
+                failed = run_file("write", path.name, content="other", context=context)
+            self.assertFalse(failed["ok"])
+            self.assertEqual(path.read_bytes(), b"original\r\n")
+            self.assertEqual(list(root.iterdir()), [path])
+
+            content = "alpha\r\nbeta\ngamma\r"
+            written = run_file("write", path.name, content=content, context=context)
+            self.assertEqual(path.read_bytes(), content.encode())
+            self.assertEqual([item["text"] for item in written["lines"]], ["alpha", "beta", "gamma"])
+
+            written = run_file("write", path.name, content="x" * 20_001, context=context)
+            self.assertTrue(written["snapshot_truncated"])
+            self.assertEqual(len(written["lines"][0]["text"]), 20_000)
+
+    def test_append_preserves_legacy_encoding_and_reports_actual_byte_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": directory}
+            path = root / "legacy.txt"
+            original = ("A" * 65_536 + "原文\r\n").encode("cp936")
+            suffix = "新行\r\n"
+            path.write_bytes(original)
+            with patch("plugins.file.tool.locale.getpreferredencoding", return_value="cp936"):
+                result = run_file("append", path.name, content=suffix, context=context)
+            self.assertEqual(result["appended"], len(suffix.encode("cp936")))
+            self.assertEqual(path.read_bytes(), original + suffix.encode("cp936"))
+
     def test_directory_actions_are_pageable_and_report_complete_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -513,6 +549,56 @@ class FilePluginTests(unittest.TestCase):
                 decoded = run_file("read", "locale.txt", context=context)
             self.assertEqual(decoded["content"], japanese)
             self.assertEqual(decoded["encoding"], "cp932")
+
+    def test_read_range_honors_line_limit_and_bounds_single_long_line_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {"root": directory}
+            path = root / "range.txt"
+            path.write_bytes(b"row1\r\nrow2\r\nrow3\r\nrow4\r\n")
+            for args, expected in (({"end_line": 4}, ["row1"]), ({"tail": 4}, ["row4"])):
+                with self.subTest(args=args):
+                    read = run_file("read_range", path.name, max_lines=1, context=context, **args)
+                    self.assertTrue(read["truncated"])
+                    self.assertEqual(read["content"], expected)
+
+            for text in ("x" * 60_000, "\t" * 30_000):
+                with self.subTest(line_length=len(text)):
+                    path.write_bytes(text.encode())
+                    read = run_file("read_range", path.name, end_line=1, context=context)
+                    self.assertTrue(read["truncated"])
+                    self.assertEqual(read["lines"], [])
+                    self.assertEqual(read["line_preview"]["total_chars"], len(text))
+                    self.assertLess(len(json.dumps(read, ensure_ascii=False)), 100_000)
+
+    def test_bom_is_not_editable_text_and_utf16_tail_counts_real_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = {"root": directory}
+            path = Path(directory) / "bom.txt"
+            content = "首行\r\n寻找\r\n结束🙂\r\n"
+            formats = (
+                ("utf-8", b"\xef\xbb\xbf"),
+                ("utf-16-le", b"\xff\xfe"),
+                ("utf-16-be", b"\xfe\xff"),
+            )
+            for codec, marker in formats:
+                with self.subTest(codec=codec):
+                    path.write_bytes(marker + content.encode(codec))
+                    first = run_file("read_range", path.name, end_line=1, context=context)
+                    self.assertEqual(first["content"], ["首行"])
+                    found = run_file("search", path.name, query="寻找", context=context)
+                    self.assertEqual([item["line"] for item in found["results"]], [2])
+                    for options in ({}, {"max_bytes": len("结束🙂\r\n".encode(codec)) + 1}):
+                        tail = run_file("read_range", path.name, tail=1, context=context, **options)
+                        self.assertEqual(tail["lines"], [{"line": 3, "text": "结束🙂"}])
+                        self.assertFalse(tail["line_numbers_estimated"])
+                    run_file(
+                        "edit", path.name, edit_mode="replace_line", line=1,
+                        expected_old_text=first["content"][0], new_text="换行内容", context=context,
+                    )
+                    run_file("append", path.name, content="最后一行\r\n", context=context)
+                    expected = content.replace("首行", "换行内容", 1) + "最后一行\r\n"
+                    self.assertEqual(path.read_bytes(), marker + expected.encode(codec))
 
     def test_edit_preserves_newline_styles_bom_and_untouched_regions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -898,6 +984,33 @@ class FilePluginTests(unittest.TestCase):
             delete_directory = run_file("delete", "moved", context=context)
             self.assertFalse(delete_directory["ok"])
             self.assertIn("shell 工具", delete_directory["error"])
+
+    def test_move_overwrite_does_not_discard_original_destination_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            context = {"root": str(root)}
+            source, target = root / "source.txt", root / "target.txt"
+            source.write_bytes(b"new")
+            target.write_bytes(b"old")
+            with patch("plugins.file.browse_operations.os.replace", side_effect=PermissionError("locked")):
+                failed = run_file("move", source.name, dst_path=target.name, overwrite=True, context=context)
+            self.assertFalse(failed["ok"])
+            self.assertEqual(source.read_bytes(), b"new")
+            self.assertEqual(target.read_bytes(), b"old")
+
+            source_dir, target_dir = root / "source-dir", root / "target-dir"
+            source_dir.mkdir()
+            target_dir.mkdir()
+            (source_dir / "new.txt").write_bytes(b"new")
+            (target_dir / "old.txt").write_bytes(b"old")
+            with patch("plugins.file.browse_operations.shutil.move", side_effect=OSError("move failed")):
+                failed = run_file(
+                    "move", source_dir.name, dst_path=target_dir.name, overwrite=True, context=context
+                )
+            self.assertFalse(failed["ok"])
+            self.assertEqual((source_dir / "new.txt").read_bytes(), b"new")
+            self.assertEqual((target_dir / "old.txt").read_bytes(), b"old")
+            self.assertEqual(list(root.glob(".kemo-move-*")), [])
 
     def test_file_manifest_exposes_optimized_parameters(self) -> None:
         registry = discover_tools(PROJECT_ROOT, "alice")

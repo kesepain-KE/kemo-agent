@@ -2,6 +2,7 @@
 
 import fnmatch
 import hashlib
+import json
 import locale
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Any
 from plugins.file.text_editing import (
     DEFAULT_READ_MAX_BYTES as _DEFAULT_READ_MAX_BYTES,
     MAX_READ_BYTES_LIMIT as _MAX_READ_BYTES_LIMIT,
+    append_encoding as _append_encoding,
     atomic_write_bytes as _atomic_write_bytes,
     bounded_line_snapshot as _bounded_line_snapshot,
     byte_limit as _byte_limit,
@@ -26,15 +28,18 @@ from plugins.file.text_editing import (
     newline_tokens as _newline_tokens,
     normalize_newlines as _normalize_newlines,
     normalized_with_boundaries as _normalized_with_boundaries,
+    payload_encoding as _payload_encoding,
     preview_lines as _preview_lines,
     range_text as _range_text,
     read_preserving_format as _read_preserving_format,
+    read_tail_bytes as _read_tail_bytes,
     read_text as _read,
     read_with_encoding as _read_with_encoding,
     read_with_encoding_bytes as _read_with_encoding_bytes,
     resolve_path as _resolve_path,
     result as _result,
     strip_trailing_newlines as _strip_trailing_newlines,
+    text_bom as _text_bom,
     validate_expected_hash as _validate_expected_hash,
     validate_expected_text as _validate_expected_text,
 )
@@ -139,7 +144,7 @@ def _run_read(
     snapshot_hash = hashlib.sha256(raw).hexdigest() if read_size == file_size else ""
     content, used_encoding = _read_with_encoding_bytes(
         raw,
-        encoding or "utf-8",
+        encoding,
         allow_incomplete_tail=file_size > limit,
     )
     content = _normalize_newlines(content)
@@ -154,6 +159,48 @@ def _run_read(
         truncated=file_size > limit,
         encoding=used_encoding,
     )
+
+
+_READ_RANGE_RESULT_CHARS = 80_000
+
+
+def _limit_range_result(
+    result: dict[str, Any], selected: list[str], first_line: int, *, tail_mode: bool
+) -> dict[str, Any]:
+    # Allow for both legacy content and numbered lines, JSON escapes, and the
+    # enclosing card. Never publish a clipped line as editable full text.
+    remaining = _READ_RANGE_RESULT_CHARS - len(json.dumps(result, ensure_ascii=False))
+    entries: list[dict[str, Any]] = []
+    offsets = range(len(selected) - 1, -1, -1) if tail_mode else range(len(selected))
+    for offset in offsets:
+        text = selected[offset]
+        row = {"line": first_line + offset, "text": text}
+        if 2 * len(text) <= remaining:
+            size = (
+                len(json.dumps(text, ensure_ascii=False))
+                + len(json.dumps(row, ensure_ascii=False))
+                + 4
+            )
+            if size <= remaining:
+                entries.append(row)
+                remaining -= size
+                continue
+        result["truncated"] = True
+        if not entries:
+            result["line_preview"] = {
+                "line": row["line"], "text": text[:2_000], "total_chars": len(text)
+            }
+        break
+    if tail_mode:
+        entries.reverse()
+    return {
+        **result,
+        "content": [entry["text"] for entry in entries],
+        "lines": entries,
+        "shown": len(entries),
+        "start_line": entries[0]["line"] if entries else 0,
+        "end_line": entries[-1]["line"] if entries else 0,
+    }
 
 
 def _run_read_range(
@@ -172,88 +219,64 @@ def _run_read_range(
             raise IsADirectoryError(f"目标是目录，不能作为文件读取: {path}")
         raise FileNotFoundError(f"文件不存在: {path}")
     limit = _byte_limit(max_bytes)
-    file_size = p.stat().st_size
+    maximum_lines = min(max(1, int(max_lines)), 50_000)
     requested_tail = max(0, int(tail))
-
-    if requested_tail:
-        read_size = min(file_size, limit)
-        start_offset = file_size - read_size
-        with p.open("rb") as handle:
-            previous = b""
-            if start_offset:
-                handle.seek(start_offset - 1)
-                previous = handle.read(1)
-            handle.seek(start_offset)
-            raw = handle.read(read_size)
-        snapshot_hash = (
-            hashlib.sha256(raw).hexdigest() if read_size == file_size else ""
-        )
-        if start_offset and previous not in (b"\n", b"\r"):
-            newline_positions = [
-                position
-                for marker in (b"\n", b"\r")
-                if (position := raw.find(marker)) >= 0
-            ]
-            raw = raw[min(newline_positions) + 1 :] if newline_positions else b""
-        text, used_encoding = _read_with_encoding_bytes(raw, encoding or "utf-8")
-        lines = text.splitlines()
-        selected = lines[-min(requested_tail, len(lines)) :]
-        total_lines, estimated = _count_lines_fast(p)
-        selected_start = max(0, total_lines - len(selected))
-        return _result(
-            True,
-            path=path,
-            content=selected,
-            lines=_line_entries(selected, selected_start),
-            start_line=(selected_start + 1 if selected else 0),
-            end_line=(selected_start + len(selected) if selected else 0),
-            line_numbers_estimated=estimated,
-            sha256=snapshot_hash,
-            sha256_complete=read_size == file_size,
-            total_lines=total_lines,
-            total_lines_estimated=estimated,
-            shown=len(selected),
-            tail_mode=True,
-            truncated=start_offset > 0 and len(lines) < requested_tail,
-            encoding=used_encoding,
-        )
-
-    read_size = min(file_size, limit)
     with p.open("rb") as handle:
-        raw = handle.read(read_size)
-    snapshot_hash = hashlib.sha256(raw).hexdigest() if read_size == file_size else ""
+        file_size = os.fstat(handle.fileno()).st_size
+        clipped_tail = bool(requested_tail and file_size > limit)
+        if clipped_tail:
+            raw, codec = _read_tail_bytes(handle, file_size, limit, encoding)
+        else:
+            raw, codec = handle.read(min(file_size, limit)), encoding
+    complete = not clipped_tail and len(raw) == file_size
     text, used_encoding = _read_with_encoding_bytes(
-        raw,
-        encoding or "utf-8",
-        allow_incomplete_tail=file_size > limit,
+        raw, codec,
+        allow_incomplete_tail=not complete and not requested_tail,
+        detect_bom=not clipped_tail,
     )
     lines = text.splitlines()
-    truncated = file_size > limit
-    total_lines, estimated = _count_lines_fast(p) if truncated else (len(lines), False)
-    maximum_lines = min(max(1, int(max_lines)), 50_000)
-    start = max(1, int(start_line or 1)) - 1
-    end = (
-        min(len(lines), int(end_line))
-        if end_line and end_line > 0
-        else min(len(lines), start + maximum_lines)
+    if not complete and not requested_tail and lines and not text.endswith(("\n", "\r")):
+        lines.pop()
+    total_lines, estimated = (
+        (len(lines), False) if complete else _count_lines_fast(p, encoding)
     )
-    selected = lines[start:end]
-    return _result(
-        True,
-        path=path,
-        content=selected,
-        lines=_line_entries(selected, start),
-        start_line=(start + 1 if selected else 0),
-        end_line=(start + len(selected) if selected else 0),
-        line_numbers_estimated=False,
-        sha256=snapshot_hash,
-        sha256_complete=read_size == file_size,
-        total_lines=total_lines,
-        total_lines_estimated=estimated,
-        shown=len(selected),
-        tail_mode=False,
-        truncated=truncated,
-        encoding=used_encoding,
+    if estimated:
+        total_lines = max(total_lines, len(lines))
+
+    if requested_tail:
+        selected = lines[-min(requested_tail, maximum_lines):]
+        first_line = max(0, total_lines - len(selected)) + 1
+        truncated = len(selected) < min(requested_tail, max(total_lines, len(lines)))
+        if clipped_tail and estimated and len(selected) < requested_tail:
+            truncated = True
+    else:
+        start = max(1, int(start_line or 1)) - 1
+        end = min(len(lines), int(end_line)) if end_line > 0 else len(lines)
+        selected = lines[start:min(end, start + maximum_lines)]
+        first_line = start + 1
+        truncated = not complete or end > start + maximum_lines
+
+    return _limit_range_result(
+        _result(
+            True,
+            path=path,
+            content=[],
+            lines=[],
+            start_line=0,
+            end_line=0,
+            shown=0,
+            line_numbers_estimated=bool(requested_tail and estimated),
+            sha256=hashlib.sha256(raw).hexdigest() if complete else "",
+            sha256_complete=complete,
+            total_lines=total_lines,
+            total_lines_estimated=estimated,
+            tail_mode=bool(requested_tail),
+            truncated=truncated,
+            encoding=used_encoding,
+        ),
+        selected,
+        first_line,
+        tail_mode=bool(requested_tail),
     )
 
 
@@ -264,16 +287,16 @@ def _run_write(
     path: str, content: str = "", encoding: str = "", **_kw: Any
 ) -> dict[str, Any]:
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
     requested_encoding = encoding or "utf-8"
-    p.write_text(content, encoding=requested_encoding)
-    written = p.read_bytes()
+    written = content.encode(requested_encoding)
     snapshot_text, used_encoding = _read_with_encoding_bytes(
         written, requested_encoding, replace=False
     )
     lines, total_lines, snapshot_truncated = _bounded_line_snapshot(
         _normalize_newlines(snapshot_text)
     )
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_bytes(p, written)
     return _result(
         True,
         action="write",
@@ -293,10 +316,12 @@ def _run_append(
     path: str, content: str = "", encoding: str = "", **_kw: Any
 ) -> dict[str, Any]:
     p = Path(path)
+    codec = _append_encoding(p, encoding)
+    added = content.encode(codec)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding=encoding or "utf-8") as handle:
-        handle.write(content)
-    return _result(True, path=path, appended=len(content.encode(encoding or "utf-8")))
+    with p.open("ab") as handle:
+        handle.write(added)
+    return _result(True, path=path, appended=len(added))
 
 
 # ── 编辑 ──────────────────────────────────────────────────────────
@@ -336,7 +361,7 @@ def _run_edit(
         raise ValueError("replace_range 不接受空 new_text；删除整行请使用 delete_range")
 
     original, used_encoding, original_bytes = _read_preserving_format(
-        p, encoding or "utf-8"
+        p, encoding
     )
     before_hash = hashlib.sha256(original_bytes).hexdigest()
     _validate_expected_hash(expected_hash, before_hash)
@@ -491,7 +516,8 @@ def _run_edit(
             preview=_preview_lines(original, line),
         )
 
-    updated_bytes = updated.encode(used_encoding)
+    marker, _ = _text_bom(original_bytes, encoding)
+    updated_bytes = marker + updated.encode(_payload_encoding(used_encoding))
     after_hash = hashlib.sha256(updated_bytes).hexdigest()
     _atomic_write_bytes(p, updated_bytes)
     return _result(

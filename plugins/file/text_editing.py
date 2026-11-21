@@ -2,23 +2,50 @@
 
 from __future__ import annotations
 
+import codecs
 import locale
 import os
 import re
 import shutil
+import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 DEFAULT_READ_MAX_BYTES = 52_428_800
 MAX_READ_BYTES_LIMIT = 536_870_912
 WRITE_SNAPSHOT_MAX_LINES = 200
 WRITE_SNAPSHOT_MAX_CHARS = 20_000
+_TEXT_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32-le"),
+    (codecs.BOM_UTF32_BE, "utf-32-be"),
+    (codecs.BOM_UTF8, "utf-8"),
+    (codecs.BOM_UTF16_LE, "utf-16-le"),
+    (codecs.BOM_UTF16_BE, "utf-16-be"),
+)
+
+
+def text_bom(data: bytes, encoding: str = "") -> tuple[bytes, str]:
+    requested = codecs.lookup(encoding).name if encoding else ""
+    for marker, codec in _TEXT_BOMS:
+        family = "utf-8-sig" if codec == "utf-8" else codec.rsplit("-", 1)[0]
+        if data.startswith(marker) and (not requested or requested in {codec, family}):
+            return marker, codec
+    return b"", ""
+
+
+def payload_encoding(encoding: str) -> str:
+    codec = codecs.lookup(encoding).name
+    if codec == "utf-8-sig":
+        return "utf-8"
+    if codec in {"utf-16", "utf-32"}:
+        return f"{codec}-{'le' if sys.byteorder == 'little' else 'be'}"
+    return codec
 
 
 def encoding_candidates(encoding: str) -> tuple[str, ...]:
-    encodings = ["utf-8", "utf-8-sig"]
+    encodings = ["utf-8"]
     try:
         system_encoding = locale.getpreferredencoding(False)
     except Exception:
@@ -34,8 +61,11 @@ def read_with_encoding_bytes(
     *,
     replace: bool = True,
     allow_incomplete_tail: bool = False,
+    detect_bom: bool = True,
 ) -> tuple[str, str]:
-    for candidate in encoding_candidates(encoding):
+    marker, detected = text_bom(data, encoding) if detect_bom else (b"", "")
+    data = data[len(marker):]
+    for candidate in (detected,) if detected else encoding_candidates(encoding):
         try:
             return data.decode(candidate), candidate
         except UnicodeDecodeError as error:
@@ -43,6 +73,7 @@ def read_with_encoding_bytes(
             incomplete = (
                 "end" in error.reason.casefold()
                 or "incomplete" in error.reason.casefold()
+                or "truncated" in error.reason.casefold()
             )
             if allow_incomplete_tail and tail_error and incomplete:
                 try:
@@ -53,8 +84,39 @@ def read_with_encoding_bytes(
         except (LookupError, UnicodeError):
             continue
     if replace:
-        return data.decode("utf-8", errors="replace"), "utf-8"
+        fallback = detected or "utf-8"
+        return data.decode(fallback, errors="replace"), fallback
     raise ValueError("无法使用指定编码、UTF-8 或系统编码解码内容")
+
+
+def append_encoding(path: Path, encoding: str) -> str:
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        return encoding or "utf-8"
+    with handle:
+        header = handle.read(4)
+        if not header:
+            return encoding or "utf-8"
+        _, detected = text_bom(header, encoding)
+        if detected:
+            return detected
+        if text_bom(header)[0]:
+            raise ValueError(f"已存在文件的 BOM 与指定编码 {encoding} 不符，拒绝追加")
+        if encoding:
+            return payload_encoding(encoding)
+        # Do not infer from only a prefix: a legacy file may start with ASCII.
+        for codec in encoding_candidates(""):
+            handle.seek(0)
+            decoder = codecs.getincrementaldecoder(codec)()
+            try:
+                for chunk in iter(lambda: handle.read(64 * 1024), b""):
+                    decoder.decode(chunk)
+                decoder.decode(b"", final=True)
+            except UnicodeDecodeError:
+                continue
+            return codec
+    raise ValueError("无法识别现有文件的编码，请指定 encoding 后再追加")
 
 
 def normalize_newlines(text: str) -> str:
@@ -87,18 +149,47 @@ def byte_limit(value: int, default: int = DEFAULT_READ_MAX_BYTES) -> int:
     return max(1, min(int(value or default), MAX_READ_BYTES_LIMIT))
 
 
-def count_lines_fast(path: Path, sample_size: int = 65_536) -> tuple[int, bool]:
-    size = path.stat().st_size
-    if size == 0:
-        return 0, False
+def count_lines_fast(path: Path, encoding: str, sample_size: int = 65_536) -> tuple[int, bool]:
     with path.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
         sample = handle.read(min(size, sample_size))
-    newline_count = len(re.findall(rb"\r\n|\r|\n", sample))
-    if size <= sample_size:
-        return newline_count + (0 if sample.endswith((b"\n", b"\r")) else 1), False
-    if newline_count == 0:
-        return 1, True
-    return max(1, round(size * newline_count / len(sample))), True
+    text, _ = read_with_encoding_bytes(sample, encoding, allow_incomplete_tail=len(sample) < size)
+    if len(sample) == size or not sample:
+        return len(text.splitlines()), len(sample) != size
+    return max(1, round(size * len(newline_tokens(text)) / len(sample))), True
+
+
+def read_tail_bytes(
+    handle: BinaryIO, file_size: int, limit: int, encoding: str
+) -> tuple[bytes, str]:
+    marker, detected = text_bom(handle.read(4), encoding)
+    codec = detected or (payload_encoding(encoding) if encoding else "")
+    width = 4 if codec.startswith("utf-32-") else 2 if codec.startswith("utf-16-") else 1
+    cr, lf = ("\r".encode(codec), "\n".encode(codec)) if width > 1 else (b"\r", b"\n")
+    # A tail may start in the middle of a code unit, a text line or a CRLF pair.
+    start = max(file_size - limit, len(marker))
+    start += (len(marker) - start) % width
+    handle.seek(max(len(marker), start - width))
+    previous = handle.read(width) if start > len(marker) else b""
+    raw = handle.read(max(0, file_size - start))
+    if start == len(marker):
+        return raw, codec
+    if previous == cr and raw.startswith(lf):
+        return raw[width:], codec
+    if previous in (cr, lf):
+        return raw, codec
+    positions = []
+    for separator in (cr, lf):
+        pos = raw.find(separator)
+        while pos >= 0 and pos % width:
+            pos = raw.find(separator, pos + 1)
+        if pos >= 0:
+            positions.append(pos)
+    if not positions:
+        return b"", codec
+    index = min(positions)
+    size = 2 * width if raw.startswith(cr + lf, index) else width
+    return raw[index + size:], codec
 
 
 def result(ok: bool, **fields: Any) -> dict[str, Any]:
@@ -200,7 +291,8 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         temp.write_bytes(data)
-        shutil.copymode(path, temp)
+        if path.exists():
+            shutil.copymode(path, temp)
         os.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
@@ -232,8 +324,7 @@ def bounded_line_snapshot(text: str) -> tuple[list[dict[str, Any]], int, bool]:
             break
         if not selected and len(value) > WRITE_SNAPSHOT_MAX_CHARS:
             selected.append(value[:WRITE_SNAPSHOT_MAX_CHARS])
-            used_chars = WRITE_SNAPSHOT_MAX_CHARS
-            break
+            return line_entries(selected, 0), len(lines), True
         selected.append(value)
         used_chars += added
     return line_entries(selected, 0), len(lines), len(selected) < len(lines)

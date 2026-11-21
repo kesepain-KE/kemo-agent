@@ -34,7 +34,7 @@ input_schema:
       description: edit 的新文本（推荐）；replace_text 可传空字符串删除精确匹配，删除整行使用 delete_line/delete_range
     encoding:
       type: string
-      description: 文本编码，默认 utf-8，失败时尝试系统编码
+      description: 文本编码；默认读取识别 BOM、UTF-8 或系统编码，write 默认 UTF-8，append 默认沿用现有文件编码
     start_line:
       type: integer
       minimum: 0
@@ -51,7 +51,7 @@ input_schema:
       type: integer
       minimum: 1
       maximum: 50000
-      description: read_range 最大返回行数，默认 500
+      description: read_range 最大返回行数（含指定 end_line 或 tail），默认 500
     max_bytes:
       type: integer
       minimum: 1
