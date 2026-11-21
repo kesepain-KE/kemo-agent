@@ -5,12 +5,24 @@ import json
 import os
 import re
 import stat
+import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
 
 class DeployError(RuntimeError):
     """An actionable deployment failure."""
+
+
+def setup_subprocess_kwargs() -> dict:
+    """Keep progress on a parent's console, but never open a new one."""
+    if os.name == 'nt':
+        from ctypes import windll
+
+        # A real console can be present even when stdout is redirected.
+        if not windll.kernel32.GetConsoleCP():
+            return {'creationflags': subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$")

@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from run.config import load_kemo_yaml, project_root
 from run.infra import install_terminal_capture, restore_terminal_capture
@@ -371,17 +371,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, *, on_ready: Callable[[str], None] | None = None
+) -> int:
     root = project_root().resolve()
     capture_installed = install_terminal_capture(root)
     try:
-        return _run_main(argv, root)
+        return _run_main(argv, root, on_ready=on_ready)
     finally:
         if capture_installed:
             restore_terminal_capture()
 
 
-def _run_main(argv: list[str] | None, root: Path) -> int:
+def _run_main(
+    argv: list[str] | None, root: Path, *, on_ready: Callable[[str], None] | None = None
+) -> int:
     args = build_parser().parse_args(argv)
 
     # 1. 加载实例环境配置并打印版本信息
@@ -443,7 +447,7 @@ def _run_main(argv: list[str] | None, root: Path) -> int:
     # Publish the actual endpoint before RuntimeHost can launch any isolated
     # Expand child.  kemo_app inherits this value when it starts and can use it
     # for a local upstream instead of assuming the legacy 1357 port.
-    _publish_runtime_web_endpoint(web_host, chosen_port)
+    endpoint = _publish_runtime_web_endpoint(web_host, chosen_port)
 
         # 5.启动RuntimeHost（除非--no-host）
     host = None
@@ -504,12 +508,20 @@ def _run_main(argv: list[str] | None, root: Path) -> int:
 
     print(f"Web 后端 → http://{web_host}:{chosen_port}")
     try:
-        uvicorn.run(
-            app,
-            host=web_host,
-            port=chosen_port,
-            log_level=args.log_level,
-        )
+        if on_ready is None:
+            uvicorn.run(app, host=web_host, port=chosen_port, log_level=args.log_level)
+        else:
+            # Uvicorn calls this on the first server tick, after it has bound
+            # the actual port (including fallback ports) and completed lifespan startup.
+            async def notify_ready():
+                server.config.callback_notify = None
+                on_ready(endpoint)
+
+            server = uvicorn.Server(uvicorn.Config(
+                app, host=web_host, port=chosen_port, log_level=args.log_level,
+                callback_notify=notify_ready,
+            ))
+            server.run()
     except KeyboardInterrupt:
         pass
     finally:

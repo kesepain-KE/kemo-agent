@@ -103,7 +103,14 @@ def main():
             command += ['--install-root', args.install_root]
         if args.yes:
             command.append('--yes')
-        return subprocess.call(command)
+        # This file is downloaded on its own, before deploy.core is available.
+        kwargs = {}
+        if os.name == 'nt':
+            from ctypes import windll
+
+            if not windll.kernel32.GetConsoleCP():
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        return subprocess.call(command, **kwargs)
 
 
 if __name__ == '__main__':

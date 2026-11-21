@@ -209,6 +209,16 @@ def ask_choice(
         print("请选择: " + ", ".join(choices))
 
 
+def console_subprocess_kwargs() -> dict:
+    """Share an existing Windows console, but never open one for setup commands."""
+    if os.name == "nt":
+        from ctypes import windll
+
+        if not windll.kernel32.GetConsoleCP():
+            return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def run(
     cmd: list[str],
     *,
@@ -219,7 +229,7 @@ def run(
     print("+ " + format_command(cmd))
     if dry_run and not capture:
         return subprocess.CompletedProcess(cmd, 0, "", "")
-    kwargs: dict = {"text": True}
+    kwargs: dict = {"text": True, **console_subprocess_kwargs()}
     if capture:
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE

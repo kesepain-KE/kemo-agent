@@ -112,9 +112,12 @@ def _run_one(args, doc, channel, bundle=None, web_args=None, available=None):
             if not python:
                 raise DeployError('Runtime not prepared; rerun install --force without --files-only')
             runtime.initialize(root, python, args.yes)
-            if args.command == 'start':
+            if args.command != 'start':
+                return 0
+            if channel != 'windows':
                 return runtime.supervise(root, python, web_args or [])
-            return 0
+        # The detached Windows process must acquire its own deployment lock.
+        return runtime.start_windows(root, python, web_args or [])
     if bundle is None:
         raise DeployError("Install/update requires a release bundle")
     if args.dry_run:

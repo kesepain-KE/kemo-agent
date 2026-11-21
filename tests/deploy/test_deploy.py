@@ -11,13 +11,17 @@ import io
 import yaml
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import urllib.request
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -81,6 +85,174 @@ class DeploymentTests(unittest.TestCase):
     def invoke(self, *args):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return cli.main(list(args))
+
+    def _install_windows_web(self, python, web):
+        deploy_files = {
+            path.relative_to(ROOT).as_posix(): path.read_bytes()
+            for path in (DEPLOY / 'deploy.py', *(DEPLOY / 'core').glob('*.py'))
+        }
+        record = self.install(self.bundle(extra={**deploy_files, 'start_web.py': web}))
+        record['python'] = str(python)
+        (self.root / '.kemo-install.json').write_bytes(json_bytes(record))
+
+    @unittest.skipUnless(os.name == 'nt', 'requires a native Windows console and venv launcher')
+    def test_windows_start_detaches_and_keeps_update_lock(self):
+        import psutil
+
+        venv = self.base / 'venv'
+        subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(venv)], check=True)
+        interpreter = venv / 'Scripts' / 'python.exe'
+        web = b'''
+import ctypes
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ready")
+
+def main(argv, *, on_ready):
+    assert argv == ["--smoke-test"]
+    assert ctypes.windll.kernel32.GetConsoleWindow() == 0
+    print("old marker below a large burst")
+    chunk = b"x" * (64 * 1024 - 1) + b"\\n"
+    for _ in range(200):
+        os.write(1, chunk)
+    print("detached stdout")
+    print("detached stderr", file=sys.stderr)
+    with HTTPServer(("127.0.0.1", 0), Health) as server:
+        server.timeout = 12
+        on_ready(f"http://127.0.0.1:{server.server_port}")
+        server.handle_request()
+    return 0
+'''
+        self._install_windows_web(interpreter, web)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        # Redirection does not remove the caller's OS console.
+        caller = (
+            'import ctypes,subprocess,sys; '
+            'assert ctypes.windll.kernel32.GetConsoleWindow(); '
+            'raise SystemExit(subprocess.call([sys.executable,*sys.argv[1:]]))'
+        )
+        result = subprocess.run(
+            [sys.executable, '-c', caller, str(self.root / 'deploy/deploy.py'),
+             'start', 'windows', '--yes', '--', '--smoke-test'],
+            cwd=self.root, capture_output=True, encoding='utf-8', errors='replace',
+            creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=startupinfo, timeout=90,
+        )
+        log_path = self.root / '.kemo-deploy/web.log'
+        self.assertEqual(result.returncode, 0, result.stderr)
+        match = re.search(r'Web is listening at (http://127\.0\.0\.1:\d+) \(PID (\d+)\)', result.stdout)
+        assert match is not None, result.stdout
+        url, pid = match.groups()
+        child = psutil.Process(int(pid))
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with log_path.open('rb') as log:
+                    log.seek(-min(log_path.stat().st_size, 512), os.SEEK_END)
+                    if b'detached stderr' in log.read():
+                        break
+                time.sleep(0.05)
+            else:
+                self.fail('background stderr did not reach the log')
+            self.assertLessEqual(log_path.stat().st_size, 10 * 1024 * 1024)
+            log = log_path.read_bytes()
+            self.assertIn(b'detached stdout', log)
+            self.assertNotIn(b'old marker below a large burst', log)
+            with self.assertRaisesRegex(DeployError, 'holds .update.lock'):
+                with Lock(self.root / '.update.lock'):
+                    pass
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(url + '/api/health', timeout=5) as response:
+                self.assertEqual(response.read(), b'ready')
+        finally:
+            child.wait(timeout=15)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                with Lock(self.root / '.update.lock'):
+                    break
+            except DeployError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+    @unittest.skipUnless(os.name == 'nt', 'requires the Windows deployment launcher')
+    def test_windows_start_rejects_lock_conflict_and_replaced_runtime(self):
+        web = b'raise AssertionError("must not import Web during a failed handoff")\\n'
+        self._install_windows_web(self.base / 'replaced-python.exe', web)
+
+        with Lock(self.root / '.update.lock'):
+            with self.assertRaisesRegex(DeployError, r'holds \.update\.lock'):
+                runtime.start_windows(self.root, sys.executable, [])
+
+        with self.assertRaisesRegex(DeployError, 'runtime changed during startup'):
+            runtime.start_windows(self.root, sys.executable, [])
+        # Rejected handoffs never start a second writer for a live service's log.
+        self.assertFalse((self.root / '.kemo-deploy/web.log').exists())
+        with Lock(self.root / '.update.lock'):
+            pass
+
+    @unittest.skipUnless(os.name == 'nt', 'requires the Windows deployment launcher')
+    def test_windows_start_surfaces_stderr_when_web_exits_without_a_receipt(self):
+        self._install_windows_web(sys.executable, b'''
+import os
+
+def main(argv, *, on_ready):
+    os.write(2, b"startup diagnostics\\n")
+    return 17
+''')
+        with self.assertRaisesRegex(DeployError, r'exit 17.*web\.log'):
+            runtime.start_windows(self.root, sys.executable, [])
+        self.assertIn(b'startup diagnostics', (self.root / '.kemo-deploy/web.log').read_bytes())
+        with Lock(self.root / '.update.lock'):
+            pass
+
+    @unittest.skipUnless(os.name == 'nt', 'requires native Windows process-tree termination')
+    def test_windows_start_timeout_reaps_the_web_process_tree(self):
+        import psutil
+
+        self._install_windows_web(sys.executable, b'''
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+def main(argv, *, on_ready):
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    marker = Path("test-pids.tmp")
+    marker.write_text(json.dumps([os.getpid(), sleeper.pid]))
+    marker.replace("test-pids.json")
+    return sleeper.wait()
+''')
+        marker = self.root / 'test-pids.json'
+        # Advance the launch clock only after both real children are running.
+        launch_clock = SimpleNamespace(
+            sleep=time.sleep,
+            monotonic=lambda: time.monotonic() + (61 if marker.is_file() else 0),
+        )
+        with mock.patch.object(runtime, 'time', launch_clock):
+            with self.assertRaisesRegex(DeployError, r'within 60 seconds.*web\.log'):
+                runtime.start_windows(self.root, sys.executable, [])
+
+        pids = json.loads(marker.read_text(encoding='utf-8'))
+        _, alive = psutil.wait_procs(
+            [psutil.Process(pid) for pid in pids if psutil.pid_exists(pid)], timeout=5,
+        )
+        self.assertFalse(alive, f'launch timed out but children survived: {alive}')
+        with Lock(self.root / '.update.lock'):
+            pass
 
     def test_default_config_loads(self):
         self.assertEqual(self.doc['deploy']['asset'], 'kemo-agent-release-{version}.zip')

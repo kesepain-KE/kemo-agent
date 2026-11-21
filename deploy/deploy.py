@@ -12,4 +12,14 @@ if sys.version_info < (3, 10):
 from core.cli import main
 
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['_serve_windows']:
+        from core.runtime import serve_windows
+
+        receipt_directory, expected_python, *web_args = sys.argv[2:]
+        raise SystemExit(serve_windows(receipt_directory, expected_python, web_args))
+    if sys.argv[1:2] == ['_windows_web']:
+        from core.runtime import run_windows_web
+
+        receipt_directory, *web_args = sys.argv[2:]
+        raise SystemExit(run_windows_web(receipt_directory, web_args))
     raise SystemExit(main())

@@ -44,9 +44,12 @@ def _fail(text: str) -> None:
 
 def _run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> bool:
     """执行命令，返回是否成功"""
+    # The updater utility is stdlib-only, including before pip install.
+    from update._utils import console_subprocess_kwargs
+
     print(f"  $ {' '.join(cmd)}")
     try:
-        subprocess.run(cmd, cwd=str(cwd or ROOT), check=check)
+        subprocess.run(cmd, cwd=str(cwd or ROOT), check=check, **console_subprocess_kwargs())
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         _fail(str(exc))

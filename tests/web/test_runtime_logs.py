@@ -250,6 +250,27 @@ class RuntimeLogTests(unittest.TestCase):
         terminal = self.backend.runtime_logs('alice', category='terminal', refresh=True)
         self.assertIn('RuntimeHost 已启动 | transports=无', [entry['title'] for entry in terminal['entries']])
 
+    def test_terminal_capture_without_console_uses_working_streams(self):
+        import sys
+
+        diagnostics.restore_terminal_capture()
+        with patch.object(sys, 'stdout', None), patch.object(sys, 'stderr', None):
+            try:
+                self.assertTrue(diagnostics.install_terminal_capture(self.root))
+                print('后台标准输出')
+                sys.stderr.write('后台标准错误')
+                sys.stderr.flush()
+                self.assertEqual(sys.stderr.encoding, 'utf-8')
+            finally:
+                diagnostics.restore_terminal_capture()
+            self.assertIsNone(sys.stdout)
+            self.assertIsNone(sys.stderr)
+        terminal = self.backend.runtime_logs('alice', category='terminal', refresh=True)
+        self.assertEqual(
+            [(entry['title'], entry['stream']) for entry in terminal['entries']],
+            [('后台标准输出', 'stdout'), ('后台标准错误', 'stderr')],
+        )
+
     def test_terminal_capture_bounds_partial_line_buffer(self):
         original = io.StringIO()
         tee = diagnostics._TerminalOutputTee(self.root, "stdout", original)

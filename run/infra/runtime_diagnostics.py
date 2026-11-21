@@ -7,6 +7,7 @@ include redacted owner-scoped bodies. These summaries are not a durable audit lo
 from __future__ import annotations
 
 from collections import deque
+from contextlib import ExitStack
 import copy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ _events: deque[tuple[float, str, str, dict[str, Any]]] = deque(maxlen=MAX_EVENTS
 _event_lock = threading.Lock()
 _cache = BoundedReadCache(max_entries=MAX_CACHE_ENTRIES, max_bytes=8 * 1024 * 1024, per_owner=1)
 _terminal_capture_lock = threading.RLock()
-_terminal_capture: tuple[Path, Any, Any, Any, Any] | None = None
+_terminal_capture: tuple[Path, Any, Any, Any, Any, ExitStack] | None = None
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _TERMINAL_SECRET_RE = re.compile(
     r"(?i)(\b(?:api(?:[_-]|\s+)?key|token|secret|password|authorization|cookie)\b\s*(?:=|:|\s+)\s*)([^\s,;]+)"
@@ -151,17 +152,24 @@ class _TerminalOutputTee:
 
 
 def install_terminal_capture(root: Path) -> bool:
-    """Capture the visible ``start_web`` terminal without hiding its output."""
+    """Capture start_web output, mirroring the original streams when available."""
     global _terminal_capture
     normalized_root = root.resolve()
     with _terminal_capture_lock:
         if _terminal_capture is not None:
             return _terminal_capture[0] == normalized_root
         stdout, stderr = sys.stdout, sys.stderr
-        stdout_tee = _TerminalOutputTee(normalized_root, "stdout", stdout)
-        stderr_tee = _TerminalOutputTee(normalized_root, "stderr", stderr)
-        sys.stdout, sys.stderr = stdout_tee, stderr_tee
-        _terminal_capture = (normalized_root, stdout, stderr, stdout_tee, stderr_tee)
+        with ExitStack() as owned:
+            out = stdout if stdout is not None else owned.enter_context(
+                open(os.devnull, "w", encoding="utf-8", errors="replace")
+            )
+            err = stderr if stderr is not None else owned.enter_context(
+                open(os.devnull, "w", encoding="utf-8", errors="replace")
+            )
+            stdout_tee = _TerminalOutputTee(normalized_root, "stdout", out)
+            stderr_tee = _TerminalOutputTee(normalized_root, "stderr", err)
+            sys.stdout, sys.stderr = stdout_tee, stderr_tee
+            _terminal_capture = (normalized_root, stdout, stderr, stdout_tee, stderr_tee, owned.pop_all())
         return True
 
 
@@ -171,16 +179,17 @@ def restore_terminal_capture() -> None:
     with _terminal_capture_lock:
         if _terminal_capture is None:
             return
-        _, stdout, stderr, stdout_tee, stderr_tee = _terminal_capture
-        try:
-            stdout_tee.flush()
-            stderr_tee.flush()
-        finally:
-            if sys.stdout is stdout_tee:
-                sys.stdout = stdout
-            if sys.stderr is stderr_tee:
-                sys.stderr = stderr
-            _terminal_capture = None
+        _, stdout, stderr, stdout_tee, stderr_tee, owned = _terminal_capture
+        with owned:
+            try:
+                stdout_tee.flush()
+                stderr_tee.flush()
+            finally:
+                if sys.stdout is stdout_tee:
+                    sys.stdout = stdout
+                if sys.stderr is stderr_tee:
+                    sys.stderr = stderr
+                _terminal_capture = None
 
 
 def record_runtime_event(
