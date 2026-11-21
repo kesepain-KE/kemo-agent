@@ -41,7 +41,7 @@ input_schema:
       - jina
       - markdown_new
       - defuddle
-      description: read reader：auto=jina、jina=稳定通用、markdown_new=干净 Markdown、defuddle=去广告
+      description: read 的第三方服务；auto 仅转发不含凭据、查询参数或片段的公网 URL，依次尝试 jina、markdown_new、defuddle；显式指定只使用所选服务
     max_chars:
       type: integer
       minimum: 1000

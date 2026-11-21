@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import ipaddress
 import json
 import re
+import socket
+from time import monotonic
 import urllib.error
 import urllib.request
 from typing import Any
@@ -309,6 +312,24 @@ def _read_reader(url: str, service: str, max_chars: int, timeout: float) -> tupl
     return text[:max_chars], response_truncated or len(text) > max_chars, content_type
 
 
+def _public_reader_target(url: str) -> bool:
+    # Auto mode must not disclose local hosts or credential-bearing URLs to hosted readers.
+    parsed = urlsplit(url)
+    if parsed.username is not None or parsed.query or parsed.fragment:
+        return False
+    host = parsed.hostname
+    if not host or ("." not in host and ":" not in host):
+        return False
+    try:
+        addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    return bool(addresses) and all(
+        (ip := ipaddress.ip_address(address[4][0])).is_global and not ip.is_multicast
+        for address in addresses
+    )
+
+
 def _run_read(
     url: str,
     strategy: str = "auto",
@@ -324,21 +345,34 @@ def _run_read(
         raise ValueError(f"未知 reader_service: {reader_service}")
     limit = min(max(1000, max_chars or _DEFAULT_WEB_READ_CHARS), _MAX_WEB_READ_CHARS)
     errors: list[str] = []
+    deadline = monotonic() + timeout
     if strategy in {"auto", "direct"}:
         try:
             text, truncated, content_type = _read_direct(value, limit, timeout)
             if text:
                 return _result(True, url=value, text=text, chars=len(text), source="direct", content_type=content_type, truncated=truncated)
-        except Exception as exc:
+        except OSError as exc:
             errors.append(f"direct: {exc}")
     if strategy in {"auto", "reader"}:
-        service = "jina" if reader_service == "auto" else reader_service
-        try:
-            text, truncated, content_type = _read_reader(value, service, limit, timeout)
-            if text:
-                return _result(True, url=value, text=text, chars=len(text), source=f"reader:{service}", content_type=content_type, truncated=truncated)
-        except Exception as exc:
-            errors.append(f"reader:{service}: {exc}")
+        if monotonic() >= deadline:
+            errors.append("网页读取已达总超时")
+        elif reader_service == "auto" and not _public_reader_target(value):
+            errors.append("自动阅读器只转发可确认的公网地址，且不携带凭据、查询参数或片段；请使用 direct")
+        else:
+            services = tuple(_READER_URLS) if reader_service == "auto" else (reader_service,)
+            for service in services:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    errors.append("网页读取已达总超时")
+                    break
+                try:
+                    text, truncated, content_type = _read_reader(value, service, limit, remaining)
+                except OSError as exc:
+                    errors.append(f"reader:{service}: {exc}")
+                    continue
+                if text:
+                    return _result(True, url=value, text=text, chars=len(text), source=f"reader:{service}", content_type=content_type, truncated=truncated)
+                errors.append(f"reader:{service}: 未返回正文")
     return _result(
         False,
         url=value,

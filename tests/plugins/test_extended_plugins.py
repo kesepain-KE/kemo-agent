@@ -2525,7 +2525,10 @@ class NetworkPluginTests(unittest.TestCase):
             False,
             None,
         )
-        with patch("plugins.network.tool._open", side_effect=[direct, reader]):
+        with (
+            patch("plugins.network.tool._open", side_effect=[direct, reader]),
+            patch("plugins.network.tool.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]),
+        ):
             result = run_network(
                 "read", "https://example.test/article", context={"tool_timeout": 10}
             )
@@ -2533,6 +2536,41 @@ class NetworkPluginTests(unittest.TestCase):
         self.assertEqual(result["source"], "reader:jina")
         self.assertEqual(result["content_type"], "text/markdown")
         self.assertFalse(result["truncated"])
+
+    def test_auto_reader_falls_back_from_jina_401_with_remaining_budget(self) -> None:
+        denied = (401, {}, b"", False, "Unauthorized")
+        readable = (200, {"Content-Type": "text/markdown"}, b"# Article", False, None)
+        url = "https://example.test/article"
+        with (
+            patch("plugins.network.tool._open", side_effect=[denied, readable]) as opened,
+            patch("plugins.network.tool.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]),
+            patch("plugins.network.tool.monotonic", side_effect=[100, 100, 101, 106]),
+        ):
+            result = run_network("read", url, strategy="reader", context={"tool_timeout": 10})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"], "reader:markdown_new")
+        self.assertEqual([call.args[0] for call in opened.call_args_list],
+                         ["https://r.jina.ai/" + url, "https://markdown.new/" + url])
+        self.assertEqual([call.kwargs["timeout"] for call in opened.call_args_list], [9, 4])
+
+        with patch("plugins.network.tool._open", return_value=denied) as opened:
+            result = run_network("read", url, strategy="reader", reader_service="jina",
+                                 context={"tool_timeout": 10})
+        self.assertFalse(result["ok"])
+        self.assertIn("401", result["error"])
+        self.assertEqual(opened.call_count, 1)
+
+    def test_auto_reader_does_not_delegate_private_or_credential_urls(self) -> None:
+        with (
+            patch("plugins.network.tool._open") as opened,
+            patch("plugins.network.tool.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("10.1.2.3", 0))]),
+        ):
+            for url in ("https://internal.example.test/article", "https://example.test/article?token=secret"):
+                with self.subTest(url=url):
+                    result = run_network("read", url, strategy="reader", context={"tool_timeout": 10})
+                    self.assertFalse(result["ok"])
+                    self.assertIn("direct", result["error"])
+        opened.assert_not_called()
 
     def test_read_failure_keeps_unified_fields(self) -> None:
         with patch(
