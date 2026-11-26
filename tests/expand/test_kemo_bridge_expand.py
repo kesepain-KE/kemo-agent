@@ -17,7 +17,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -59,9 +59,11 @@ from web.services.module_panels import load_module_panel  # noqa: E402
 
 class KemoBridgeExpandTests(unittest.TestCase):
     def setUp(self) -> None:
-        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(scratch / "_lifecycle.lock")))
-        self.enterContext(mock.patch.object(bridge_update, "write_status"))
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        scratch = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        stack.enter_context(mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(scratch / "_lifecycle.lock")))
+        stack.enter_context(mock.patch.object(bridge_update, "write_status"))
 
     def test_lifecycle_is_native_panel_only(self) -> None:
         panel, error = load_module_panel(MODULE_ROOT, "expand")

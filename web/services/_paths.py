@@ -17,6 +17,9 @@ from run.infra import BoundedReadCache
 
 _DIRECTORY_SCAN_MAX_ENTRIES = 10_000
 _DIRECTORY_SCAN_MAX_DEPTH = 32
+# Only defined on Windows; None keeps the comparison false on other platforms,
+# where the tag attribute is absent and reads back as 0.
+_IO_REPARSE_TAG_MOUNT_POINT = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
 _DIRECTORY_CACHE_TTL_SECONDS = 10.0
 _DIRECTORY_CACHE = BoundedReadCache(
     max_entries=256, max_bytes=16 * 1024 * 1024, per_owner=128,
@@ -64,7 +67,7 @@ def _scandir_children(directory: str | Path) -> list[os.DirEntry[str]]:
                 if is_junction is not None:
                     if is_junction():
                         continue
-                elif os.name == "nt" and item.stat(follow_symlinks=False).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT:
+                elif os.name == "nt" and item.stat(follow_symlinks=False).st_reparse_tag == _IO_REPARSE_TAG_MOUNT_POINT:
                     continue
                 children.append(item)
     except OSError:
@@ -189,7 +192,7 @@ def _directory_listing(
                 info = os.lstat(current)
             except OSError:
                 return [], 0, 0, -math.inf
-            if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_reparse_tag", 0) == stat.IO_REPARSE_TAG_MOUNT_POINT:
+            if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_reparse_tag", 0) == _IO_REPARSE_TAG_MOUNT_POINT:
                 return [], 0, 0, -math.inf
         return _scan_direct_children(current, path)
 
