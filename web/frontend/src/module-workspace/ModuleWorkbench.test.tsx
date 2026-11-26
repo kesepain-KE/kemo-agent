@@ -51,6 +51,43 @@ function renderWorkbench(kind: 'expand' | 'sense' = 'expand') {
 }
 
 describe('module workbench', () => {
+  it('copies the configured access key only when the native panel copy button is clicked', async () => {
+    const copy = vi.fn().mockResolvedValue(undefined)
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: copy } })
+    const requests: unknown[] = []
+    handlers()
+    server.use(
+      http.get('/api/users/alice/module-workspaces/expand/global/sample/panel', () => HttpResponse.json({
+        ...panel, panel: { ...panel.panel!, containers: [{
+          kind: 'action', title: '访问密钥', width: 'full', height: 'h2',
+          controls: [{ type: 'copy', label: '复制访问密钥', command: 'copy_access_key' }],
+        }] },
+      })),
+      http.post('/api/users/alice/expand/global/sample/panel/action', async ({ request }) => {
+        requests.push(await request.json())
+        return HttpResponse.json({ result: { clipboard_text: 'test-workspace-access-key' } })
+      }),
+    )
+    const view = renderWorkbench()
+    try {
+      await screen.findByRole('button', { name: /真实接口测试模块/ })
+      fireEvent.click(screen.getByRole('button', { name: '通用配置' }))
+      const button = await screen.findByRole('button', { name: '复制访问密钥' })
+      expect(requests).toEqual([])
+      for (let i = 1; i <= 2; i++) {
+        fireEvent.click(button)
+        await waitFor(() => expect(copy).toHaveBeenCalledTimes(i))
+      }
+      expect(requests).toEqual(Array(2).fill({ command: 'copy_access_key', params: {} }))
+      expect(copy).toHaveBeenLastCalledWith('test-workspace-access-key')
+      expect(screen.queryByText('test-workspace-access-key')).toBeNull()
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+      view.unmount(); view.router.dispose(); view.client.clear()
+    }
+  })
   it.each(['expand', 'sense'] as const)('separates %s collection and injection tabs and their content', async kind => {
     handlers(kind)
     const view = renderWorkbench(kind)

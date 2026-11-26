@@ -1,5 +1,5 @@
 import { Fragment, Suspense, lazy, type MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
   ChevronDown,
@@ -33,7 +33,7 @@ import type { ScheduledTaskItem } from '../components/RecentActivityCard'
 import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
-import type { ChatItem, CronTaskSummary, InputAttachment, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
+import type { ChatItem, CronTaskSummary, GuidanceMode, InputAttachment, KnowledgeDocumentSummary, MediaArtifact, PlanSummary, RunEvent } from '../types/api'
 import { copyText } from '../utils/clipboard'
 import { playUserCompletionSound, playUserFailureSound } from '../utils/completionSound'
 import { randomUUID } from '../randomId'
@@ -115,6 +115,7 @@ import {
 } from './chatPresentation'
 export { buildScheduledTaskItems, buildSenseDataItems, formatSenseUpdateInterval, mediaArtifactUrl } from './chatPresentation'
 import { createPlanWorkflow, createSendHandler } from './chatWorkflows'
+import { providerSaveFilter } from '../providerConfigSave'
 import { ChatPageView } from './ChatPageView'
 
 const MarkdownMessage = lazy(async () => ({
@@ -123,7 +124,7 @@ const MarkdownMessage = lazy(async () => ({
 
 export function ChatPage() {
   useLanguage()
-  const { reasoningControl, sessionReady } = useOutletContext<ShellOutletContext>()
+  const { reasoningControl, sessionReady, sessionReadable, persistedRunStatus } = useOutletContext<ShellOutletContext>()
   const { user, userAvatarUrl, sessionId, clientId, chatRunning: chatRunningForSession, chatStopping: stopping, setChatRunning: setRunning, setChatStopping: setStopping, chatRunId: activeRunId, chatRunSessionId, chatRunToken, setChatRunId: setActiveRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, finishChatRun, clearChatRun, restoreChatRun, setSessionId, detachSession, notifySessionDeleted, sessions, refreshSessions, createNewSession, overview, refreshOverview } = useOutletContext<ShellOutletContext>()
   // AppShell resolves controls for the displayed conversation.  Keep the
   // session check as a defensive guard for an in-flight route transition.
@@ -135,7 +136,11 @@ export function ChatPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
+  const providerConfigSaving = useIsMutating(providerSaveFilter(user)) > 0
   const draftKey = chatDraftKey(user, sessionId)
+  const executionPending = persistedRunStatus === 'active' || persistedRunStatus === 'result_pending'
+    || persistedRunStatus === 'owner_unknown'
+  const sessionWritable = !sessionId || (sessionReady !== false && !executionPending)
   const draftSnapshot = useChatDraftStore((state) => state.drafts[draftKey] ?? EMPTY_CHAT_DRAFT)
   const setDraftText = useChatDraftStore((state) => state.setText)
   const setDraftUploads = useChatDraftStore((state) => state.setPendingUploads)
@@ -250,7 +255,7 @@ export function ChatPage() {
       || sessions.some((session) => session.session_id === sessionId)
   }, [sessionId, sessionReady, sessions])
   const historyQuery = useChatHistory(
-    user, sessionId, Boolean(user && sessionId && (hasCommitted || sessionReady)),
+    user, sessionId, Boolean(user && sessionId && (hasCommitted || sessionReadable)),
     liveRun?.historyBefore,
   )
   const tasksQuery = useQuery({
@@ -416,7 +421,7 @@ export function ChatPage() {
     loadingEarlierRef.current = false
   }, [historyQuery.data?.pages.length])
 
-  const send = createSendHandler({
+  const sendTurn = createSendHandler({
     draft, user, running, stopping, uploading, sessionId, draftKey, clientId,
     persistedUserMessages, editingSource, lastAttemptSessionRef, currentUserRef,
     currentLiveSessionRef, submittedUploadsRef, undoneRoundBaselineRef,
@@ -428,12 +433,13 @@ export function ChatPage() {
     refreshSessions, isCurrentConversation, moveDraft, setSessionId,
     refreshOverview, setDraftText, finishChatRun, setStopping, createNewSession, creatingSendSessionRef,
   })
+  const send = (...args: Parameters<typeof sendTurn>) => sessionWritable ? sendTurn(...args) : Promise.resolve(false)
 
   const scratchSendRef = useRef<(text: string) => Promise<boolean>>(async () => false)
   const scratchScopeRef = useRef(draftKey)
   scratchScopeRef.current = draftKey
   scratchSendRef.current = async text => {
-    if (!user || uploading || editingSource || creatingSendSessionRef.current) return false
+    if (!sessionWritable || !user || uploading || editingSource || creatingSendSessionRef.current) return false
     if (running || stopping) {
       if (!liveSessionId) return false
       queueNextTurnMessage(user, liveSessionId, {
@@ -450,7 +456,7 @@ export function ChatPage() {
 
   useEffect(() => {
     const pending = liveRun?.nextTurnQueue[0]
-    if (!pending || pending.status !== 'queued' || running || uploading || stopping || editingSource || consumingNextTurnRef.current || !user || !liveSessionId) return
+    if (!sessionWritable || !pending || pending.status !== 'queued' || running || uploading || stopping || providerConfigSaving || editingSource || consumingNextTurnRef.current || !user || !liveSessionId) return
     consumingNextTurnRef.current = true
     setNextTurnMessageStatus(user, liveSessionId, pending.id, 'sending')
     void send(pending.content, {
@@ -474,10 +480,10 @@ export function ChatPage() {
     }).finally(() => {
       consumingNextTurnRef.current = false
     })
-  }, [liveRun?.nextTurnQueue, liveSessionId, removeNextTurnMessage, running, setNextTurnMessageStatus, stopping, uploading, user, editingSource])
+  }, [liveRun?.nextTurnQueue, liveSessionId, removeNextTurnMessage, running, setNextTurnMessageStatus, stopping, uploading, user, editingSource, sessionWritable, providerConfigSaving])
 
   const uploadFiles = async (files: File[]) => {
-    if (!user || uploading || !files.length) return
+    if (!sessionWritable || !user || uploading || !files.length) return
     const remainingSlots = Math.max(0, 20 - pendingUploads.length)
     if (!remainingSlots) {
       setUploadFeedback({ tone: 'error', text: '每轮最多附加 20 个文件，请先移除部分附件' })
@@ -717,7 +723,7 @@ export function ChatPage() {
   }
 
   const editAndResend = (id: string, content: string) => {
-    if (running || conversationBusy || !lastUserMessage || lastUserMessage.id !== id) return
+    if (!sessionWritable || running || conversationBusy || !lastUserMessage || lastUserMessage.id !== id) return
     const targetSession = sessionId || lastAttemptSessionRef.current
     const expectedIntegrationCount = conversationIntegrationCount
     if (!targetSession || expectedIntegrationCount < 1) return
@@ -751,6 +757,7 @@ export function ChatPage() {
   }
 
   const queueFollowUp = () => {
+    if (!sessionWritable) return
     const content = draft.trim()
     const uploadedFiles = pendingUploads.map((file) => ({ ...file }))
     if ((!content && !uploadedFiles.length) || !user || uploading) return
@@ -769,7 +776,7 @@ export function ChatPage() {
   }
 
   const sendGuidance = async (message: PendingNextTurnMessage) => {
-    if (!user || !running || stopping || !effectiveRunId || !liveSessionId || !['queued', 'error'].includes(message.status)) return
+    if (!sessionWritable || !user || !running || stopping || !effectiveRunId || !liveSessionId || !['queued', 'error'].includes(message.status)) return
     const targetUser = user
     const targetSession = liveSessionId
     const targetRunId = effectiveRunId
@@ -778,6 +785,7 @@ export function ChatPage() {
     if (guidingFollowUpsRef.current.has(claimKey)) return
     guidingFollowUpsRef.current.add(claimKey)
     const guidance = message.content
+    const mode = message.mode ?? 'interrupt'
     const uploadedFiles = message.uploadedFiles ?? []
     const attachments = uploadedFiles.map(pendingInputAttachment)
     const displayText = guidance || `附件引导：${uploadedFiles.map((file) => file.name).join('、')}`
@@ -787,25 +795,34 @@ export function ChatPage() {
       id,
       kind: 'guidance',
       guidanceId: id,
+      mode,
       content: displayText,
       attachments,
-      status: 'queued',
+      status: mode === 'background' ? 'submitting' : 'queued',
     }])
     try {
       const result = await submitGuidance(targetUser, targetRunId, guidance, {
         sessionId: targetSession,
         guidanceId: id,
         uploadedFiles: uploadedFiles.map((file) => file.path),
+        mode,
       })
       if (result.status === 'queued_next_turn') {
         removePendingGuidance()
         setNextTurnMessageStatus(targetUser, targetSession, id, 'queued')
       } else {
+        if (mode === 'background') {
+          updateChatRunItems(targetUser, targetSession, (current) => current.map((item) => (
+            item.kind === 'guidance' && item.id === id && item.status === 'submitting'
+              ? { ...item, status: 'queued' }
+              : item
+          )))
+        }
         removeNextTurnMessage(targetUser, targetSession, id)
       }
     } catch (error) {
       removePendingGuidance()
-      if (error instanceof ApiError && error.status === 404) {
+      if (mode === 'interrupt' && error instanceof ApiError && error.status === 404) {
         setNextTurnMessageStatus(targetUser, targetSession, id, 'queued')
       } else {
         setNextTurnMessageStatus(targetUser, targetSession, id, 'error', error instanceof Error ? error.message : '本轮引导提交失败')
@@ -815,7 +832,8 @@ export function ChatPage() {
     }
   }
 
-  const guideDraft = () => {
+  const guideDraft = (mode: GuidanceMode) => {
+    if (!sessionWritable) return
     const content = draft.trim()
     const uploadedFiles = pendingUploads.map((file) => ({ ...file }))
     if (
@@ -830,6 +848,7 @@ export function ChatPage() {
     const message: PendingNextTurnMessage = {
       id: eventId('guidance'),
       content,
+      mode,
       uploadedFiles,
       historyUserMessages: Math.max(
         persistedUserMessages,
@@ -859,7 +878,11 @@ export function ChatPage() {
     && !followUpQueue.some((message) => message.id === latestRunningGuidance.id && message.status !== 'guiding')
     ? latestRunningGuidance : undefined
   const regenerateLastResponse = async () => {
-    if (running || conversationBusy || editingSource || !lastUserMessage || lastUserMessage.kind !== 'message') return
+    if (!sessionWritable || running || conversationBusy || editingSource || !lastUserMessage || lastUserMessage.kind !== 'message') return
+    if (queryClient.isMutating(providerSaveFilter(user))) {
+      setConversationFeedback({ tone: 'error', text: t('请等待 Provider 配置保存后再发送。') })
+      return
+    }
     const prompt = lastUserMessage.content
     const targetSession = sessionId || lastAttemptSessionRef.current
     const expectedIntegrationCount = conversationIntegrationCount
@@ -892,6 +915,7 @@ export function ChatPage() {
     const handleConversationCommand = (event: Event) => {
       const action = (event as CustomEvent<ConversationCommandAction>).detail
       if (action === 'new') void directlyNewConversation()
+      else if (!sessionWritable) return
       else if (action === 'save') void saveAndNewConversation()
       else if (action === 'clear') void clearConversation()
       else if (action === 'compress') void compressCurrentConversation()
@@ -899,9 +923,9 @@ export function ChatPage() {
     }
     window.addEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand)
     return () => window.removeEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand)
-  }, [clearConversation, compressCurrentConversation, directlyNewConversation, regenerateLastResponse, saveAndNewConversation])
+  }, [clearConversation, compressCurrentConversation, directlyNewConversation, regenerateLastResponse, saveAndNewConversation, sessionWritable])
   const recentTasks = useMemo(() => buildScheduledTaskItems(tasksQuery.data?.cron_tasks || []), [tasksQuery.data])
-  const { commandPlanStatus, planActions } = createPlanWorkflow({
+  const { commandPlanStatus, planActions: writablePlanActions } = createPlanWorkflow({
     user, running, sessionId, clientId, persistedUserMessages, planMutationNotices,
     lastAttemptSessionRef, currentUserRef, currentLiveSessionRef, followOutputRef,
     locallyCommittedSessionRef, queryClient, setLiveItems, setPlanOverrides,
@@ -911,6 +935,10 @@ export function ChatPage() {
     refreshSessions, isCurrentConversation, setSessionId, refreshOverview,
     finishChatRun, setStopping, setCollapsedPlans, navigate,
   })
+  const planActions = (plan: PlanSummary) => {
+    const actions = writablePlanActions(plan)
+    return sessionWritable ? actions : { onToggleCollapse: actions.onToggleCollapse }
+  }
   const persistedPlans = useMemo(() => tasksQuery.data?.plans ?? [], [tasksQuery.data?.plans])
   const persistedPlanById = useMemo(
     () => new Map(persistedPlans.map((plan) => [plan.plan_id, plan])),
@@ -1155,10 +1183,10 @@ export function ChatPage() {
     ),
     [conversationItems, historyData?.pagination?.first_integration_number, historyData?.user_messages],
   )
-  const showWelcome = items.length === 0 && !editingSource
+  const showWelcome = sessionWritable && items.length === 0 && !editingSource
 
   return <><ChatPageView {...{
-    showWelcome, scrollRef, handleChatScroll, handleChatContentClick, sessionId, historyQuery,
+    showWelcome, scrollRef, handleChatScroll, handleChatContentClick, sessionId, historyQuery, sessionWritable, persistedRunStatus,
     user, overview, reasoningControl, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
     recentTasks,
     tokenTotal: runtimeTokensQuery.data?.tokens.total_tokens,

@@ -1,9 +1,11 @@
-import { useId, useState } from 'react'
+import { Fragment, useId, useState } from 'react'
 import { ArrowDownLeft, ArrowUpRight, CheckCircle2, ChevronDown, CircleAlert, Download, FileText, MessageSquare, Terminal } from 'lucide-react'
-import { messageFileDownloadUrl } from '../api/client'
+import { messageFileDownloadUrl, messageFilePreviewUrl } from '../api/client'
 import { DocumentMarkdown } from '../components/DocumentMarkdown'
 import { t } from '../i18n'
-import type { MessageLogEntry, MessageTransportSummary } from '../types/api'
+import { FilePreview, fileKind } from '../reference/FilePreview'
+import type { FileListEntry, MessageLogEntry, MessageTransportSummary } from '../types/api'
+import { workspaceFilePath } from '../utils/filePath'
 import styles from './Messages.module.css'
 
 export function formatMessageTime(value: string | number | null) {
@@ -59,8 +61,36 @@ export function MessageStatus({ transport: item, bindings }: {
   </div>
 }
 
+type MessageFile = NonNullable<MessageTransportSummary['temporary_files']>[number]
+
+function previewEntry(file: MessageFile): FileListEntry {
+  const slash = file.relative_path.lastIndexOf('/')
+  const dot = file.name.lastIndexOf('.')
+  return {
+    ...file, type: 'file', parent_path: slash < 0 ? '' : file.relative_path.slice(0, slash),
+    extension: dot < 0 ? '' : file.name.slice(dot + 1), child_count: 0,
+  }
+}
+
+function isMediaFile(file: FileListEntry) {
+  return Boolean(file.extension) && ['image', 'audio', 'video'].includes(fileKind(file))
+}
+
+function MessageFilePreview({ file, user, transport, area = 'module', onClose }: {
+  file: FileListEntry; user: string; transport: MessageTransportSummary; area?: 'module' | 'download'; onClose: () => void
+}) {
+  if (area === 'download') return <FilePreview file={file} user={user} area={area} onClose={onClose} />
+  const path = file.relative_path
+  return <FilePreview file={file} user={user} onClose={onClose} source={{
+    previewUrl: messageFilePreviewUrl(user, transport.id, path),
+    downloadUrl: messageFileDownloadUrl(user, transport.id, path),
+    workspacePath: `${transport.files_path}/${path}`,
+  }} />
+}
+
 export function MessageFiles({ user, transport: item }: { user: string; transport: MessageTransportSummary }) {
   const [requestedPage, setPage] = useState(1)
+  const [previewPath, setPreviewPath] = useState('')
   const files = item.temporary_files
   const total = Math.max(1, Math.ceil((files?.length || 0) / 12))
   const page = Math.min(requestedPage, total)
@@ -71,12 +101,21 @@ export function MessageFiles({ user, transport: item }: { user: string; transpor
       : !files.length ? <div className={styles.empty}><FileText size={30} /><h3>{t('暂无临时文件')}</h3></div>
         : <><div className={styles.tableScroll}><table className={styles.table}>
           <thead><tr>{['文件名', '大小', '更新时间', '操作'].map(label => <th key={label}>{t(label)}</th>)}</tr></thead>
-          <tbody>{files.slice((page - 1) * 12, page * 12).map(file => <tr key={file.relative_path}>
-            <td><strong>{file.name}</strong><small>{file.relative_path}</small></td><td>{formatMessageBytes(file.size)}</td>
-            <td>{formatMessageTime(file.updated_at)}</td><td><a className={styles.download}
-              href={messageFileDownloadUrl(user, item.id, file.relative_path)} download={file.name}
-              title={t('下载')} aria-label={t('下载')}><Download size={16} /></a></td>
-          </tr>)}</tbody>
+          <tbody>{files.slice((page - 1) * 12, page * 12).map(file => {
+            const entry = previewEntry(file)
+            const open = file.relative_path === previewPath
+            return <Fragment key={file.relative_path}>
+              <tr><td><strong>{file.name}</strong><small>{file.relative_path}</small></td><td>{formatMessageBytes(file.size)}</td>
+                <td>{formatMessageTime(file.updated_at)}</td><td>
+                  {isMediaFile(entry) ? <button type="button" aria-expanded={open}
+                    onClick={() => setPreviewPath(open ? '' : file.relative_path)}>{t('预览')}</button> : null}
+                  <a className={styles.download} href={messageFileDownloadUrl(user, item.id, file.relative_path)}
+                    download={file.name} title={t('下载')} aria-label={t('下载')}><Download size={16} /></a>
+                </td></tr>
+              {open ? <tr><td colSpan={4}><MessageFilePreview file={entry} user={user} transport={item}
+                onClose={() => setPreviewPath('')} /></td></tr> : null}
+            </Fragment>
+          })}</tbody>
         </table></div><MessagePager page={page} total={total} onChange={setPage} /></>}
   </div>
 }
@@ -100,7 +139,31 @@ function messageExchanges(entries: MessageLogEntry[]) {
   return [...groups.values()]
 }
 
-function MessageRecord({ entry, log = false }: { entry: MessageLogEntry; log?: boolean }) {
+function messageLogPreview(entry: MessageLogEntry, user: string, transport: MessageTransportSummary) {
+  const path = entry.file_path?.replace(/\\/g, '/')
+  const modulePrefix = `${transport.files_path}/`
+  const downloadPrefix = `${workspaceFilePath(user, 'download', '')}/`
+  if (path?.startsWith(modulePrefix)) {
+    const relative = path.slice(modulePrefix.length)
+    const file = transport.temporary_files?.find(item => item.relative_path === relative)
+    if (file) return { file: previewEntry(file), area: 'module' as const }
+  } else if (path?.startsWith(downloadPrefix)) {
+    const relative = path.slice(downloadPrefix.length)
+    const name = relative.split('/').at(-1) || ''
+    return { file: previewEntry({ name, relative_path: relative, size: entry.size ?? 0,
+      updated_at: Date.parse(entry.timestamp) / 1000 }), area: 'download' as const }
+  }
+}
+
+function MessageRecord({ entry, user, transport, log = false }: {
+  entry: MessageLogEntry; user: string; transport: MessageTransportSummary; log?: boolean
+}) {
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const media = /^(image|audio|video)\//i.test(entry.mime ?? '')
+  const preview = media ? messageLogPreview(entry, user, transport) : undefined
+  const canPreview = preview && isMediaFile(preview.file)
+  const metadata = [entry.file_path, entry.mime, entry.size != null ? formatMessageBytes(entry.size) : null]
+    .filter(Boolean).join(' · ')
   return <article className={`${styles.message} ${log && entry.direction === 'send' ? styles.outgoing : ''}`}>
     <header>{log ? <span>{entry.direction === 'send' ? <ArrowUpRight size={14} /> : <ArrowDownLeft size={14} />}
       {t(entry.direction === 'send' ? '发送' : '接收')}</span> : null}
@@ -108,12 +171,19 @@ function MessageRecord({ entry, log = false }: { entry: MessageLogEntry; log?: b
       <time>{formatMessageTime(entry.timestamp)}</time>
       <span className={entry.success ? styles.ok : styles.failed}>{t(entry.success ? '成功' : '失败')}</span></header>
     <pre>{entry.content || t('（无文本正文）')}</pre>
-    {entry.file_path ? <div className={styles.filePath}><FileText size={13} />{entry.file_path}{entry.size != null ? ` · ${formatMessageBytes(entry.size)}` : ''}</div> : null}
+    {metadata ? <div className={styles.filePath}><FileText size={13} /><span>{metadata}</span>
+      {canPreview ? <button type="button" aria-expanded={previewOpen}
+        onClick={() => setPreviewOpen(!previewOpen)}>{t('预览')}</button>
+        : media ? <span>{t('原文件不可预览')}</span> : null}</div> : null}
+    {preview && canPreview && previewOpen ? <MessageFilePreview file={preview.file} user={user}
+      transport={transport} area={preview.area} onClose={() => setPreviewOpen(false)} /> : null}
     {log ? <footer><span>{entry.chat_type || '—'} · {entry.chat_id || '—'}</span><span>{entry.source}</span></footer> : null}
   </article>
 }
 
-function MessageExchangeCard({ exchange, direction }: { exchange: MessageExchange; direction?: MessageLogEntry['direction'] }) {
+function MessageExchangeCard({ exchange, direction, user, transport }: {
+  exchange: MessageExchange; direction?: MessageLogEntry['direction']; user: string; transport: MessageTransportSummary
+}) {
   const [expanded, setExpanded] = useState(false)
   const contentId = useId()
   const latest = exchange.entries[0]
@@ -140,13 +210,16 @@ function MessageExchangeCard({ exchange, direction }: { exchange: MessageExchang
     {expanded ? <div id={contentId} className={styles.exchangeBody}>
       {directions.map(({ direction, label, Icon, entries }) => <section key={direction} className={styles.exchangeSide} aria-label={t(label)}>
         <header><Icon size={15} />{t(label)}</header>
-        <div className={styles.exchangeEntries}>{entries.map(entry => <MessageRecord key={entry.id} entry={entry} />)}</div>
+        <div className={styles.exchangeEntries}>{entries.map(entry => <MessageRecord key={entry.id} entry={entry}
+          user={user} transport={transport} />)}</div>
       </section>)}
     </div> : null}
   </article>
 }
 
-export function MessageHistory({ transport: item, mode }: { transport: MessageTransportSummary; mode: 'messages' | 'logs' }) {
+export function MessageHistory({ user, transport: item, mode }: {
+  user: string; transport: MessageTransportSummary; mode: 'messages' | 'logs'
+}) {
   const [filter, setFilter] = useState('all')
   const [requestedPage, setPage] = useState(1)
   const entries = item.logs.filter(entry => (
@@ -171,8 +244,8 @@ export function MessageHistory({ transport: item, mode }: { transport: MessageTr
     {!count ? <div className={styles.empty}>{mode === 'messages' ? <MessageSquare size={30} /> : <Terminal size={30} />}
       <h3>{t('当前分类暂无记录')}</h3></div> : <div className={styles.history}>
       {mode === 'messages' ? exchanges.slice((page - 1) * 10, page * 10).map(exchange => <MessageExchangeCard key={exchange.id}
-        exchange={exchange} direction={filter === 'receive' || filter === 'send' ? filter : undefined} />)
-        : visible.map(entry => <MessageRecord key={entry.id} entry={entry} log />)}
+        exchange={exchange} direction={filter === 'receive' || filter === 'send' ? filter : undefined} user={user} transport={item} />)
+        : visible.map(entry => <MessageRecord key={entry.id} entry={entry} user={user} transport={item} log />)}
     </div>}
     <MessagePager page={page} total={total} onChange={setPage} />
   </div>

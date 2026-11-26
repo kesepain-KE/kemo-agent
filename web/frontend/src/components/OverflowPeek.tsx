@@ -17,14 +17,22 @@ interface PreviewPosition {
   placement: 'above' | 'below'
 }
 
+interface PeekAttachment {
+  name: string
+  kind: 'image' | 'audio' | 'video' | 'file'
+  previewUrl?: string
+}
+
 export function OverflowPeek({
   text,
   attachmentNames = [],
+  attachments,
   className = '',
   children,
 }: {
   text: string
   attachmentNames?: string[]
+  attachments?: PeekAttachment[]
   className?: string
   children: ReactNode
 }) {
@@ -35,6 +43,8 @@ export function OverflowPeek({
   const [open, setOpen] = useState(false)
   const [pinned, setPinned] = useState(false)
   const [position, setPosition] = useState<PreviewPosition | null>(null)
+  const names = attachments?.length ? attachments.map(item => item.name) : attachmentNames
+  const mediaDialog = pinned && Boolean(attachments?.some(item => item.previewUrl))
 
   const measureOverflow = () => {
     const anchor = anchorRef.current
@@ -68,13 +78,14 @@ export function OverflowPeek({
   }
 
   const showPreview = (nextPinned = false) => {
-    if (!measureOverflow()) return
+    if (pinned && !nextPinned || !measureOverflow()) return
     updatePosition()
     setPinned(nextPinned)
     setOpen(true)
   }
 
   const closePreview = () => {
+    if (tooltipRef.current?.contains(document.activeElement)) anchorRef.current?.focus()
     setOpen(false)
     setPinned(false)
   }
@@ -86,7 +97,11 @@ export function OverflowPeek({
     const observer = new ResizeObserver(measureOverflow)
     observer.observe(anchor)
     return () => observer.disconnect()
-  }, [text, attachmentNames.join('|')])
+  }, [text, names.join('|')])
+
+  useEffect(() => {
+    if (mediaDialog) tooltipRef.current?.focus()
+  }, [mediaDialog])
 
   useEffect(() => {
     if (!open) return
@@ -129,7 +144,7 @@ export function OverflowPeek({
   }
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!overflowing) return
+    if (!overflowing || event.target !== event.currentTarget) return
     if (event.key === 'Escape') {
       closePreview()
       return
@@ -141,8 +156,8 @@ export function OverflowPeek({
     }
   }
 
-  const label = attachmentNames.length
-    ? (text || '仅附件消息') + '；附件：' + attachmentNames.join('、')
+  const label = names.length
+    ? (text || '仅附件消息') + '；附件：' + names.join('、')
     : text
 
   return <>
@@ -151,7 +166,8 @@ export function OverflowPeek({
       className={[styles.anchor, className].filter(Boolean).join(' ')}
       data-overflow={overflowing ? 'true' : 'false'}
       tabIndex={overflowing ? 0 : undefined}
-      aria-describedby={open ? tooltipId : undefined}
+      aria-describedby={open && label ? tooltipId : undefined}
+      onLoadCapture={measureOverflow}
       onMouseEnter={() => showPreview(false)}
       onMouseLeave={() => { if (!pinned) setOpen(false) }}
       onFocus={() => showPreview(false)}
@@ -172,14 +188,28 @@ export function OverflowPeek({
           position.placement === 'above' ? styles.above : styles.below,
           pinned ? styles.interactive : '',
         ].filter(Boolean).join(' ')}
-        role="tooltip"
+        role={mediaDialog ? 'dialog' : 'tooltip'}
+        aria-label={mediaDialog ? '完整消息跟进' : undefined}
+        tabIndex={mediaDialog ? -1 : undefined}
         style={{ top: position.top, left: position.left, width: position.width }}
       >
         <small>完整消息跟进</small>
+        {mediaDialog ? <button type="button" className={styles.close} onClick={closePreview}>关闭预览</button> : null}
         {text ? <p>{text}</p> : null}
-        {attachmentNames.length ? <div className={styles.attachments}>
+        {names.length ? <div className={styles.attachments}>
           <strong>附件</strong>
-          <ul>{attachmentNames.map((name, index) => <li key={name + '_' + index}>{name}</li>)}</ul>
+          <ul>{names.map((name, index) => {
+            const item = attachments?.[index]
+            const url = item?.previewUrl
+            return <li key={name + '_' + index}>
+              {name}
+              {url && item.kind === 'image' ? <img src={url} alt={name} /> : null}
+              {url && item.kind === 'audio' ? <audio src={url} controls preload="metadata"
+                tabIndex={pinned ? undefined : -1} aria-label={name} /> : null}
+              {url && item.kind === 'video' ? <video src={url} controls preload="metadata"
+                tabIndex={pinned ? undefined : -1} aria-label={name} /> : null}
+            </li>
+          })}</ul>
         </div> : null}
       </div>,
       document.body,

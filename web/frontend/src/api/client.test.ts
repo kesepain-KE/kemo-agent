@@ -264,7 +264,7 @@ describe('parseSseFrames', () => {
     expect(parsed.frames[0]).toEqual({ event: 'done', data: '{"type":"done",\n"metadata":{}}' })
   })
 
-  it('提交运行中引导到指定 run_id', async () => {
+  it.each(['background', 'interrupt', undefined] as const)('提交运行中引导到指定 run_id，mode=%s', async (mode) => {
     let body: Record<string, unknown> = {}
     server.use(http.post('/api/runs/:runId/guidance', async ({ params, request }) => {
       body = await request.json() as Record<string, unknown>
@@ -274,6 +274,7 @@ describe('parseSseFrames', () => {
       sessionId: 'session-guidance',
       guidanceId: 'guidance_123',
       uploadedFiles: ['clip.mp4', 'voice.mp3'],
+      mode,
     })
     expect(result).toMatchObject({ run_id: 'run_test_123', status: 'accepted_current_run', queued: 1 })
     expect(body).toEqual({
@@ -283,6 +284,7 @@ describe('parseSseFrames', () => {
       guidance: 'adjust',
       guidance_id: 'guidance_123',
       uploaded_files: ['clip.mp4', 'voice.mp3'],
+      ...(mode === undefined ? {} : { mode }),
     })
   })
 

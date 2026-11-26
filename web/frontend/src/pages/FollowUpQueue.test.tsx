@@ -41,6 +41,29 @@ describe('FollowUpQueue', () => {
     ])
   })
 
+  it('多条多图跟进的每个内容区独立滚动，并用待发送附件的校验和请求缩略图', () => {
+    const checksum = 'a'.repeat(64)
+    const messages = ['a', 'b'].map(id => ({
+      ...message(id),
+      uploadedFiles: Array.from({ length: 7 }, (_, index) => ({
+        path: `${id}/${index}.png`, name: `${id}-${index}.png`, size: 20,
+        mimeType: 'image/png', mediaKind: 'image' as const, checksumSha256: checksum,
+      })),
+    }))
+    render(<FollowUpQueue user="alice" messages={messages} canGuide onGuide={vi.fn()} onRemove={vi.fn()} onRetry={vi.fn()} onReorder={vi.fn()} />)
+    const rows = screen.getAllByRole('article', { name: /^消息跟进 \d+$/ })
+    expect(rows).toHaveLength(2)
+    for (const [index, row] of rows.entries()) {
+      const body = row.querySelector('[data-overflow]')!
+      expect(getComputedStyle(body).overflowY).toBe('auto')
+      expect(getComputedStyle(body).overflowX).toBe('hidden')
+      expect(within(body as HTMLElement).getAllByRole('img')).toHaveLength(7)
+      const id = messages[index].id
+      expect(within(body as HTMLElement).getByRole('img', { name: `${id}-0.png` })).toHaveAttribute('src',
+        `/api/users/alice/attachment-thumbnails/${checksum}?path=${id}%2F0.png`)
+    }
+  })
+
   it('发送中的条目保持锁定，正在提交本轮引导的条目从队列消失', () => {
     const queue = [message('a', 'sending'), message('b'), message('c', 'guiding')]
     expect(reorderFollowUps(queue, 'b', 'a')).toBe(queue)

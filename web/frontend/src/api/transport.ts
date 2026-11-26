@@ -63,6 +63,7 @@ export const runEventSchema = z
       'tool_call_result',
       'media_output',
       'media_input_update',
+      'guidance_handoff',
       'guidance_applied',
       'context_compression',
       'context_window',

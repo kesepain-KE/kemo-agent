@@ -6,6 +6,8 @@ export interface RuntimeMessageBody {
   kind: string
   status: string
   occurred_at: string
+  mime?: string
+  size?: number
 }
 
 export interface RuntimeLogEntry {

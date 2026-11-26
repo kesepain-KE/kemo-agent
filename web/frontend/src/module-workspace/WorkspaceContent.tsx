@@ -36,7 +36,7 @@ export function WorkspaceContent({ user, item, page, refresh, onDirtyChange, onE
       try { await api.savePanel(user, item, values, clearSecrets, revision); await panel.refetch(); await refresh() }
       finally { setBusy(false) }
     }}
-    onAction={async (command, params) => {
+    onAction={async (command, params, type) => {
       setBusy(true)
       try {
         if (item.kind === 'sense') {
@@ -45,7 +45,10 @@ export function WorkspaceContent({ user, item, page, refresh, onDirtyChange, onE
         } else if (item.kind === 'message') {
           if (command === 'refresh') await core.checkMessageModule(user, item.module)
           else await api.invokeAction(user, item, command, params)
-        } else await core.invokeExpandModulePanelAction(user, item.scope, item.module, command, params)
+        } else {
+          const receipt = await core.invokeExpandModulePanelAction(user, item.scope, item.module, command, params)
+          if (type === 'copy') return receipt
+        }
         await panel.refetch(); await refresh()
       } finally { setBusy(false) }
     }} /></div>

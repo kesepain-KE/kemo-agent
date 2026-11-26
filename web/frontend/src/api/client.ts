@@ -163,15 +163,20 @@ export async function retrySessionSummary(
   )
 }
 
-export async function touchSessionLease(user: string, sessionId: string, clientId: string): Promise<void> {
-  await requestJson(
+export async function touchSessionLease(
+  user: string, sessionId: string, clientId: string, keepalive = false, signal?: AbortSignal,
+): Promise<boolean> {
+  const response = await requestJson<{ leased: boolean }>(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/lease`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: clientId, lease_sequence: nextLeaseSequence(clientId) }),
+      keepalive,
+      signal,
     },
   )
+  return response.leased === true
 }
 
 export async function releaseSessionLease(
@@ -871,7 +876,15 @@ export async function deleteMessageModule(user: string, moduleName: string): Pro
 }
 
 export function messageFileDownloadUrl(user: string, moduleName: string, path: string): string {
-  return `${apiBase}/api/users/${encodeURIComponent(user)}/message/modules/${encodeURIComponent(moduleName)}/files/download?path=${encodeURIComponent(path)}`
+  return messageFileUrl(user, moduleName, path, 'download')
+}
+
+export function messageFilePreviewUrl(user: string, moduleName: string, path: string): string {
+  return messageFileUrl(user, moduleName, path, 'preview')
+}
+
+function messageFileUrl(user: string, moduleName: string, path: string, action: 'download' | 'preview'): string {
+  return `${apiBase}/api/users/${encodeURIComponent(user)}/message/modules/${encodeURIComponent(moduleName)}/files/${action}?path=${encodeURIComponent(path)}`
 }
 
 export async function getUserSoul(user: string, signal?: AbortSignal): Promise<SoulResponse> {

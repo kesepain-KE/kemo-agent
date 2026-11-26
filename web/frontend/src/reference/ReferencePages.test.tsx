@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
+import { createMemoryRouter, MemoryRouter, Outlet, Route, RouterProvider, Routes, useSearchParams } from 'react-router-dom'
 import { http, HttpResponse } from 'msw'
 import { Blob as NodeBlob } from 'node:buffer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../test/server'
+import { getKemoModelCapabilities, getRuntimeStatus } from '../api/client'
 import { ReferencePage, loadReferenceData } from './ReferencePage'
 import { FilesPage } from './FilesPage'
 import { openCronDialog } from './tasks.js'
@@ -22,15 +23,15 @@ function renderPage(path: string, files = false) {
 describe('样例替换后的生产路由', () => {
   afterEach(() => vi.unstubAllGlobals())
   it('调度页独立刷新共享请求池，不重建页面或请求完整提示词，切页后停止轮询', async () => {
-    const data = await loadReferenceData('/status', 'kesepain', 's1')
+    const runtime = await getRuntimeStatus('kesepain', 's1')
     let active = 4
-    let fullReads = 0
+    const statusReads: string[] = []
     let poolReads = 0
     server.use(http.get('/api/users/kesepain/runtime/status', ({ request }) => {
-      const url = new URL(request.url)
-      if (url.searchParams.get('sections') === 'congestion') poolReads++
-      else fullReads++
-      return HttpResponse.json({ ...data.runtime, congestion: { ...data.runtime.congestion,
+      const sections = new URL(request.url).searchParams.get('sections') || ''
+      if (sections === 'congestion') poolReads++
+      else statusReads.push(sections)
+      return HttpResponse.json({ ...runtime, included_sections: sections.split(','), congestion: { ...runtime.congestion,
         provider: { active_requests: active, max_requests: 10, available_requests: 10 - active, waiting_estimate: 1 } } })
     }))
     renderPage('/status?tab=maintenance')
@@ -41,8 +42,11 @@ describe('样例替换后的生产路由', () => {
     await waitFor(() => expect(pool).toHaveTextContent('0 / 10'), { timeout: 3500 })
     expect(screen.getByRole('group', { name: 'Provider 请求' })).toBe(pool)
     expect(screen.getByRole('heading', { name: '运行诊断' })).toBe(page)
-    expect(fullReads).toBe(1)
+    expect(statusReads.sort()).toEqual(['api', 'maintenance'])
     expect(poolReads).toBeGreaterThanOrEqual(2)
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await waitFor(() => expect(statusReads).toHaveLength(4))
+    expect(screen.getByRole('group', { name: 'Provider 请求' })).toBe(pool)
     fireEvent.click(screen.getByRole('button', { name: '今日 Token' }))
     await screen.findByText('按小时明细')
     await waitFor(() => expect(screen.queryByRole('group', { name: 'Provider 请求' })).toBeNull())
@@ -53,28 +57,30 @@ describe('样例替换后的生产路由', () => {
 
   it('运行诊断同屏预览提示词与组件状态，小时图显示刻度和极值', async () => {
     renderPage('/status')
+    fireEvent.click(await screen.findByRole('button', { name: '系统提示词上下文' }))
     await screen.findByText('系统提示词与拼接状态')
     expect(await screen.findByRole('heading', { name: '用户人格' })).toBeInTheDocument()
     expect(document.querySelectorAll('.runtime-prompt-components tbody tr')).toHaveLength(2)
     expect(screen.queryByRole('button', { name: '拼接组件状态' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '今日 Token' }))
+    await screen.findByText('按小时明细')
     expect(document.querySelector('.runtime-token-chart')).toHaveTextContent('最高 52 · 最低 8 Tokens')
     expect(document.querySelectorAll('.runtime-token-chart circle')).toHaveLength(10)
     expect(document.querySelector('.runtime-token-chart')).toHaveTextContent('09')
     fireEvent.click(screen.getByRole('button', { name: '外部组件与路由' }))
+    expect(await screen.findByText('OneBot 正向 WebSocket')).toBeInTheDocument()
     expect(document.querySelectorAll('.runtime-component-card')).toHaveLength(4)
-    expect(screen.getByText('OneBot 正向 WebSocket')).toBeInTheDocument()
   })
 
   it('API 预览按真实配置显示流式、超时、模型路由，未知能力不冒充不支持', async () => {
-    const data = await loadReferenceData('/status', 'kesepain', 's1')
-    Object.assign(data.runtime.api, { stream: false, timeout: 90, context_tokens: 240000,
+    const runtime = await getRuntimeStatus('kesepain', 's1')
+    Object.assign(runtime.api, { stream: false, timeout: 90, context_tokens: 240000,
       input_modalities: ['text', 'image'], agent_models: { default: 'agent-model' },
       multimodal_models: { vision: 'vision-model' }, multimodal_routing: { vision: 'dedicated' } })
-    server.use(http.get('/api/users/kesepain/runtime/status', () => HttpResponse.json(data.runtime)))
+    server.use(http.get('/api/users/kesepain/runtime/status', () => HttpResponse.json(runtime)))
     renderPage('/status')
     fireEvent.click(await screen.findByRole('button', { name: '用户 API 配置' }))
-    expect(screen.getByText('已关闭')).toBeInTheDocument()
+    expect(await screen.findByText('已关闭')).toBeInTheDocument()
     expect(screen.getByText('90 秒')).toBeInTheDocument()
     expect(screen.getByText('240,000 tokens')).toBeInTheDocument()
     expect(screen.getByText('agent-model')).toBeInTheDocument()
@@ -85,18 +91,19 @@ describe('样例替换后的生产路由', () => {
   })
 
   it.each(['limits', 'extensions'] as const)('运行诊断从 %s 展示真实模型容量，而非 metadata', async (location) => {
-    const data = await loadReferenceData('/status', 'kesepain', 's1')
-    data.runtime.api.type = 'kemo'
+    const runtime = await getRuntimeStatus('kesepain', 's1')
+    const manifest = await getKemoModelCapabilities('kesepain', runtime.api.model)
+    runtime.api.type = 'kemo'
     const limits = { context_window: 1000000, max_input_tokens: 1000000, max_output_tokens: 384000 }
     const capability = {
-      ...data.capabilities.capabilities, input_modalities: ['text'], metadata: {},
+      ...manifest.capabilities, input_modalities: ['text'], metadata: {},
       limits: location === 'limits' ? limits : { context_window: null },
       extensions: location === 'extensions' ? { limits } : {},
     }
     server.use(
-      http.get('/api/users/kesepain/runtime/status', () => HttpResponse.json(data.runtime)),
+      http.get('/api/users/kesepain/runtime/status', () => HttpResponse.json(runtime)),
       http.get('/api/users/kesepain/provider/model-capabilities', () => HttpResponse.json({
-        ...data.capabilities, capabilities: capability,
+        ...manifest, capabilities: capability,
       })),
     )
     renderPage('/status?tab=api')
@@ -104,6 +111,100 @@ describe('样例替换后的生产路由', () => {
     expect(windowLabel.closest('.desc-row')).toHaveTextContent('1,000,000 tokens')
     expect(screen.getByText('模型最大输入').closest('.desc-row')).toHaveTextContent('1,000,000 tokens')
     expect(screen.getByText('模型最大输出').closest('.desc-row')).toHaveTextContent('384,000 tokens')
+  })
+
+  it('提示词、日志与模型能力悬而未决时，仍可点击同一组诊断标签', async () => {
+    const runtime = await getRuntimeStatus('kesepain', 's1')
+    const requests: string[] = []
+    let logsCanceled = false
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    server.use(
+      http.get('/api/users/kesepain/runtime/status', async ({ request }) => {
+        const sections = new URL(request.url).searchParams.get('sections') || ''
+        requests.push(sections)
+        if (sections === 'summary,prompt') await pending
+        return HttpResponse.json({ ...runtime, api: { ...runtime.api, type: 'kemo' },
+          included_sections: sections === 'external' ? [] : sections.split(',') })
+      }),
+      http.get('/api/users/kesepain/runtime/logs', async ({ request }) => {
+        requests.push('logs')
+        request.signal.addEventListener('abort', () => { logsCanceled = true }, { once: true })
+        await pending
+        return HttpResponse.json({ category: 'all', entries: [], pagination: { page: 1, total_pages: 1 } })
+      }),
+      http.get('/api/users/kesepain/provider/model-capabilities', async () => {
+        requests.push('capabilities')
+        await pending
+        return HttpResponse.json({ capabilities: { input_modalities: [] } })
+      }),
+    )
+    try {
+      renderPage('/status')
+      const prompt = screen.getByRole('button', { name: '系统提示词上下文' })
+      const tokens = screen.getByRole('button', { name: '今日 Token' })
+      await waitFor(() => expect([...requests].sort()).toEqual(['api', 'maintenance']))
+      expect(screen.getByRole('button', { name: /消息路由/ })).toHaveTextContent('未读取')
+      expect(screen.queryByText('无错误通道')).not.toBeInTheDocument()
+      fireEvent.click(prompt)
+      await waitFor(() => expect(requests).toContain('summary,prompt'))
+      expect(screen.queryByText('系统提示词与拼接状态')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '运行日志' }))
+      await waitFor(() => expect(requests).toContain('logs'))
+      expect(screen.getByText('正在读取日志…')).toBeVisible()
+      fireEvent.click(screen.getByRole('button', { name: '用户 API 配置' }))
+      await waitFor(() => expect(requests).toContain('capabilities'))
+      expect(logsCanceled).toBe(true)
+      expect(screen.getByText('读取能力中…')).toBeVisible()
+      expect(screen.getByText('Base URL')).toBeVisible()
+      fireEvent.click(tokens)
+      expect(await screen.findByText('按小时明细')).toBeVisible()
+      expect(screen.getByRole('button', { name: '今日 Token' })).toBe(tokens)
+      fireEvent.click(screen.getByRole('button', { name: '外部组件与路由' }))
+      expect(await screen.findByText('服务端未返回此分区')).toBeVisible()
+      expect(screen.queryByText('OneBot 正向 WebSocket')).not.toBeInTheDocument()
+    } finally { release() }
+  })
+
+  it.each([['another-user', 's1'], ['kesepain', 's2']])('切到 %s/%s 后，不显示迟到的提示词响应', async (user, sessionId) => {
+    const runtime = await getRuntimeStatus('kesepain', 's1')
+    let oldRequested = false
+    let oldAborted = false
+    let release!: () => void
+    const delayed = new Promise<void>(resolve => { release = resolve })
+    server.use(http.get('/api/users/:user/runtime/status', async ({ params, request }) => {
+      const query = new URL(request.url).searchParams
+      const sections = query.get('sections') || ''
+      const session = query.get('session_id')
+      const old = params.user === 'kesepain' && session === 's1'
+      if (old && sections === 'summary,prompt') {
+        oldRequested = true
+        request.signal.addEventListener('abort', () => { oldAborted = true }, { once: true })
+        await delayed
+      }
+      return HttpResponse.json({ ...runtime, user: params.user, session_id: session, included_sections: sections.split(','),
+        prompt: { ...runtime.prompt, content: old ? '# 旧面板正文' : '# 新面板正文' } })
+    }))
+
+    function ScopedOutlet() {
+      const [params] = useSearchParams()
+      return <Outlet context={{ user: params.get('user')!, sessionId: params.get('session')!, chatRunning: false } satisfies Partial<ShellOutletContext>} />
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const router = createMemoryRouter([{ element: <ScopedOutlet />, children: [{ path: '/status', element: <ReferencePage /> }] }],
+      { initialEntries: ['/status?tab=prompt&user=kesepain&session=s1'] })
+    const view = render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>)
+    try {
+      await waitFor(() => expect(oldRequested).toBe(true))
+      await act(() => router.navigate(`/status?tab=prompt&user=${user}&session=${sessionId}`))
+      expect(await screen.findByRole('heading', { name: '新面板正文' })).toBeVisible()
+      await waitFor(() => expect(oldAborted).toBe(true))
+      await act(async () => { release() })
+      expect(screen.queryByRole('heading', { name: '旧面板正文' })).not.toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: '新面板正文' })).toBeVisible()
+    } finally {
+      release(); view.unmount(); router.dispose(); client.clear()
+    }
   })
 
   it('终端显示实际输出，消息日志保留完整输入输出正文', async () => {
@@ -725,12 +826,12 @@ describe('样例替换后的生产路由', () => {
     expect(document.body.textContent).not.toContain('undefined')
   })
 
-  it('刷新保存当前诊断标签，不跳回默认 Prompt', async () => {
+  it('刷新保留当前诊断标签，不跳回诊断首页', async () => {
     const client = renderPage('/status')
     await screen.findByRole('heading', { name: '运行诊断' })
     fireEvent.click(screen.getByRole('button', { name: /外部组件/ }))
     await screen.findByText('最近更新偏慢')
-    await act(() => client.invalidateQueries({ queryKey: ['reference-page'] }))
+    await act(() => client.invalidateQueries({ queryKey: ['runtime-status', 'kesepain', 's1'] }))
     expect(screen.getByText('最近更新偏慢')).toBeInTheDocument()
   })
 

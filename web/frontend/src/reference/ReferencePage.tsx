@@ -8,7 +8,7 @@ import type { ShellOutletContext } from '../components/appShellTypes'
 import { DocumentMarkdown } from '../components/DocumentMarkdown'
 import { ModulePanel } from '../components/ModulePanel'
 import { RuntimeCongestion } from '../components/RuntimeCongestion'
-import type { KnowledgeDocumentSummary, ModulePanelDefinition, ModulePanelResponse, ModulePanelValue, ExpandScope } from '../types/api'
+import type { KnowledgeDocumentSummary, ModulePanelDefinition, ModulePanelResponse, ModulePanelValue, ExpandScope, RuntimeStatusResponse } from '../types/api'
 import { KnowledgeFilePreview } from './KnowledgeFilePreview'
 import { disposeReferencePage, renderReferencePage, toast } from './runtime.js'
 
@@ -40,19 +40,54 @@ export async function loadReferenceData(route: string, user: string, sessionId: 
       const [agents, messages, expand] = await Promise.all([api.getAgents(user), api.getMessageStatus(user), api.getExpands(user)])
       return { agents, messages, expand }
     }
-    case '/status': {
-      const [runtime, logs] = await Promise.all([api.getRuntimeStatus(user, sessionId), api.getRuntimeLogs(user)])
-      let capabilities: any = {
-        capabilities: { input_modalities: [], output_modalities: [], reasoning: { supported: false, efforts: [], summary: '未读取模型能力' }, tools: {}, metadata: {} },
-      }
-      let capabilityError = ''
-      if (runtime.api.type === 'kemo' && runtime.api.configured) {
-        try { capabilities = await api.getKemoModelCapabilities(user, runtime.api.model) }
-        catch (error) { capabilityError = error instanceof Error ? error.message : tr('模型能力读取失败') }
-      }
-      return { runtime, logs, capabilities, capabilityError }
-    }
     default: throw new Error(`未注册的业务页面：${route}`)
+  }
+}
+
+function useRuntimeSection(user: string, sessionId: string, sections: string[], active = true) {
+  return useQuery({
+    queryKey: ['runtime-status', user, sessionId, sections.join(',')],
+    queryFn: ({ signal }) => api.getRuntimeStatus(user, sessionId, sections, signal),
+    enabled: Boolean(user) && active,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
+  })
+}
+
+function included(data: RuntimeStatusResponse | undefined, section: string) {
+  return data?.included_sections?.includes(section) ? data : undefined
+}
+
+function useRuntimeView(user: string, sessionId: string, tab: string) {
+  const apiRead = useRuntimeSection(user, sessionId, ['api'])
+  const maintenance = useRuntimeSection(user, sessionId, ['maintenance'])
+  const prompt = useRuntimeSection(user, sessionId, ['summary', 'prompt'], tab === 'prompt')
+  const tokens = useRuntimeSection(user, sessionId, ['tokens'], tab === 'tokens')
+  const external = useRuntimeSection(user, sessionId, ['external'], tab === 'external')
+  const provider = included(apiRead.data, 'api')?.api
+  const readCapabilities = Boolean(user && tab === 'api' && provider?.type === 'kemo' && provider.configured)
+  const capabilities = useQuery({
+    queryKey: ['runtime-status', user, sessionId, 'capabilities', provider?.model, provider?.base_url],
+    queryFn: ({ signal }) => api.getKemoModelCapabilities(user, provider!.model, false, signal),
+    enabled: readCapabilities,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
+  })
+  const reads = new Map([['api', apiRead], ['maintenance', maintenance], ['prompt', prompt], ['tokens', tokens], ['external', external]])
+  const detail = reads.get(tab)
+  return {
+    tab, provider,
+    context: included(prompt.data, 'summary')?.context,
+    routes: included(external.data, 'external')?.message_routes.summary,
+    maintenance: included(maintenance.data, 'maintenance')?.system_cron,
+    maintenancePending: maintenance.isPending,
+    maintenanceError: maintenance.error?.message,
+    runtime: included(detail?.data, tab),
+    detailPending: detail?.isPending,
+    detailError: detail?.error?.message,
+    capability: readCapabilities ? capabilities.data?.capabilities : undefined,
+    capabilityPending: readCapabilities && capabilities.isPending,
+    capabilityError: readCapabilities ? capabilities.error?.message : undefined,
   }
 }
 
@@ -100,17 +135,21 @@ function EmbeddedPanel({ user, kind, name, scope, initial, panelError, refresh }
 /** 原样例 DOM 的 React 组合根；协议组件仍由生产版安全渲染器负责。 */
 export function ReferencePage() {
   const language = useLanguage()
-  const { user, sessionId, clientId, chatRunning, sessions } = useOutletContext<ShellOutletContext>()
+  const { user, sessionId, chatRunning, sessions } = useOutletContext<ShellOutletContext>()
   const location = useLocation()
   const navigate = useNavigate()
   const client = useQueryClient()
   const hostRef = useRef<HTMLDivElement>(null)
   const route = location.pathname
+  const isStatus = route === '/status'
   const params = Object.fromEntries(new URLSearchParams(location.search))
   const viewState = useMemo(() => ({}), [route, user, sessionId, location.search])
-  const renderRef = useRef<{ active: boolean; busy: boolean } | null>(null)
+  const [selectedTab, setSelectedTab] = useState<{ viewState: object; tab: string }>()
+  const statusTab = selectedTab?.viewState === viewState ? selectedTab.tab : params.tab ?? ''
+  const status = useRuntimeView(isStatus ? user : '', sessionId, statusTab)
+  const renderRef = useRef<{ active: boolean; busy: boolean; updateStatus?: (view: typeof status) => void } | null>(null)
   const forceRefreshRef = useRef(false)
-  const queryKey = ['reference-page', route, user, route === '/status' || route === '/tasks' ? sessionId : '']
+  const queryKey = ['reference-page', route, user, route === '/tasks' ? sessionId : '']
   const pageQuery = useQuery({
     queryKey,
     queryFn: () => {
@@ -119,22 +158,23 @@ export function ReferencePage() {
         hostRef.current?.contains(document.activeElement) && document.activeElement?.matches('input,textarea,select'))) return previous
       return loadReferenceData(route, user, sessionId)
     },
-    enabled: Boolean(user),
+    enabled: Boolean(user) && !isStatus,
     staleTime: 0,
     // 编辑、确认窗口和配置面板操作期间不销毁用户正在使用的 DOM。
     refetchOnWindowFocus: false,
     refetchInterval: query => {
       if (route === '/tasks') return query.state.data?.tasks.summary.active_plans > 0 ? 1_200 : 15_000
-      return route === '/status' ? 30_000 : false
+      return false
     },
   })
   useEffect(() => {
-    if (!pageQuery.data || !hostRef.current) return
+    if ((!isStatus && !pageQuery.data) || !hostRef.current) return
     const host = hostRef.current
     const roots: Array<{ root: Root; node: HTMLElement; mounted: boolean; disposed: boolean }> = []
     const cleanups: Array<() => void> = []
     const ctx: any = {
       user, sessionId, running: chatRunning, params, viewState, active: true, busy: false, host,
+      selectStatusTab: (tab: string) => setSelectedTab({ viewState, tab }),
       registerCleanup: (cleanup: () => void) => cleanups.push(cleanup),
       navigate: (path: string, extra: Record<string, string> = {}) => {
         const query = new URLSearchParams({ user, ...(sessionId ? { session: sessionId } : {}), ...extra })
@@ -145,10 +185,16 @@ export function ReferencePage() {
         if ((plan.source || 'web') !== 'web' || !plan.session_id) throw new Error('此计划必须在其原来源渠道执行')
         const owner = sessions?.find(item => item.session_id === plan.session_id)
         if (!owner) throw new Error('计划所属会话已清理或不可用，不能为孤立计划创建新会话')
-        if (owner.state === 'closed') await api.reopenSession(user, plan.session_id, clientId)
         if (ctx.active) ctx.navigate('/chat', { session: plan.session_id, plan_id: plan.plan_id })
       },
       refresh: async () => {
+        if (isStatus) {
+          await Promise.all([
+            client.refetchQueries({ queryKey: ['runtime-status', user, sessionId], type: 'active' }, { throwOnError: true }),
+            ctx.refreshLogs?.(),
+          ])
+          return
+        }
         forceRefreshRef.current = true
         try {
           const result = await pageQuery.refetch()
@@ -167,8 +213,8 @@ export function ReferencePage() {
       queueMicrotask(() => { if (ctx.active && !entry.disposed) root.render(content) })
       return node
     }
-    ctx.mountCongestion = (initial: React.ComponentProps<typeof RuntimeCongestion>['initial']) => mount(
-      <QueryClientProvider client={client}><RuntimeCongestion user={user} sessionId={sessionId} initial={initial} /></QueryClientProvider>)
+    ctx.mountCongestion = () => mount(
+      <QueryClientProvider client={client}><RuntimeCongestion user={user} sessionId={sessionId} /></QueryClientProvider>)
     ctx.mountKnowledgePreview = (document: KnowledgeDocumentSummary, onClose: () => void, onEdit?: () => void) =>
       mount(<KnowledgeFilePreview document={document} user={user} onClose={onClose} onEdit={onEdit} />)
     ctx.mountMarkdown = (content: string, options: { readOnly?: boolean } = {}) => mount(<DocumentMarkdown content={content} onWidgetAction={options.readOnly ? undefined : action => {
@@ -183,22 +229,7 @@ export function ReferencePage() {
         </QueryClientProvider>)
     }
     try {
-      host.replaceChildren(renderReferencePage(route, ctx, pageQuery.data))
-      if (pageQuery.data.capabilityError) {
-        const alert = document.createElement('div')
-        alert.className = 'banner banner-warning'; alert.textContent = pageQuery.data.capabilityError
-        host.querySelector('.page-inner')?.prepend(alert)
-      }
-      const pendingCount = pageQuery.data.runtime?.system_cron?.pending_confirmation_count
-      if (route === '/status' && Number.isSafeInteger(pendingCount) && pendingCount > 0) {
-        const notice = document.createElement('div')
-        notice.className = 'banner banner-warning'
-        notice.setAttribute('role', 'status')
-        notice.setAttribute('aria-label', tr('系统维护任务待确认'))
-        notice.textContent = tr('有 {count} 个系统维护任务因中断暂停，等待确认后恢复。', { count: pendingCount })
-          + ' ' + tr('请先核对已执行操作，再显式恢复任务。')
-        host.querySelector('.page-inner')?.prepend(notice)
-      }
+      host.replaceChildren(renderReferencePage(route, ctx, pageQuery.data ?? {}))
     } catch (error) {
       const alert = document.createElement('div')
       alert.className = 'banner banner-danger'; alert.setAttribute('role', 'alert')
@@ -226,13 +257,16 @@ export function ReferencePage() {
       queueMicrotask(() => remaining.forEach(entry => entry.root.unmount()))
       host.replaceChildren()
     }
-  }, [pageQuery.data, route, user, sessionId, location.search, client, navigate, viewState, language])
+  }, [isStatus, pageQuery.data, route, user, sessionId, location.search, client, navigate, viewState, language])
+  useEffect(() => { renderRef.current?.updateStatus?.(status) })
 
   if (!user) return <div className="empty"><div className="empty-title">{tr("请先选择用户")}</div></div>
-  if (pageQuery.isLoading) return <div className="reference-loading" role="status"><span className="spinner" />{tr("正在读取真实数据…")}</div>
+  if (!isStatus && pageQuery.isLoading) return <div className="reference-loading" role="status"><span className="spinner" />{tr("正在读取真实数据…")}</div>
   if (pageQuery.isError && !pageQuery.data) return <div className="page"><div className="page-inner"><div className="banner banner-danger" role="alert">
     {pageQuery.error instanceof Error ? pageQuery.error.message : tr('读取失败')}
     <button className="btn btn-outline" onClick={() => void pageQuery.refetch()}>{tr("重试")}</button>
   </div></div></div>
-  return <>{pageQuery.isError && <div className="banner banner-warning" role="alert">{tr("刷新失败，当前显示上次成功读取的数据。")}<button onClick={() => void pageQuery.refetch()}>{tr("重试")}</button></div>}<div className="reference-page-host" ref={hostRef} /></>
+  return <>{pageQuery.isError && <div className="banner banner-warning" role="alert">{tr("刷新失败，当前显示上次成功读取的数据。")}<button onClick={() => void pageQuery.refetch()}>{tr("重试")}</button></div>}
+    <div key={isStatus ? JSON.stringify([user, sessionId]) : route} className="reference-page-host" ref={hostRef} />
+  </>
 }

@@ -14,14 +14,17 @@ describe('FollowUpQueue height budget styles', () => {
     expect(rule).toContain('scrollbar-gutter: stable')
   })
 
-  it('caps one card without introducing a nested vertical scroller', () => {
+  // 2026-11-24 需求变更：一条跟进消息里可放多张图片/多媒体，原先「卡片内不滚动」
+  // 会导致超出 26.25rem 的内容被 overflow:hidden 直接裁掉、看图看不到。
+  // 改为卡片内可滚，外层队列滚动条保留（两者职责不同：外层翻消息，内层看单条全文）。
+  it('caps one card while allowing the body to scroll its own overflow', () => {
     const bubbleRule = stylesheet.match(/\.bubble\s*\{([^}]*)\}/)?.[1] ?? ''
     const bodyRule = stylesheet.match(/\.body\s*\{([^}]*)\}/)?.[1] ?? ''
 
     expect(bubbleRule).toContain('max-height: var(--composer-follow-up-max, 26.25rem)')
     expect(bubbleRule).toContain('overflow: hidden')
     expect(bodyRule).toContain('min-height: 0')
-    expect(bodyRule).toContain('overflow: hidden')
-    expect(bodyRule).not.toContain('overflow-y: auto')
+    expect(bodyRule).toContain('overflow-y: auto')
+    expect(bodyRule).not.toContain('overflow: hidden')
   })
 })

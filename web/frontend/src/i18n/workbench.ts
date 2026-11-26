@@ -30,6 +30,7 @@ Shell 后台任务|Shell background jobs|Tareas de Shell en segundo plano|Tâche
 关闭标签|Close tab|Cerrar pestaña|Fermer l’onglet|Tab schließen|Fechar aba|Закрыть вкладку|タブを閉じる|탭 닫기
 在工作面板打开|Open in workspace|Abrir en el panel|Ouvrir dans le panneau|Im Arbeitsbereich öffnen|Abrir no painel|Открыть в рабочей панели|作業パネルで開く|작업 패널에서 열기
 查看后台任务|View background job|Ver tarea en segundo plano|Voir la tâche en arrière-plan|Hintergrundaufgabe ansehen|Ver tarefa em segundo plano|Посмотреть фоновую задачу|バックグラウンドタスクを表示|백그라운드 작업 보기
+已转后台|Moved to background|Pasó a segundo plano|Passé en arrière-plan|In den Hintergrund verschoben|Movido para segundo plano|Перенесено в фон|バックグラウンドに移行済み|백그라운드로 전환됨
 后台任务范围|Background job scope|Ámbito de tareas|Périmètre des tâches|Aufgabenbereich|Escopo das tarefas|Область фоновых задач|タスクの表示範囲|백그라운드 작업 범위
 此用户全部任务|All jobs for this user|Todas las tareas del usuario|Toutes les tâches de cet utilisateur|Alle Aufgaben dieses Benutzers|Todas as tarefas deste usuário|Все задачи пользователя|このユーザーの全タスク|이 사용자의 모든 작업
 当前对话任务|Current conversation jobs|Tareas de esta conversación|Tâches de cette conversation|Aufgaben dieses Gesprächs|Tarefas desta conversa|Задачи текущего диалога|現在の会話のタスク|현재 대화 작업

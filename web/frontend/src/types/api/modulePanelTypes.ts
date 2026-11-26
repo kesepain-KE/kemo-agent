@@ -55,9 +55,10 @@ export interface ModulePanelConfigContainer {
 }
 
 export interface ModulePanelControl {
-  type: 'button' | 'send'
+  type: 'button' | 'send' | 'copy'
   label: string
   command: string
+  confirm?: string
   inputs?: ModulePanelField[]
 }
 

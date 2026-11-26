@@ -171,7 +171,7 @@ function MessageWorkspace({ user }: { user: string }) {
             <div className={styles.workspaceBody} role="tabpanel" id="message-tab-content" aria-labelledby={`message-tab-${activeId}`}>
               {activeId === 'status' ? <MessageStatus transport={transport} bindings={status.data?.bindings || []} /> : null}
               {activeId === 'files' ? <MessageFiles key={transport.id} user={user} transport={transport} /> : null}
-              {activeId === 'messages' || activeId === 'logs' ? <MessageHistory key={`${transport.id}:${activeId}`} transport={transport} mode={activeId} /> : null}
+              {activeId === 'messages' || activeId === 'logs' ? <MessageHistory key={`${transport.id}:${activeId}`} user={user} transport={transport} mode={activeId} /> : null}
               {activeId === 'diagnostics' ? <MessageDiagnostics transport={transport} issues={status.data?.issues || []} uiError={item?.ui_error || item?.panel_error} /> : null}
               {item && customPage ? needsPermission ? <div className={styles.permissionArea}><ShieldCheck size={24} /><div><h3>{t('插件页面需要授权')}</h3>
                 <p>{t('由实例管理员审查后授予本模块能力。')}</p><ul>{customPage.permissions?.map(value => <li key={value}>{t(permissionLabels[value] || value)}</li>)}</ul>

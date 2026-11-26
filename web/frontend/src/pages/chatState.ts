@@ -235,7 +235,8 @@ export function finalizeCurrentRoundItems(
       return {
         ...item,
         status: detail ? detail.ok === false || detail.status === 'not_applied' ? 'not_applied' as const : 'completed' as const
-          : item.status === 'queued' ? 'not_applied' as const : item.status === 'accepted' ? 'completed' as const : item.status,
+          : item.status === 'queued' || item.status === 'submitting' ? 'not_applied' as const
+            : item.status === 'accepted' ? 'completed' as const : item.status,
         finalized: true,
       }
     }
@@ -312,18 +313,31 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
         && item.kind === 'reasoning'
         && item.streaming ? { ...item, streaming: false } : item)
     }
-    const index = findLastCurrentRoundItemIndex(
+    let index = findLastCurrentRoundItemIndex(
       items,
       (item) => item.kind === 'message' && item.role === 'assistant' && Boolean(item.streaming)
         && (!event.response_id || item.providerResponseId === event.response_id)
         && (!event.item_id || item.providerItemId === event.item_id),
     )
-    if (index >= 0) {
-      return items.map((item, position) => position === index && item.kind === 'message' ? { ...item, content: item.content + (event.content || '') } : item)
+    if (index < 0) {
+      if (event.item_id) {
+        index = findLastCurrentRoundItemIndex(
+          items,
+          (item) => item.kind === 'message' && item.role === 'assistant' && !item.streaming
+            && item.providerItemId === event.item_id
+            && item.providerResponseId === (event.response_id || undefined),
+        )
+        if (index >= 0 && items.slice(index + 1).some((item) => item.kind === 'tool')) index = -1
+      }
+      const roundStart = currentRoundStartIndex(items)
+      items = items.map((item, position) => position >= roundStart
+        && item.kind === 'message' && item.role === 'assistant' && item.streaming
+        ? { ...item, streaming: false } : item)
     }
-    items = items.map((item, position) => position >= currentRoundStartIndex(items)
-      && item.kind === 'message' && item.role === 'assistant' && item.streaming
-      ? { ...item, streaming: false } : item)
+    if (index >= 0) {
+      return items.map((item, position) => position === index && item.kind === 'message'
+        ? { ...item, content: item.content + (event.content || ''), streaming: true } : item)
+    }
     return [...items, {
       id: eventId('assistant'), kind: 'message', role: 'assistant', content: event.content || '',
       providerItemId: event.item_id || undefined, providerResponseId: event.response_id || undefined,
@@ -364,7 +378,8 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
     const stillRunning = backendStatus === 'timed_out_running' || resultError?.still_running === true || event.error?.still_running === true
     const executionLive = event.metadata?.execution_live === true
     const failed = Boolean(event.error) || backendStatus === 'failed' || result?.ok === false
-    const toolStatus = stillRunning ? 'still_running' as const : executionLive ? 'running' as const : failed ? 'error' as const : 'success' as const
+    const toolStatus = backendStatus === 'handed_off' ? 'handed_off' as const : stillRunning ? 'still_running' as const
+      : executionLive ? 'running' as const : failed ? 'error' as const : 'success' as const
     const elapsedMs = event.metadata?.elapsed_ms === undefined ? undefined : Number(event.metadata.elapsed_ms)
     const toolIndex = findLastCurrentRoundItemIndex(
       items,
@@ -405,6 +420,17 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
         || candidate.kind === 'error',
     )
   }
+  if (event.type === 'guidance_handoff') {
+    const { guidance_id, execution_id, job_id } = event.metadata || {}
+    if (typeof guidance_id !== 'string' || typeof execution_id !== 'string' || !event.content) return items
+    const item: ChatItem = {
+      id: `handoff_${guidance_id}_${execution_id}`, kind: 'guidance_handoff', guidanceId: guidance_id,
+      toolName: event.tool_name || '', content: event.content,
+      jobId: typeof job_id === 'string' ? job_id : undefined,
+    }
+    const index = findLastCurrentRoundItemIndex(items, (candidate) => candidate.id === item.id)
+    return index < 0 ? [...items, item] : items.map((old, position) => position === index ? item : old)
+  }
   if (event.type === 'guidance_applied') {
     const pending = Array.isArray(event.metadata?.guidance)
       ? event.metadata.guidance.map((value) => String(value))
@@ -414,7 +440,7 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
         .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object')
       : event.metadata?.id ? [event.metadata] : []
     return items.map((item) => {
-      if (item.kind !== 'guidance' || item.status !== 'queued') return item
+      if (item.kind !== 'guidance' || (item.status !== 'queued' && item.status !== 'submitting')) return item
       const detail = item.guidanceId
         ? details.find((value) => String(value.id || '') === item.guidanceId)
         : undefined
@@ -427,7 +453,7 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
             : item.attachments,
         }
       }
-      if (item.guidanceId && details.length) return item
+      if (item.mode === 'background' || (item.guidanceId && details.length)) return item
       const matched = pending.indexOf(item.content)
       if (matched < 0) return item
       pending.splice(matched, 1)
@@ -495,9 +521,10 @@ export function reduceRunEvent(items: ChatItem[], event: RunEvent): ChatItem[] {
       if (item.kind === 'guidance') {
         const detail = item.guidanceId ? guidanceDetails.find(value => String(value.id || '') === item.guidanceId) : undefined
         const applied = detail ? detail.ok !== false && detail.status !== 'not_applied'
-          : item.status === 'accepted' || item.status === 'queued' && guidanceRemaining > 0 && (!item.guidanceId || !guidanceDetails.length)
+          : item.status === 'accepted' || item.mode !== 'background' && item.status === 'queued'
+            && guidanceRemaining > 0 && (!item.guidanceId || !guidanceDetails.length)
         if (applied && guidanceRemaining > 0) guidanceRemaining -= 1
-        if (detail || item.status === 'accepted' || item.status === 'queued') {
+        if (detail || item.status === 'accepted' || item.status === 'queued' || item.status === 'submitting') {
           return { ...item, status: applied ? 'completed' as const : 'not_applied' as const, finalized: true }
         }
         return { ...item, finalized: true }

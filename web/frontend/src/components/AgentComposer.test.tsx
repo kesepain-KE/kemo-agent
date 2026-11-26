@@ -29,25 +29,29 @@ describe('AgentComposer', () => {
     expect(onStopAndCancelSubagents).toHaveBeenCalledOnce()
   })
 
-  it('运行中 Enter 默认消息跟进，Ctrl+Enter 直接本轮引导，Shift+Enter 保留换行', () => {
+  it('运行中 Enter 继续跟进，Ctrl+Enter 本轮引导，Alt+Enter 延迟引导，Shift+Enter 保留换行', () => {
     const onSubmit = vi.fn()
     const onGuide = vi.fn()
     const { rerender, props } = renderComposer({
       value: '跟进任务', running: true, onSubmit, onGuide, onStop: vi.fn(),
     })
     const input = screen.getByRole('textbox', { name: '消息内容' })
-    expect(input).toHaveAttribute('aria-keyshortcuts', 'Control+Enter')
+    expect(input).toHaveAttribute('aria-keyshortcuts', 'Control+Enter Alt+Enter')
     fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
     expect(onSubmit).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true, isComposing: true })
+    fireEvent.keyDown(input, { key: 'Enter', altKey: true, isComposing: true })
     expect(onGuide).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(onSubmit).toHaveBeenCalledOnce()
     fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
-    expect(onGuide).toHaveBeenCalledOnce()
+    expect(onGuide).toHaveBeenCalledExactlyOnceWith('interrupt')
     expect(onSubmit).toHaveBeenCalledOnce()
-    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
-    expect(onGuide).toHaveBeenCalledOnce()
+    fireEvent.keyDown(input, { key: 'Enter', altKey: true })
+    expect(onGuide.mock.calls).toEqual([['interrupt'], ['background']])
+    expect(onSubmit).toHaveBeenCalledOnce()
+    expect(fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })).toBe(true)
+    expect(onGuide).toHaveBeenCalledTimes(2)
     expect(onSubmit).toHaveBeenCalledOnce()
     expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '停止生成' })).toBeInTheDocument()
@@ -56,14 +60,16 @@ describe('AgentComposer', () => {
     expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
   })
 
-  it('空闲时 Enter 发送，Shift+Enter 和 Ctrl+Enter 均保留编辑行为', () => {
+  it('空闲时只有普通 Enter 发送，Alt+Enter 也不触发斜杠命令', () => {
     const onSubmit = vi.fn()
     const onGuide = vi.fn()
-    renderComposer({
+    const onSlashCommand = vi.fn()
+    const { rerender, props } = renderComposer({
       value: '检查状态',
       contextUsage: <button aria-label="查看上下文用量" />,
       onSubmit,
       onGuide,
+      onSlashCommand,
     })
     expect(screen.getByRole('button', { name: '查看上下文用量' })).toBeInTheDocument()
     expect(document.querySelector('.reference-round-stat, .reference-round-bubble')).toBeNull()
@@ -73,9 +79,14 @@ describe('AgentComposer', () => {
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
     expect(onSubmit).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+    fireEvent.keyDown(input, { key: 'Enter', altKey: true })
     expect(onSubmit).not.toHaveBeenCalled()
     expect(onGuide).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    rerender(<AgentComposer {...props} value="/new" />)
+    fireEvent.keyDown(input, { key: 'Enter', altKey: true })
+    expect(onSlashCommand).not.toHaveBeenCalled()
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
 

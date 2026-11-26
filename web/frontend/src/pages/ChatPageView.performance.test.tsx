@@ -4,6 +4,7 @@ import type { ChatItem, PlanSummary } from '../types/api'
 import { AssistantTurn, assistantTurnPropsEqual } from './ChatPageView'
 import { ChatStreamFixture, createChatStreamItems } from '../test/chatStreamFixture'
 import { stripBackendJudgmentAsides } from './assistantOutput'
+import { reduceRunEvent } from './chatState'
 
 const probes = vi.hoisted(() => ({ partition: vi.fn(), copy: vi.fn() }))
 vi.mock('./chatState', async (importOriginal) => {
@@ -35,6 +36,30 @@ function toolItem(id: string): Extract<ChatItem, { kind: 'tool' }> {
 
 describe('ChatPageView streaming render boundaries', () => {
   beforeEach(() => vi.clearAllMocks())
+
+  it('shows only the current heartbeat as live progress, not assistant text', () => {
+    let items = createChatStreamItems(0)
+    function heartbeat(elapsed: number) {
+      items = reduceRunEvent(items, {
+        type: 'subagent_progress', tool_call_id: 'call-worker',
+        metadata: { task_id: 'task-worker', status: 'running', heartbeat: true,
+          elapsed_seconds: elapsed, recent_cards: [{ summary: '内部卡片不展示' }] },
+      })
+    }
+    heartbeat(600)
+    const view = render(<ChatStreamFixture items={items} />)
+    const progress = screen.getByText('子代理已运行 10 分钟，仍在执行')
+    expect(progress).toHaveAttribute('role', 'status')
+    expect(progress.closest('article')).toBeNull()
+    expect(screen.queryByText('内部卡片不展示')).not.toBeInTheDocument()
+    heartbeat(1200)
+    view.rerender(<ChatStreamFixture items={items} />)
+    expect(screen.queryByText('子代理已运行 10 分钟，仍在执行')).not.toBeInTheDocument()
+    expect(screen.getAllByText('子代理已运行 20 分钟，仍在执行')).toHaveLength(1)
+    items = reduceRunEvent(items, { type: 'done' })
+    view.rerender(<ChatStreamFixture items={items} />)
+    expect(screen.queryByText('子代理已运行 20 分钟，仍在执行')).not.toBeInTheDocument()
+  })
 
   it('compares an unchanged turn and detects content and callback changes', () => {
     const items = Array.from({ length: 800 }, (_, index) => toolItem(`tool-${index}`))

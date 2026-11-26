@@ -12,7 +12,7 @@ import { chatDraftKey, useChatDraftStore } from '../store/chatDrafts'
 import { useCompressionStatus } from '../store/compressionStatus'
 import { useScratchSender } from '../store/scratchNotes'
 import type { OverviewResponse, SessionSummary } from '../types/api'
-import { forgetSession, rememberSession } from '../sessionNavigation'
+import { forgetSession, readRememberedSession, rememberSession } from '../sessionNavigation'
 import type { ShellOutletContext } from './appShellTypes'
 
 afterEach(() => {
@@ -103,6 +103,134 @@ describe('AppShell user persistence', () => {
     expect(transitions[2].lease_sequence).toBeGreaterThan(transitions[1].lease_sequence)
   })
 
+  it('retains the document lease on a persisted BFCache pagehide', async () => {
+    const lease = '/api/users/kesepain/sessions/s1/lease'
+    const fetches = vi.spyOn(globalThis, 'fetch')
+    const requests = () => fetches.mock.calls
+      .map(([input]) => new URL(input instanceof Request ? input.url : String(input), window.location.origin).pathname)
+      .filter(path => path === lease || path === `${lease}/release`)
+    renderApp('/chat?user=kesepain&session=s1')
+    await waitFor(() => expect(requests()).toEqual([lease]))
+    await act(async () => {
+      fireEvent(window, new PageTransitionEvent('pagehide', { persisted: true }))
+    })
+    expect(requests()).not.toContain(`${lease}/release`)
+  })
+
+  it.each([false, true])('keeps the original archive and draft until explicit reopen (sibling won: %s)', async (siblingWon) => {
+    rememberSession('kesepain', 'archived')
+    const key = chatDraftKey('kesepain', 'archived')
+    useChatDraftStore.getState().setText(key, '原会话草稿')
+    let closed = true
+    const restore = vi.fn(() => HttpResponse.json({ session: { session_id: 'replacement' } }))
+    const reopen = vi.fn(() => {
+      closed = false
+      if (siblingWon) return HttpResponse.json({ error: { code: 'conflict', message: 'another tab reopened' } }, { status: 409 })
+      return HttpResponse.json({ reopened: true })
+    })
+    const touches: string[] = []
+    server.use(
+      http.get('/api/users/kesepain/sessions/active', restore),
+      http.post('/api/users/kesepain/sessions/archived/reopen', reopen),
+      http.post('/api/users/kesepain/sessions/archived/lease', () => {
+        touches.push(closed ? 'closed' : 'open')
+        return closed ? HttpResponse.json({ error: { code: 'session_closed', message: 'closed' } }, { status: 404 })
+          : HttpResponse.json({ leased: true })
+      }),
+      http.get('/api/users/kesepain/sessions/archived/history', () => HttpResponse.json({
+        ...cardHistory({
+          user: 'kesepain', source: 'web', session_id: 'archived',
+          messages: [{ role: 'user', content: '已归档的原会话正文' }], integrations: [], integration_traces: [],
+        }),
+        state: closed ? 'closed' : 'open',
+      })),
+    )
+    const app = renderApp('/chat?user=kesepain')
+    const resume = await screen.findByRole('button', { name: '继续此对话' })
+    expect(screen.getByText('已归档的原会话正文')).toBeInTheDocument()
+    const input = screen.getByRole('textbox', { name: '消息内容' })
+    expect(input).toHaveValue('原会话草稿')
+    expect(input).toBeDisabled()
+    expect(app.getSearch()).toBe('?user=kesepain&session=archived')
+    expect(readRememberedSession('kesepain')).toBe('archived')
+    expect(reopen).not.toHaveBeenCalled()
+    expect(restore).not.toHaveBeenCalled()
+
+    fireEvent.click(resume)
+    await waitFor(() => expect(input).toBeEnabled())
+    expect(reopen).toHaveBeenCalledOnce()
+    expect(touches).toEqual(['closed', 'open'])
+    expect(input).toHaveValue('原会话草稿')
+    expect(app.getSearch()).toBe('?user=kesepain&session=archived')
+    expect(screen.queryByRole('button', { name: '继续此对话' })).not.toBeInTheDocument()
+  })
+
+  it.each([401, 503])('keeps the original URL, draft and pointer when history verification returns %s', async (status) => {
+    rememberSession('kesepain', 'uncertain')
+    useChatDraftStore.getState().setText(chatDraftKey('kesepain', 'uncertain'), '待保留的草稿')
+    const restore = vi.fn(() => HttpResponse.json({ session: { session_id: 'replacement' } }))
+    server.use(
+      http.get('/api/users/kesepain/sessions/active', restore),
+      http.post('/api/users/kesepain/sessions/uncertain/lease', () =>
+        HttpResponse.json({ error: { code: 'not_found', message: 'unknown' } }, { status: 404 })),
+      http.get('/api/users/kesepain/sessions/uncertain/history', () =>
+        HttpResponse.json({ error: { message: 'unavailable' } }, { status })),
+    )
+    const app = renderApp('/chat?user=kesepain&session=uncertain')
+    await screen.findByRole('button', { name: '重新检查' })
+    expect(app.getSearch()).toBe('?user=kesepain&session=uncertain')
+    expect(readRememberedSession('kesepain')).toBe('uncertain')
+    expect(screen.getByRole('textbox', { name: '消息内容' })).toHaveValue('待保留的草稿')
+    expect(screen.queryByRole('button', { name: '继续此对话' })).not.toBeInTheDocument()
+    expect(restore).not.toHaveBeenCalled()
+  })
+
+  it('shows a durable pending receipt without a local Run journal or a new submission', async () => {
+    const submit = vi.fn(() => HttpResponse.error())
+    server.use(
+      http.get('/api/users/kesepain/sessions/s1/run', () =>
+        HttpResponse.json({ run: null, execution: { status: 'result_pending' } })),
+      http.post('/api/chat', submit),
+    )
+    const app = renderApp('/chat?user=kesepain&session=s1')
+    expect(await screen.findByText('后台执行结果待提交。')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '消息内容' })).toBeDisabled()
+    expect(app.getSearch()).toBe('?user=kesepain&session=s1')
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('loads history and current execution for the URL session when the new document was discarded', async () => {
+    const property = Object.getOwnPropertyDescriptor(document, 'wasDiscarded')
+    Object.defineProperty(document, 'wasDiscarded', { configurable: true, value: true })
+    rememberSession('kesepain', 'another-session')
+    const lease = vi.fn(() => HttpResponse.json({ leased: true }))
+    const restore = vi.fn(() => HttpResponse.error())
+    const submit = vi.fn(() => HttpResponse.error())
+    server.use(
+      http.get('/api/users/kesepain/sessions/active', restore),
+      http.post('/api/users/kesepain/sessions/s1/lease', lease),
+      http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json(cardHistory({
+        user: 'kesepain', source: 'web', session_id: 's1',
+        messages: [{ role: 'user', content: '丢弃前已保存的正文' }], integrations: [], integration_traces: [],
+      }))),
+      http.get('/api/users/kesepain/sessions/s1/run', () =>
+        HttpResponse.json({ run: null, execution: { status: 'active' } })),
+      http.post('/api/chat', submit),
+    )
+    try {
+      const app = renderApp('/chat?user=kesepain&session=s1')
+      expect(await screen.findByText('丢弃前已保存的正文')).toBeInTheDocument()
+      expect(await screen.findByText('此对话仍在后台执行。')).toBeInTheDocument()
+      expect(app.getSearch()).toBe('?user=kesepain&session=s1')
+      expect(lease).toHaveBeenCalledOnce()
+      expect(restore).not.toHaveBeenCalled()
+      expect(submit).not.toHaveBeenCalled()
+    } finally {
+      if (property) Object.defineProperty(document, 'wasDiscarded', property)
+      else Reflect.deleteProperty(document, 'wasDiscarded')
+    }
+  })
+
   it('后端重启后从无参数页面恢复最近访问空间，即使它不在历史列表第一页', async () => {
     rememberSession('kesepain', 'selected-old')
     let restores = 0
@@ -182,7 +310,8 @@ describe('AppShell user persistence', () => {
   it('已清理对话恢复时解除绑定、刷新日期归档且不在开始页显示孤立计划', async () => {
     let creates = 0
     server.use(
-      http.post('/api/users/kesepain/sessions/gone/lease', () => HttpResponse.json({ error: { message: 'gone' } }, { status: 404 })),
+      http.post('/api/users/kesepain/sessions/gone/lease', () => HttpResponse.json({ error: { code: 'not_found', message: 'gone' } }, { status: 404 })),
+      http.get('/api/users/kesepain/sessions/gone/history', () => HttpResponse.json({ error: { code: 'not_found', message: 'gone' } }, { status: 404 })),
       http.post('/api/users/kesepain/sessions', () => {
         creates += 1
         return HttpResponse.json({ user: 'kesepain', created: true, session: { session_id: 'must_not_create', integration_count: 0 } })
@@ -214,6 +343,8 @@ describe('AppShell user persistence', () => {
       user: 'kesepain', source: 'all', date: '2026-08-25', sessions: [{ session_id: 'gone' }],
     })
     await screen.findByText(/此对话已被清理或删除/)
+    expect(screen.getByRole('button', { name: '查看历史' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '新建会话' })).toBeInTheDocument()
     await waitFor(() => expect(new URLSearchParams(app.getSearch()).has('session')).toBe(false))
     await waitFor(() => expect(app.client.getQueryState(['history-sessions', 'kesepain', '2026-08-25'])?.isInvalidated).toBe(true))
     await delay(30)
@@ -934,8 +1065,24 @@ describe('AppShell navigation', () => {
     })
     const rail = screen.getByRole('button', { name: /轮次位置/ })
     fireEvent.click(rail)
-    const cards = within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')
+    const wheel = within(screen.getByRole('group', { name: '对话轮次卡片' }))
+    const expectedCards = full.messages.filter((message) => message.role === 'user')
+      .map((message) => `第 ${message.integration_number} 轮：${message.content}`)
+    const readIndex = () => {
+      fireEvent.keyDown(rail, { key: 'Home' })
+      const labels: Array<string | null> = []
+      for (let i = 0; i <= expectedCards.length; i += 1) {
+        const label = wheel.getByRole('button', { current: true }).getAttribute('aria-label')
+        if (labels.at(-1) === label) break
+        labels.push(label)
+        fireEvent.keyDown(rail, { key: 'ArrowDown' })
+      }
+      return labels
+    }
+    const cards = readIndex()
     expect(cards).toHaveLength(24)
+    expect(cards).toEqual(expectedCards)
+    expect(screen.getByRole('progressbar', { name: '当前预选轮次' })).toHaveAttribute('aria-valuemax', '24')
     expect(scroll.querySelector('[data-user-message-id="history_card_s1_1_user"]')).toBeNull()
     fireEvent.keyDown(rail, { key: 'Home' })
     expect(screen.getByRole('button', { name: '第 1 轮：导航问题1' })).toHaveAttribute('aria-current', 'true')
@@ -943,8 +1090,8 @@ describe('AppShell navigation', () => {
     fireEvent.keyDown(rail, { key: 'Enter' })
     await waitFor(() => expect(scroll.querySelector('[data-user-message-id="history_card_s1_1_user"]')).not.toBeNull())
     await waitFor(() => expect(scrollTo).toHaveBeenLastCalledWith({ top: 424, behavior: 'smooth' }))
+    expect(readIndex()).toEqual(cards)
     expect(requestedBefore.filter(Boolean)).toEqual(['45', '23'])
-    expect(within(screen.getByRole('group', { name: '对话轮次卡片' })).getAllByRole('button')).toEqual(cards)
     expect(screen.getByRole('status')).not.toHaveTextContent('正在定位消息')
   })
 
@@ -1397,21 +1544,25 @@ describe('AppShell navigation', () => {
     expect((await screen.findAllByText('kemo-agent')).length).toBeGreaterThan(0)
   })
 
-  it('未提交的会话不会请求 history API', async () => {
+  it('租约 404 后只探查原 ID 历史，确认未预留才解绑', async () => {
     let historyRequests = 0
+    const restores = vi.fn(() => HttpResponse.json({ session: { session_id: 'other' } }))
     server.use(
       http.get('/api/users/kesepain/sessions', () => HttpResponse.json({ user: 'kesepain', source: 'web', sessions: [] })),
+      http.get('/api/users/kesepain/sessions/active', restores),
       http.post('/api/users/kesepain/sessions/web_uncommitted/lease', () => (
-        HttpResponse.json({ error: { message: '未预留的会话不存在' } }, { status: 404 })
+        HttpResponse.json({ error: { code: 'not_found', message: '未预留的会话不存在' } }, { status: 404 })
       )),
-      http.get('/api/users/kesepain/sessions/:sessionId/history', () => {
+      http.get('/api/users/kesepain/sessions/web_uncommitted/history', () => {
         historyRequests += 1
-        return HttpResponse.json(cardHistory({ user: 'kesepain', source: 'web', session_id: 'web_uncommitted', messages: [], integrations: [], integration_traces: [] }))
+        return HttpResponse.json({ error: { code: 'not_found', message: '未预留的会话不存在' } }, { status: 404 })
       }),
     )
-    renderApp('/chat?user=kesepain&session=web_uncommitted')
-    await waitFor(() => expect(screen.getAllByText('kesepain').length).toBeGreaterThan(0))
-    expect(historyRequests).toBe(0)
+    const app = renderApp('/chat?user=kesepain&session=web_uncommitted')
+    await screen.findByText(/此对话已被清理或删除/)
+    await waitFor(() => expect(new URLSearchParams(app.getSearch()).has('session')).toBe(false))
+    expect(historyRequests).toBe(1)
+    expect(restores).not.toHaveBeenCalled()
   })
 
   it('首轮提交在会话列表延迟刷新时不会回退欢迎页', async () => {
@@ -1492,6 +1643,25 @@ describe('AppShell navigation', () => {
     expect(await screen.findByTitle('模型与思考档位')).toBeInTheDocument()
   })
 
+  it('历史统计兼容旧失败轮次并显示新失败轮次的实测耗时', async () => {
+    server.use(http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json(cardHistory({
+      user: 'kesepain', session_id: 's1',
+      messages: [
+        { role: 'user', content: '旧请求', integration_number: 1 },
+        { role: 'user', content: '新请求', integration_number: 2 },
+      ],
+      integrations: [
+        { integration_number: 1, status: 'failed', elapsed_ms: 0 },
+        { integration_number: 2, status: 'failed', elapsed_ms: 125 },
+      ],
+    }))))
+    renderApp('/chat?user=kesepain&session=s1')
+    const old = await screen.findByRole('group', { name: '第 1 轮运行统计' })
+    const current = await screen.findByRole('group', { name: '第 2 轮运行统计' })
+    expect(within(old).getByText('0 ms')).toBeInTheDocument()
+    expect(within(current).getByText('125 ms')).toBeInTheDocument()
+  })
+
   it('文件历史只展示当前对话的来源与输出文件', async () => {
     server.use(http.get('/api/users/kesepain/sessions/s1/history', () => HttpResponse.json(cardHistory({
       user: 'kesepain', source: 'web', session_id: 's1',
@@ -1533,6 +1703,11 @@ describe('AppShell navigation', () => {
     let model = 'original-model'
     let savedChanges: unknown
     let catalogRequests = 0
+    let chatRequests = 0
+    let releasePatch!: () => void
+    let releaseCapabilities!: () => void
+    const patchPending = new Promise<void>(resolve => { releasePatch = resolve })
+    const capabilityPending = new Promise<void>(resolve => { releaseCapabilities = resolve })
     const capabilityModels: string[] = []
     server.use(
       http.get('/api/users/kesepain/overview', () => HttpResponse.json({
@@ -1555,8 +1730,10 @@ describe('AppShell navigation', () => {
           { id: 'next-model', owned_by: 'vendor', provider_id: 'vendor', task: 'llm' },
         ] })
       }),
-      http.get('/api/users/kesepain/provider/model-capabilities', ({ request }) => {
-        capabilityModels.push(new URL(request.url).searchParams.get('model') || '')
+      http.get('/api/users/kesepain/provider/model-capabilities', async ({ request }) => {
+        const selected = new URL(request.url).searchParams.get('model') || ''
+        capabilityModels.push(selected)
+        if (selected === 'next-model') await capabilityPending
         return HttpResponse.json({
           capabilities: {
             reasoning: { supported: true, efforts: ['low', 'medium', 'high'] },
@@ -1566,10 +1743,11 @@ describe('AppShell navigation', () => {
       }),
       http.patch('/api/users/kesepain/config', async ({ request }) => {
         savedChanges = (await request.json() as { changes: unknown }).changes
-        await delay(30)
         model = 'next-model'
-        return HttpResponse.json({ updated: true })
+        await patchPending
+        return HttpResponse.json({ user: 'kesepain', config: { provider: { model } }, redacted_paths: [], updated: true })
       }),
+      http.post('/api/chat', () => { chatRequests++; return HttpResponse.json({}, { status: 500 }) }),
     )
     const app = renderApp('/chat?user=kesepain&session=s1')
     await waitFor(() => expect(screen.getByRole('button', { name: '输入框切换模型' })).toBeEnabled())
@@ -1579,18 +1757,29 @@ describe('AppShell navigation', () => {
     expect(catalogRequests).toBe(0)
     fireEvent.click(trigger)
     fireEvent.click(await screen.findByRole('option', { name: 'next-model vendor' }))
-    await waitFor(() => expect(trigger).toBeDisabled())
-    expect(screen.getByRole('combobox', { name: '输入框思考档位' })).toBeDisabled()
-    await waitFor(() => expect(trigger).toHaveTextContent('next-model'))
-    await waitFor(() => expect(trigger).toBeEnabled())
-    expect(screen.getByTitle('模型与思考档位')).toHaveTextContent('next-model')
-    expect(textarea).toHaveValue('保留待发送草稿')
-    expect(savedChanges).toEqual({ provider: { model: 'next-model' } })
-    expect(app.getPathname()).toBe('/chat')
-    expect(app.getSearch()).toBe('?user=kesepain&session=s1')
-    expect(catalogRequests).toBe(1)
-    if (protocol === 'kemo') await waitFor(() => expect(capabilityModels).toContain('next-model'))
-    else expect(capabilityModels).toHaveLength(0)
+    try {
+      expect(screen.queryByRole('dialog', { name: '切换对话模型' })).not.toBeInTheDocument()
+      expect(screen.getByText('正在切换到 next-model')).toBeVisible()
+      await waitFor(() => expect(model).toBe('next-model')) // The write reached the server, but the ACK is still held.
+      expect(trigger).toBeDisabled()
+      expect(trigger).toHaveTextContent('original-model')
+      expect(screen.getByTitle('模型与思考档位')).toHaveTextContent('original-model')
+      expect(screen.getByRole('combobox', { name: '输入框思考档位' })).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: '发送' }))
+      expect(await screen.findByText('请等待 Provider 配置保存后再发送。')).toBeVisible()
+      expect(chatRequests).toBe(0)
+      releasePatch()
+      await waitFor(() => expect(trigger).toHaveTextContent('next-model'))
+      await waitFor(() => expect(trigger).toBeEnabled())
+      expect(screen.getByTitle('模型与思考档位')).toHaveTextContent('next-model')
+      expect(textarea).toHaveValue('保留待发送草稿')
+      expect(savedChanges).toEqual({ provider: { model: 'next-model' } })
+      expect(app.getPathname()).toBe('/chat')
+      expect(app.getSearch()).toBe('?user=kesepain&session=s1')
+      expect(catalogRequests).toBe(1)
+      if (protocol === 'kemo') await waitFor(() => expect(capabilityModels).toContain('next-model'))
+      else expect(capabilityModels).toHaveLength(0)
+    } finally { releasePatch(); releaseCapabilities() }
   })
 
   it('输入框直接展开档位气泡并保存，不跳配置页', async () => {
@@ -3542,9 +3731,13 @@ describe('AppShell navigation', () => {
         reopenedSession = String(params.sessionId)
         return HttpResponse.json({ user: 'kesepain', source: 'web', session_id: params.sessionId, reopened: true, session: { ...sessions[1], state: 'open' } })
       }),
-      http.get('/api/users/kesepain/sessions/s2/history', () => HttpResponse.json(cardHistory({
-        user: 'kesepain', source: 'web', session_id: 's2', messages: [], integrations: [], integration_traces: [],
-      }))),
+      http.post('/api/users/kesepain/sessions/s2/lease', () => reopenedSession === 's2'
+        ? HttpResponse.json({ leased: true })
+        : HttpResponse.json({ error: { code: 'session_closed', message: 'closed' } }, { status: 404 })),
+      http.get('/api/users/kesepain/sessions/s2/history', () => HttpResponse.json({
+        ...cardHistory({ user: 'kesepain', source: 'web', session_id: 's2', messages: [], integrations: [], integration_traces: [] }),
+        state: reopenedSession === 's2' ? 'open' : 'closed',
+      })),
     )
     const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
     fireEvent.click(await screen.findByTitle('搜索历史对话'))
@@ -3560,8 +3753,12 @@ describe('AppShell navigation', () => {
     fireEvent.click(within(switchDialog).getByRole('button', { name: '确认切换' }))
 
     await waitFor(() => expect(closedSession).toBe('s1'))
-    await waitFor(() => expect(reopenedSession).toBe('s2'))
     await waitFor(() => expect(getSearch()).toContain('session=s2'))
+    const resume = await screen.findByRole('button', { name: '继续此对话' })
+    expect(reopenedSession).toBe('')
+    fireEvent.click(resume)
+    await waitFor(() => expect(reopenedSession).toBe('s2'))
+    await waitFor(() => expect(screen.queryByRole('button', { name: '继续此对话' })).not.toBeInTheDocument())
     expect(extractedSession).toBe('')
     expect(screen.queryByRole('dialog', { name: '历史对话' })).not.toBeInTheDocument()
   })
@@ -3596,9 +3793,12 @@ describe('AppShell navigation', () => {
           session: { ...session('dated-session', '日期归档', 2), title_source: 'manual', state: 'open' },
         })
       }),
-      http.get('/api/users/kesepain/sessions/dated-session/history', () => HttpResponse.json(cardHistory({
-        user: 'kesepain', source: 'web', session_id: 'dated-session', messages: [], integrations: [], integration_traces: [],
-      }))),
+      http.post('/api/users/kesepain/sessions/dated-session/lease', () =>
+        HttpResponse.json({ error: { code: 'session_closed', message: 'closed' } }, { status: 404 })),
+      http.get('/api/users/kesepain/sessions/dated-session/history', () => HttpResponse.json({
+        ...cardHistory({ user: 'kesepain', source: 'web', session_id: 'dated-session', messages: [], integrations: [], integration_traces: [] }),
+        state: 'closed',
+      })),
     )
     const { getSearch } = renderApp('/chat?user=kesepain&session=s1')
     fireEvent.click(await screen.findByTitle('搜索历史对话'))
@@ -3616,8 +3816,9 @@ describe('AppShell navigation', () => {
     const switchDialog = screen.getByRole('alertdialog', { name: '确认切换历史对话？' })
     fireEvent.click(within(switchDialog).getByRole('button', { name: '确认切换' }))
 
-    await waitFor(() => expect(reopenedSession).toBe('dated-session'))
     await waitFor(() => expect(getSearch()).toContain('session=dated-session'))
+    expect(await screen.findByRole('button', { name: '继续此对话' })).toBeInTheDocument()
+    expect(reopenedSession).toBe('')
   })
 
   it('输入框知识库按钮按真实目录展示文件并把引用写入草稿', async () => {
@@ -3850,10 +4051,12 @@ describe('AppShell navigation', () => {
 
   it('记忆模式、密钥环境变量和插件权限均保存到当前用户且不会写回脱敏密钥', async () => {
     const userSaves: Record<string, unknown>[] = []
+    const storedProvider = { type: 'kemo', model: 'test-model', base_url: 'http://127.0.0.1:8741', api_key: '***', stream: false, reasoning_effort: 'medium' }
     server.use(http.patch('/api/users/kesepain/config', async ({ request }) => {
       const { changes } = await request.json() as { changes: Record<string, unknown> }
       userSaves.push(changes)
-      return HttpResponse.json({ user: 'kesepain', config: {}, updated: true, redacted_paths: [] })
+      return HttpResponse.json({ user: 'kesepain', config: { ...changes, provider: { ...storedProvider, ...changes.provider as object } },
+        updated: true, redacted_paths: ['provider.api_key'] })
     }))
     renderApp('/settings?user=kesepain&tab=memory')
     fireEvent.change(await screen.findByRole('combobox', { name: '记忆模式' }), { target: { value: 'work' } })
@@ -3873,6 +4076,109 @@ describe('AppShell navigation', () => {
     await waitFor(() => expect(userSaves).toHaveLength(3))
     expect(userSaves[2]).toMatchObject({ provider: { api_key_env: 'OPENAI_API_KEY' } })
     expect(userSaves[2].provider).not.toHaveProperty('api_key')
+  })
+
+  it('配置回执立刻确认模型，目录挂起或失败不撤销保存，密钥草稿不进入共享缓存', async () => {
+    const draftKey = 'fixture-draft-key'
+    let releasePatch!: () => void
+    let releaseCatalog!: () => void
+    const patchPending = new Promise<void>(resolve => { releasePatch = resolve })
+    const catalogPending = new Promise<void>(resolve => { releaseCatalog = resolve })
+    let reads = 0
+    let writtenKey: unknown
+    server.use(
+      http.get('/api/users/kesepain/provider/models', async () => {
+        if (++reads === 1) return HttpResponse.json({ data: [] })
+        await catalogPending
+        return HttpResponse.json({ error: { message: '目录暂不可用' } }, { status: 502 })
+      }),
+      http.patch('/api/users/kesepain/config', async ({ request }) => {
+        const { changes } = await request.json() as { changes: { provider: Record<string, unknown> } }
+        writtenKey = changes.provider.api_key
+        await patchPending
+        return HttpResponse.json({ user: 'kesepain', updated: true, redacted_paths: ['provider.api_key'], config: {
+          provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741', ...changes.provider, model: 'confirmed-model', api_key: '***' },
+        } })
+      }),
+    )
+    const { client } = renderApp('/settings?user=kesepain&session=s1&tab=provider')
+    const cacheData = () => JSON.stringify([
+      client.getQueryCache().getAll().map(query => query.state.data),
+      client.getMutationCache().getAll().map(mutation => mutation.state),
+    ])
+    try {
+      await screen.findByText('Kemo API 已验证，但当前密钥没有可用的 LLM 模型')
+      const model = screen.getByLabelText('模型')
+      const key = screen.getByLabelText('API Key')
+      fireEvent.change(model, { target: { value: 'draft-model' } })
+      fireEvent.change(key, { target: { value: draftKey } })
+      fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
+      expect(screen.getByRole('button', { name: '保存中…' })).toBeDisabled()
+      await waitFor(() => expect(writtenKey).toBe(draftKey))
+      expect(screen.getByTitle('模型与思考档位')).toHaveTextContent('test-model')
+      expect(cacheData()).not.toContain(draftKey)
+      expect(reads).toBe(1)
+
+      releasePatch()
+      expect(await screen.findByText('模型与 Provider 已保存')).toBeVisible()
+      await waitFor(() => expect(reads).toBe(2))
+      expect(screen.getByText('正在获取模型列表…')).toBeVisible()
+      expect(screen.getByTitle('模型与思考档位')).toHaveTextContent('confirmed-model')
+      expect(model).toHaveValue('confirmed-model')
+      expect(key).toHaveValue('***')
+      expect(cacheData()).not.toContain(draftKey)
+      releaseCatalog()
+      expect(await screen.findByText('目录暂不可用')).toBeVisible()
+      expect(screen.getByText('模型与 Provider 已保存')).toBeVisible()
+      expect(screen.queryByText(/用户配置保存失败/)).not.toBeInTheDocument()
+    } finally { releasePatch(); releaseCatalog() }
+  })
+
+  it('配置 PATCH 失败不改变生效模型，保留模型与密钥草稿', async () => {
+    server.use(http.patch('/api/users/kesepain/config', () =>
+      HttpResponse.json({ error: { message: '配置校验不通过' } }, { status: 400 })))
+    renderApp('/settings?user=kesepain&session=s1&tab=provider')
+    const model = await screen.findByLabelText('模型')
+    const key = screen.getByLabelText('API Key')
+    fireEvent.change(model, { target: { value: 'retry-model' } })
+    fireEvent.change(key, { target: { value: 'retry-key-fixture' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('用户配置保存失败：配置校验不通过')
+    expect(screen.getByTitle('模型与思考档位')).toHaveTextContent('test-model')
+    expect(model).toHaveValue('retry-model')
+    expect(key).toHaveValue('retry-key-fixture')
+    expect(screen.queryByText('模型与 Provider 已保存')).not.toBeInTheDocument()
+  })
+
+  it('用户配置已确认而全局写失败时分开显示结果并保留失败侧草稿', async () => {
+    let releaseGlobal!: () => void
+    const globalPending = new Promise<void>(resolve => { releaseGlobal = resolve })
+    server.use(
+      http.patch('/api/users/kesepain/config', async ({ request }) => {
+        const { changes } = await request.json() as { changes: Record<string, unknown> }
+        return HttpResponse.json({ user: 'kesepain', updated: true, config: changes, redacted_paths: [] })
+      }),
+      http.patch('/api/global-config', async () => {
+        await globalPending
+        return HttpResponse.json({ error: { message: '全局写入失败' } }, { status: 503 })
+      }),
+    )
+    const { client } = renderApp('/settings?user=kesepain&tab=memory')
+    try {
+      const week = await screen.findByRole('spinbutton', { name: '周记忆上限' })
+      const limit = screen.getByRole('spinbutton', { name: 'Token 上限' })
+      fireEvent.change(week, { target: { value: '47' } })
+      fireEvent.change(limit, { target: { value: '701000' } })
+      fireEvent.click(screen.getByRole('button', { name: '保存记忆与上下文' }))
+      expect(await screen.findByText('用户配置已保存')).toBeVisible()
+      expect(screen.getByRole('button', { name: '保存中…' })).toBeDisabled()
+      releaseGlobal()
+      expect(await screen.findByRole('alert')).toHaveTextContent('全局配置保存失败：全局写入失败')
+      expect(screen.getByText('用户配置已保存')).toBeVisible()
+      expect(screen.queryByText('记忆与上下文 已保存')).not.toBeInTheDocument()
+      expect(client.getQueryData(['user-config', 'kesepain'])).toMatchObject({ config: { memory: { temporary_injection_limits: { seven_days: 47 } } } })
+      expect(limit).toHaveValue(701000)
+    } finally { releaseGlobal() }
   })
 
   it('高级配置从设置导航打开并只提交被修改的全局字段', async () => {

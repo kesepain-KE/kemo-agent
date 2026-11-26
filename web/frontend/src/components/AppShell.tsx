@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { normalizeLanguage } from '../i18n/locales'
 import { AppBackground } from './AppBackground'
 import { WorkspaceLauncher, WorkspaceLayout } from './workspace/WorkspaceLayout'
-import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query'
 import {
   Activity,
   ArrowLeft,
@@ -50,12 +50,9 @@ import {
   getVersion,
   logoutAuth,
   patchPreferences,
-  patchUserConfig,
   patchSessionMarks,
   renameSession,
-  releaseSessionLease,
   retrySessionSummary,
-  touchSessionLease,
   reopenSession,
   AVATAR_UPDATED_EVENT,
 } from '../api/client'
@@ -70,12 +67,15 @@ import { UserProfileCard } from './UserProfileCard'
 import { KemoLogo } from './KemoLogo'
 import lifecycleStyles from './SessionLifecycle.module.css'
 import modelStyles from './ModelRuntimePopover.module.css'
-import type { AuthStatusResponse, ChatItem, OverviewResponse, SessionSummary } from '../types/api'
+import type { AuthStatusResponse, ChatItem, HistoryResponse, OverviewResponse, SessionSummary } from '../types/api'
 import { useUiStore } from '../store/ui'
 import { chatDraftKey, useChatDraftStore, type PendingUploadedFile } from '../store/chatDrafts'
 import { createSessionChannel, getPageClientId } from '../sessionClient'
 import { forgetSession, rememberSession, restoreWebSession } from '../sessionNavigation'
 import { cacheCreatedSession, hasCreatedSessionLease } from '../sessionCreation'
+import { watchWebSession, type SessionAccess } from '../webSessionPresence'
+import { chatHistoryKey } from '../pages/chatHistory'
+import { providerSaveFilter, saveUserConfig } from '../providerConfigSave'
 import {
   normalizeKemoReasoningEffort,
   normalizeReasoningEffort,
@@ -143,10 +143,16 @@ export function AppShell() {
   const sessionId = params.get('session') || ''
   const compressionStatus = useCompressionStatus((state) => state.entries[chatRunKey(user, sessionId)])
   const newUserTab = params.get('new_session') === '1' && !sessionId
-  const [sessionLifecycleNotice, setSessionLifecycleNotice] = useState('')
-  const [leasedConversation, setLeasedConversation] = useState('')
+  const [missingSession, setMissingSession] = useState(false)
+  const [sessionAccess, setSessionAccess] = useState<{ key: string; kind: SessionAccess['kind'] }>()
+  const [reopening, setReopening] = useState<{ key: string; pending: boolean; failed?: boolean }>()
+  const presenceRef = useRef<ReturnType<typeof watchWebSession> | null>(null)
+  const conversationKey = chatRunKey(user, sessionId)
+  const access = sessionAccess?.key === conversationKey ? sessionAccess.kind : 'checking'
+  const sessionReady = Boolean(sessionId && access === 'open')
+  const sessionReadable = sessionReady || access === 'closed' || access === 'readable'
   useEffect(() => {
-    setSessionLifecycleNotice('')
+    setMissingSession(false)
     setSessionTransitioning(false)
   }, [user])
   const sessionsQuery = useQuery({
@@ -159,25 +165,33 @@ export function AppShell() {
   )
   const activeSessionQuery = useQuery({
     queryKey: ['active-session', user, clientId, newUserTab ? 'new-tab' : 'restore'],
-    queryFn: () => newUserTab ? createSession(user, clientId) : restoreWebSession(user, clientId),
+    queryFn: ({ signal }) => newUserTab ? createSession(user, clientId) : restoreWebSession(user, clientId, signal),
     enabled: Boolean(user) && !sessionId && !sessionTransitioning,
     staleTime: newUserTab ? Infinity : 0,
     retry: newUserTab ? false : undefined,
     refetchOnWindowFocus: !newUserTab,
     refetchOnReconnect: !newUserTab,
   })
+  const providerConfigSaving = useIsMutating(providerSaveFilter(user)) > 0
   const overviewQuery = useQuery({
     queryKey: ['overview', user, sessionId],
     queryFn: ({ signal }) => getOverview(user, sessionId, signal),
-    enabled: Boolean(user && sessionId),
+    enabled: Boolean(user && sessionId && !providerConfigSaving),
+    staleTime: 15_000,
     refetchInterval: 30_000,
   })
+  const refreshOverview = () => {
+    if (!queryClient.isMutating(providerSaveFilter(user))) void overviewQuery.refetch()
+  }
   const overviewProvider = overviewQuery.data?.provider
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const providerCapabilitiesQuery = useQuery({
     queryKey: ['provider-model-capabilities', user, overviewProvider?.model || '', overviewProvider?.base_url || ''],
-    queryFn: ({ signal }) => getKemoModelCapabilities(user, overviewProvider?.model || '', true, signal),
+    queryFn: ({ signal }) => getKemoModelCapabilities(user, overviewProvider?.model || '', false, signal),
     enabled: Boolean(
       user
+        && !providerConfigSaving
+        && (location.pathname !== '/status' || modelMenuOpen)
         && overviewProvider?.type === 'kemo'
         && overviewProvider.configured
         && overviewProvider.model,
@@ -212,22 +226,12 @@ export function AppShell() {
   })
   const reasoningEffortMutation = useMutation({
     mutationKey: ['provider-config', user],
-    mutationFn: ({ targetUser, reasoningEffort }: { targetUser: string; reasoningEffort: ReasoningEffort }) => patchUserConfig(targetUser, {
+    mutationFn: ({ targetUser, reasoningEffort }: { targetUser: string; reasoningEffort: ReasoningEffort }) => saveUserConfig(queryClient, targetUser, {
       provider: { reasoning_effort: reasoningEffort },
     }),
-    onSuccess: async (_, variables) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['overview', variables.targetUser] }),
-        queryClient.invalidateQueries({ queryKey: ['settings', variables.targetUser] }),
-        queryClient.invalidateQueries({ queryKey: ['user-config', variables.targetUser] }),
-        queryClient.invalidateQueries({ queryKey: ['runtime-status', variables.targetUser] }),
-      ])
-    },
   })
-  const providerConfigSaving = useIsMutating({ mutationKey: ['provider-config', user] }) > 0
 
   const [fontSizeMenuOpen, setFontSizeMenuOpen] = useState(false)
-  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [commandQuery, setCommandQuery] = useState('')
   const [commandMode, setCommandMode] = useState<'main' | 'slash'>('main')
@@ -249,6 +253,7 @@ export function AppShell() {
   locationRef.current = location
   const {
     userRef, sessionIdRef, chatRuns, chatRunning, chatStopping, chatRunId, chatRunSessionId, chatRunToken,
+    refreshChatRun, persistedRunStatus,
     beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus,
     removeNextTurnMessage, finishChatRun, reorderNextTurnMessages, clearChatRun, restoreChatRun,
     setChatRunning, setChatRunId, setChatAbortController, setChatStopping, abortChatRun,
@@ -372,12 +377,12 @@ export function AppShell() {
     setParams(next)
   }
 
-  const setSessionId = (nextSession: string) => {
+  const setSessionId = (nextSession: string, moveDraft = true) => {
     if (userRef.current !== user) return
     const current = locationRef.current
     const next = new URLSearchParams(current.search)
     if (user) next.set('user', user)
-    if (nextSession && !next.get('session')) {
+    if (moveDraft && nextSession && !next.get('session')) {
       useChatDraftStore.getState().moveDraft(chatDraftKey(user, ''), chatDraftKey(user, nextSession))
     }
     if (nextSession) next.delete('new_session')
@@ -418,7 +423,6 @@ export function AppShell() {
         cacheCreatedSession(queryClient, result)
         if (hasCreatedSessionLease(result, user, clientId)) {
           createdLeaseRef.current = { user, session: active, until: Date.now() + 15_000 }
-          setLeasedConversation(chatRunKey(user, active))
         }
         const next = new URLSearchParams(locationRef.current.search)
         next.delete('new_session')
@@ -427,7 +431,7 @@ export function AppShell() {
         setParams(next, { replace: true })
         void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
       } else {
-        setSessionId(active)
+        setSessionId(active, false)
         void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
       }
     }
@@ -436,78 +440,100 @@ export function AppShell() {
 
   useEffect(() => {
     if (!user || !sessionId) return
-    let disposed = false
-    let suspended = false
-    const touch = (updateLatest = false) => {
-      if (!disposed && !suspended) void touchSessionLease(user, sessionId, clientId).then(() => {
-        if (!disposed) {
-          rememberSession(user, sessionId, updateLatest && document.visibilityState !== 'hidden')
-          setLeasedConversation(chatRunKey(user, sessionId))
-        }
-      }).catch((error: unknown) => {
-        if (disposed || !(error instanceof ApiError) || error.status !== 404) return
-        forgetSession(user, sessionId)
-        setLeasedConversation('')
-        setSessionLifecycleNotice('此对话已被清理或删除，已返回开始页。历史归档列表将自动刷新；如归档也已清理，则无法恢复。')
-        queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
-        queryClient.removeQueries({ queryKey: ['history', user, sessionId] })
-        queryClient.removeQueries({ queryKey: ['overview', user, sessionId] })
-        void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
-        void queryClient.invalidateQueries({ queryKey: ['history-sessions', user] })
-        setSessionTransitioning(true)
-        setSessionId('')
-      })
-    }
-    const release = () => {
-      suspended = true
-      void releaseSessionLease(user, sessionId, clientId, true).catch(() => undefined)
-    }
-    const resume = () => { suspended = false; touch(true) }
-    const visibility = () => { if (!suspended) touch(true) }
     const proof = createdLeaseRef.current
-    if (proof?.user === user && proof.session === sessionId && proof.until > Date.now()) {
-      createdLeaseRef.current = null
-      rememberSession(user, sessionId, document.visibilityState !== 'hidden')
-      setLeasedConversation(chatRunKey(user, sessionId))
-    } else resume()
-    const heartbeat = window.setInterval(touch, 15_000)
-    window.addEventListener('pagehide', release)
-    window.addEventListener('pageshow', resume)
-    window.addEventListener('online', resume)
-    document.addEventListener('visibilitychange', visibility)
+    const leaseProven = proof?.user === user && proof.session === sessionId && proof.until > Date.now()
+    createdLeaseRef.current = null
+    setSessionAccess({ key: conversationKey, kind: 'checking' })
+    setMissingSession(false)
+    setReopening(undefined)
+    // A discarded tab loads a new document, with a new client ID and no prior
+    // creation proof. It takes this same URL-first recovery path.
+    const presence = watchWebSession({
+      user, sessionId, clientId, leaseProven,
+      isCurrent: () => userRef.current === user && sessionIdRef.current === sessionId,
+      onAccess: (state, updateLatest) => {
+        setSessionAccess(current => current?.key === conversationKey && current.kind === state.kind
+          ? current : { key: conversationKey, kind: state.kind })
+        if ('history' in state) {
+          const key = chatHistoryKey(user, sessionId)
+          if (queryClient.getQueryData(key)) {
+            // Keep the loaded pages until the existing paginator refetches them.
+            void queryClient.invalidateQueries({ queryKey: key, exact: true })
+          } else {
+            queryClient.setQueryData<InfiniteData<HistoryResponse>>(key, { pages: [state.history], pageParams: [undefined] })
+          }
+        }
+        if (state.kind === 'open' || state.kind === 'closed' || state.kind === 'readable') {
+          rememberSession(user, sessionId, updateLatest)
+        } else if (state.kind === 'missing') {
+          forgetSession(user, sessionId)
+          setMissingSession(true)
+          queryClient.removeQueries({ queryKey: ['active-session', user, clientId] })
+          queryClient.removeQueries({ queryKey: ['history', user, sessionId] })
+          queryClient.removeQueries({ queryKey: ['overview', user, sessionId] })
+          void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+          void queryClient.invalidateQueries({ queryKey: ['history-sessions', user] })
+          setSessionTransitioning(true)
+          setSessionId('')
+        }
+      },
+      onResume: () => {
+        void queryClient.invalidateQueries({ queryKey: chatHistoryKey(user, sessionId), exact: true })
+        refreshChatRun()
+      },
+    })
+    presenceRef.current = presence
     return () => {
-      disposed = true
-      window.clearInterval(heartbeat)
-      window.removeEventListener('pagehide', release)
-      window.removeEventListener('pageshow', resume)
-      window.removeEventListener('online', resume)
-      document.removeEventListener('visibilitychange', visibility)
-      release()
+      if (presenceRef.current === presence) presenceRef.current = null
+      presence.dispose()
     }
   }, [clientId, sessionId, user])
+
+  const continueArchivedSession = async () => {
+    const presence = presenceRef.current
+    if (access !== 'closed' || !presence || reopening?.pending) return
+    const current = () => presenceRef.current === presence && userRef.current === user && sessionIdRef.current === sessionId
+    setReopening({ key: conversationKey, pending: true })
+    try {
+      await reopenSession(user, sessionId)
+      if (!current()) return
+      const checked = await presence.recheck()
+      void queryClient.invalidateQueries({ queryKey: ['sessions', user] })
+      void queryClient.invalidateQueries({ queryKey: ['history-sessions', user] })
+      if (!current()) return
+      if (checked === 'open') sessionChannelRef.current?.post({ type: 'session-updated', user, sessionId, clientId })
+      setReopening(checked === 'closed' ? { key: conversationKey, pending: false, failed: true } : undefined)
+    } catch (error) {
+      if (!current()) return
+      // A sibling tab may have reopened the same archive while we were waiting.
+      const checked = error instanceof ApiError && (error.status === 404 || error.status === 409)
+        ? await presence.recheck() : undefined
+      if (current()) setReopening(checked === 'open' ? undefined : {
+        key: conversationKey, pending: false, failed: true,
+      })
+    }
+  }
 
   useEffect(() => {
     const channel = createSessionChannel((event) => {
       if (event.type === 'session-updated') {
         void queryClient.invalidateQueries({ queryKey: ['sessions', event.user] })
         void queryClient.invalidateQueries({ queryKey: ['history-sessions', event.user] })
+        if (event.user === userRef.current && event.sessionId === sessionIdRef.current && event.clientId !== clientId) {
+          void presenceRef.current?.recheck()
+        }
         return
       }
       if (event.clientId === clientId || event.user !== userRef.current) return
+      if (sessionIdRef.current === event.sessionId) {
+        void presenceRef.current?.recheck()
+        return
+      }
       forgetSession(event.user, event.sessionId)
       queryClient.removeQueries({ queryKey: ['history', event.user, event.sessionId] })
       void queryClient.invalidateQueries({ queryKey: ['sessions', event.user] })
       void queryClient.invalidateQueries({ queryKey: ['history-sessions', event.user] })
       void queryClient.invalidateQueries({ queryKey: ['overview', event.user] })
-      if (sessionIdRef.current === event.sessionId) {
-        queryClient.removeQueries({ queryKey: ['active-session', event.user, clientId] })
-        setSessionTransitioning(true)
-        const current = locationRef.current
-        const next = new URLSearchParams(current.search)
-        next.delete('session')
-        navigate({ pathname: current.pathname, search: `?${next.toString()}`, hash: current.hash }, { replace: true })
-        setHistorySwitchError('当前对话已在另一个页面删除，已为本页面解除绑定。')
-      }
     })
     sessionChannelRef.current = channel
     return () => {
@@ -535,7 +561,6 @@ export function AppShell() {
           cacheCreatedSession(queryClient, result)
           if (hasCreatedSessionLease(result, requestedUser, clientId)) {
             createdLeaseRef.current = { user: requestedUser, session: result.session.session_id, until: Date.now() + 15_000 }
-            setLeasedConversation(chatRunKey(requestedUser, result.session.session_id))
           }
           next.set('user', requestedUser)
           next.delete('new_session')
@@ -591,14 +616,8 @@ export function AppShell() {
       const currentSession = sessionsQuery.data?.sessions.find(
         (session) => (session.source || 'web') === 'web' && session.session_id === sessionId,
       )
-      if (sessionId && !chatRunning && currentSession?.state !== 'closed') {
+      if (sessionReady && !chatRunning && currentSession?.state !== 'closed') {
         await closeSession(user, sessionId, clientId)
-      }
-      const targetSession = [...(historySessionsData?.sessions ?? []), ...(sessionsQuery.data?.sessions ?? [])].find(
-        (session) => (session.source || 'web') === 'web' && session.session_id === targetSessionId,
-      )
-      if (targetSession?.state === 'closed') {
-        await reopenSession(user, targetSessionId, clientId)
       }
       setHistoryDrawerOpen(false)
       navigate(withContext('/chat', targetSessionId))
@@ -935,13 +954,27 @@ export function AppShell() {
         </header>
         <WorkspaceLayout user={user} sessionId={sessionId}><main className="reference-outlet">
           {healthQuery.isError && <div className="banner banner-warning" role="status">Web 后端连接异常，请检查服务。</div>}
-          {sessionLifecycleNotice && <div className={lifecycleStyles.notice} role="status">{sessionLifecycleNotice}<button onClick={() => setSessionLifecycleNotice('')}>{tr("知道了")}</button></div>}
+          {missingSession && <div className={lifecycleStyles.notice}>
+            <span role="status">{tr('此对话已被清理或删除。')}</span>
+            <button type="button" onClick={openHistoryDrawer}>{tr('查看历史')}</button>
+            <button type="button" onClick={() => { void createNewSession().catch(() => setHistorySwitchError(tr('创建对话失败，请重试。'))) }}>{tr('新建会话')}</button>
+          </div>}
+          {sessionId && access === 'closed' && <div className={lifecycleStyles.notice}>
+            <span role="status">{tr('此对话已归档，历史仍可查看')}</span>
+            <button type="button" disabled={reopening?.key === conversationKey && reopening.pending}
+              onClick={() => { void continueArchivedSession() }}>{tr('继续此对话')}</button>
+            {reopening?.key === conversationKey && reopening.failed && <span role="alert">{tr('继续对话失败，请重试。')}</span>}
+          </div>}
+          {sessionId && (access === 'unverified' || access === 'readable') && <div className={lifecycleStyles.notice}>
+            <span role="status">{tr('暂未确认对话可写，已保留原对话。')}</span>
+            <button type="button" onClick={() => { void presenceRef.current?.recheck() }}>{tr('重新检查')}</button>
+          </div>}
           {historySwitchError && <div className="banner banner-danger" role="alert">{historySwitchError}</div>}
           {newUserTab || (location.pathname === '/chat' && !sessionId && !sessionTransitioning
             && (activeSessionQuery.isPending || activeSessionQuery.isFetching || activeSessionQuery.isError
               || Boolean(activeSessionQuery.data?.session?.session_id))) ? <div className={lifecycleStyles.pending} role={activeSessionQuery.isError ? 'alert' : 'status'}>
             {activeSessionQuery.isError ? <>{newUserTab ? '创建独立对话失败，请重试。' : '恢复对话失败，请重试。'}<button onClick={() => { void activeSessionQuery.refetch() }}>{newUserTab ? '重试创建对话' : '重试恢复对话'}</button></> : newUserTab ? '正在为此用户创建独立对话…' : '正在恢复最近的对话…'}
-          </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady: Boolean(sessionId && leasedConversation === chatRunKey(user, sessionId)), clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, restoreChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview: () => { void overviewQuery.refetch() } } satisfies ShellOutletContext} />}
+          </div> : <Outlet context={{ user, userAvatarUrl: user ? getUserAvatarUrl(user, avatarRevision) : undefined, sessionId, sessionReady, sessionReadable, persistedRunStatus, clientId, chatRunning, chatStopping, setChatRunning, setChatStopping, chatRunId, chatRunSessionId, chatRunToken, setChatRunId, setChatAbortController, abortChatRun, chatRuns, beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus, removeNextTurnMessage, reorderNextTurnMessages, finishChatRun, clearChatRun, restoreChatRun, setSessionId, detachSession, notifySessionDeleted, sessions: webSessions, refreshSessions, createNewSession, overview, reasoningControl, refreshOverview } satisfies ShellOutletContext} />}
         </main></WorkspaceLayout>
       </div>
 
@@ -1081,7 +1114,9 @@ export function AppShell() {
               <h3 id="conversation-command-title">{tr("对话操作")}</h3>
               <div className="command-card-grid">{filteredConversationCommands.map((command) => {
                 const Icon = command.icon
-                return <button className={`command-item ${command.tone || ''}`} type="button" key={command.id} disabled={chatRunning || location.pathname !== '/chat'} onClick={() => runCommand(command.action)}><span className="command-item-icon"><Icon size={18} /></span><span><strong>{tr(command.label)}</strong><small>{location.pathname !== '/chat' ? '请先进入对话页面' : tr(command.detail)}</small></span></button>
+                return <button className={`command-item ${command.tone || ''}`} type="button" key={command.id}
+                  disabled={chatRunning || location.pathname !== '/chat' || Boolean(sessionId && !sessionReady && command.id !== 'new')}
+                  onClick={() => runCommand(command.action)}><span className="command-item-icon"><Icon size={18} /></span><span><strong>{tr(command.label)}</strong><small>{location.pathname !== '/chat' ? '请先进入对话页面' : tr(command.detail)}</small></span></button>
               })}</div>
             </section>}
             {showSlashCommand && <section className="command-section" aria-labelledby="slash-command-title">

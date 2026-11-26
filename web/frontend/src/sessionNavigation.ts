@@ -1,5 +1,4 @@
-import { getActiveSession, touchSessionLease } from './api/client'
-import { ApiError } from './api/transport'
+import { getActiveSession } from './api/client'
 import type { ActiveSessionResponse } from './types/api'
 
 const sessionKey = (user: string) => `kemo-last-web-session:${encodeURIComponent(user)}`
@@ -33,25 +32,16 @@ export function forgetSession(user: string, sessionId?: string) {
   }
 }
 
-/** 缓存只保存身份；服务端租约验证后才恢复，不隐式重开 closed/deleted 历史。 */
-export async function restoreWebSession(user: string, clientId: string): Promise<ActiveSessionResponse> {
+/** Resolve the target only. URL and remembered targets share the same lease/history check. */
+export async function restoreWebSession(user: string, clientId: string, signal?: AbortSignal): Promise<ActiveSessionResponse> {
   const remembered = readRememberedSession(user)
   if (remembered) {
-    try {
-      await touchSessionLease(user, remembered, clientId)
-      return {
-        user, client_id: clientId, active_key: '', created: false,
-        session: {
-          session_id: remembered, source: 'web', state: 'open',
-          window: '', title: '', integration_count: 0, updated_at: '',
-        },
-      }
-    } catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 404) throw error
-      forgetSession(user, remembered)
+    return {
+      user, client_id: clientId, active_key: '', created: false,
+      session: { session_id: remembered, source: 'web', title: '', updated_at: '' },
     }
   }
-  return getActiveSession(user, clientId)
+  return getActiveSession(user, clientId, signal)
 }
 
 export function chatSessionUrl(user: string, sessionId: string) {

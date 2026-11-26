@@ -1,15 +1,17 @@
 import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { DocumentMarkdown } from './DocumentMarkdown'
-import { Eye, EyeOff, Play, RotateCcw, Save, Settings2, Trash2 } from 'lucide-react'
+import { Copy, Eye, EyeOff, Play, RotateCcw, Save, Settings2, Trash2 } from 'lucide-react'
 import type {
   ModulePanelConfigContainer,
+  ModulePanelControl,
   ModulePanelContainer,
   ModulePanelField,
   ModulePanelResponse,
   ModulePanelValue,
 } from '../types/api'
 import { HoverPreview } from './HoverPreview'
+import { copyText } from '../utils/clipboard'
 import styles from './ModulePanel.module.css'
 
 interface ModulePanelProps {
@@ -20,7 +22,7 @@ interface ModulePanelProps {
   error?: string
   emptyText: string
   onSave: (values: Record<string, ModulePanelValue>, clearSecrets: string[], configRevision?: string) => Promise<void>
-  onAction: (command: string, params: Record<string, ModulePanelValue>) => Promise<void>
+  onAction: (command: string, params: Record<string, ModulePanelValue>, type: ModulePanelControl['type']) => Promise<unknown>
   onDirtyChange?: (dirty: boolean) => void
 }
 
@@ -234,13 +236,19 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
       setLocalError(caught instanceof Error ? caught.message : '配置保存失败')
     }
   }
-  const runAction = async (command: string, fields: ModulePanelField[] = []) => {
+  const runAction = async ({ command, inputs = [], type, confirm }: ModulePanelControl) => {
+    if (confirm && !window.confirm(confirm)) return
     setFeedback(''); setLocalError('')
     try {
       const params: Record<string, ModulePanelValue> = {}
-      for (const field of fields) params[field.key] = actionValues[`${command}:${field.key}`] ?? fieldDefault(field)
-      await onAction(command, params)
-      setFeedback(command === 'refresh' ? '已触发刷新' : `操作“${command}”已完成`)
+      for (const field of inputs) params[field.key] = actionValues[`${command}:${field.key}`] ?? fieldDefault(field)
+      const receipt = await onAction(command, params, type) as { result?: { clipboard_text?: string } } | undefined
+      if (type === 'copy') {
+        const value = receipt?.result?.clipboard_text
+        if (typeof value !== 'string' || !value) throw new Error('未取得可复制的内容')
+        await copyText(value)
+        setFeedback('已复制到剪贴板')
+      } else setFeedback(command === 'refresh' ? '已触发刷新' : `操作“${command}”已完成`)
     } catch (caught) {
       setLocalError(caught instanceof Error ? caught.message : '面板操作失败')
     }
@@ -280,7 +288,7 @@ export function ModulePanel({ kind, data, loading = false, busy = false, error =
           onClear={() => undefined}
           onChange={(value) => { markDirty(true); setActionValues((current) => ({ ...current, [`${control.command}:${field.key}`]: value })) }}
           idPrefix={`action-${control.command}`}
-        />)}<button type="button" disabled={busy} onClick={() => { void runAction(control.command, control.inputs) }}>{control.command === 'refresh' ? <RotateCcw size={14} /> : <Play size={14} />}{control.label}</button></section>)}</div>}</div>
+        />)}<button type="button" disabled={busy} onClick={() => { void runAction(control) }}>{control.type === 'copy' ? <Copy size={14} /> : control.command === 'refresh' ? <RotateCcw size={14} /> : <Play size={14} />}{control.label}</button></section>)}</div>}</div>
       </section>
     </HoverPreview>)}</div>
     {busy ? <div className={styles.busyOverlay}><RotateCcw className={styles.spinning} size={18} />正在处理…</div> : null}

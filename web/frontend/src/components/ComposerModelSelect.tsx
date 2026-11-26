@@ -3,8 +3,9 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, LoaderCircle, RefreshCw, Search } from 'lucide-react'
-import { ApiError, getChatProviderModels, getKemoProviderModels, patchUserConfig } from '../api/client'
-import type { OverviewResponse, ProviderSummary } from '../types/api'
+import { ApiError, getChatProviderModels, getKemoProviderModels } from '../api/client'
+import type { ProviderSummary } from '../types/api'
+import { providerSaveFilter, saveUserConfig } from '../providerConfigSave'
 import { ReferenceIcon } from '../reference/ReferenceIcon'
 import styles from './ComposerModelSelect.module.css'
 
@@ -19,6 +20,7 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
   const client = useQueryClient()
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const [pendingModel, setPendingModel] = useState('')
   const forceRefreshRef = useRef(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -29,17 +31,17 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
   })
   const protocol = provider?.type
   const available = Boolean(user && provider?.configured && (protocol === 'chat' || protocol === 'kemo'))
-  const configSaving = useIsMutating({ mutationKey: ['provider-config', user] }) > 0
-  const blocked = disabled || configSaving || !available
+  const configSaving = useIsMutating(providerSaveFilter(user)) > 0
+  const blocked = disabled || configSaving || Boolean(pendingModel) || !available
   const modelsQuery = useQuery({
     queryKey: ['composer-provider-models', user, protocol, provider?.base_url],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (protocol === 'kemo') {
-        const response = await getKemoProviderModels(user, forceRefreshRef.current)
+        const response = await getKemoProviderModels(user, forceRefreshRef.current, signal)
         return response.data.filter((model) => model.task === 'llm')
           .map((model) => ({ id: model.id, detail: model.provider_id }))
       }
-      const response = await getChatProviderModels(user)
+      const response = await getChatProviderModels(user, signal)
       return response.data.map((model) => ({ id: model.id, detail: model.owned_by }))
     },
     enabled: open && available,
@@ -49,16 +51,8 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
   const save = useMutation({
     mutationKey: ['provider-config', user],
     mutationFn: ({ targetUser, model }: { targetUser: string; model: string }) =>
-      patchUserConfig(targetUser, { provider: { model } }),
-    onSuccess: async (_, { targetUser, model }) => {
-      // 只在保存成功后更新共享概览，顶栏、输入坞与新模型的能力查询保持一致。
-      client.setQueriesData<OverviewResponse>({ queryKey: ['overview', targetUser] }, (current) => current
-        ? { ...current, provider: { ...current.provider, model } } : current)
-      await Promise.all(['overview', 'settings', 'user-config', 'runtime-status'].map((key) =>
-        client.invalidateQueries({ queryKey: [key, targetUser] })))
-      setOpen(false)
-      triggerRef.current?.focus()
-    },
+      saveUserConfig(client, targetUser, { provider: { model } }),
+    onSettled: () => setPendingModel(''),
   })
   const models = Array.from(new Map((modelsQuery.data ?? []).map((model) => [model.id, model])).values())
   const visibleModels = models.filter((model) => `${model.id} ${model.detail}`.toLocaleLowerCase()
@@ -77,6 +71,10 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
     save.reset()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, protocol, provider?.base_url, disabled])
+
+  useEffect(() => {
+    if (!blocked && (save.isSuccess || save.isError) && document.activeElement === document.body) triggerRef.current?.focus()
+  }, [blocked, save.isSuccess, save.isError])
 
   useLayoutEffect(() => {
     if (!open) return
@@ -133,7 +131,7 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
 
   const openPicker = () => {
     if (blocked) return
-    setSearch('')
+    if (!save.isError) setSearch('')
     save.reset()
     setOpen((current) => !current)
   }
@@ -145,15 +143,17 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
   return <>
     <button ref={triggerRef} type="button" className={`model-pill ${styles.trigger}`}
       aria-label={tr("输入框切换模型")} aria-haspopup="dialog" aria-expanded={open}
-      aria-controls={open ? listId : undefined} disabled={blocked}
+      aria-controls={open ? listId : undefined} disabled={blocked} aria-busy={Boolean(pendingModel)}
       title={disabled ? tr('当前对话运行或操作中，结束后可切换模型') : available ? tr('切换模型') : tr('请先配置 Provider')}
       onClick={openPicker}
       onKeyDown={(event) => {
         if (event.key === 'ArrowDown' && !open && !blocked) { event.preventDefault(); openPicker() }
       }}>
       <ReferenceIcon name="cpu" small /><span>{provider?.model || tr('尚未配置模型')}</span>
-      {save.isPending ? <LoaderCircle className={styles.spinner} size={13} /> : <ChevronDown size={13} />}
+      {pendingModel ? <LoaderCircle className={styles.spinner} size={13} /> : <ChevronDown size={13} />}
     </button>
+    {pendingModel && <span className={styles.status} role="status">{tr('正在切换到 {model}', { model: pendingModel })}</span>}
+    {save.isError && <span className={styles.error} role="alert">{tr('模型切换失败，已保留原模型，请重试。')}</span>}
     {open && createPortal(
       <div ref={popoverRef} id={listId} className={styles.popover} style={position}
         role="dialog" aria-label={tr("切换对话模型")}>
@@ -176,8 +176,6 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
         </label>
         {modelsQuery.isFetching && <span className={styles.status} role="status">{tr("正在获取模型列表…")}</span>}
         {modelsQuery.isError && <div className={styles.error} role="alert">{tr("模型列表获取失败：")}{discoveryError}</div>}
-        {save.isError && <div className={styles.error} role="alert">{tr("模型切换失败，已保留原模型，请重试。")}</div>}
-        {save.isPending && <span className={styles.status} role="status">{tr("正在保存模型…")}</span>}
         <div className={styles.options} role="listbox" aria-label={tr("可用对话模型")}
           onKeyDown={(event) => {
             if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
@@ -193,7 +191,10 @@ export function ComposerModelSelect({ user, provider, disabled = false }: Compos
             aria-selected={model.id === provider?.model} disabled={configSaving || modelsQuery.isFetching}
             className={model.id === provider?.model ? styles.selected : ''}
             onClick={() => {
-              if (model.id === provider?.model) { setOpen(false); triggerRef.current?.focus(); return }
+              setOpen(false)
+              triggerRef.current?.focus()
+              if (model.id === provider?.model) return
+              setPendingModel(model.id)
               save.mutate({ targetUser: user, model: model.id })
             }}>
             <span><strong>{model.id}</strong>{model.detail && <small>{model.detail}</small>}</span>

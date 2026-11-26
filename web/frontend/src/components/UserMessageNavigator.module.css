@@ -48,7 +48,6 @@
   color: var(--text-tertiary);
   box-shadow: var(--shadow-md);
   text-align: left;
-  backdrop-filter: blur(12px);
   transform: translate(-50%, -50%) scale(var(--wheel-scale));
   transition: left var(--dur-slow) var(--ease-out), top var(--dur-slow) var(--ease-out),
     transform var(--dur-slow) var(--ease-out), opacity var(--dur), width var(--dur),
@@ -81,6 +80,7 @@
   border-radius: var(--r-xl);
   background: var(--bg-raised);
   color: var(--text-primary);
+  backdrop-filter: blur(12px);
   box-shadow: var(--shadow-lg), 0 0 0 4px var(--accent-soft);
 }
 .card.active strong { font-size: var(--t-md); font-weight: 600; line-height: 1.6; -webkit-line-clamp: 3; }

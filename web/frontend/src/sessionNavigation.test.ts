@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from './test/server'
 import { chatSessionUrl, forgetSession, readRememberedSession, rememberSession, restoreWebSession } from './sessionNavigation'
 
@@ -30,21 +30,27 @@ describe('Web 会话恢复', () => {
     expect(restores).toBe(0)
   })
 
-  it('已关闭或删除的缓存空间不隐式重开，回退到后端的合法活跃绑定', async () => {
+  it('有记忆 ID 时只选原目标，不抢在 AppShell 的核验前回退或续租', async () => {
     rememberSession('kesepain', 'closed')
-    server.use(http.post('/api/users/kesepain/sessions/closed/lease', () => (
-      HttpResponse.json({ error: { message: 'closed' } }, { status: 404 })
-    )))
+    const touches = vi.fn(() => HttpResponse.json({ leased: false }, { status: 404 }))
+    const restores = vi.fn(() => HttpResponse.json({ session: { session_id: 'other' } }))
+    server.use(
+      http.post('/api/users/kesepain/sessions/closed/lease', touches),
+      http.get('/api/users/kesepain/sessions/active', restores),
+    )
     const result = await restoreWebSession('kesepain', 'web_restore_test')
-    expect(result.session.session_id).toBe('s1')
-    expect(readRememberedSession('kesepain')).toBe('')
+    expect(result.session.session_id).toBe('closed')
+    expect(readRememberedSession('kesepain')).toBe('closed')
+    expect(touches).not.toHaveBeenCalled()
+    expect(restores).not.toHaveBeenCalled()
   })
 
-  it('重启期间断网不清掉最近空间，也不创建替代会话', async () => {
-    rememberSession('kesepain', 'selected')
-    server.use(http.post('/api/users/kesepain/sessions/selected/lease', () => HttpResponse.error()))
+  it('没有记忆 ID 才查询后端 active，断网错误交给恢复页', async () => {
+    const restores = vi.fn(() => HttpResponse.error())
+    server.use(http.get('/api/users/kesepain/sessions/active', restores))
     await expect(restoreWebSession('kesepain', 'web_restore_test')).rejects.toThrow()
-    expect(readRememberedSession('kesepain')).toBe('selected')
+    expect(restores).toHaveBeenCalledOnce()
+    expect(readRememberedSession('kesepain')).toBe('')
   })
 
   it('旧会话删除通知不会清除其他标签页刚选中的空间', () => {

@@ -56,6 +56,12 @@ function sameAttachment(left: InputAttachment, right: InputAttachment) {
   )
 }
 
+export function userAttachmentThumbnailUrl(user: string, attachment: InputAttachment) {
+  return attachment.media_kind === 'image' && attachment.checksum_sha256
+    ? getUserAttachmentThumbnailUrl(user, attachment.checksum_sha256, attachment.relative_path)
+    : ''
+}
+
 export const UserAttachmentCard = memo(function UserAttachmentCard({ user, attachment }: { user: string; attachment: InputAttachment }) {
   useLanguage()
   const [unavailable, setUnavailable] = useState(!attachment.available)
@@ -65,9 +71,7 @@ export const UserAttachmentCard = memo(function UserAttachmentCard({ user, attac
     ? getUserFileDownloadUrl(user, 'file_upload', attachment.relative_path)
     : ''
   const image = attachment.media_kind === 'image'
-  const thumbnailUrl = image && attachment.checksum_sha256
-    ? getUserAttachmentThumbnailUrl(user, attachment.checksum_sha256, attachment.relative_path)
-    : ''
+  const thumbnailUrl = userAttachmentThumbnailUrl(user, attachment)
 
   useEffect(() => {
     setUnavailable(!attachment.available)
@@ -103,7 +107,7 @@ export const UserAttachmentCard = memo(function UserAttachmentCard({ user, attac
   return (
     <article className={`user-attachment-card ${attachment.media_kind}${unavailable ? ' unavailable' : ''}`} aria-label={`${unavailable ? '已清理附件' : '附件'}：${attachment.name}`}>
       {thumbnailUrl && !thumbnailFailed ? (
-        <span className="user-attachment-preview">
+        <span className="user-attachment-thumb">
           <img src={thumbnailUrl} alt={attachment.name} loading="lazy" onError={() => setThumbnailFailed(true)} />
         </span>
       ) : (
@@ -248,7 +252,8 @@ export type GuidanceDisplayItem = GuidanceItem | {
 }
 
 export function guidanceTitleLabel(item: GuidanceDisplayItem) {
-  return item.status === 'queued'
+  if (item.status === 'queued' && item.mode === 'background') return tr('延迟引导')
+  return item.status === 'queued' || item.status === 'submitting'
     ? tr('引导中')
     : item.status === 'next_turn'
       ? tr('已排队到下一轮')
@@ -281,8 +286,10 @@ export const GuidanceMessage = memo(function GuidanceMessage({ user, item, place
   useLanguage()
   const title = guidanceTitleLabel(item)
   const detail = guidanceDetailLabel(item)
+  const waiting = item.status === 'queued' && item.mode === 'background'
   return <article className={`guidance-message guidance-${placement} ${item.status}`} data-guidance-status={item.status}>
-    {placement === 'current' ? <span className="sr-only">{item.status === 'queued' ? tr('正在引导') : title}</span> : null}
+    {placement === 'current' ? <span className="sr-only">{!waiting && (item.status === 'queued' || item.status === 'submitting') ? tr('正在引导') : title}</span> : null}
+    {placement === 'current' && waiting ? <small>{tr('已排队，等当前工具完成后引导')}</small> : null}
     {placement === 'completed' ? <div className="guidance-meta">
       <small>{detail}</small>
       <span className="guidance-title"><i aria-hidden="true" />{title}</span>
@@ -308,6 +315,7 @@ export const GuidanceMessage = memo(function GuidanceMessage({ user, item, place
   const rightAttachments = right.attachments || []
   return left.id === right.id && left.content === right.content
     && left.status === right.status && left.guidanceId === right.guidanceId
+    && (left.status !== 'queued' || right.status !== 'queued' || left.mode === right.mode)
     && leftAttachments.length === rightAttachments.length
     && leftAttachments.every((attachment, index) => sameAttachment(attachment, rightAttachments[index]))
 })

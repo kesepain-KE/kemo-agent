@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Save } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useAnchoredPopover } from '../hooks/useAnchoredPopover'
-import type { KemoModelCapabilitiesResponse, KemoModelCatalogItem } from '../types/api'
+import type { KemoModelCapabilitiesResponse } from '../types/api'
 import { normalizeKemoReasoningEffort, normalizeReasoningEffort, type ReasoningEffort } from '../reasoningEffort'
 import { useUiStore } from '../store/ui'
 
@@ -55,11 +55,6 @@ export interface SaveRequest {
   userChanges?: Record<string, unknown>
   globalChanges?: Record<string, unknown>
   providerDiscovery?: ProviderType
-}
-
-export interface SaveResult {
-  providerModels?: KemoModelCatalogItem[]
-  providerDiscoveryError?: string
 }
 
 export const settingsTabs: Array<{ id: SettingsTab; label: string }> = [

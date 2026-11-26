@@ -22,6 +22,7 @@ export function shouldPrefetchEarlierHistory(
 function historyToolStatus(status: string): Extract<ChatItem, { kind: 'tool' }>['status'] {
   if (status === 'timed_out_running') return 'still_running'
   if (status === 'running') return 'running'
+  if (status === 'handed_off') return 'handed_off'
   if (status === 'completed' || status === 'success' || status === 'duplicate_reused') return 'success'
   return 'error'
 }

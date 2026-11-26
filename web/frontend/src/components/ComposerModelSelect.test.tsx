@@ -26,6 +26,8 @@ describe('输入框模型切换', () => {
   it('Chat 从兼容模型 API 获取并搜索，保存只修改模型且成功后更新共享概览', async () => {
     const patches: unknown[] = []
     let catalogs = 0
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
     server.use(
       http.get('/api/users/alice/provider/chat-models', () => {
         catalogs += 1
@@ -35,7 +37,8 @@ describe('输入框模型切换', () => {
       }),
       http.patch('/api/users/alice/config', async ({ request }) => {
         patches.push(await request.json())
-        return HttpResponse.json({ updated: true })
+        await pending
+        return HttpResponse.json({ user: 'alice', config: { provider: { model: 'new-model' } }, redacted_paths: [], updated: true })
       }),
     )
     const { client } = mount()
@@ -50,8 +53,14 @@ describe('输入框模型切换', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '搜索可用模型' }), { target: { value: 'new-' } })
     expect(screen.queryByRole('option', { name: 'current-model vendor' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('option', { name: 'new-model vendor' }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '切换对话模型' })).not.toBeInTheDocument())
-    expect(patches).toEqual([{ changes: { provider: { model: 'new-model' } } }])
+    try {
+      expect(screen.queryByRole('dialog', { name: '切换对话模型' })).not.toBeInTheDocument()
+      expect(screen.getByText('正在切换到 new-model')).toBeVisible()
+      expect(trigger).toHaveTextContent('current-model')
+      expect(client.getQueryData(['overview', 'alice', 's1'])).toEqual({ provider })
+      await waitFor(() => expect(patches).toEqual([{ changes: { provider: { model: 'new-model' } } }]))
+    } finally { release() }
+    await waitFor(() => expect(screen.queryByText('正在切换到 new-model')).not.toBeInTheDocument())
     expect(client.getQueryData(['overview', 'alice', 's1'])).toEqual({ provider: { ...provider, model: 'new-model' } })
     expect(trigger).toHaveFocus()
     expect(catalogs).toBe(1)
@@ -85,7 +94,7 @@ describe('输入框模型切换', () => {
         : HttpResponse.json({ data: [{ id: 'new-model', owned_by: '' }] })),
       http.patch('/api/users/alice/config', () => saveFails
         ? HttpResponse.json({ error: { message: 'fail' } }, { status: 500 })
-        : HttpResponse.json({ updated: true })),
+        : HttpResponse.json({ user: 'alice', config: { provider: { model: 'new-model' } }, redacted_paths: [], updated: true })),
     )
     mount()
     const trigger = screen.getByRole('button', { name: '输入框切换模型' })
@@ -97,9 +106,11 @@ describe('输入框模型切换', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'new-model' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('模型切换失败')
     expect(trigger).toHaveTextContent('current-model')
+    expect(screen.queryByRole('dialog', { name: '切换对话模型' })).not.toBeInTheDocument()
     saveFails = false
-    fireEvent.click(screen.getByRole('option', { name: 'new-model' }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '切换对话模型' })).not.toBeInTheDocument())
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByRole('option', { name: 'new-model' }))
+    await waitFor(() => expect(trigger).toBeEnabled())
   })
 
   it.each([

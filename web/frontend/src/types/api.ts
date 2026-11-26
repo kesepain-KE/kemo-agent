@@ -25,6 +25,8 @@ import type { PlanSummary } from './api/taskTypes'
 
 import type { ReasoningEffort } from '../reasoningEffort'
 
+export type GuidanceMode = 'interrupt' | 'background'
+
 export type RunEventType =
   | 'text_delta'
   | 'reasoning_delta'
@@ -32,6 +34,7 @@ export type RunEventType =
   | 'tool_call_result'
   | 'media_output'
   | 'media_input_update'
+  | 'guidance_handoff'
   | 'guidance_applied'
   | 'context_compression'
   | 'context_window'
@@ -357,6 +360,7 @@ export interface HistoryResponse {
   source: string
   session_id: string
   engine: 'cardstream'
+  state?: 'open' | 'closed'
   cards: HistoryCard[]
   integrations: HistoryIntegration[]
   integration_traces: Array<{
@@ -1017,7 +1021,7 @@ export interface ApiErrorPayload {
 }
 
 export type ChatItem =
-  | { id: string; kind: 'subagent_progress'; callId: string; agent: string; status: string; iteration: number; toolName: string; toolCount: number; nextAttempt: number }
+  | { id: string; kind: 'subagent_progress'; callId: string; agent: string; status: string; iteration: number; toolName: string; toolCount: number; nextAttempt: number; heartbeatSeconds?: number }
   | { id: string; kind: 'message'; role: 'user' | 'assistant'; content: string; level?: 'initial' | 'guidance' | 'interim' | 'final'; providerItemId?: string; providerResponseId?: string; integrationNumber?: number; attachments?: InputAttachment[]; streaming?: boolean; edited?: boolean; originalContent?: string }
   | { id: string; kind: 'execution_marker'; planId: string; integrationNumber?: number }
   | { id: string; kind: 'context_compression'; runId: string; status: 'started' | 'ready' | 'failed'; trigger: string; historyTokensBefore: number; historyTokensAfter: number; absorbedCards: number; content: string }
@@ -1035,11 +1039,12 @@ export type ChatItem =
       result?: unknown
       resultText?: string
       resultTruncated?: boolean
-      status: 'running' | 'still_running' | 'success' | 'error'
+      status: 'running' | 'still_running' | 'handed_off' | 'success' | 'error'
       elapsedMs?: number
       mediaInputs?: NativeMediaInput[]
     }
   | { id: string; kind: 'usage'; integrationId?: string; usage: Record<string, unknown>; elapsedMs?: number; round?: number; toolCalls?: number; providerRequestCount?: number }
   | { id: string; kind: 'task_plan'; plan: PlanSummary; presentation?: 'record' | 'reference' }
-  | { id: string; kind: 'guidance'; content: string; status: 'queued' | 'accepted' | 'completed' | 'not_applied' | 'error'; guidanceId?: string; attachments?: InputAttachment[]; finalized?: boolean }
+  | { id: string; kind: 'guidance'; content: string; status: 'submitting' | 'queued' | 'accepted' | 'completed' | 'not_applied' | 'error'; guidanceId?: string; mode?: GuidanceMode; attachments?: InputAttachment[]; finalized?: boolean }
+  | { id: string; kind: 'guidance_handoff'; guidanceId: string; toolName: string; content: string; jobId?: string }
   | { id: string; kind: 'error'; content: string }

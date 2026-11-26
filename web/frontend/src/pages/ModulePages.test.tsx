@@ -65,11 +65,7 @@ describe('current settings and profile pages', () => {
         return HttpResponse.json({
           scope: 'global',
           config: {
-            agents: {
-              token_limit: 1000000,
-              token_compression_ratio: 0.3,
-              output_reserve: 8192,
-            },
+            agents: body.changes.agents,
             memory: { temporary_injection_limits: { seven_days: 100, one_month: 200, half_year: 300 } },
           },
           redacted_paths: [],
@@ -161,7 +157,10 @@ describe('current settings and profile pages', () => {
     server.use(http.patch('/api/users/kesepain/config', async ({ request }) => {
       const body = await request.json() as { changes: Record<string, unknown> }
       savedChanges = body.changes
-      return HttpResponse.json({ user: 'kesepain', config: body.changes, redacted_paths: ['provider.api_key'], updated: true })
+      return HttpResponse.json({ user: 'kesepain', config: {
+        ...body.changes,
+        provider: { type: 'kemo', base_url: 'http://127.0.0.1:8741', api_key: '***', ...body.changes.provider as object },
+      }, redacted_paths: ['provider.api_key'], updated: true })
     }), http.get('/api/users/kesepain/provider/models', () => {
       modelDiscoveryCalls += 1
       return HttpResponse.json({
@@ -231,7 +230,7 @@ describe('current settings and profile pages', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存模型与 Provider' }))
     expect(await screen.findByText('模型与 Provider 已保存')).toBeInTheDocument()
     expect(await screen.findByText('Kemo API 已验证，已获取 1 个可用模型')).toBeInTheDocument()
-    expect(modelDiscoveryCalls).toBe(2)
+    expect(modelDiscoveryCalls).toBe(1)
     expect(screen.queryByText('可选择')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '主模型选择模型' })).toHaveTextContent('选择模型')
     fireEvent.click(screen.getByRole('button', { name: '主模型选择模型' }))
@@ -251,6 +250,8 @@ describe('current settings and profile pages', () => {
       multimodal_routing: { vision: 'dedicated' },
       multimodal_models: { file_understanding: 'document-model-next' },
     }))
+    expect(savedChanges?.provider).not.toHaveProperty('base_url')
+    expect(savedChanges?.provider).not.toHaveProperty('type')
 
     fireEvent.click(screen.getByRole('button', { name: '用户切换' }))
     expect(screen.queryByRole('combobox', { name: '可切换用户' })).not.toBeInTheDocument()

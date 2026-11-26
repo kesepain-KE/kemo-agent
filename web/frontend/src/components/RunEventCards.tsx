@@ -201,7 +201,8 @@ export const ToolCallCard = memo(function ToolCallCard({ item, user = '', sessio
       : toolPayloadPreview(item.resultText, item.result, item.resultTruncated),
   } : null
   const statusLabel = item.status === 'running' ? tr('运行中')
-    : item.status === 'still_running' ? '超时后未确认退出'
+    : item.status === 'handed_off' ? tr('已转后台')
+      : item.status === 'still_running' ? '超时后未确认退出'
       : item.status === 'success' ? tr('已完成') : tr('失败')
   const argumentSummary = toolArgumentSummary(item.argumentsText, item.arguments)
   const elapsed = item.status === 'running'
@@ -219,12 +220,13 @@ export const ToolCallCard = memo(function ToolCallCard({ item, user = '', sessio
           <span className={`tool-call-status ${item.status}`} aria-label={statusLabel} title={statusLabel}>
             {item.status === 'running' && <LoaderCircle className="spin tool-running-spinner" size={16} />}
             {item.status === 'success' && <CheckCircle2 size={17} />}
+            {item.status === 'handed_off' && statusLabel}
             {item.status === 'error' && <AlertCircle size={17} />}
             {item.status === 'still_running' && <AlertCircle size={17} />}
           </span>
         </span>
       </button>
-      <ShellJobLink user={user} sessionId={sessionId} name={item.name} result={item.result} resultText={item.resultText} />
+      <ShellJobLink user={user} sessionId={sessionId} name={item.name} result={item.result} resultText={item.resultText} showId={item.status === 'handed_off'} />
       <NativeMediaLinks user={user} item={item} />
       {body && <div className="tool-call-body">
         {item.status === 'still_running' && <p role="status">超时后未确认退出，执行结果尚未确认，请先核对状态，勿重复执行。</p>}
@@ -241,6 +243,16 @@ export const ToolCallCard = memo(function ToolCallCard({ item, user = '', sessio
     </article>
   )
 })
+
+export function GuidanceHandoffNotice({ item, user, sessionId }: {
+  item: Extract<ChatItem, { kind: 'guidance_handoff' }>; user: string; sessionId: string
+}) {
+  useLanguage()
+  return <div className="guidance-handoff-notice" role="status">
+    <span>{item.toolName ? `${item.toolName}：` : ''}{tr(item.content)}</span>
+    {item.jobId && <ShellJobLink user={user} sessionId={sessionId} name={item.toolName} result={{ job_id: item.jobId }} showId />}
+  </div>
+}
 
 function metric(value: unknown) {
   const number = Number(value)

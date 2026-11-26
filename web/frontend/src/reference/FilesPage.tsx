@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useOutletContext } from 'react-router-dom'
 import * as api from '../api/client'
+import { requestJson } from '../api/transport'
 import type { ShellOutletContext } from '../components/appShellTypes'
-import type { FileListEntry, FileSortBy, FileSortOrder } from '../types/api'
+import type { FileListEntry, FileSortBy, FileSortOrder, TmpFilesResponse, UserFilesResponse } from '../types/api'
 import { GlobalConfirmDialog } from '../components/GlobalConfirmDialog'
 import { FilePreview, fileKind as kind, type FileArea } from './FilePreview'
 import { formatBytes, formatDateTime } from '../components/ModuleUi'
@@ -39,11 +40,23 @@ export function FilesPage() {
   const [confirm, setConfirm] = useState<'selected' | 'all' | null>(null)
   const [error, setError] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const refreshRef = useRef(false)
   const fileQuery = useQuery({
     queryKey: ['reference-files', user, area, path, search, page, sortBy, sortOrder],
-    queryFn: () => area === 'tmp' ? api.getTmpFiles(path, search, page, 6, sortBy, sortOrder) : api.getUserFiles(user, area, path, search, page, 6, sortBy, sortOrder),
+    queryFn: ({ signal }) => {
+      const endpoint = area === 'tmp' ? '/api/tmp' : `/api/users/${encodeURIComponent(user)}/files/${area}`
+      const query = new URLSearchParams({ path, search, page: String(page), page_size: '6', sort_by: sortBy, sort_order: sortOrder })
+      if (refreshRef.current) query.set('refresh', 'true')
+      refreshRef.current = false
+      return requestJson<UserFilesResponse | TmpFilesResponse>(`${endpoint}?${query}`, { signal })
+    },
     enabled: Boolean(user),
   })
+  const refresh = async () => {
+    setPreview(null)
+    refreshRef.current = true
+    try { await fileQuery.refetch() } finally { refreshRef.current = false }
+  }
   useEffect(() => {
     setPath(''); setSearch(''); setPage(1); setSelected([]); setPreview(null); setRename(null); setConfirm(null)
   }, [user])
@@ -79,7 +92,7 @@ export function FilesPage() {
   }
   return <div className="page file-space-page"><div className="page-inner wide">
     <div className="page-head"><div><div className="page-title">{tr("文件空间")}</div><div className="page-desc">三个区域的影响范围不同：用户上传与产物按用户隔离，全局临时区不隔离。列表由后端排序分页。</div></div>
-      <div className="page-head-actions"><button className="btn btn-outline" onClick={() => { setPreview(null); void fileQuery.refetch() }} disabled={fileQuery.isFetching}><ReferenceIcon name="refresh" small />{tr("刷新")}</button>
+      <div className="page-head-actions"><button className="btn btn-outline" onClick={() => void refresh()} disabled={fileQuery.isFetching}><ReferenceIcon name="refresh" small />{tr("刷新")}</button>
         <button className="btn btn-primary" onClick={() => inputRef.current?.click()} disabled={area === 'tmp' || mutation.isPending}><ReferenceIcon name="upload" small />{tr("上传到当前目录")}</button></div></div>
     <input ref={inputRef} type="file" multiple hidden aria-label={tr("上传文件")} onChange={event => { if (event.target.files?.length) upload(event.target.files); event.currentTarget.value = '' }} />
     <div className="tabs">{areas.map(item => <button key={item.key} className={`tab ${area === item.key ? 'is-active' : ''}`} onClick={() => { setArea(item.key); goPath(''); setSearch('') }}>{item.label}</button>)}</div>

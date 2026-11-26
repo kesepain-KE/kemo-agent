@@ -22,9 +22,12 @@
 .tooltip small { color: var(--brand); font-size: .625rem; font-weight: 780; letter-spacing: .04em; }
 .tooltip p { margin: 0; color: var(--text-2); font-size: .8125rem; line-height: 1.65; white-space: pre-wrap; }
 .interactive { pointer-events: auto; cursor: auto; }
+.close { justify-self: end; }
 .attachments { display: grid; gap: 5px; padding-top: 7px; border-top: 1px solid var(--line); }
 .attachments strong { color: var(--muted); font-size: .6875rem; }
 .attachments ul { display: grid; gap: 3px; padding: 0; margin: 0; list-style: none; }
 .attachments li { color: var(--text-2); font-size: .75rem; overflow-wrap: anywhere; }
+.attachments img, .attachments video { display: block; max-width: 100%; max-height: 12rem; object-fit: contain; }
+.attachments audio { display: block; max-width: 100%; }
 .above { transform: translate(-50%, -100%); }
 .below { transform: translateX(-50%); }

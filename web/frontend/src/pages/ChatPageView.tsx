@@ -16,7 +16,7 @@ import { KnowledgeReferenceDrawer } from '../components/KnowledgeReferenceDrawer
 import { SubagentToolCard } from '../components/SubagentProgressBubble'
 import { statusLabel } from '../components/ModuleUi'
 import type { ScheduledTaskItem } from '../components/RecentActivityCard'
-import { ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
+import { GuidanceHandoffNotice, ReasoningTrace, ToolCallCard, UsageCard } from '../components/RunEventCards'
 import { TaskPlanBubble, taskPlanFromSummary } from '../components/TaskPlanBubble'
 import { UserDecisionCards } from '../components/UserDecisionCards'
 import { UserMessageNavigator, type UserMessageMarker } from '../components/UserMessageNavigator'
@@ -123,6 +123,7 @@ const AssistantTurnItem = memo(function AssistantTurnItem({
       : <ToolCallCard item={item} user={user} sessionId={sessionId} />
   }
   if (item.kind === 'media') return <MediaArtifactCard user={user} artifact={item.artifact} />
+  if (item.kind === 'guidance_handoff') return <GuidanceHandoffNotice item={item} user={user} sessionId={sessionId} />
   if (item.kind === 'usage' || item.kind === 'task_plan' || item.kind === 'guidance') return null
   if (item.kind === 'error') return <div className="chat-error">{item.content}</div>
   if (item.role !== 'assistant') return null
@@ -205,7 +206,7 @@ export const AssistantTurn = memo(function AssistantTurn({
     if (item.kind === 'message') return item.role === 'assistant' && Boolean(item.content || item.streaming)
     if (item.kind === 'reasoning') return Boolean(item.content || item.streaming)
     return item.kind === 'tool' || item.kind === 'media' || item.kind === 'error'
-      || item.kind === 'retry_boundary'
+      || item.kind === 'retry_boundary' || item.kind === 'guidance_handoff'
   }) || planItems.length > 0 || finalizedGuidance.length > 0
   const footer = (usageItems.length > 0 || assistantMessages.length > 0) && (
     <div className="assistant-turn-footer">
@@ -335,6 +336,7 @@ export function ChatPageView(props: ChatPageViewProps) {
   useLanguage()
   const {
     showWelcome, scrollRef, handleChatScroll, handleChatContentClick, sessionId, historyQuery,
+    sessionWritable = true, persistedRunStatus,
     user, overview, reasoningControl, activePlan, dockedPlan, activeTaskOpen, setActiveTaskOpen, navigate, setDraft,
     recentTasks, tokenTotal, tokenCacheRate, outputTokens, liveItems, items, historyData, conversationBlocks, userAvatarUrl,
     editedSources, running, lastUserMessage, editAndResend, conversationBusy, conversationFeedback, setConversationFeedback, copyMessage, copiedItem,
@@ -375,20 +377,16 @@ export function ChatPageView(props: ChatPageViewProps) {
   const widgetActionRef = useRef<(action: InlineWidgetAction) => void>(() => {})
   useLayoutEffect(() => {
     widgetActionRef.current = (action: InlineWidgetAction) => {
-    if (action.type === 'fill-input') {
-      setDraft(action.text)
-      window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')?.focus())
-      return
-    }
-    if (action.type === 'copy') {
-      void copyMessage('widget-action', action.text)
-      return
-    }
-    if (running || stopping) {
-      setDraft(action.text)
-      window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')?.focus())
-      return
-    }
+      if (action.type === 'copy') {
+        void copyMessage('widget-action', action.text)
+        return
+      }
+      if (!sessionWritable) return
+      if (action.type === 'fill-input' || running || stopping) {
+        setDraft(action.text)
+        window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息内容"]')?.focus())
+        return
+      }
       void send(action.text)
     }
   })
@@ -404,7 +402,7 @@ return (
             collapsed={collapsedPlans.has(dockedPlan.plan_id)}
             {...planActions(dockedPlan)}
           />}
-          <UserDecisionCards key={`${user}:${sessionId}`} user={user} sessionId={sessionId || ''} running={running} />
+          {sessionWritable && <UserDecisionCards key={`${user}:${sessionId}`} user={user} sessionId={sessionId || ''} running={running} />}
       </div>
       <div className="chat-scroll" ref={scrollRef} onScroll={handleChatScroll} onClickCapture={handleChatContentClick}>
       {showWelcome && (!sessionId || !historyQuery.isLoading) && (
@@ -484,7 +482,7 @@ return (
                   <div className="user-message-actions">
                     {item.edited ? <span className="edited-label">{tr("编辑后重发")}</span> : null}
                     {editedSources.has(item.id) ? <span className="edited-label">{tr("已用于重发")}</span> : null}
-                    {!running && item.content && lastUserMessage?.id === item.id ? <button type="button" onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label={tr("编辑后重发")}><Pencil size={12} />{conversationBusy === 'edit' ? tr('正在撤销…') : tr('编辑重发')}</button> : null}
+                    {sessionWritable && !running && item.content && lastUserMessage?.id === item.id ? <button type="button" onClick={() => void editAndResend(item.id, item.content)} disabled={Boolean(conversationBusy)} aria-label={tr("编辑后重发")}><Pencil size={12} />{conversationBusy === 'edit' ? tr('正在撤销…') : tr('编辑重发')}</button> : null}
                     <button type="button" onClick={() => void copyMessage(item.id, item.content)} disabled={!item.content} aria-label={tr("复制消息")}>{copiedItem === item.id ? <Check size={12} /> : <Copy size={12} />}{copiedItem === item.id ? tr('已复制') : tr('复制')}</button>
                   </div>
                 </article>
@@ -501,7 +499,7 @@ return (
               dockedPlanId={dockedPlan?.plan_id}
               running={running}
               conversationBusy={conversationBusy || (editingSource ? 'edit' : '')}
-              lastUserMessage={lastUserMessage}
+              lastUserMessage={sessionWritable ? lastUserMessage : undefined}
               copiedItem={copiedItem}
               resolvePlan={resolvePlan}
               revealPlan={stableRevealPlan}
@@ -511,6 +509,11 @@ return (
             />
           )
         })}
+        {liveItems.map((item) => item.kind === 'subagent_progress' && item.heartbeatSeconds !== undefined
+          ? <div key={item.id} className="history-page-status" role="status">
+              {tr('子代理已运行 {minutes} 分钟，仍在执行', { minutes: Math.floor(item.heartbeatSeconds / 60) })}
+            </div>
+          : null)}
       </div>
       </div>
       <UserMessageNavigator
@@ -523,6 +526,12 @@ return (
     </div>
     <div className="composer-dock composer-zone">
       <div className="composer-auxiliary">
+      {persistedRunStatus && <div className="run-retry-bubble" role="status"><span>{
+        persistedRunStatus === 'active' ? tr('此对话仍在后台执行。')
+          : persistedRunStatus === 'result_pending' ? tr('后台执行结果待提交。')
+            : persistedRunStatus === 'owner_unknown' ? tr('后台执行状态待核对。')
+              : tr('上一次后台执行已中断，已保存的历史仍可查看。')
+      }</span></div>}
       {connectionNotice ? <div className="run-retry-bubble" role="status"><span>{connectionNotice}</span></div> : null}
       {conversationFeedback?.tone === 'error' ? (
         <div className="run-error-bubble" role="alert">
@@ -544,7 +553,7 @@ return (
       <ComposerMessagePanel
         sessionKey={liveSessionId || sessionId || ''}
         followUpCount={visibleFollowUpCount}
-        followUpContent={<FollowUpQueue embedded user={user} messages={followUpQueue} canGuide={running && !stopping}
+        followUpContent={<FollowUpQueue embedded user={user} messages={followUpQueue} canGuide={sessionWritable && running && !stopping}
           onGuide={(message) => { void sendGuidance(message) }}
           onRemove={(id) => removeNextTurnMessage(user, liveSessionId, id)}
           onRetry={(id) => setNextTurnMessageStatus(user, liveSessionId, id, 'queued')}
@@ -563,14 +572,14 @@ return (
           <ComposerReasoningSelect key={`${user}:${overview?.provider?.model}`} control={reasoningControl} />
         </div>}
         value={draft}
-        placeholder={user ? running ? tr('Enter 加入消息跟进；Ctrl+Enter 直接本轮引导…') : tr('给 kemo-agent 发送消息…') : tr('请先选择用户')}
+        placeholder={user ? running ? tr('Enter 加入消息跟进；Ctrl+Enter 本轮引导；Alt+Enter 延迟引导…') : tr('给 kemo-agent 发送消息…') : tr('请先选择用户')}
         contextUsage={<ComposerContextUsage key={`${user}:${sessionId}`}
           snapshot={overviewMatches ? overview.context_snapshot : undefined}
           capacityTokens={overviewMatches ? overview.context.limit : undefined}
           cacheHitRate={overviewMatches && sessionId ? overview.context.usage.cache_hit_rate : undefined} />}
         running={running}
         stopping={stopping}
-        disabled={!user || conversationBusy === 'edit'}
+        disabled={!user || !sessionWritable || conversationBusy === 'edit'}
         commandBusy={Boolean(conversationBusy)}
         pendingFileCount={pendingUploads.length}
         uploading={uploading}
@@ -598,7 +607,7 @@ return (
         onStopAndCancelSubagents={() => { void stopCurrentRun(true) }}
       />
       </div>
-      <div className="composer-hint"><span><kbd>Enter</kbd> {running ? tr('下一轮跟进') : tr('发送')}</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> {tr("换行")}</span><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> {tr("引导当前轮")}</span><span><kbd>Ctrl</kbd> + <kbd>K</kbd> {tr("命令面板")}</span></div>
+      <div className="composer-hint"><span><kbd>Enter</kbd> {running ? tr('下一轮跟进') : tr('发送')}</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> {tr("换行")}</span><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> {tr('本轮引导')}</span><span><kbd>Alt</kbd> + <kbd>Enter</kbd> {tr('延迟引导')}</span><span><kbd>Ctrl</kbd> + <kbd>K</kbd> {tr("命令面板")}</span></div>
     </div>
     <KnowledgeReferenceDrawer
       open={knowledgeDrawerOpen}

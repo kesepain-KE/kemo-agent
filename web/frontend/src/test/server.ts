@@ -211,6 +211,7 @@ export const handlers = [
   })),
   http.get('/api/users/kesepain/runtime/status', ({ request }) => HttpResponse.json({
     schema_version: 1,
+    included_sections: (new URL(request.url).searchParams.get('sections') || 'api,congestion,external,maintenance,prompt,summary,tokens').split(',').sort(),
     generated_at: '2026-07-21T14:30:00+08:00',
     user: 'kesepain',
     session_id: new URL(request.url).searchParams.get('session_id') || '',

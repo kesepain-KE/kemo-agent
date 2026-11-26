@@ -23,6 +23,12 @@ describe('快捷轮次导航布局合同', () => {
     expect(css).not.toMatch(/#[a-f0-9]{3,8}\b/i)
   })
 
+  it('背景模糊仅用于激活卡片和轨道', () => {
+    expect(css.match(/\.card\s*\{([^}]*)\}/)?.[1]).not.toContain('backdrop-filter')
+    expect(css.match(/\.card\.active\s*\{([^}]*)\}/)?.[1]).toContain('backdrop-filter: blur(12px)')
+    expect(css.match(/\.rail\s*\{([^}]*)\}/)?.[1]).toContain('backdrop-filter: blur(8px)')
+  })
+
   it('移动端保留轨道，矮聊天区域收起旁卡而不是隐藏导航功能', () => {
     expect(css).toContain('@media (max-width: 600px)')
     expect(css).toContain('@container (max-height: 240px)')

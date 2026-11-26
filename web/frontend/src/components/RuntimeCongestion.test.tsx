@@ -20,8 +20,8 @@ it('refreshes only congestion at 1.5 seconds, preserves card nodes and returns t
       provider: { active_requests: active, max_requests: 10, available_requests: 10 - active, waiting_estimate: 2 } } })
   }))
   const client = new QueryClient()
-  render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="s1" initial={data.congestion} /></QueryClientProvider>)
-  const pool = screen.getByRole('group', { name: 'Provider 请求' })
+  render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="s1" /></QueryClientProvider>)
+  const pool = await screen.findByRole('group', { name: 'Provider 请求' })
   await within(pool).findByText('3 / 10')
   expect(within(pool).getByText('可用 7')).toBeVisible()
   expect(within(pool).getByText('排队 2')).toBeVisible()
@@ -39,12 +39,15 @@ it('refreshes only congestion at 1.5 seconds, preserves card nodes and returns t
 
 it('keeps the last successful values on refresh failure and supports explicit retry', async () => {
   const data = await getRuntimeStatus('kesepain', 's1')
-  let fail = true
+  let fail = false
   server.use(http.get('/api/users/kesepain/runtime/status', () => fail
     ? HttpResponse.json({ error: { message: 'unavailable' } }, { status: 503 })
     : HttpResponse.json(data)))
   const client = new QueryClient()
-  render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="s1" initial={data.congestion} /></QueryClientProvider>)
+  render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="s1" /></QueryClientProvider>)
+  expect(await screen.findByRole('group', { name: 'Provider 请求' })).toHaveTextContent('2 / 10')
+  fail = true
+  fireEvent.click(screen.getByRole('button', { name: '刷新并发状态' }))
   expect(await screen.findByRole('status')).toHaveTextContent('刷新失败，当前显示上次成功读取的数据。')
   expect(screen.getByRole('group', { name: 'Provider 请求' })).toHaveTextContent('2 / 10')
   fail = false
@@ -62,20 +65,21 @@ it('cancels in-flight snapshots and removes its query when unmounted', async () 
     return HttpResponse.json(data)
   }))
   const client = new QueryClient()
-  const view = render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="s1" initial={data.congestion} /></QueryClientProvider>)
+  const view = render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="s1" /></QueryClientProvider>)
   await waitFor(() => expect(requested).toBe(true))
+  expect(screen.getByText('正在读取真实数据…')).toBeVisible()
+  expect(screen.queryByRole('group', { name: 'Provider 请求' })).toBeNull()
   view.unmount()
   await waitFor(() => expect(aborted).toBe(true))
   await waitFor(() => expect(client.getQueryData(['runtime-congestion', 'kesepain', 's1'])).toBeUndefined())
 })
 
 it('isolates users and sessions in the query key and localizes the pool without translating values', async () => {
-  const data = await getRuntimeStatus('kesepain', 's1')
   act(() => useUiStore.getState().setLanguage('en', 'kesepain'))
   const client = new QueryClient()
-  render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="different-space" initial={data.congestion} /></QueryClientProvider>)
+  render(<QueryClientProvider client={client}><RuntimeCongestion user="kesepain" sessionId="different-space" /></QueryClientProvider>)
   expect(screen.getByRole('region', { name: 'Congestion and concurrency' })).toBeVisible()
-  expect(screen.getByRole('group', { name: 'Provider requests' })).toHaveTextContent('2 / 10')
+  expect(await screen.findByRole('group', { name: 'Provider requests' })).toHaveTextContent('2 / 10')
   expect(client.getQueryData(['runtime-congestion', 'kesepain', 's1'])).toBeUndefined()
   expect(client.getQueryData(['runtime-congestion', 'kesepain', 'different-space'])).toBeDefined()
   for (const { code } of languages) {

@@ -1,4 +1,4 @@
-import type { ApiErrorPayload, RunEvent } from '../types/api'
+import type { ApiErrorPayload, GuidanceMode, RunEvent } from '../types/api'
 import { z } from 'zod'
 import {
   ApiError,
@@ -32,11 +32,17 @@ const runSnapshotSchema = z.object({
 })
 export type RunSnapshot = z.infer<typeof runSnapshotSchema>
 
-export async function getCurrentRun(user: string, sessionId: string, signal?: AbortSignal): Promise<RunSnapshot | null> {
-  const value = await requestJson<{ run: unknown }>(
+const persistedRunStatusSchema = z.enum(['active', 'result_pending', 'owner_unknown', 'interrupted'])
+export type PersistedRunStatus = z.infer<typeof persistedRunStatusSchema>
+
+export async function getCurrentRun(user: string, sessionId: string, signal?: AbortSignal) {
+  const value = await requestJson<{ run: unknown; execution?: { status?: unknown } }>(
     `/api/users/${encodeURIComponent(user)}/sessions/${encodeURIComponent(sessionId)}/run`, { signal },
   )
-  return value.run ? runSnapshotSchema.parse(value.run) : null
+  return {
+    run: value.run ? runSnapshotSchema.parse(value.run) : null,
+    status: persistedRunStatusSchema.safeParse(value.execution?.status).data,
+  }
 }
 
 function runQuery(options: Pick<StreamChatOptions, 'user' | 'sessionId'>) {
@@ -135,7 +141,7 @@ export async function submitGuidance(
   user: string,
   runId: string,
   guidance: string,
-  options: { sessionId: string; source?: 'web' | 'app'; guidanceId?: string; uploadedFiles?: string[] },
+  options: { sessionId: string; source?: 'web' | 'app'; guidanceId?: string; uploadedFiles?: string[]; mode?: GuidanceMode },
 ): Promise<{
   run_id: string
   status: 'accepted_current_run' | 'queued_next_turn'
@@ -159,6 +165,7 @@ export async function submitGuidance(
       guidance,
       guidance_id: options.guidanceId || '',
       uploaded_files: options.uploadedFiles || [],
+      mode: options.mode,
     }),
   })
   if (result.ok === false || result.status === 'not_applied') {

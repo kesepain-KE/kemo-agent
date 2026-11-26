@@ -1,10 +1,11 @@
 import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useRef } from 'react'
 import { ArrowDown, ArrowUp, GripVertical } from 'lucide-react'
+import { getUserFilePreviewUrl } from '../api/client'
 import type { PendingNextTurnMessage } from '../components/appShellTypes'
 import { OverflowPeek } from '../components/OverflowPeek'
 import { pendingInputAttachment } from './chatRunSupport'
-import { UserAttachmentCard } from './chatPresentation'
+import { UserAttachmentCard, userAttachmentThumbnailUrl } from './chatPresentation'
 import styles from './FollowUpQueue.module.css'
 
 export function FollowUpQueue({ user, messages, canGuide, onGuide, onRemove, onRetry, onReorder, embedded = false }: {
@@ -31,44 +32,53 @@ export function FollowUpQueue({ user, messages, canGuide, onGuide, onRemove, onR
   const locked = (message: PendingNextTurnMessage) => ['sending', 'guiding'].includes(message.status)
   return <section className={[styles.queue, embedded ? styles.embedded : ''].filter(Boolean).join(' ')} aria-label="消息跟进队列">
     <ol ref={listRef}>
-      {visibleMessages.map((message, index) => <li key={message.id} data-follow-up-id={message.id}
-        onDragOver={(event) => { if (!locked(message)) event.preventDefault() }}
-        onDrop={(event) => {
-          event.preventDefault()
-          const id = event.dataTransfer.getData('application/x-kemo-follow-up')
-          if (id && !locked(message)) onReorder(id, message.id)
-        }}>
-        <article className={styles.bubble} aria-label={`消息跟进 ${index + 1}`}>
-          <div className={styles.heading}>
-            <button type="button" className={styles.drag} draggable={!locked(message)} disabled={locked(message)} aria-label={`拖动消息跟进 ${index + 1}`}
-              onDragStart={(event) => {
-                event.dataTransfer.setData('application/x-kemo-follow-up', message.id)
-                event.dataTransfer.effectAllowed = 'move'
-              }}><GripVertical aria-hidden="true" /></button>
-            <strong>{tr("消息跟进")}{index + 1}</strong>
-            <span role="status">{message.status === 'guiding' ? '正在提交本轮引导' : message.status === 'sending' ? '正在发送' : message.status === 'error' ? tr('自动发送失败') : tr('已排队到下一轮')}</span>
-          </div>
-          <OverflowPeek
-            className={styles.body}
-            text={message.content || ''}
-            attachmentNames={message.uploadedFiles?.map((file) => file.name)}
-          >
-            {message.content ? <p>{message.content}</p> : null}
-            {message.uploadedFiles?.length ? <div className="user-attachment-list guidance-attachment-list">
-              {message.uploadedFiles.map((file) => <UserAttachmentCard key={file.path} user={user} attachment={pendingInputAttachment(file)} />)}
-            </div> : null}
-            {message.error ? <small role="alert">{message.error}</small> : null}
-          </OverflowPeek>
-          <div className={styles.actions}>
-            <button type="button" onClick={() => onReorder(message.id, visibleMessages[index - 1].id)} disabled={locked(message) || index === 0 || locked(visibleMessages[index - 1])} aria-label={`上移消息跟进 ${index + 1}`}><ArrowUp aria-hidden="true" />上移</button>
-            <button type="button" onClick={() => onReorder(message.id, visibleMessages[index + 1].id)} disabled={locked(message) || index === visibleMessages.length - 1 || locked(visibleMessages[index + 1])} aria-label={`下移消息跟进 ${index + 1}`}><ArrowDown aria-hidden="true" />下移</button>
-            <span className={styles.spacer} />
-            {canGuide ? <button type="button" className={styles.guide} disabled={locked(message)} onClick={() => onGuide(message)}>本轮引导</button> : null}
-            {message.status === 'error' ? <button type="button" onClick={() => onRetry(message.id)}>{tr("重新发送")}</button> : null}
-            <button type="button" onClick={() => onRemove(message.id)} disabled={locked(message)}>{tr("取消")}</button>
-          </div>
-        </article>
-      </li>)}
+      {visibleMessages.map((message, index) => {
+        const attachments = message.uploadedFiles?.map(pendingInputAttachment) ?? []
+        return <li key={message.id} data-follow-up-id={message.id}
+          onDragOver={(event) => { if (!locked(message)) event.preventDefault() }}
+          onDrop={(event) => {
+            event.preventDefault()
+            const id = event.dataTransfer.getData('application/x-kemo-follow-up')
+            if (id && !locked(message)) onReorder(id, message.id)
+          }}>
+          <article className={styles.bubble} aria-label={`消息跟进 ${index + 1}`}>
+            <div className={styles.heading}>
+              <button type="button" className={styles.drag} draggable={!locked(message)} disabled={locked(message)} aria-label={`拖动消息跟进 ${index + 1}`}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData('application/x-kemo-follow-up', message.id)
+                  event.dataTransfer.effectAllowed = 'move'
+                }}><GripVertical aria-hidden="true" /></button>
+              <strong>{tr("消息跟进")}{index + 1}</strong>
+              <span role="status">{message.status === 'guiding' ? '正在提交本轮引导' : message.status === 'sending' ? '正在发送' : message.status === 'error' ? tr('自动发送失败') : tr('已排队到下一轮')}</span>
+            </div>
+            <OverflowPeek
+              className={styles.body}
+              text={message.content || ''}
+              attachments={attachments.map(attachment => ({
+                name: attachment.name,
+                kind: attachment.media_kind,
+                previewUrl: attachment.media_kind === 'file' ? undefined
+                  : userAttachmentThumbnailUrl(user, attachment)
+                    || getUserFilePreviewUrl(user, 'file_upload', attachment.relative_path),
+              }))}
+            >
+              {message.content ? <p>{message.content}</p> : null}
+              {attachments.length ? <div className="user-attachment-list guidance-attachment-list">
+                {attachments.map(attachment => <UserAttachmentCard key={attachment.relative_path} user={user} attachment={attachment} />)}
+              </div> : null}
+              {message.error ? <small role="alert">{message.error}</small> : null}
+            </OverflowPeek>
+            <div className={styles.actions}>
+              <button type="button" onClick={() => onReorder(message.id, visibleMessages[index - 1].id)} disabled={locked(message) || index === 0 || locked(visibleMessages[index - 1])} aria-label={`上移消息跟进 ${index + 1}`}><ArrowUp aria-hidden="true" />上移</button>
+              <button type="button" onClick={() => onReorder(message.id, visibleMessages[index + 1].id)} disabled={locked(message) || index === visibleMessages.length - 1 || locked(visibleMessages[index + 1])} aria-label={`下移消息跟进 ${index + 1}`}><ArrowDown aria-hidden="true" />下移</button>
+              <span className={styles.spacer} />
+              {canGuide ? <button type="button" className={styles.guide} disabled={locked(message)} onClick={() => onGuide(message)}>本轮引导</button> : null}
+              {message.status === 'error' ? <button type="button" onClick={() => onRetry(message.id)}>{tr("重新发送")}</button> : null}
+              <button type="button" onClick={() => onRemove(message.id)} disabled={locked(message)}>{tr("取消")}</button>
+            </div>
+          </article>
+        </li>
+      })}
     </ol>
   </section>
 }

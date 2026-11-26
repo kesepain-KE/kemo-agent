@@ -6,7 +6,7 @@
 .heading { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: .75rem; }
 .heading span { margin-left: auto; color: var(--muted); font-size: .7rem; }
 .heading, .actions { flex: 0 0 auto; }
-.body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.body { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }
 .body p { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; line-height: 1.5; }
 .body small { color: var(--red); overflow-wrap: anywhere; }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

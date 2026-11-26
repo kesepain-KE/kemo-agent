@@ -111,7 +111,10 @@ export function guideAgentTask(user: string, id: string, source: string, session
 }
 export function cancelAgentTask(user: string, id: string, source: string, sessionId: string) {
   const query = new URLSearchParams({ source, session_id: sessionId })
-  return requestJson<{ ok: boolean; task_id: string; status: string; cancel_requested: boolean; process_terminated: boolean }>(
+  return requestJson<{
+    ok: boolean; task_id: string; status: string; cancel_requested: boolean; process_terminated: boolean
+    cancel_state?: 'requested' | 'still_running' | 'exited'; message?: string; remote_exit_confirmed?: boolean
+  }>(
     `/api/users/${encodeURIComponent(user)}/workspace/agents/${encodeURIComponent(id)}/cancel?${query}`,
     { method: 'POST' },
   )

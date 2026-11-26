@@ -1,6 +1,6 @@
 import type { ChatItem, RunEvent } from '../types/api'
 
-const terminalStatuses = new Set(['completed', 'completed_after_timeout', 'completed_after_detach', 'failed', 'cancelled', 'timed_out'])
+const terminalStatuses = new Set(['completed', 'completed_after_timeout', 'completed_after_detach', 'failed', 'cancelled', 'timed_out', 'tool_limit'])
 const liveStatuses = new Set(['queued', 'started', 'running', 'model_request', 'tool_running', 'validating', 'retrying', 'timed_out_running'])
 
 export function reduceSubagentProgress(items: ChatItem[], event: RunEvent): ChatItem[] {
@@ -10,6 +10,7 @@ export function reduceSubagentProgress(items: ChatItem[], event: RunEvent): Chat
   }
   const callId = event.tool_call_id || String(event.metadata?.task_id || '')
   if (!callId) return items
+  const heartbeatId = `subagent_heartbeat_${event.metadata?.task_id || callId}`
   const remove = () => items.filter((item) => item.kind !== 'subagent_progress' || item.callId !== callId)
   if (event.type === 'tool_call_result') {
     const envelope = event.result as { result?: { status?: string }; status?: string } | undefined
@@ -19,21 +20,32 @@ export function reduceSubagentProgress(items: ChatItem[], event: RunEvent): Chat
   const start = event.type === 'tool_call_start' && event.tool_name === 'subagent_dispatch' && event.arguments?.action === 'call'
   if (!start && event.type !== 'subagent_progress') return items
   const status = start ? 'started' : String(event.metadata?.status || '')
-  if (terminalStatuses.has(status)) return remove()
+  if (terminalStatuses.has(status) || status === 'cancel_requested') {
+    return items.filter((item) => item.kind !== 'subagent_progress' || item.id !== heartbeatId
+      && !(item.callId === callId && item.heartbeatSeconds === undefined))
+  }
   if (!liveStatuses.has(status)) return items
-  const progress = items.filter((item): item is Extract<ChatItem, { kind: 'subagent_progress' }> => item.kind === 'subagent_progress' && item.callId === callId)
+  const progress = items.filter((item): item is Extract<ChatItem, { kind: 'subagent_progress' }> =>
+    item.kind === 'subagent_progress' && item.callId === callId && item.heartbeatSeconds === undefined)
   const previous = progress.at(-1)
   const count = (key: string, fallback = 0) => {
     const value = event.metadata?.[key]
     return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : fallback
   }
 
-  const record = (id: string, iteration: number, toolName: string): ChatItem => ({
+  const record = (id: string, iteration: number, toolName: string): Extract<ChatItem, { kind: 'subagent_progress' }> => ({
     id, kind: 'subagent_progress', callId,
     agent: String(start ? event.arguments?.agent || '子代理' : event.metadata?.agent || previous?.agent || '子代理'),
     status, iteration, toolName,
     toolCount: count('tool_count', previous?.toolCount), nextAttempt: count('next_attempt'),
   })
+
+  if (event.metadata?.heartbeat === true && status === 'running' && count('elapsed_seconds') > 0) {
+    const next = { ...record(heartbeatId, 0, ''), heartbeatSeconds: count('elapsed_seconds') }
+    return items.some((item) => item.id === heartbeatId)
+      ? items.map((item) => item.id === heartbeatId ? next : item)
+      : [...items, next]
+  }
 
   // Keep an invisible pending record until the subagent reports an actual tool.
   // The UI deliberately renders only tool-name rows, so it never exposes dispatch

@@ -1,5 +1,5 @@
 import { t as tr } from '../i18n'
-import { icon, h, LIVE_RUNTIME, pageHead, refreshPage, fmtNum, fmtRelative, $$, fill, fmtThousands, statusText, copyText, buildTokenChart, navigate, LIVE_CAPABILITIES, statusBadge, readDetail, Api, Store, setRuntimeLogs, LIVE_RUNTIME_LOGS, emptyState, clamp, fmtDateTime, fmtDuration, makePager, renderMarkdownWithWidgets } from './shared.js'
+import { icon, h, pageHead, refreshPage, fmtNum, fmtRelative, fill, fmtThousands, copyText, buildTokenChart, statusBadge, Api, emptyState, clamp, fmtDateTime, fmtDuration, makePager } from './shared.js'
 /* ============================================================================
    pages/status-profile · 运行诊断 / 身份与人格 / 运行模块兼容入口
    ========================================================================= */
@@ -18,12 +18,10 @@ const runtimeBadge = state => statusBadge(state, {
 }[state]);
 
 export function renderStatusPage(ctx) {
-  let activeTab = ctx.viewState.statusTab || ctx.params.tab || 'prompt';
-
   const pageEl = h('div.page', h('div.page-inner.wide'));
   const inner = pageEl.firstElementChild;
-
-  const R = LIVE_RUNTIME;
+  const notice = h('div');
+  inner.appendChild(notice);
 
   inner.appendChild(pageHead({
     title: tr('运行诊断'),
@@ -35,58 +33,90 @@ export function renderStatusPage(ctx) {
     ],
   }));
 
-  /* 顶部 4 张摘要卡 */
   const summaryCards = h('div.stat-row');
   const cardDefs = [
-    { label: tr('API 配置'), value: R.api.model, foot: `${R.api.type} · ${R.api.configured ? tr('已配置') : tr('待配置')}`, icon: 'cpu', tab: 'api', smallValue: true },
-    { label: tr('上下文占用'), value: `${Number(R.context.percent).toFixed(1)}%`, foot: `${fmtNum(R.context.used_tokens)} / ${fmtNum(R.context.max_tokens)} tokens`, icon: 'gauge', tab: 'tokens' },
-    { label: tr('上下文卡片'), value: `${R.context.cards_active} / ${R.context.last_seq}`, foot: R.context.available && R.context.compression_threshold != null ? `压缩阈值 ${fmtNum(R.context.compression_threshold)} tokens` : '压缩阈值暂不可用', icon: 'chat', tab: 'prompt' },
-    { label: tr('消息路由'), value: `${R.message_routes.summary.connected_transports} / ${R.message_routes.summary.total_transports}`, foot: R.message_routes.summary.error_transports ? tr('部分异常') : tr('无错误通道'), icon: 'route', tab: 'external' },
+    { label: tr('API 配置'), icon: 'cpu', tab: 'api', smallValue: true },
+    { label: tr('上下文占用'), icon: 'gauge', tab: 'tokens' },
+    { label: tr('上下文卡片'), icon: 'chat', tab: 'prompt' },
+    { label: tr('消息路由'), icon: 'route', tab: 'external' },
   ];
-  cardDefs.forEach((c) => {
+  const cards = cardDefs.map(c => {
+    const value = h('div.stat-value', { style: c.smallValue ? { fontSize: 'var(--t-md)', letterSpacing: '-0.01em', marginTop: '8px' } : {} });
+    const foot = h('div.stat-foot');
     const card = h('button.stat', {
-      style: { textAlign: 'left', cursor: 'pointer', borderColor: activeTab === c.tab ? 'var(--accent)' : '' },
-      onclick: () => setTab(c.tab),
-    },
-      h('div.stat-label', h('span', { html: icon(c.icon, 'icon-sm') }), c.label),
-      h('div.stat-value', { style: c.smallValue ? { fontSize: 'var(--t-md)', letterSpacing: '-0.01em', marginTop: '8px' } : {} }, c.value),
-      h('div.stat-foot', c.foot),
-    );
+      style: { textAlign: 'left', cursor: 'pointer' },
+      onclick: () => ctx.selectStatusTab(c.tab),
+    }, h('div.stat-label', h('span', { html: icon(c.icon, 'icon-sm') }), c.label), value, foot);
     summaryCards.appendChild(card);
+    return { card, value, foot };
   });
   inner.appendChild(summaryCards);
 
-  const tabBar = h('div.tabs', RUNTIME_TABS.map((t) =>
-    h('button.tab' + (t.key === activeTab ? '.is-active' : ''), {
-      onclick: () => setTab(t.key),
-    }, h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
-      h('span', { html: icon(t.icon, 'icon-sm') }), t.label)),
-  ));
-  inner.appendChild(tabBar);
-
+  const tabs = RUNTIME_TABS.map(t => h('button.tab', { onclick: () => ctx.selectStatusTab(t.key) },
+    h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+      h('span', { html: icon(t.icon, 'icon-sm') }), t.label)));
+  const congestion = h('div', { hidden: true, style: { marginBottom: 'var(--s-5)' } });
   const body = h('div');
-  inner.appendChild(body);
+  inner.append(h('div.tabs', tabs), congestion, body);
+  let panelKey;
+  let closeLogs;
+  ctx.registerCleanup(() => closeLogs?.());
 
-  function setTab(key) {
-    activeTab = key;
-    ctx.viewState.statusTab=key;
-    $$('.tab', tabBar).forEach((x, i) => x.classList.toggle('is-active', RUNTIME_TABS[i].key === key));
-    $$('.stat', summaryCards).forEach((x, i) => { x.style.borderColor = cardDefs[i].tab === key ? 'var(--accent)' : ''; });
-    draw();
-  }
+  ctx.updateStatus = view => {
+    const { provider, context, routes, maintenance, runtime } = view;
+    const tab = RUNTIME_TABS.some(t => t.key === view.tab) ? view.tab : '';
+    tabs.forEach((button, i) => {
+      const active = RUNTIME_TABS[i].key === tab;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
 
-  function draw() {
-    fill(body);
-    if (activeTab === 'prompt') body.appendChild(drawPromptTab());
-    else if (activeTab === 'tokens') body.appendChild(drawTokensTab());
-    else if (activeTab === 'api') body.appendChild(drawApiTab());
-    else if (activeTab === 'external') body.appendChild(drawExternalTab());
-    else if (activeTab === 'maintenance') body.appendChild(drawMaintenanceTab());
-    else body.appendChild(drawLogsTab());
-  }
+    const summaries = [
+      provider && [provider.model, `${provider.type} · ${provider.configured ? tr('已配置') : tr('待配置')}`],
+      context && (context.available ? [`${Number(context.percent).toFixed(1)}%`, `${fmtNum(context.used_tokens)} / ${fmtNum(context.max_tokens)} tokens`] : ['—', tr('暂不可用')]),
+      context && [`${context.cards_active} / ${context.last_seq}`, context.available && context.compression_threshold != null
+        ? `压缩阈值 ${fmtNum(context.compression_threshold)} tokens` : '压缩阈值暂不可用'],
+      routes && [`${routes.connected_transports} / ${routes.total_transports}`, routes.error_transports ? tr('部分异常') : tr('无错误通道')],
+    ];
+    cards.forEach(({ card, value, foot }, i) => {
+      card.style.borderColor = tab === cardDefs[i].tab ? 'var(--accent)' : '';
+      value.textContent = summaries[i]?.[0] || '—';
+      foot.textContent = summaries[i]?.[1] || tr('未读取');
+    });
+
+    const count = maintenance?.pending_confirmation_count;
+    fill(notice,
+      Number.isSafeInteger(count) && count > 0 ? h('div.banner.banner-warning', { role: 'status', 'aria-label': tr('系统维护任务待确认') },
+        tr('有 {count} 个系统维护任务因中断暂停，等待确认后恢复。', { count }) + ' ' + tr('请先核对已执行操作，再显式恢复任务。')) : null,
+      view.maintenanceError ? h('div.banner.banner-warning', { role: 'alert' }, `${tr('系统维护任务状态读取失败')}: ${view.maintenanceError}`)
+        : count == null ? h('div.runtime-muted', { role: 'status' }, view.maintenancePending
+          ? tr('正在读取系统维护任务状态…') : tr('系统维护任务状态未提供')) : null,
+    );
+
+    const key = [tab, runtime, view.detailPending, view.detailError,
+      ...(tab === 'api' ? [context?.max_tokens, view.capability, view.capabilityPending, view.capabilityError] : [])];
+    if (panelKey?.every((value, i) => value === key[i])) return;
+    if (panelKey?.[0] !== tab) {
+      congestion.hidden = tab !== 'maintenance';
+      fill(congestion, tab === 'maintenance' ? ctx.mountCongestion() : null);
+    }
+    panelKey = key;
+    closeLogs?.();
+    closeLogs = undefined;
+    if (tab === 'logs') fill(body, drawLogsTab());
+    else if (!tab) fill(body, h('div.runtime-muted', tr('选择标签查看详情')));
+    else if (!runtime) fill(body, view.detailError
+      ? h('div.banner.banner-danger', { role: 'alert' }, view.detailError)
+      : h('div.runtime-muted', { role: 'status' }, view.detailPending ? tr('正在读取真实数据…') : tr('服务端未返回此分区')));
+    else {
+      const panels = { prompt: drawPromptTab, tokens: drawTokensTab, api: drawApiTab, external: drawExternalTab, maintenance: drawMaintenanceTab };
+      fill(body, view.detailError ? h('div.banner.banner-warning', { role: 'alert' }, tr('刷新失败，当前显示上次成功读取的数据。')) : null,
+        panels[tab](runtime, view));
+    }
+  };
 
   /* ---- 系统提示词 ---- */
-  function drawPromptTab() {
+  function drawPromptTab(R) {
     const names = {
       user_soul: '用户人格', global_soul: '全局人格', agents: '运行手册',
       global_agents: '全局子智能体', user_agents: '用户子智能体', plugins: '工具插件',
@@ -110,7 +140,7 @@ export function renderStatusPage(ctx) {
       ),
       h('div.runtime-prompt-layout',
         h('div.doc-content.runtime-prompt-content',
-          renderMarkdownWithWidgets(R.prompt.content || '（本次提示词为空）', { readOnly: true })),
+          ctx.mountMarkdown(R.prompt.content || '（本次提示词为空）', { readOnly: true })),
         h('div.runtime-prompt-components',
           h('table.table',
             h('thead', h('tr', h('th', tr('模块')), h('th', tr('状态')), h('th.num', 'Tokens（估算）'), h('th', tr('来源')))),
@@ -133,7 +163,7 @@ export function renderStatusPage(ctx) {
   }
 
   /* ---- Token ---- */
-  function drawTokensTab() {
+  function drawTokensTab(R) {
     const wrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--s-5)' } });
     const tk = R.tokens;
 
@@ -179,11 +209,11 @@ export function renderStatusPage(ctx) {
   }
 
   /* ---- API 配置 ---- */
-  function drawApiTab() {
-    const capability = LIVE_CAPABILITIES.capabilities;
+  function drawApiTab(R, { context, capability, capabilityPending, capabilityError }) {
+    const configuredContext = R.api.context_tokens ?? context?.max_tokens;
     const limits = Object.fromEntries(['context_window', 'max_input_tokens', 'max_output_tokens'].map(key =>
-      [key, capability.limits?.[key] ?? capability.extensions?.limits?.[key]]));
-    const hasCapabilities = Boolean(limits.context_window || limits.max_input_tokens || limits.max_output_tokens || capability.input_modalities?.length);
+      [key, capability?.limits?.[key] ?? capability?.extensions?.limits?.[key]]));
+    const hasCapabilities = Boolean(limits.context_window || limits.max_input_tokens || limits.max_output_tokens || capability?.input_modalities?.length);
     const modelLabels = {
       default: '默认子智能体', cheap: '轻量子智能体', reasoning: '推理子智能体',
       vision: '视觉理解', image_generation: '图片生成', image_edit: '图片编辑',
@@ -203,7 +233,7 @@ export function renderStatusPage(ctx) {
         h('div.section-title', { style: { fontSize: 'var(--t-sm)' } }, h('span', { html: icon('cpu', 'icon-sm') }), tr('用户 API 配置')),
         h('div', { style: { flex: '1' } }),
         R.api.configured ? h('span.badge.badge-success', tr('已配置')) : h('span.badge.badge-warning', tr('待配置')),
-        h('button.btn.btn-ghost.btn-sm', { onclick: () => navigate('/settings', { tab: 'provider' }) },
+        h('button.btn.btn-ghost.btn-sm', { onclick: () => ctx.navigate('/settings', { tab: 'provider' }) },
           h('span', { html: icon('settings', 'icon-sm') }), tr('编辑配置')),
       ),
       h('div.banner.banner-info', { style: { marginBottom: 'var(--s-4)' } },
@@ -219,7 +249,7 @@ export function renderStatusPage(ctx) {
           h('span.badge', R.api.credential_source === 'inline' ? tr('配置文件内联') : R.api.credential_source === 'environment' ? tr('环境变量') : tr('缺失')))),
         h('div.desc-row', h('span.desc-key', tr('流式')), h('span.desc-val', R.api.stream === undefined ? tr('未提供') : R.api.stream ? tr('已开启') : tr('已关闭'))),
         h('div.desc-row', h('span.desc-key', tr('请求超时')), h('span.desc-val', R.api.timeout == null ? tr('未提供') : `${R.api.timeout} 秒`)),
-        h('div.desc-row', h('span.desc-key', '配置上下文上限'), h('span.desc-val.tnum', `${fmtThousands(R.api.context_tokens ?? R.context.max_tokens)} tokens`)),
+        h('div.desc-row', h('span.desc-key', '配置上下文上限'), h('span.desc-val.tnum', configuredContext == null ? tr('未提供') : `${fmtThousands(configuredContext)} tokens`)),
         h('div.desc-row', h('span.desc-key', '配置输入模态'), h('span.desc-val', (R.api.input_modalities || []).join(' / ') || '未单独声明')),
       ),
       h('div.runtime-api-models',
@@ -229,23 +259,25 @@ export function renderStatusPage(ctx) {
       ),
       h('div', { style: { marginTop: 'var(--s-5)' } },
         h('div.doc-label', { style: { marginBottom: '8px' } }, tr('模型能力声明')),
-        !hasCapabilities ? h('div.runtime-muted', R.api.type === 'chat'
-          ? 'Chat 协议未提供模型能力声明，以上为实际配置值。'
-          : '模型能力声明暂不可用，以上为实际配置值。') : null,
+        capabilityError ? h('div.banner.banner-warning', { role: 'alert' }, capabilityError) : null,
+        capabilityPending ? h('div.runtime-muted', { role: 'status' }, tr('读取能力中…')) :
+          !hasCapabilities && !capabilityError ? h('div.runtime-muted', R.api.type === 'chat'
+            ? 'Chat 协议未提供模型能力声明，以上为实际配置值。'
+            : '模型能力声明暂不可用，以上为实际配置值。') : null,
         hasCapabilities ? 
         h('div.desc-list',
           h('div.desc-row', h('span.desc-key', tr('输入模态')), h('span.desc-val',
             h('div', { style: { display: 'flex', gap: '5px', flexWrap: 'wrap' } },
-              (LIVE_CAPABILITIES.capabilities.input_modalities || []).map((m) => h('span.badge', m))))),
+              (capability.input_modalities || []).map((m) => h('span.badge', m))))),
           h('div.desc-row', h('span.desc-key', tr('输出模态')), h('span.desc-val',
             h('div', { style: { display: 'flex', gap: '5px' } },
-              (LIVE_CAPABILITIES.capabilities.output_modalities || []).map((m) => h('span.badge', m))))),
+              (capability.output_modalities || []).map((m) => h('span.badge', m))))),
           h('div.desc-row', h('span.desc-key', tr('推理支持')), h('span.desc-val',
-            LIVE_CAPABILITIES.capabilities.reasoning.supported
-              ? `支持 · 档位 ${LIVE_CAPABILITIES.capabilities.reasoning.efforts.join(' / ')}`
+            capability.reasoning.supported
+              ? `支持 · 档位 ${capability.reasoning.efforts.join(' / ')}`
               : tr('不支持'))),
           h('div.desc-row', h('span.desc-key', tr('工具能力')), h('span.desc-val',
-            `并行调用 ${LIVE_CAPABILITIES.capabilities.tools.parallel_calls ? tr('支持') : tr('不支持')} · 多模态结果 ${LIVE_CAPABILITIES.capabilities.tools.multimodal_results ? tr('支持') : tr('不支持')}`)),
+            `并行调用 ${capability.tools.parallel_calls ? tr('支持') : tr('不支持')} · 多模态结果 ${capability.tools.multimodal_results ? tr('支持') : tr('不支持')}`)),
           ...[['模型上下文窗口', 'context_window'], ['模型最大输入', 'max_input_tokens'], ['模型最大输出', 'max_output_tokens']].map(([label, key]) =>
             h('div.desc-row', h('span.desc-key', tr(label)), h('span.desc-val.tnum', limits[key] ? fmtThousands(limits[key]) + ' tokens' : tr('模型未声明')))),
         ) : null,
@@ -254,7 +286,7 @@ export function renderStatusPage(ctx) {
   }
 
   /* ---- 外部组件 ---- */
-  function drawExternalTab() {
+  function drawExternalTab(R) {
     const componentCard = (item, kind) => h('article.runtime-component-card',
       h('div.runtime-component-head',
         h('span', { html: icon(kind, 'icon-sm') }),
@@ -298,10 +330,8 @@ export function renderStatusPage(ctx) {
   }
 
   /* ---- 调度与维护 ---- */
-  function drawMaintenanceTab() {
+  function drawMaintenanceTab(R) {
     const wrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--s-5)' } });
-    wrap.appendChild(ctx.mountCongestion(R.congestion));
-
     wrap.appendChild(h('div.card.card-pad',
       h('div.section-title', { style: { marginBottom: 'var(--s-4)' } }, h('span', { html: icon('memory', 'icon-sm') }), tr('记忆更新')),
       h('div.metric-grid',
@@ -338,7 +368,7 @@ export function renderStatusPage(ctx) {
           h('div.desc-row', h('span.desc-key', tr('执行记录')), h('span.desc-val.tnum', String(R.system_cron.executions.length))),
         ),
       ),
-      h('button.btn.btn-ghost.btn-sm', { style: { marginTop: 'var(--s-3)' }, onclick: () => navigate('/tasks') },
+      h('button.btn.btn-ghost.btn-sm', { style: { marginTop: 'var(--s-3)' }, onclick: () => ctx.navigate('/tasks') },
         tr('在任务中枢查看'), h('span', { html: icon('arrowRight', 'icon-sm') })),
     ));
     return wrap;
@@ -348,13 +378,53 @@ export function renderStatusPage(ctx) {
   function drawLogsTab() {
     let category = ctx.viewState.logsCategory || 'all';
     let page = ctx.viewState.logsPage || 1;
-    const PER_PAGE = 25;
     const host = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 'var(--s-4)' } });
+    const loadState = h('div');
+    let logs;
+    let request;
+    let loadError = '';
     let terminalView = null;
 
+    function renderLoadState() {
+      loadState.hidden = !loadError && Boolean(logs);
+      fill(loadState, loadError ? h('div.banner.banner-warning', { role: 'alert' }, loadError)
+        : !logs ? h('div.runtime-muted', { role: 'status' }, tr('正在读取日志…')) : null);
+    }
+
+    async function load(refresh = false) {
+      request?.abort();
+      const controller = new AbortController();
+      request = controller;
+      loadError = '';
+      renderLoadState();
+      try {
+        const result = await Api.getRuntimeLogs(ctx.user, category, page, refresh, controller.signal);
+        if (ctx.active && !controller.signal.aborted) {
+          logs = result;
+          render();
+        }
+      } catch (error) {
+        if (ctx.active && !controller.signal.aborted) {
+          loadError = error instanceof Error ? error.message : tr('读取失败');
+          renderLoadState();
+        }
+      } finally {
+        if (request === controller) request = undefined;
+      }
+    }
+
+    function select(nextCategory, nextPage) {
+      category = ctx.viewState.logsCategory = nextCategory;
+      page = ctx.viewState.logsPage = nextPage;
+      logs = undefined;
+      loadError = '';
+      render();
+      void load();
+    }
+
     function updateTerminal(view) {
-      const entries = LIVE_RUNTIME_LOGS.entries;
-      const info = LIVE_RUNTIME_LOGS.terminal || {};
+      const entries = logs.entries;
+      const info = logs.terminal || {};
       const follow = ctx.viewState.terminalFollow !== false;
       const top = view.initialized ? view.term.scrollTop : ctx.viewState.terminalScrollTop || 0;
       const ids = new Set(entries.map(entry => entry.id));
@@ -381,7 +451,7 @@ export function renderStatusPage(ctx) {
       view.metrics.forEach((node, index) => { node.textContent = String(values[index]); });
       view.followButton.textContent = follow ? tr('跟随最新输出') : '回到最新输出';
       view.retention.textContent = `保留 ${info.retention_seconds ?? 3600} 秒 · 仅当前进程`;
-      fill(view.errors, (LIVE_RUNTIME_LOGS.source_errors || []).map(error =>
+      fill(view.errors, (logs.source_errors || []).map(error =>
         h('div.banner.banner-warning', { role: 'status' }, error)));
       view.initialized = true;
       requestAnimationFrame(() => {
@@ -392,9 +462,10 @@ export function renderStatusPage(ctx) {
     }
 
     const render = () => {
+      renderLoadState();
       // Keep the terminal and its controls mounted across 2-second snapshots.
       // This preserves selection, scrolling and a stable click target.
-      if (category === 'terminal' && LIVE_RUNTIME_LOGS.category === 'terminal' && terminalView?.panel.isConnected) {
+      if (category === 'terminal' && logs?.category === 'terminal' && terminalView?.panel.isConnected) {
         updateTerminal(terminalView);
         return;
       }
@@ -408,23 +479,13 @@ export function renderStatusPage(ctx) {
       host.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--s-3)', flexWrap: 'wrap' } },
         h('div.segments', ['all', 'backend', 'threads', 'terminal', 'message'].map((k) =>
           h('button.segment' + (k === category ? '.is-active' : ''), {
-            onclick: (ev) => {
-              category = k; page = 1; ctx.viewState.logsCategory=k;ctx.viewState.logsPage=1;
-              void readDetail(() => Api.getRuntimeLogs(Store.user, k, 1), result => { if(category===k){setRuntimeLogs(result); render();} });
-              $$('.segment', ev.currentTarget.parentElement).forEach((x) => x.classList.remove('is-active'));
-              ev.currentTarget.classList.add('is-active');
-              render();
-            },
+            onclick: () => select(k, 1),
           }, k === 'all' ? tr('全部') : k === 'backend' ? '后端日志' : k === 'threads' ? '后端线程' : k === 'terminal' ? '终端日志' : '消息日志')),
         ),
         h('div', { style: { flex: '1' } }),
         h('span', { style: { fontSize: 'var(--t-2xs)', color: 'var(--text-faint)' } },
           category === 'terminal' ? '每 2 秒刷新' : '每 10 秒刷新'),
-        h('button.btn.btn-outline.btn-sm', { onclick: () => {
-          const requestedCategory = category, requestedPage = page;
-          void readDetail(() => Api.getRuntimeLogs(Store.user, requestedCategory, requestedPage, true),
-            result => { if (category === requestedCategory && page === requestedPage) { setRuntimeLogs(result); render(); } });
-        } },
+        h('button.btn.btn-outline.btn-sm', { onclick: () => { void load(true); } },
           h('span', { html: icon('refresh', 'icon-sm') }), tr('刷新')),
       ));
 
@@ -441,28 +502,24 @@ export function renderStatusPage(ctx) {
         hintMap[category] + ' 这是有界的近期视图，不代表完整历史。',
       ));
 
-      const entries = LIVE_RUNTIME_LOGS.entries;
-      for (const error of LIVE_RUNTIME_LOGS.source_errors || []) {
+      host.appendChild(loadState);
+      if (!logs) return;
+      const entries = logs.entries;
+      for (const error of logs.source_errors || []) {
         host.appendChild(h('div.banner.banner-warning', { role: 'status' }, error));
-      }
-      // A category switch can leave the previous snapshot in memory until
-      // the new request resolves. Never label old rows as the new category.
-      if (LIVE_RUNTIME_LOGS.category !== category) {
-        host.appendChild(h('div.runtime-muted', '正在读取日志…'));
-        return;
       }
       if (!entries.length && category !== 'terminal') {
         host.appendChild(emptyState({ icon: 'terminal', title: '当前分类暂无记录', desc: '部分日志源可能不可用，或该分类真的为空。' }));
         return;
       }
 
-      const totalPages = LIVE_RUNTIME_LOGS.pagination.total_pages || 1;
-      page = clamp(page, 1, totalPages);
+      const totalPages = logs.pagination.total_pages || 1;
+      page = ctx.viewState.logsPage = clamp(page, 1, totalPages);
       const slice = entries;
 
       /* 终端输出合并视图 */
       if (category === 'terminal') {
-        const info = LIVE_RUNTIME_LOGS.terminal || {};
+        const info = logs.terminal || {};
         const follow = ctx.viewState.terminalFollow !== false;
         const summary = h('div.runtime-terminal-summary',
           [['采集状态', '实时接收'], ['载入窗口', `${info.loaded_items ?? slice.length} / ${info.window_size ?? 300}`],
@@ -534,29 +591,22 @@ export function renderStatusPage(ctx) {
         host.appendChild(list);
       }
 
-      const pager = makePager(page, totalPages, (p) => { page = p;ctx.viewState.logsPage=p; void readDetail(() => Api.getRuntimeLogs(Store.user, category, p), result => { if(page===p){setRuntimeLogs(result); render();} }); });
+      const pager = makePager(page, totalPages, p => select(category, p));
       if (pager) host.appendChild(pager);
     };
 
-    let ticks=0;
-    const timer=setInterval(()=>{
-      if(!host.isConnected || !ctx.active){clearInterval(timer);return}
-      if(document.hidden || ctx.busy)return;
-      if(category!=='terminal' && ++ticks%5!==0)return;
-      const requestedCategory=category,requestedPage=page;
-      void readDetail(()=>Api.getRuntimeLogs(ctx.user,requestedCategory,requestedPage),result=>{
-        if(category===requestedCategory && page===requestedPage){setRuntimeLogs(result);render()}
-      });
-    },2_000);
-    ctx.registerCleanup?.(()=>clearInterval(timer));
-    if(LIVE_RUNTIME_LOGS.category!==category || LIVE_RUNTIME_LOGS.pagination.page!==page){
-      void readDetail(()=>Api.getRuntimeLogs(ctx.user,category,page),result=>{setRuntimeLogs(result);render()});
-    }
+    let ticks = 0;
+    const timer = setInterval(() => {
+      if (document.hidden || request) return;
+      if (category === 'terminal' || ++ticks % 5 === 0) void load();
+    }, 2_000);
+    ctx.refreshLogs = () => load(true);
+    closeLogs = () => { clearInterval(timer); request?.abort(); ctx.refreshLogs = undefined; };
     render();
+    void load();
     return host;
   }
 
-  draw();
   return pageEl;
 }
 

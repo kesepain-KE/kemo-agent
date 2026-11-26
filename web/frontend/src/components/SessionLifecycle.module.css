@@ -1,12 +1,9 @@
 .notice {
-  position: absolute;
-  z-index: 30;
-  top: 12px;
-  left: 16px;
-  right: 16px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
+  margin: 12px 16px 0;
   padding: 12px 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
@@ -14,7 +11,6 @@
   color: var(--text-2);
   font-size: .8125rem;
   line-height: 1.6;
-  box-shadow: 0 4px 20px #0001;
 }
 
 .pending {

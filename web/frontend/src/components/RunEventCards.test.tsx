@@ -1,8 +1,22 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { GuidanceMessage } from '../pages/chatPresentation'
 import { ReasoningTrace, ToolCallCard, toolArgumentSummary, UsageCard } from './RunEventCards'
 
 describe('RunEventCards', () => {
+  it('延迟引导排队时显示等待工具，不显示已应用', () => {
+    const item = { id: 'g1', kind: 'guidance', mode: 'background', content: '处理完再调整' } as const
+    const { rerender } = render(<GuidanceMessage user="alice" item={{ ...item, status: 'submitting' }} placement="current" />)
+    expect(screen.queryByText('已排队，等当前工具完成后引导')).not.toBeInTheDocument()
+    rerender(<GuidanceMessage user="alice" item={{ ...item, status: 'queued' }} placement="current" />)
+    expect(screen.getByText('已排队，等当前工具完成后引导')).toBeInTheDocument()
+    expect(screen.getByRole('article')).toHaveAttribute('data-guidance-status', 'queued')
+    expect(screen.queryByText('引导成功')).not.toBeInTheDocument()
+    rerender(<GuidanceMessage user="alice" item={{ ...item, status: 'completed' }} placement="completed" />)
+    expect(screen.getByText('引导成功')).toBeInTheDocument()
+    expect(screen.queryByText('已排队，等当前工具完成后引导')).not.toBeInTheDocument()
+  })
+
   it('运行中默认展开、尊重手动折叠，并在运行结束后自动收起', () => {
     const { rerender } = render(<ReasoningTrace item={{ id: 'r1', kind: 'reasoning', content: '正在分析', streaming: true }} />)
     const toggle = screen.getByRole('button', { name: '正在思考' })

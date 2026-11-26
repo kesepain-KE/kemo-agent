@@ -605,6 +605,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .tool-call-status { display: flex; color: var(--text-tertiary); }
 .tool-call-status.success { color: var(--success); } .tool-call-status.error { color: var(--danger); }
 .tool-call-status.still_running { color: var(--text-secondary); }
+.tool-call-status.handed_off { color: var(--accent-text); font-size: var(--t-2xs); font-weight: 650; }
 .tool-call-body { min-width: 0; padding: 0 12px 12px; border-top: 1px solid var(--border-subtle); overflow: hidden; }
 .tool-call-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-width: 0; padding-top: 12px; align-items: start; }
 .tool-call-panel { min-width: 0; max-width: 100%; overflow: hidden; }
@@ -898,6 +899,16 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 }
 .guidance-message + .assistant-response,
 .assistant-response + .guidance-message { margin-top: 16px; }
+.guidance-handoff-notice {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--info-soft);
+  color: var(--text-secondary);
+  font-size: var(--t-xs);
+  overflow-wrap: anywhere;
+}
 .composer-guidance-preview {
   min-width: 0;
   min-height: 0;

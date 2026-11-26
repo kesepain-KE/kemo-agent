@@ -5,6 +5,7 @@ import { BookOpen, Boxes, Mic, Paperclip, Square } from 'lucide-react'
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition'
 import { useComposerAutosize } from '../hooks/useComposerAutosize'
 import { ReferenceIcon } from '../reference/ReferenceIcon'
+import type { GuidanceMode } from '../types/api'
 import { composerSlashCommands, type ConversationCommandAction } from './appShellConfig'
 
 export interface AgentComposerProps {
@@ -26,7 +27,7 @@ export interface AgentComposerProps {
   onOpenCapabilities: () => void
   onSlashCommand?: (action: ConversationCommandAction) => void
   onSubmit: () => void
-  onGuide?: () => void
+  onGuide?: (mode: GuidanceMode) => void
   onStop?: () => void
   onStopAndCancelSubagents?: () => void
 }
@@ -118,7 +119,7 @@ export function AgentComposer({
         return
       }
       if (event.key === 'Enter' && !event.nativeEvent.isComposing
-        && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
         event.preventDefault()
         runSlashCommand(filteredSlashCommands[selectedSlashIndex].action)
         return
@@ -127,10 +128,15 @@ export function AgentComposer({
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
     if (running && !stopping && event.ctrlKey && onGuide) {
       event.preventDefault()
-      if (canSubmit) onGuide()
+      if (canSubmit) onGuide('interrupt')
       return
     }
-    if (!event.shiftKey && !event.ctrlKey) {
+    if (running && !stopping && event.altKey && onGuide) {
+      event.preventDefault()
+      if (canSubmit) onGuide('background')
+      return
+    }
+    if (!event.shiftKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault()
       handleSubmit()
     }
@@ -167,7 +173,7 @@ export function AgentComposer({
           disabled={disabled}
           rows={1}
           aria-label={tr("消息内容")}
-          aria-keyshortcuts={running && onGuide ? 'Control+Enter' : undefined}
+          aria-keyshortcuts={running && !stopping && onGuide ? 'Control+Enter Alt+Enter' : undefined}
           aria-autocomplete={slashMenuOpen ? 'list' : undefined}
           aria-expanded={slashMenuOpen}
           aria-controls={slashMenuOpen ? slashMenuId : undefined}

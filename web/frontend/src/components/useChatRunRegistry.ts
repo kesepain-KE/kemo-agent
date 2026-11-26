@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { followRun, getCurrentRun } from '../api/streamClient'
+import { followRun, getCurrentRun, type PersistedRunStatus } from '../api/streamClient'
 import { reduceRecoveredRunEvent, restoreRunSnapshot } from '../pages/runRecovery'
 
 import { reorderFollowUps } from './followUpQueue'
@@ -23,6 +23,9 @@ export function useChatRunRegistry(user: string, sessionId: string) {
   const chatRunControlsRef = useRef(new Map<string, ChatRunControl>())
   const chatDraftRunKeysRef = useRef(new Map<string, string>())
   const observedFinishedRunsRef = useRef(new Map<string, string>())
+  const discoverRef = useRef<(() => void) | null>(null)
+  const refreshChatRun = useCallback(() => discoverRef.current?.(), [])
+  const [persistedRun, setPersistedRun] = useState<{ key: string; status: PersistedRunStatus }>()
   const [chatRuns, setChatRuns] = useState<Record<string, ChatRunSnapshot>>({})
   const userRef = useRef(user)
   const sessionIdRef = useRef(sessionId)
@@ -43,6 +46,7 @@ export function useChatRunRegistry(user: string, sessionId: string) {
   const chatRunId = currentChatRunControl?.runId || ''
   const chatRunSessionId = currentChatRunControl?.sessionId || ''
   const chatRunToken = currentChatRunControl?.logicalRunId || ''
+  const persistedRunStatus = !chatRunning && persistedRun?.key === chatRunKey(user, sessionId) ? persistedRun.status : undefined
 
   const beginChatRun = useCallback((runUser: string, runSessionId: string, runId: string, historyUserMessages: number) => {
     const key = chatRunKey(runUser, runSessionId)
@@ -167,14 +171,28 @@ export function useChatRunRegistry(user: string, sessionId: string) {
     const key = chatRunKey(user, sessionId)
     let timer: ReturnType<typeof setTimeout>
     let ownedRunId = ''
+    let discovering = false
+    let lastStatus: PersistedRunStatus | undefined
     const notice = (message: string) => setChatRuns(current => current[key] ? {
       ...current, [key]: { ...current[key], connectionNotice: message },
     } : current)
     const discover = async () => {
+      if (discovering || controller.signal.aborted) return
+      clearTimeout(timer)
+      discovering = true
       try {
         if (chatRunControlsRef.current.get(key)?.running) return
-        const snapshot = await getCurrentRun(user, sessionId, controller.signal)
-        if (controller.signal.aborted || !snapshot || chatRunControlsRef.current.get(key)?.running) return
+        const { run: snapshot, status } = await getCurrentRun(user, sessionId, controller.signal)
+        if (controller.signal.aborted || chatRunControlsRef.current.get(key)?.running) return
+        const nextStatus = snapshot ? undefined : status
+        setPersistedRun(current => nextStatus
+          ? current?.key === key && current.status === nextStatus ? current : { key, status: nextStatus }
+          : current?.key === key ? undefined : current)
+        if (lastStatus && lastStatus !== nextStatus) {
+          void queryClient.invalidateQueries({ queryKey: ['history', user, sessionId] })
+        }
+        lastStatus = nextStatus
+        if (!snapshot) return
         if (snapshot.finished && observedFinishedRunsRef.current.get(key) === snapshot.run_id) return
         ownedRunId = snapshot.run_id
         chatRunControlsRef.current.set(key, {
@@ -205,16 +223,22 @@ export function useChatRunRegistry(user: string, sessionId: string) {
           chatRunControlsRef.current.delete(key)
           bumpChatControlRevision()
         }
+        ownedRunId = ''
+        discovering = false
         if (!controller.signal.aborted) timer = setTimeout(discover, 5000)
       }
     }
-    void discover()
+    const refresh = () => { void discover() }
+    discoverRef.current = refresh
+    refresh()
     return () => {
+      if (discoverRef.current === refresh) discoverRef.current = null
       clearTimeout(timer)
       controller.abort()
-      if (ownedRunId) setChatRuns(current => {
+      const runId = ownedRunId
+      if (runId) setChatRuns(current => {
         const existing = current[key]
-        if (!existing?.recovered || existing.runId !== ownedRunId) return current
+        if (!existing?.recovered || existing.runId !== runId) return current
         return { ...current, [key]: { ...existing, items: [], phase: 'idle', recovered: false,
           historyBefore: undefined, connectionNotice: '' } }
       })
@@ -338,6 +362,7 @@ export function useChatRunRegistry(user: string, sessionId: string) {
 
   return {
     userRef, sessionIdRef, chatRuns, chatRunning, chatStopping, chatRunId, chatRunSessionId, chatRunToken,
+    refreshChatRun, persistedRunStatus,
     beginChatRun, updateChatRunItems, queueNextTurnMessage, setNextTurnMessageStatus,
     removeNextTurnMessage, finishChatRun, reorderNextTurnMessages, clearChatRun, restoreChatRun,
     setChatRunning, setChatRunId, setChatAbortController, setChatStopping, abortChatRun,

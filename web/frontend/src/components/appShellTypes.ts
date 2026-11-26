@@ -1,6 +1,7 @@
-import type { OverviewResponse, ChatItem, SessionsResponse } from '../types/api'
+import type { OverviewResponse, ChatItem, GuidanceMode, SessionsResponse } from '../types/api'
 import type { PendingUploadedFile } from '../store/chatDrafts'
 import type { ReasoningEffort, ReasoningEffortOption } from '../reasoningEffort'
+import type { PersistedRunStatus } from '../api/streamClient'
 
 export interface ProviderReasoningControl {
   value: ReasoningEffort
@@ -17,6 +18,8 @@ export interface ShellOutletContext {
   userAvatarUrl?: string
   sessionId: string
   sessionReady?: boolean
+  sessionReadable?: boolean
+  persistedRunStatus?: PersistedRunStatus
   clientId: string
   chatRunning: boolean
   chatStopping: boolean
@@ -54,6 +57,7 @@ export type ChatItemsUpdater = ChatItem[] | ((items: ChatItem[]) => ChatItem[])
 export interface PendingNextTurnMessage {
   id: string
   content: string
+  mode?: GuidanceMode
   uploadedFiles?: PendingUploadedFile[]
   historyUserMessages: number
   status: 'queued' | 'sending' | 'guiding' | 'error'

@@ -1,11 +1,98 @@
 import { cardHistory } from '../test/cardHistory'
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import { archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isRetryAttemptProgress, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { http, HttpResponse } from 'msw'
+import { createElement as h } from 'react'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { AppShell } from '../components/AppShell'
+import { server } from '../test/server'
+import { ChatPage, archiveTerminalPlansInConversation, buildHistoryItems, buildScheduledTaskItems, buildSenseDataItems, buildUserMessageMarkers, compactPlanAssistantText, createDeltaEventBatcher, executeStopRequest, extractPlanSummary, finalizeCurrentRoundItems, formatSenseUpdateInterval, groupConversationItems, isFailedRunCompletion, isNearScrollBottom, isRetryAttemptProgress, isSuccessfulRunCompletion, mediaArtifactUrl, mergeHistoryPages, partitionAssistantTurnItems, prepareRunUserMessage, reduceRunEvent, removeSubmittedUploads, resetCurrentRoundItemsForRetry, resolveHistoryUserMessages, selectDockedPlan } from './ChatPage'
 import type { ChatItem, CronTaskSummary, HistoryResponse, MediaArtifact, PlanSummary, RunEvent, SenseSourceSummary } from '../types/api'
 import { resetProviderResponseForRetry } from './chatState'
 import { splitInlineWidgets } from '../components/Chat/inlineWidgetProtocol'
 import { mergeHistoryAndLiveItems, shouldPrefetchEarlierHistory } from './chatHistory'
+
+it('ChatPage 把 Alt 和 Ctrl 引导原样发到当前运行，入队不等于已应用', async () => {
+  let stream: ReadableStreamDefaultController<Uint8Array> | undefined
+  const guidance: Record<string, unknown>[] = []
+  server.use(
+    http.post('/api/chat', () => new HttpResponse(new ReadableStream<Uint8Array>({
+      start(controller) { stream = controller },
+    }), { headers: { 'Content-Type': 'text/event-stream' } })),
+    http.post('/api/runs/:runId/guidance', async ({ params, request }) => {
+      const body = await request.json() as Record<string, unknown>
+      guidance.push(body)
+      return HttpResponse.json({ run_id: params.runId, status: 'accepted_current_run', queued: 1 })
+    }),
+  )
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const view = render(h(QueryClientProvider, { client },
+    h(MemoryRouter, { initialEntries: ['/chat?user=kesepain&session=s1'] },
+      h(Routes, null, h(Route, { path: '/', element: h(AppShell) },
+        h(Route, { path: 'chat', element: h(ChatPage) }))),
+    ),
+  ))
+  try {
+    const input = await screen.findByRole('textbox', { name: '消息内容' })
+    await waitFor(() => expect(input).toBeEnabled())
+    fireEvent.change(input, { target: { value: '开始任务' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(stream).toBeDefined())
+
+    fireEvent.change(input, { target: { value: '等工具完成后处理' } })
+    fireEvent.keyDown(input, { key: 'Enter', altKey: true })
+    expect(await screen.findByText('已排队，等当前工具完成后引导')).toBeInTheDocument()
+    expect(screen.queryByText('引导成功')).not.toBeInTheDocument()
+
+    fireEvent.change(input, { target: { value: '立即检查设置' } })
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+    await waitFor(() => expect(guidance).toMatchObject([
+      { session_id: 's1', guidance: '等工具完成后处理', mode: 'background' },
+      { session_id: 's1', guidance: '立即检查设置', mode: 'interrupt' },
+    ]))
+
+    const jobId = `job_${'a'.repeat(32)}`
+    const guidanceId = guidance[1].guidance_id
+    const failure = '后台作业名额已满，命令仍在前台运行；引导将在阻塞结束后投递。'
+    const emit = (event: RunEvent) => stream!.enqueue(new TextEncoder().encode(
+      `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+    ))
+    emit({ type: 'tool_call_start', tool_name: 'shell', tool_call_id: 'c1' })
+    emit({ type: 'tool_call_result', tool_name: 'shell', tool_call_id: 'c1', result: { ok: true, job_id: jobId },
+      metadata: { status: 'handed_off', execution_live: false } })
+    emit({ type: 'guidance_handoff', tool_name: 'shell', tool_call_id: 'c1', content: '已转后台',
+      metadata: { guidance_id: guidanceId, execution_id: 'exec_1', status: 'handed_off', job_id: jobId } })
+    emit({ type: 'guidance_handoff', tool_name: 'shell', tool_call_id: 'c2', content: failure,
+      metadata: { guidance_id: guidanceId, execution_id: 'exec_2', status: 'failed', reason: 'quota_full' } })
+    expect(await screen.findByText(`shell：${failure}`)).toBeVisible()
+    const card = await screen.findByLabelText('已转后台')
+    expect(card).toHaveClass('handed_off')
+    expect(card.closest('.tool-call')).not.toHaveTextContent('已完成')
+    expect(screen.getAllByRole('button', { name: jobId })).toHaveLength(2)
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeInTheDocument()
+    expect(screen.queryByText('引导成功')).not.toBeInTheDocument()
+    emit({ type: 'text_delta', content: '继续推理中' })
+    expect(await screen.findByText('继续推理中')).toBeInTheDocument()
+  } finally {
+    stream?.enqueue(new TextEncoder().encode('event: done\ndata: {"type":"done","metadata":{"status":"completed"}}\n\n'))
+    stream?.close()
+    view.unmount()
+    client.clear()
+  }
+})
+
+it('历史移交回执保留已转后台状态，不投影成完成或失败', () => {
+  const jobId = `job_${'a'.repeat(32)}`
+  const items = buildHistoryItems(cardHistory({
+    messages: [{ role: 'user', content: '运行任务' }, { role: 'assistant', content: '已转后台' }],
+    integration_traces: [{ integration_number: 1, tools: [{ call_id: 'c1', name: 'shell', status: 'handed_off',
+      result_text: JSON.stringify({ ok: true, status: 'handed_off', job_id: jobId }) }] }],
+  }))
+  expect(items.find((item) => item.kind === 'tool')).toMatchObject({
+    status: 'handed_off', resultText: expect.stringContaining(jobId),
+  })
+})
 
 describe('正文内联组件消息链路', () => {
   const incompleteWidget = '分析如下：\n\n```kemo-widget\n{"schema_version":1,"id":"retry-widget"'
@@ -68,6 +155,77 @@ describe('历史轮次预加载', () => {
 })
 
 describe('reduceRunEvent', () => {
+  it('思考插入正文后继续原气泡，正常收尾不重复插入正文', () => {
+    const ids = { response_id: 'resp_one', item_id: 'msg_body' }
+    const tail = '源码。我先查清楚 worker 是什么。'
+    const content = `回到${tail}`
+    let items = reduceRunEvent([], { type: 'text_delta', ...ids, content: '回到' })
+    const id = items[0].id
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '确认入口。' })
+    expect(items[0]).toMatchObject({ streaming: false })
+
+    items = reduceRunEvent(items, { type: 'text_delta', ...ids, content: tail })
+    expect(partitionAssistantTurnItems(items).assistantMessages).toMatchObject([
+      { id, content, streaming: true },
+    ])
+
+    items = reduceRunEvent(items, { type: 'done', metadata: {
+      status: 'completed', text: content, final_item_ids: [ids.item_id],
+    } })
+    expect(partitionAssistantTurnItems(items).assistantMessages).toMatchObject([
+      { id, content, level: 'final', streaming: false },
+    ])
+  })
+
+  it('工具调用前后的正文即使复用同一 Item ID 也保持两张气泡', () => {
+    const ids = { response_id: 'resp_one', item_id: 'msg_body' }
+    let items = reduceRunEvent([], { type: 'text_delta', ...ids, content: '调用前' })
+    items = reduceRunEvent(items, { type: 'tool_call_start', tool_call_id: 'c1', tool_name: 'file' })
+    items = reduceRunEvent(items, { type: 'tool_call_result', tool_call_id: 'c1', result: { ok: true } })
+    items = reduceRunEvent(items, { type: 'text_delta', ...ids, content: '调用后' })
+
+    expect(items).toMatchObject([
+      { kind: 'message', role: 'assistant', content: '调用前', streaming: false },
+      { kind: 'tool', callId: 'c1', status: 'success' },
+      { kind: 'message', role: 'assistant', content: '调用后', streaming: true },
+    ])
+  })
+
+  it.each([{ response_id: 'resp_one' }, { response_id: 'resp_one', item_id: '' }])(
+    'Item ID 缺失或为空时不续写被思考收束的正文：%j', (ids) => {
+      let items = reduceRunEvent([], { type: 'text_delta', ...ids, content: '前段' })
+      items = reduceRunEvent(items, { type: 'reasoning_delta', content: '继续分析。' })
+      items = reduceRunEvent(items, { type: 'text_delta', ...ids, content: '后段' })
+
+      expect(partitionAssistantTurnItems(items).assistantMessages).toMatchObject([
+        { content: '前段', streaming: false }, { content: '后段', streaming: true },
+      ])
+    },
+  )
+
+  it.each(['resp_second', undefined])('响应 ID 不匹配时不续写被思考收束的正文：%s', (response_id) => {
+    let items = reduceRunEvent([], {
+      type: 'text_delta', response_id: 'resp_one', item_id: 'msg_body', content: '上一响应',
+    })
+    items = reduceRunEvent(items, { type: 'reasoning_delta', content: '继续分析。' })
+    items = reduceRunEvent(items, { type: 'text_delta', response_id, item_id: 'msg_body', content: '新正文' })
+
+    expect(partitionAssistantTurnItems(items).assistantMessages).toMatchObject([
+      { content: '上一响应', streaming: false }, { content: '新正文', streaming: true },
+    ])
+  })
+
+  it('同一响应交错输出不同正文时只让正在续写的气泡处于流式状态', () => {
+    const ids = { response_id: 'resp_one', item_id: 'msg_body' }
+    let items = reduceRunEvent([], { type: 'text_delta', ...ids, content: '甲' })
+    items = reduceRunEvent(items, { type: 'text_delta', response_id: 'resp_one', item_id: 'msg_other', content: '乙' })
+    items = reduceRunEvent(items, { type: 'text_delta', ...ids, content: '的续写' })
+
+    expect(partitionAssistantTurnItems(items).assistantMessages).toMatchObject([
+      { content: '甲的续写', streaming: true }, { content: '乙', streaming: false },
+    ])
+  })
+
   it('同一响应中的 commentary 和 final 消息分别收集，只把后端确认的最终正文放到正文区', () => {
     let items = reduceRunEvent([], {
       type: 'text_delta', response_id: 'resp_one', item_id: 'msg_commentary', content: '正在核对',
@@ -766,6 +924,23 @@ describe('reduceRunEvent', () => {
     } })
     expect(result[0]).toMatchObject({ status: 'not_applied' })
     expect(result[1]).toMatchObject({ status: 'completed' })
+  })
+
+  it('延迟引导只按自己的确认回执生效，不用同名文本或计数推断', () => {
+    const items: ChatItem[] = [
+      { id: 'alt', guidanceId: 'alt', kind: 'guidance', content: 'same', mode: 'background', status: 'queued' },
+      { id: 'ctrl', guidanceId: 'ctrl', kind: 'guidance', content: 'same', mode: 'interrupt', status: 'queued' },
+    ]
+    const legacy = reduceRunEvent(items, { type: 'guidance_applied', metadata: { guidance: ['same'] } })
+    expect(legacy[0]).toMatchObject({ status: 'queued' })
+    expect(legacy[1]).toMatchObject({ status: 'accepted' })
+    expect(reduceRunEvent(items, { type: 'done', metadata: { guidance_count: 1 } })[0]).toMatchObject({
+      status: 'not_applied', finalized: true,
+    })
+    const confirmed = reduceRunEvent([{ ...items[0], status: 'submitting' } as ChatItem], {
+      type: 'guidance_applied', metadata: { id: 'alt', status: 'applied' },
+    })
+    expect(confirmed[0]).toMatchObject({ status: 'accepted' })
   })
 
   it('最终 error 中明确未投递的明细优先于前一次尝试的 accepted 状态', () => {

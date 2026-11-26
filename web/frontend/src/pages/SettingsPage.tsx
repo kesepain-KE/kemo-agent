@@ -1,7 +1,7 @@
 import { t as tr, useLanguage } from '../i18n'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Check, Cloud, Copy, LockKeyhole, Play, Power, RefreshCw, Trash2, Upload } from 'lucide-react'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
@@ -20,7 +20,6 @@ import {
   getVersionCheck,
   patchGlobalConfig,
   patchPreferences,
-  patchUserConfig,
   restartSystem,
   uploadCompletionSound,
   uploadFailureSound,
@@ -45,6 +44,7 @@ import { scheduleRestartReturn } from './restartReturn'
 import { LanguageSetting } from './LanguageSetting'
 import { BackgroundSetting } from './BackgroundSetting'
 import { AdvancedSettings } from './AdvancedSettings'
+import { providerSaveFilter, saveUserConfig } from '../providerConfigSave'
 
 import {
   SettingsTab,
@@ -56,7 +56,6 @@ import {
   UserConfigDraft,
   GlobalConfigDraft,
   SaveRequest,
-  SaveResult,
   settingsTabs,
   multimodalFields,
   agentModelFields,
@@ -78,7 +77,24 @@ import {
   SettingsModelOption,
 } from './settingsSupport'
 
+type SaveScope = 'user' | 'global'
+type WriteReceipt = { status: 'pending' | 'saved' } | { status: 'failed'; message: string }
+
+function acceptDraftSections<T extends object>(current: T | null, submitted: T | null, saved: T, changes: Record<string, unknown>) {
+  if (!current || !submitted) return current
+  const next = { ...current }
+  for (const key of Object.keys(changes) as Array<keyof T>) {
+    if (key in saved && current[key] === submitted[key]) next[key] = saved[key]
+  }
+  return next
+}
+
 export function SettingsPage() {
+  const { user } = useOutletContext<ShellOutletContext>()
+  return <SettingsForm key={user} />
+}
+
+function SettingsForm() {
   useLanguage()
   const { user, sessionId, chatRunning } = useOutletContext<ShellOutletContext>()
   const client = useQueryClient()
@@ -87,8 +103,9 @@ export function SettingsPage() {
   const windowsDesktop = isWindowsDesktop()
   const requestedTab = searchParams.get('tab')
   const [tab, setTab] = useState<SettingsTab>(() => isSettingsTab(requestedTab) ? requestedTab : 'appearance')
+  const providerConfigSaving = useIsMutating(providerSaveFilter(user)) > 0
   const settingsQuery = useQuery({ queryKey: ['settings', user], queryFn: ({ signal }) => getSettings(user, signal), enabled: Boolean(user) })
-  const userConfigQuery = useQuery({ queryKey: ['user-config', user], queryFn: ({ signal }) => getUserConfig(user, signal), enabled: Boolean(user) })
+  const userConfigQuery = useQuery({ queryKey: ['user-config', user], queryFn: ({ signal }) => getUserConfig(user, signal), enabled: Boolean(user) && !providerConfigSaving })
   const globalConfigQuery = useQuery({ queryKey: ['global-config'], queryFn: ({ signal }) => getGlobalConfig(signal), enabled: Boolean(user) })
   const storedProviderType = record(userConfigQuery.data?.config.provider).type === 'kemo' ? 'kemo' : 'chat'
   const providerModelsQuery = useQuery({
@@ -139,11 +156,12 @@ export function SettingsPage() {
   })
   const [userDraft, setUserDraft] = useState<UserConfigDraft | null>(null)
   const [globalDraft, setGlobalDraft] = useState<GlobalConfigDraft | null>(null)
-  const [initialApiKey, setInitialApiKey] = useState('')
-  const [providerModels, setProviderModels] = useState<SettingsModelOption[]>([])
-  const [providerDiscovery, setProviderDiscovery] = useState<{ status: 'idle' | 'valid' | 'failed'; message: string }>({ status: 'idle', message: '' })
+  const providerModels = providerModelsQuery.isError ? [] : providerModelsQuery.data ?? []
   const [formError, setFormError] = useState('')
   const [savedLabel, setSavedLabel] = useState('')
+  const [receipts, setReceipts] = useState<Partial<Record<SaveScope, WriteReceipt>>>({})
+  const savePending = Object.values(receipts).some(receipt => receipt.status === 'pending')
+  const stagedSave = useRef<{ request: SaveRequest; submittedUser: UserConfigDraft | null; submittedGlobal: GlobalConfigDraft | null } | null>(null)
   const [restartState, setRestartState] = useState<RestartState>('idle')
   const [restartMessage, setRestartMessage] = useState('')
   const [restartCanForce, setRestartCanForce] = useState(false)
@@ -162,7 +180,8 @@ export function SettingsPage() {
       && tab === 'provider'
       && storedProviderType === 'kemo'
       && userDraft?.provider.type === 'kemo'
-      && providerDiscovery.status === 'valid'
+      && providerModelsQuery.isSuccess
+      && !providerConfigSaving
       && selectedProviderModel,
   )
   const providerCapabilitiesQuery = useQuery({
@@ -215,16 +234,10 @@ export function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    if (!userConfigQuery.data || !globalConfigQuery.data) return
-    const next = buildUserDraft(userConfigQuery.data.config, globalConfigQuery.data.config)
-    setUserDraft(next)
-    setInitialApiKey(next.provider.api_key)
+    const userConfig = userConfigQuery.data?.config
+    const globalConfig = globalConfigQuery.data?.config
+    if (userConfig && globalConfig) setUserDraft(current => current ?? buildUserDraft(userConfig, globalConfig))
   }, [userConfigQuery.data, globalConfigQuery.data])
-
-  useEffect(() => {
-    setProviderModels([])
-    setProviderDiscovery({ status: 'idle', message: '' })
-  }, [user])
 
   useEffect(() => {
     setCompletionSoundFeedback('')
@@ -234,32 +247,8 @@ export function SettingsPage() {
   }, [user, tab])
 
   useEffect(() => {
-    if (providerModelsQuery.isError) {
-      setProviderModels([])
-      setProviderDiscovery({
-        status: 'failed',
-        message: providerModelsQuery.error instanceof Error
-          ? providerModelsQuery.error.message
-          : `${storedProviderType === 'chat' ? 'Chat' : 'Kemo'} 模型 API 验证失败，未拉取模型`,
-      })
-      return
-    }
-    if (!providerModelsQuery.data) return
-    setProviderModels(providerModelsQuery.data)
-    if (storedProviderType === 'kemo') {
-      setProviderDiscovery({
-        status: 'valid',
-        message: providerModelsQuery.data.length
-          ? `Kemo API 已验证，已获取 ${providerModelsQuery.data.length} 个可用模型`
-          : 'Kemo API 已验证，但当前密钥没有可用的 LLM 模型',
-      })
-    } else {
-      setProviderDiscovery({ status: 'idle', message: '' })
-    }
-  }, [providerModelsQuery.data, providerModelsQuery.error, providerModelsQuery.isError, storedProviderType])
-
-  useEffect(() => {
-    if (globalConfigQuery.data) setGlobalDraft(buildGlobalDraft(globalConfigQuery.data.config))
+    const config = globalConfigQuery.data?.config
+    if (config) setGlobalDraft(current => current ?? buildGlobalDraft(config))
   }, [globalConfigQuery.data])
 
   useEffect(() => {
@@ -288,64 +277,51 @@ export function SettingsPage() {
   }, [requestedTab])
 
   const saveMutation = useMutation({
-    mutationFn: async ({ userChanges, globalChanges, providerDiscovery }: SaveRequest): Promise<SaveResult> => {
-      await Promise.all([
-        userChanges ? patchUserConfig(user, userChanges) : Promise.resolve(),
-        globalChanges ? patchGlobalConfig(globalChanges) : Promise.resolve(),
-      ])
-      if (providerDiscovery !== 'kemo') return {}
-      try {
-        const catalog = await getKemoProviderModels(user, true)
-        return { providerModels: catalog.data }
-      } catch (error) {
-        return {
-          providerDiscoveryError: error instanceof Error
-            ? error.message
-            : 'Kemo API 验证失败，未拉取模型',
+    mutationKey: ['provider-config', user, 'settings'],
+    mutationFn: async (_providerWrite: boolean) => {
+      // Mutation variables hold only the Provider-write flag, not the password.
+      const { request, submittedUser, submittedGlobal } = stagedSave.current!
+      stagedSave.current = null
+      const { userChanges, globalChanges, providerDiscovery } = request
+      const write = async (scope: SaveScope, run: () => Promise<void>) => {
+        try {
+          await run()
+          setReceipts(current => ({ ...current, [scope]: { status: 'saved' } }))
+          return true
+        } catch (error) {
+          setReceipts(current => ({ ...current, [scope]: { status: 'failed', message: error instanceof Error ? error.message : String(error) } }))
+          return false
         }
       }
-    },
-    onSuccess: async (result, request) => {
-      setFormError('')
-      setSavedLabel(request.label)
-      if (request.providerDiscovery === 'chat') {
-        client.removeQueries({ queryKey: ['provider-models', user] })
-        client.removeQueries({ queryKey: ['provider-model-capabilities', user] })
-        setProviderModels([])
-        setProviderDiscovery({ status: 'idle', message: '' })
-      } else if (request.providerDiscovery === 'kemo') {
-        client.removeQueries({ queryKey: ['provider-model-capabilities', user] })
-        if (result.providerModels) {
-          const models: SettingsModelOption[] = result.providerModels
-            .filter((item) => item.task === 'llm' || item.task === 'unknown')
-            .map((item) => ({ ...item, source: 'kemo' as const }))
-          client.setQueryData(['provider-models', user, 'kemo'], models)
-          setProviderModels(models)
-          setProviderDiscovery({
-            status: 'valid',
-            message: result.providerModels.length
-              ? `Kemo API 已验证，已获取 ${result.providerModels.length} 个可用模型`
-              : 'Kemo API 已验证，但当前密钥没有可用的 LLM 模型',
+      const results = await Promise.all([
+        userChanges && write('user', async () => {
+          const receipt = await saveUserConfig(client, user, userChanges)
+          const saved = buildUserDraft(receipt.config, globalConfigQuery.data?.config)
+          setUserDraft(current => {
+            const next = acceptDraftSections(current, submittedUser, saved, userChanges)
+            if (next && userChanges.provider && current?.provider.api_key === submittedUser?.provider.api_key) {
+              return { ...next, provider: { ...next.provider, api_key: saved.provider.api_key } }
+            }
+            return next
           })
-        } else {
-          setProviderModels([])
-          setProviderDiscovery({
-            status: 'failed',
-            message: result.providerDiscoveryError || 'Kemo API 验证失败，未拉取模型',
-          })
-        }
-      }
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ['settings', user] }),
-        client.invalidateQueries({ queryKey: ['user-config', user] }),
-        client.invalidateQueries({ queryKey: ['global-config'] }),
-        client.invalidateQueries({ queryKey: ['overview', user] }),
-        client.invalidateQueries({ queryKey: ['runtime-status', user] }),
-        ...(request.providerDiscovery === 'chat'
-          ? [client.invalidateQueries({ queryKey: ['provider-models', user] })] : []),
+        }),
+        globalChanges && write('global', async () => {
+          const receipt = await patchGlobalConfig(globalChanges)
+          void client.cancelQueries({ queryKey: ['global-config'] })
+          client.setQueryData(['global-config'], receipt)
+          setGlobalDraft(current => acceptDraftSections(current, submittedGlobal, buildGlobalDraft(record(receipt.config)), globalChanges))
+          void client.invalidateQueries({ queryKey: ['settings', user] })
+          void client.invalidateQueries({ queryKey: ['overview', user] })
+          void client.invalidateQueries({ queryKey: ['runtime-status', user] })
+        }),
       ])
+      if (results.every(result => result !== false)) setSavedLabel(request.label)
+      if (results[0] === true && providerDiscovery) {
+        void client.resetQueries({ queryKey: ['provider-model-capabilities', user] })
+        void client.resetQueries({ queryKey: ['composer-provider-models', user] })
+        void client.resetQueries({ queryKey: ['provider-models', user, providerDiscovery], exact: true })
+      }
     },
-    onError: (error) => setFormError(String(error)),
   })
 
   const switchTab = (nextTab: SettingsTab) => {
@@ -403,12 +379,19 @@ export function SettingsPage() {
   }
 
   const refreshAll = () => {
+    if (savePending || providerConfigSaving) return
     setSavedLabel('')
     setFormError('')
+    setReceipts({})
     void Promise.all([
-      settingsQuery.refetch(),
       userConfigQuery.refetch(),
       globalConfigQuery.refetch(),
+    ]).then(([userResult, globalResult]) => {
+      if (userResult.isSuccess && globalResult.isSuccess) setUserDraft(buildUserDraft(userResult.data.config, globalResult.data.config))
+      if (globalResult.isSuccess) setGlobalDraft(buildGlobalDraft(globalResult.data.config))
+    })
+    void Promise.all([
+      settingsQuery.refetch(),
       versionQuery.refetch(),
       ...(tab === 'provider' ? [providerModelsQuery.refetch()] : []),
     ])
@@ -416,13 +399,20 @@ export function SettingsPage() {
   const settingsRefreshing = settingsQuery.isFetching || userConfigQuery.isFetching || globalConfigQuery.isFetching || versionQuery.isFetching
 
   const submit = (request: SaveRequest, validationError = '') => {
+    const providerWrite = Boolean(request.userChanges?.provider)
+    if (saveMutation.isPending || stagedSave.current || (providerWrite && client.isMutating(providerSaveFilter(user)))) return
     if (validationError) {
       setFormError(validationError)
       return
     }
     setSavedLabel('')
     setFormError('')
-    saveMutation.mutate(request)
+    setReceipts({
+      ...(request.userChanges && { user: { status: 'pending' } }),
+      ...(request.globalChanges && { global: { status: 'pending' } }),
+    })
+    stagedSave.current = { request, submittedUser: userDraft, submittedGlobal: globalDraft }
+    saveMutation.mutate(providerWrite)
   }
 
   const saveProvider = () => {
@@ -444,20 +434,24 @@ export function SettingsPage() {
       if (userDraft.provider.supports_file_input) inputModalities.push('file')
     }
     const provider: Record<string, unknown> = {
-      type: userDraft.provider.type,
       model: userDraft.provider.model.trim(),
-      base_url: userDraft.provider.base_url.trim(),
       stream: userDraft.provider.stream,
       reasoning_effort: userDraft.provider.reasoning_effort,
       input_modalities: inputModalities,
     }
-    if (userDraft.provider.api_key !== initialApiKey) provider.api_key = userDraft.provider.api_key
-    if (userDraft.provider.api_key_env !== (record(userConfigQuery.data?.config.provider).api_key_env || '')) {
-      provider.api_key_env = userDraft.provider.api_key_env
+    const stored = record(userConfigQuery.data?.config.provider)
+    const connection = {
+      type: userDraft.provider.type,
+      base_url: userDraft.provider.base_url.trim(),
+      api_key: userDraft.provider.api_key,
+      api_key_env: userDraft.provider.api_key_env,
     }
+    const changed = Object.entries(connection).filter(([key, value]) =>
+      value !== (stored[key] ?? '') && (key !== 'api_key' || value !== '***'))
+    for (const [key, value] of changed) provider[key] = value
     submit({
       label: '保存模型与 Provider',
-      providerDiscovery: userDraft.provider.type,
+      providerDiscovery: changed.length ? userDraft.provider.type : undefined,
       userChanges: {
         provider,
         agent_models: userDraft.agent_models,
@@ -584,6 +578,12 @@ export function SettingsPage() {
       ? '可直接输入模型名，或从当前 Chat Provider 的 /models 列表中选择'
       : '可直接输入模型名，或从已验证 Kemo 模型目录中选择'
     : '模型列表未加载时仍可直接输入模型名'
+  const catalogMessage = providerModelsQuery.isFetching ? tr('正在获取模型列表…')
+    : providerModelsQuery.isError ? providerModelsQuery.error.message
+      : storedProviderType === 'kemo' && providerModelsQuery.isSuccess
+        ? providerModels.length ? `Kemo API 已验证，已获取 ${providerModels.length} 个可用模型`
+          : tr('Kemo API 已验证，但当前密钥没有可用的 LLM 模型')
+        : ''
   const kemoReasoning = providerCapabilitiesQuery.data?.capabilities.reasoning
   const kemoReasoningOptions = kemoReasoning?.supported
     ? reasoningEffortOptionsFor(kemoReasoning.efforts)
@@ -610,6 +610,10 @@ export function SettingsPage() {
     {settingsQuery.isError || userConfigQuery.isError || globalConfigQuery.isError ? <ModuleError message="配置读取失败，请检查配置文件格式或 Web API。" /> : null}
     {tab === 'version' && versionQuery.isError ? <ModuleError message="版本信息读取失败，请检查 version.json。" /> : null}
     {formError ? <ModuleError message={formError} /> : null}
+    {receipts.user?.status === 'failed' && <ModuleError message={`${tr('用户配置保存失败')}：${receipts.user.message}`} />}
+    {receipts.global?.status === 'failed' && <ModuleError message={`${tr('全局配置保存失败')}：${receipts.global.message}`} />}
+    {receipts.global && receipts.user?.status === 'saved' && <div role="status">{tr('用户配置已保存')}</div>}
+    {receipts.user && receipts.global?.status === 'saved' && <div role="status">{tr('全局配置已保存')}</div>}
     <div className="settings-layout">
       <nav className="settings-nav" aria-label={tr("配置分类")}>
         {settingsTabs.map((item) => <button key={item.id} className={`settings-nav-item ${tab === item.id ? 'active is-active' : ''}`} onClick={() => switchTab(item.id)}>
@@ -683,14 +687,10 @@ export function SettingsPage() {
          </> : null}
 
         {tab === 'provider' && userDraft ? <>
-          <ConfigSaveBar label="保存模型与 Provider" description="保存后从下一次 Run 开始使用，不对运行中的请求热切换协议。" pending={saveMutation.isPending} saved={savedLabel === '保存模型与 Provider'} onSave={saveProvider} />
+          <ConfigSaveBar label="保存模型与 Provider" description="保存后从下一次 Run 开始使用，不对运行中的请求热切换协议。" pending={savePending || providerConfigSaving} saved={savedLabel === '保存模型与 Provider'} onSave={saveProvider} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>核心连接</strong><span>Provider 类型只允许 chat 或 kemo；运行中不会跨协议自动回退。</span></div>
             <SettingRow title="Provider 类型" description={userDraft.provider.type === 'chat' ? '标准 /v1/chat/completions，保证文本、工具和图片输入基线' : '原生 Kemo Provider，支持网关声明的完整能力'} source="user" control={<ProviderSelect value={userDraft.provider.type} onChange={(value) => {
-              if (value !== 'kemo') {
-                setProviderModels([])
-                setProviderDiscovery({ status: 'idle', message: '' })
-              }
               setUserDraft({
                 ...userDraft,
                 provider: {
@@ -710,7 +710,9 @@ export function SettingsPage() {
               enabled={modelPickerEnabled}
               onChange={(model) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, model } })}
             />} />
-            {userDraft.provider.type === 'kemo' && providerDiscovery.status !== 'idle' ? <SettingRow title="Kemo 模型目录" description={providerDiscovery.message} control={<StatusChip status={providerDiscovery.status === 'valid' ? 'configured' : 'error'}>{providerDiscovery.status === 'valid' ? 'API 有效' : '未拉取'}</StatusChip>} /> : null}
+            {userDraft.provider.type === storedProviderType && catalogMessage ? <SettingRow
+              title={storedProviderType === 'kemo' ? 'Kemo 模型目录' : tr('Chat · Provider 模型 API')} description={catalogMessage}
+              control={providerModelsQuery.isFetching ? null : <StatusChip status={providerModelsQuery.isError ? 'error' : 'configured'}>{providerModelsQuery.isError ? tr('未拉取') : tr('API 有效')}</StatusChip>} /> : null}
             <SettingRow title="Base URL" description="chat 模式自动补全 /v1；kemo 模式使用协议根地址" source="user" control={<input className="config-field" aria-label="Base URL" value={userDraft.provider.base_url} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, base_url: event.target.value } })} />} />
             <SettingRow title="API Key" description="已保存的密钥只显示脱敏占位；不修改就不会覆盖" source="user" control={<input className="config-field" type="password" autoComplete="new-password" aria-label="API Key" placeholder={tr("未配置")} value={userDraft.provider.api_key} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key: event.target.value } })} />} />
             <SettingRow title="密钥环境变量" description="指定密钥读取来源；已填写的 API Key 优先。留空使用协议默认环境变量。" source="user" control={<select className="config-field settings-choice" aria-label={tr('密钥环境变量')} value={userDraft.provider.api_key_env} onChange={(event) => setUserDraft({ ...userDraft, provider: { ...userDraft.provider, api_key_env: event.target.value } })}>
@@ -796,7 +798,7 @@ export function SettingsPage() {
         </> : null}
 
         {tab === 'memory' && globalDraft && userDraft ? <>
-          <ConfigSaveBar label="保存记忆与上下文" description="自动注入总开关与上下文参数保存到全局；分类开关和各层注入上限保存到当前用户。" pending={saveMutation.isPending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
+          <ConfigSaveBar label="保存记忆与上下文" description="自动注入总开关与上下文参数保存到全局；分类开关和各层注入上限保存到当前用户。" pending={savePending} saved={savedLabel === '保存记忆与上下文'} onSave={saveMemory} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>CardStream 上下文</strong><span>每次主请求前检查容量；超过有效输入上限的 80% 时压缩历史，RAW 始终保留。</span></div>
             <SettingRow title="Token 上限" description="界面显示的窗口容量；模型未声明最大输入和上下文窗口时，也作为压缩容量兜底" source="global" control={<NumberInput label="Token 上限" value={globalDraft.agents.token_limit} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, agents: { ...globalDraft.agents, token_limit: value } })} />} />
@@ -824,7 +826,7 @@ export function SettingsPage() {
         </> : null}
 
         {tab === 'permissions' && userDraft ? <>
-          <ConfigSaveBar label="保存权限边界" description="知识范围与模块白名单写入当前用户配置；知识图谱外挂由普通拓展和插件权限控制。" pending={saveMutation.isPending} saved={savedLabel === '保存权限边界'} onSave={savePermissions} />
+          <ConfigSaveBar label="保存权限边界" description="知识范围与模块白名单写入当前用户配置；知识图谱外挂由普通拓展和插件权限控制。" pending={savePending} saved={savedLabel === '保存权限边界'} onSave={savePermissions} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>知识库开关</strong><span>用户知识库始终有效；以下开关控制额外知识层。</span></div>
             <SettingRow title="使用共享知识库" description="将 knowledge/share 加入当前用户知识范围" source="user" control={<Toggle checked={userDraft.knowledge.use_shared} label="使用共享知识库" onChange={(value) => setUserDraft({ ...userDraft, knowledge: { ...userDraft.knowledge, use_shared: value } })} />} />
@@ -849,7 +851,7 @@ export function SettingsPage() {
         </> : null}
 
         {tab === 'runtime' && userDraft && globalDraft ? <>
-          <ConfigSaveBar label="保存运行限制" description="运行限制属于全局默认；任务计划自动接受为当前用户偏好。" pending={saveMutation.isPending} saved={savedLabel === '保存运行限制'} onSave={saveRuntime} />
+          <ConfigSaveBar label="保存运行限制" description="运行限制属于全局默认；任务计划自动接受为当前用户偏好。" pending={savePending} saved={savedLabel === '保存运行限制'} onSave={saveRuntime} />
           <article className="setting-section">
             <div className="setting-section-head"><strong>工具执行</strong><span>分别约束工具等待时间、单轮调用总数以及连续重复或失败行为。</span></div>
             <SettingRow title="工具调用超时（秒）" description="单个工具执行的最长等待时间" source="global" control={<NumberInput label="工具调用超时" value={globalDraft.tools.timeout} min={1} onChange={(value) => setGlobalDraft({ ...globalDraft, tools: { ...globalDraft.tools, timeout: value } })} />} />
@@ -919,7 +921,7 @@ export function SettingsPage() {
           </div>, document.body) : null}
         </> : null}
 
-        {tab === 'advanced' && globalConfigQuery.data ? <AdvancedSettings key={user} config={globalConfigQuery.data.config} pending={saveMutation.isPending} saved={savedLabel === '保存高级配置'} onSave={submit} /> : null}
+        {tab === 'advanced' && globalConfigQuery.data ? <AdvancedSettings key={user} config={globalConfigQuery.data.config} pending={savePending} saved={savedLabel === '保存高级配置'} onSave={submit} /> : null}
 
         {tab === 'version' && versionQuery.data ? <>
           <article className="setting-section version-overview-section">

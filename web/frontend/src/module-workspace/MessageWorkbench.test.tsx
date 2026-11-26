@@ -116,6 +116,36 @@ describe('消息工作区', () => {
     expect(screen.queryByText('meeting_notes.docx')).toBeNull()
   })
 
+  it('临时文件、收发详情和日志复用媒体预览，不按文件名猜已回收的原件', async () => {
+    const data = await core.getMessageStatus('kesepain')
+    const item = data.transports[0]
+    item.temporary_files = [{ name: 'stored.png', relative_path: 'nested/stored.png', size: 42, updated_at: 1 }]
+    const template = { ...item.logs[0], kind: 'file' as const, mime: 'image/png', size: 42, exchange_id: 'media' }
+    item.logs = [
+      { ...template, id: 'retained', content: '原始图片.png', file_path: `${item.files_path}/nested/stored.png` },
+      { ...template, id: 'removed', content: '已回收图片.png', file_path: `${item.files_path}/removed/stored.png` },
+    ]
+    server.use(http.get('/api/users/kesepain/message/status', () => HttpResponse.json(data)))
+    renderWorkbench()
+    const url = '/api/users/kesepain/message/modules/onebot/files/preview?path=nested%2Fstored.png'
+    fireEvent.click(await screen.findByRole('tab', { name: '文件' }))
+    fireEvent.click(screen.getByRole('button', { name: '预览' }))
+    expect(screen.getByRole('img', { name: 'stored.png' })).toHaveAttribute('src', url)
+    fireEvent.click(screen.getByRole('button', { name: '关闭文件详情' }))
+    expect(screen.queryByRole('img', { name: 'stored.png' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: '消息' }))
+    fireEvent.click(screen.getByRole('button', { name: '展开消息' }))
+    expect(screen.getAllByText(/image\/png · 42 B/)).toHaveLength(2)
+    expect(screen.getByText('原文件不可预览')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '预览' }))
+    expect(screen.getByRole('img', { name: 'stored.png' })).toHaveAttribute('src', url)
+
+    fireEvent.click(screen.getByRole('tab', { name: '日志' }))
+    fireEvent.click(screen.getByRole('button', { name: '预览' }))
+    expect(screen.getByRole('img', { name: 'stored.png' })).toHaveAttribute('src', url)
+  })
+
   it('关联收发默认折叠，刷新保留展开状态，筛选只展示对应方向和类型的记录', async () => {
     const data = await core.getMessageStatus('kesepain')
     const item = data.transports[0]

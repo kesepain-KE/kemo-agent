@@ -5,6 +5,7 @@ import type { ChatItem, OverviewResponse, PlanSummary, RunEvent } from '../types
 import { chatDraftKey, type PendingUploadedFile } from '../store/chatDrafts'
 import { useCompressionStatus } from '../store/compressionStatus'
 import { randomUUID } from '../randomId'
+import { providerSaveFilter } from '../providerConfigSave'
 import type { ShellOutletContext } from '../components/appShellTypes'
 import { restoreRunSnapshot } from './runRecovery'
 import {
@@ -112,6 +113,14 @@ return async (
   const uploadedFiles = options.uploadedFiles ?? []
   const hasContent = Boolean(options.content?.length)
   if ((!prompt && !hasContent && !uploadedFiles.length) || !user || (!options.internalNextTurn && (running || stopping)) || uploading) return false
+  const providerSavePending = () => {
+    if (!queryClient.isMutating(providerSaveFilter(user))) return false
+    setRunErrorNoticeFor(user, currentLiveSessionRef.current || sessionId, {
+      id: eventId('provider-save'), message: tr('请等待 Provider 配置保存后再发送。'),
+    })
+    return true
+  }
+  if (providerSavePending()) return false
   if (creatingSendSessionRef.current) return false
   let activeSession = options.sessionId || sessionId
   if (!activeSession) {
@@ -157,6 +166,7 @@ return async (
       setConversationBusy('')
     }
   }
+  if (providerSavePending()) return false
   const targetUser = user
   const submissionDraftKey = chatDraftKey(user, activeSession)
   const finalDraftKey = submissionDraftKey

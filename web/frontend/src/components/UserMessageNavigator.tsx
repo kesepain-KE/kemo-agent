@@ -36,6 +36,7 @@ type RoundProgressStyle = CSSProperties & {
 
 const CLOSE_DELAY_MS = 180
 const WHEEL_THROTTLE_MS = 75
+const WINDOW_RADIUS = 10
 
 export function compactUserMessagePreview(content: string, limit = 96) {
   const compact = content
@@ -108,6 +109,7 @@ export function UserMessageNavigator({
   const closeTimerRef = useRef<number | null>(null)
   const lastWheelTimeRef = useRef(Number.NEGATIVE_INFINITY)
   const markersRef = useRef(markers)
+  const previewCache = useRef(new Map<string, string>())
   markersRef.current = markers
 
   const activeId = markers.some((marker) => marker.id === previewId)
@@ -286,6 +288,9 @@ export function UserMessageNavigator({
 
   if (markers.length === 0) return null
 
+  const windowStart = Math.max(0, activeIndex - WINDOW_RADIUS)
+  const windowEnd = Math.min(markers.length, activeIndex + WINDOW_RADIUS + 1)
+
   return (
     <nav
       ref={navigatorRef}
@@ -303,8 +308,13 @@ export function UserMessageNavigator({
         <span className={styles.glow} aria-hidden="true" />
         {open ? (
           <>
-            {markers.map((marker, index) => {
-              const preview = compactUserMessagePreview(marker.content)
+            {markers.slice(windowStart, windowEnd).map((marker, offset) => {
+              const index = windowStart + offset
+              let preview = previewCache.current.get(marker.id)
+              if (preview === undefined) {
+                preview = compactUserMessagePreview(marker.content)
+                previewCache.current.set(marker.id, preview)
+              }
               const active = index === activeIndex
               const angle = wheelPosition(index, markers.length, activeIndex).angle
               return (

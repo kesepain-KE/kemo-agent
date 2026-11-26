@@ -19,8 +19,8 @@ export function shellJobId(value: unknown, depth = 0): string | undefined {
   }
   return undefined
 }
-export function ShellJobLink({ user, sessionId, name, result, resultText }: {
-  user: string; sessionId: string; name?: string; result: unknown; resultText?: string
+export function ShellJobLink({ user, sessionId, name, result, resultText, showId = false }: {
+  user: string; sessionId: string; name?: string; result: unknown; resultText?: string; showId?: boolean
 }) {
   useLanguage()
   if (!user || !/(?:^|[._/])shell$/.test(name || '')) return null
@@ -28,6 +28,6 @@ export function ShellJobLink({ user, sessionId, name, result, resultText }: {
   if (!jobId) return null
   return <div className={styles.toolbar}><button className={styles.button}
     onClick={() => openWorkspaceJob(user, { job_id: jobId, session_id: sessionId, source: 'web' })}>
-    <Terminal size={15} />{t('查看后台任务')}
+    <Terminal size={15} />{showId ? <code>{jobId}</code> : t('查看后台任务')}
   </button></div>
 }

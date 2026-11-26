@@ -13,7 +13,7 @@ export let Current;
 export const Store = {user:'', sessionId:'', running:false};
 export const Bus = {emit: (_event, payload) => navigate('/chat', {prompt:payload?.text || ''})};
 export let LIVE_AGENTS, LIVE_SKILLS, LIVE_KNOWLEDGE, LIVE_MEMORY, LIVE_IMPORTANT_MEMORY;
-export let LIVE_TASKS, LIVE_SENSE, LIVE_EXPANDS, LIVE_MESSAGES, LIVE_RUNTIME, LIVE_RUNTIME_LOGS, LIVE_CAPABILITIES;
+export let LIVE_TASKS, LIVE_SENSE, LIVE_EXPANDS, LIVE_MESSAGES;
 export const navigate = (path, params={}) => Current.navigate(path, params);
 export const renderMarkdownWithWidgets = (content, options = {}) => Current.mountMarkdown(String(content ?? ''), options);
 
@@ -748,13 +748,11 @@ export function sortableTh(label, key, state, onSort, extra) {
 
 
 export function setContext(ctx) { Current=ctx; Object.assign(Store,{user:ctx.user,sessionId:ctx.sessionId,running:ctx.running}); }
-export function setRuntimeLogs(data) { LIVE_RUNTIME_LOGS=data; }
 export function setLiveData(data) {
   LIVE_AGENTS=data.agents; LIVE_SKILLS=data.skills; LIVE_KNOWLEDGE=data.knowledge;
   LIVE_MEMORY=data.memory; LIVE_IMPORTANT_MEMORY=data.important;
   LIVE_TASKS=data.tasks; LIVE_SENSE=data.sense; LIVE_EXPANDS=data.expand;
-  LIVE_MESSAGES=data.messages; LIVE_RUNTIME=data.runtime; LIVE_RUNTIME_LOGS=data.logs;
-  LIVE_CAPABILITIES=data.capabilities;
+  LIVE_MESSAGES=data.messages;
 }
 
 export { Api, icon };
