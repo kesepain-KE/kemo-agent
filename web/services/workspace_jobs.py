@@ -12,11 +12,14 @@ from typing import Any
 
 from run.config import user_dir
 from run.config import _contains_reparse_point
-from run.tools import JOB_SCHEMA_VERSION, public_background_job
+from run.tools import (
+    FOREGROUND_HANDOFF, JOB_SCHEMA_VERSION, MAX_BACKGROUND_JOB_RECORD_BYTES,
+    background_job_visible, public_background_job,
+)
 from web.errors import InvalidRequestError, NotFoundError
 
 LOG_TAIL_BYTES = 64 * 1024
-MAX_RECORD_BYTES = 128 * 1024
+MAX_RECORD_BYTES = MAX_BACKGROUND_JOB_RECORD_BYTES
 _REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
@@ -67,7 +70,7 @@ def _read_safe(path: Path, limit: int, *, tail: bool = False) -> tuple[bytes, in
         return handle.read(limit), current.st_size
 
 
-def _record(directory: Path, job_id: str, user: str) -> dict[str, Any]:
+def _record(root: Path, directory: Path, job_id: str, user: str) -> dict[str, Any]:
     import re
     if not re.fullmatch(r"job_[a-f0-9]{32}", job_id):
         raise NotFoundError("后台作业不存在")
@@ -77,8 +80,10 @@ def _record(directory: Path, job_id: str, user: str) -> dict[str, Any]:
         if (not isinstance(record, dict) or record.get("schema_version") != JOB_SCHEMA_VERSION
                 or record.get("job_id") != job_id or record.get("user") != user):
             raise ValueError("后台作业记录不匹配")
+        if not background_job_visible(root, user, record):
+            raise ValueError("后台作业尚未提交")
         return record
-    except (OSError, ValueError) as exc:
+    except (KeyError, OSError, ValueError) as exc:
         raise NotFoundError("后台作业不存在或不可读取") from exc
 
 
@@ -100,7 +105,7 @@ def list_jobs(backend: Any, user: str, *, session_id: str = "", source: str = ""
         if candidate.name.endswith(".request.json"):
             continue
         try:
-            record = _record(directory, candidate.stem, user)
+            record = _record(backend.root, directory, candidate.stem, user)
         except NotFoundError:
             continue
         if session_id and record.get("session_id") != session_id:
@@ -124,12 +129,12 @@ def list_jobs(backend: Any, user: str, *, session_id: str = "", source: str = ""
 def job_detail(backend: Any, user: str, job_id: str, *, session_id: str = "",
                source: str = "") -> dict[str, Any]:
     user, directory = _directory(backend, user)
-    record = _record(directory, job_id, user)
+    record = _record(backend.root, directory, job_id, user)
     if ((session_id and record.get("session_id") != session_id)
             or (source and record.get("source") != source)):
         raise NotFoundError("后台作业不存在")
     streams = {}
-    for stream in ("stdout", "stderr"):
+    for stream in (() if record.get("owner_kind") == FOREGROUND_HANDOFF else ("stdout", "stderr")):
         try:
             data, size = _read_safe(directory / f"{job_id}.{stream}.log", LOG_TAIL_BYTES, tail=True)
             text = _decode_log(data, truncated=size > LOG_TAIL_BYTES,

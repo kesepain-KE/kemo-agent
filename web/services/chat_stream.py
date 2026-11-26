@@ -178,6 +178,10 @@ def stream_chat(
             value = metadata.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
                 safe[key] = max(0, value)
+        if metadata.get("heartbeat") is True:
+            elapsed = metadata.get("elapsed_seconds")
+            if type(elapsed) in (int, float) and 0 <= elapsed < float("inf"):
+                safe.update(heartbeat=True, elapsed_seconds=elapsed)
         put(RunEvent(type="subagent_progress", tool_call_id=event.tool_call_id, metadata=safe))
 
     request["_subagent_event_callback"] = subagent_event

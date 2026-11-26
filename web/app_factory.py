@@ -384,6 +384,7 @@ def create_app(
             session_id=body.session_id,
             guidance_id=body.guidance_id,
             uploaded_files=body.uploaded_files,
+            mode=body.mode,
         )
 
     @app.post("/api/runs/{run_id}/cancel")

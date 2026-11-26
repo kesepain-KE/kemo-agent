@@ -4,18 +4,13 @@ from __future__ import annotations
 
 import json
 import secrets
-import sys
 import threading
 from pathlib import Path
 from typing import Any, TYPE_CHECKING, cast
 
 from jsonschema import Draft202012Validator, ValidationError
 
-from run.config import load_config
-from run.extensions import (
-    EXPAND_CALL_RESULT_PREFIX, EXPAND_CALL_RUNNER, ExpandRuntimeError, invoke_expand,
-    module_execution_lock, module_update_timeout, read_expand_runtime, run_protocol_process,
-)
+from run.extensions import ExpandRuntimeError, read_expand_runtime
 from run.modules import ModuleSpecError, locate_modules, read_manifest
 from run.modules.paths import module_path
 from run.modules.spec import ModuleKind, ModuleSpec
@@ -23,6 +18,7 @@ from web.errors import ConflictError, InvalidRequestError, NotFoundError, WebSer
 from web.services._io import atomic_write
 from web.services.module_panels import PanelKind, load_module_panel, module_panel_response, save_module_panel_values
 from web.services.message_workspace import MessageWorkspaceSpec
+from web.services.module_workspace_actions import invoke_expand_action, invoke_ui_action
 from web.services.module_workspace_schema import fingerprint, workspace_declaration
 
 if TYPE_CHECKING:
@@ -200,7 +196,14 @@ class ModuleWorkspaceService:
 
     def panel(self, user: str, kind: str, scope: str, module: str) -> dict[str, Any]:
         name, path = self._identity(user, kind, scope, module)
-        return {"user": name, "module": module, "scope": scope, **module_panel_response(path, self._kind(kind))}
+
+        def live_status(command: str) -> Any:
+            spec = self._spec(path, kind, scope)
+            return invoke_ui_action(self.root, name, scope, module, spec, command, {}, source="module_panel_status")
+
+        return {"user": name, "module": module, "scope": scope, **module_panel_response(
+            path, self._kind(kind), read_status=live_status,
+        )}
 
     def save_config(self, user: str, kind: str, scope: str, module: str, body: dict[str, Any]) -> dict[str, Any]:
         name, path = self._identity(user, kind, scope, module)
@@ -264,7 +267,8 @@ class ModuleWorkspaceService:
             raise InvalidRequestError("文档超过 512 KiB")
         return {"content": path.read_text("utf-8-sig")}
 
-    def action(self, user: str, kind: str, scope: str, module: str, action_id: Any, params: Any) -> Any:
+    def action(self, user: str, kind: str, scope: str, module: str, action_id: Any, params: Any,
+               *, workspace_instance: bool = False) -> Any:
         item, spec = self.describe(user, kind, scope, module)
         if not item["enabled"]:
             raise WorkspaceForbidden("当前模块已停用，不能执行动作")
@@ -277,29 +281,12 @@ class ModuleWorkspaceService:
             raise InvalidRequestError("动作参数不符合 input_schema") from exc
         if action["handler"] == "refresh":
             return self.refresh(user, kind, scope, module)
-        timeout = module_update_timeout(load_config(user, self.root))
         if kind == "expand":
             try:
-                return invoke_expand(
-                    root=self.root, user=user, scope=scope, module=module,
-                    command=action["handler"], params=params, timeout=timeout,
-                )
+                return invoke_expand_action(self.root, user, scope, module, action["handler"], params,
+                                            source="module_ui", spec=cast(ModuleSpec, spec),
+                                            workspace_instance=workspace_instance)
             except ExpandRuntimeError as exc:
                 raise WebServiceError(f"拓展页面操作失败：{exc}") from exc
-        if spec.ui_action_entry is None:
-            raise InvalidRequestError("模块未声明 UI 动作入口")
-        request = json.dumps({"command": action["handler"], "params": params, "context": {
-            "user": user, "scope": scope, "module": module, "source": "module_ui",
-        }}, ensure_ascii=False)
-        with module_execution_lock(spec.module_dir, timeout=timeout):
-            code, payload, _, _ = run_protocol_process(
-                [sys.executable, "-I", "-c", EXPAND_CALL_RUNNER, str(spec.ui_action_entry), str(spec.module_dir)],
-                cwd=spec.module_dir, timeout=timeout, result_prefix=EXPAND_CALL_RESULT_PREFIX,
-                stdin_payload=request,
-            )
-        if code or not payload or payload.get("ok") is not True:
-            raise WebServiceError("模块 UI 动作执行失败：" + str((payload or {}).get("reason", "无有效回执")))
-        result = payload.get("result")
-        if isinstance(result, dict) and (result.get("ok") is False or result.get("status") in {"error", "failed", "failure"}):
-            raise WebServiceError("模块 UI 动作返回失败：" + str(result.get("error") or result.get("message") or "无错误详情"))
-        return result
+        return invoke_ui_action(self.root, user, scope, module, spec, action["handler"], params,
+                                source="module_ui", workspace_instance=workspace_instance)

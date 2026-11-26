@@ -7,7 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-from typing import Any
+from typing import Any, Callable, NamedTuple
 import zipfile
 
 from web.constants import _WINDOWS_INVALID_PATH_CHARS, _WINDOWS_RESERVED_NAMES
@@ -17,11 +17,24 @@ from run.infra import BoundedReadCache
 
 _DIRECTORY_SCAN_MAX_ENTRIES = 10_000
 _DIRECTORY_SCAN_MAX_DEPTH = 32
-_DIRECTORY_SUMMARY_CACHE_TTL_SECONDS = 10.0
-_DIRECTORY_SUMMARY_CACHE_MAX_ENTRIES = 256
-_DIRECTORY_SUMMARY_CACHE = BoundedReadCache(
-    max_entries=_DIRECTORY_SUMMARY_CACHE_MAX_ENTRIES, max_bytes=2 * 1024 * 1024, per_owner=8,
+_DIRECTORY_CACHE_TTL_SECONDS = 10.0
+_DIRECTORY_CACHE = BoundedReadCache(
+    max_entries=256, max_bytes=16 * 1024 * 1024, per_owner=128,
+    per_owner_bytes=8 * 1024 * 1024,
 )
+
+
+class _DirectoryItem(NamedTuple):
+    name: str
+    relative_path: str
+    is_dir: bool
+    size: int
+    updated_at: float
+    child_count: int = 0
+
+    def __deepcopy__(self, memo):
+        # The cache copies containers; these rows contain only immutable values.
+        return self
 
 
 def _directory_cache_key(directory: Path) -> str:
@@ -29,7 +42,7 @@ def _directory_cache_key(directory: Path) -> str:
 
 
 def _invalidate_directory_summary(directory: Path) -> None:
-    """Invalidate one scope summary without relying on directory mtimes.
+    """Invalidate the recursive and direct listings for one file scope.
 
     All Web mutations call this explicitly.  The short TTL remains a bounded
     fallback for files written directly by plugins, agents, or external tools.
@@ -37,10 +50,33 @@ def _invalidate_directory_summary(directory: Path) -> None:
     """
 
     key = _directory_cache_key(directory)
-    _DIRECTORY_SUMMARY_CACHE.invalidate(lambda candidate: candidate == key)
+    _DIRECTORY_CACHE.invalidate(lambda candidate: isinstance(candidate, tuple) and candidate[0] == key)
 
 
-def _scan_directory_summary(directory: Path) -> dict[str, Any]:
+def _scandir_children(directory: str | Path) -> list[os.DirEntry[str]]:
+    children = []
+    try:
+        with os.scandir(directory) as scan:
+            for item in scan:
+                if item.name.startswith(".") or item.name == "__pycache__" or item.is_symlink():
+                    continue
+                is_junction = getattr(item, "is_junction", None)
+                if is_junction is not None:
+                    if is_junction():
+                        continue
+                elif os.name == "nt" and item.stat(follow_symlinks=False).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT:
+                    continue
+                children.append(item)
+    except OSError:
+        return []
+    return children
+
+
+def _scan_order(item: os.DirEntry[str]) -> tuple[bool, str, str]:
+    return (not item.is_dir(follow_symlinks=False), item.name.casefold(), item.name)
+
+
+def _scan_directory_snapshot(directory: Path) -> tuple[dict[str, Any], list[_DirectoryItem]]:
     summary = {
         "total_files": 0,
         "total_dirs": 0,
@@ -48,81 +84,65 @@ def _scan_directory_summary(directory: Path) -> dict[str, Any]:
         "scanned_entries": 0,
         "truncated": False,
     }
+    entries: list[_DirectoryItem] = []
 
-    def scan(current: Path, depth: int) -> None:
+    def visit(current: str | Path, prefix: str, depth: int) -> tuple[int, float, int]:
         if depth > _DIRECTORY_SCAN_MAX_DEPTH:
             summary["truncated"] = True
-            return
-        for child in _visible_children(current):
+            return 0, 0.0, 0
+        children = sorted(_scandir_children(current), key=_scan_order)
+        size, updated_at = 0, 0.0
+        for child in children:
             if summary["scanned_entries"] >= _DIRECTORY_SCAN_MAX_ENTRIES:
                 summary["truncated"] = True
-                return
+                break
             summary["scanned_entries"] += 1
             try:
-                if child.is_dir():
-                    summary["total_dirs"] += 1
-                    scan(child, depth + 1)
-                elif child.is_file():
-                    child_stat = child.stat()
-                    summary["total_files"] += 1
-                    summary["total_size"] += child_stat.st_size
+                info = child.stat(follow_symlinks=False)
             except OSError:
                 continue
+            relative = prefix + child.name
+            if stat.S_ISDIR(info.st_mode):
+                summary["total_dirs"] += 1
+                child_size, child_time, count = visit(child.path, relative + "/", depth + 1)
+                entry = _DirectoryItem(child.name, relative, True, child_size, child_time, count)
+            elif stat.S_ISREG(info.st_mode):
+                summary["total_files"] += 1
+                summary["total_size"] += info.st_size
+                entry = _DirectoryItem(child.name, relative, False, info.st_size, info.st_mtime)
+            else:
+                continue
+            entries.append(entry)
+            size += entry.size
+            updated_at = max(updated_at, entry.updated_at)
+        return size, updated_at, len(children)
 
-    scan(directory, 0)
-    return summary
+    visit(directory, "", 0)
+    return summary, entries
 
 
-def _cached_directory_summary(directory: Path) -> dict[str, Any]:
-    key = _directory_cache_key(directory)
-    owner = _directory_cache_key(directory.parent)
-    return _DIRECTORY_SUMMARY_CACHE.get_or_load(
-        key, lambda: _scan_directory_summary(directory), owner=owner,
-        ttl=_DIRECTORY_SUMMARY_CACHE_TTL_SECONDS,
-    )[0]
+def _scan_direct_children(directory: str, parent: str) -> tuple[list[_DirectoryItem], int, int, float]:
+    children = _scandir_children(directory)
+    entries = []
+    size, updated_at = 0, -math.inf
+    prefix = parent + "/" if parent else ""
+    for child in children:
+        try:
+            info = child.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        updated_at = max(updated_at, info.st_mtime)
+        if stat.S_ISDIR(info.st_mode):
+            entries.append(_DirectoryItem(child.name, prefix + child.name, True, 0, info.st_mtime))
+        elif stat.S_ISREG(info.st_mode):
+            entries.append(_DirectoryItem(child.name, prefix + child.name, False, info.st_size, info.st_mtime))
+            size += info.st_size
+    return entries, len(children), size, updated_at
 
 
 def _visible_children(directory: Path) -> list[Path]:
-    try:
-        children = [
-            item
-            for item in directory.iterdir()
-            if not item.name.startswith(".")
-            and item.name != "__pycache__"
-            and not item.is_symlink()
-            and not getattr(item, "is_junction", lambda: False)()
-        ]
-    except (FileNotFoundError, NotADirectoryError):
-        return []
-    except OSError:
-        return []
-    children.sort(
-        key=lambda item: (
-            0 if item.is_dir() else 1,
-            item.name.casefold(),
-            item.name,
-        )
-    )
-    return children
-def _populate_directory_entry(directory: Path, entry: dict[str, Any]) -> None:
-    """Use the same direct-child metadata for display and numeric sorting."""
-    if entry["type"] != "directory":
-        return
-    target = directory.joinpath(*PurePosixPath(entry["relative_path"]).parts)
-    children = _visible_children(target)
-    entry["child_count"] = len(children)
-    direct_size = 0
-    updated_at = float(entry["updated_at"])
-    for child in children:
-        try:
-            child_stat = child.stat()
-            if child.is_file():
-                direct_size += child_stat.st_size
-        except OSError:
-            continue
-        updated_at = max(updated_at, child_stat.st_mtime)
-    entry["size"] = direct_size
-    entry["updated_at"] = updated_at
+    # Callers operating on files (rather than listing them) still use Path.
+    return [Path(item.path) for item in sorted(_scandir_children(directory), key=_scan_order)]
 
 
 def _directory_listing(
@@ -134,19 +154,12 @@ def _directory_listing(
     page_size: int = 6,
     sort_by: str = "name",
     sort_order: str = "asc",
+    refresh: bool = False,
 ) -> dict[str, Any]:
     if sort_by not in ("name", "updated_at", "size"):
         raise InvalidRequestError("sort_by 只允许 name、updated_at 或 size")
     if sort_order not in ("asc", "desc"):
         raise InvalidRequestError("sort_order 只允许 asc 或 desc")
-    summary = {
-        "total_files": 0,
-        "total_dirs": 0,
-        "total_size": 0,
-        "scanned_entries": 0,
-        "truncated": False,
-    }
-    entries: list[dict[str, Any]] = []
     normalized_path = path.strip().replace("\\", "/") if isinstance(path, str) else ""
     normalized_search = search.strip().casefold() if isinstance(search, str) else ""
     current_directory = directory
@@ -158,114 +171,53 @@ def _directory_listing(
             normalized_path = ""
             current_directory = directory
 
-    def visit_search(current: Path, depth: int) -> tuple[int, float, int]:
-        if depth > _DIRECTORY_SCAN_MAX_DEPTH:
-            summary["truncated"] = True
-            return 0, 0.0, 0
-        total_size = 0
-        updated_at = 0.0
-        children = _visible_children(current)
-        for item in children:
-            if summary["scanned_entries"] >= _DIRECTORY_SCAN_MAX_ENTRIES:
-                summary["truncated"] = True
-                break
-            summary["scanned_entries"] += 1
-            relative = item.relative_to(directory).as_posix()
-            parent_path = item.parent.relative_to(directory).as_posix()
-            if parent_path == ".":
-                parent_path = ""
+    if refresh:
+        _invalidate_directory_summary(directory)
+    root = _directory_cache_key(directory)
+    parent = "" if normalized_path == "." else normalized_path
+
+    def cached(kind: str, path: str, load: Callable[[], Any]) -> Any:
+        return _DIRECTORY_CACHE.get_or_load(
+            (root, kind, path), load, owner=os.path.dirname(root), ttl=_DIRECTORY_CACHE_TTL_SECONDS,
+        )[0]
+
+    def scan_direct(path: str):
+        current = os.fspath(current_directory) if path == parent else os.path.join(directory, path)
+        if path != parent:
+            # A cached directory entry may since have been replaced by a link.
             try:
-                if item.is_dir():
-                    summary["total_dirs"] += 1
-                    child_size, child_updated_at, child_count = visit_search(item, depth + 1)
-                    entry = {
-                        "type": "directory",
-                        "name": item.name,
-                        "relative_path": relative,
-                        "parent_path": parent_path,
-                        "size": child_size,
-                        "updated_at": child_updated_at,
-                        "extension": "",
-                        "child_count": child_count,
-                    }
-                    total_size += child_size
-                    updated_at = max(updated_at, child_updated_at)
-                elif item.is_file():
-                    stat = item.stat()
-                    summary["total_files"] += 1
-                    summary["total_size"] += stat.st_size
-                    entry = {
-                        "type": "file",
-                        "name": item.name,
-                        "relative_path": relative,
-                        "parent_path": parent_path,
-                        "size": stat.st_size,
-                        "updated_at": stat.st_mtime,
-                        "extension": item.suffix.lower(),
-                        "child_count": 0,
-                    }
-                    total_size += stat.st_size
-                    updated_at = max(updated_at, stat.st_mtime)
-                else:
-                    continue
+                info = os.lstat(current)
             except OSError:
-                continue
+                return [], 0, 0, -math.inf
+            if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_reparse_tag", 0) == stat.IO_REPARSE_TAG_MOUNT_POINT:
+                return [], 0, 0, -math.inf
+        return _scan_direct_children(current, path)
 
-            haystack = f"{entry['name']} {entry['relative_path']}".casefold()
-            if normalized_search in haystack:
-                entries.append(entry)
-        return total_size, updated_at, len(children)
+    def direct(path: str):
+        return cached("direct", path, lambda: scan_direct(path))
 
+    def hydrate(entry: _DirectoryItem, load: Callable):
+        if not entry.is_dir:
+            return entry
+        _, count, size, updated_at = load(entry.relative_path)
+        return entry._replace(size=size, updated_at=max(entry.updated_at, updated_at), child_count=count)
+
+    summary, snapshot = cached("recursive", "", lambda: _scan_directory_snapshot(directory))
     if normalized_search:
-        visit_search(directory, 0)
+        entries = [entry for entry in snapshot if normalized_search in f"{entry.name} {entry.relative_path}".casefold()]
+    elif sort_by == "name":
+        entries = direct(parent)[0]
     else:
-        summary = _cached_directory_summary(directory)
-        for item in _visible_children(current_directory):
-            relative = item.relative_to(directory).as_posix()
-            parent_path = item.parent.relative_to(directory).as_posix()
-            if parent_path == ".":
-                parent_path = ""
-            try:
-                item_stat = item.stat()
-                if item.is_dir():
-                    entry_type = "directory"
-                    size = 0
-                    extension = ""
-                elif item.is_file():
-                    entry_type = "file"
-                    size = item_stat.st_size
-                    extension = item.suffix.lower()
-                else:
-                    continue
-            except OSError:
-                continue
-            entries.append({
-                "type": entry_type,
-                "name": item.name,
-                "relative_path": relative,
-                "parent_path": parent_path,
-                "size": size,
-                "updated_at": item_stat.st_mtime,
-                "extension": extension,
-                "child_count": 0,
-            })
-    # Numeric sorting must use displayed metadata for every candidate BEFORE
-    # pagination. Name browsing retains its inexpensive page-only hydration.
-    if not normalized_search and sort_by != "name":
-        for entry in entries:
-            _populate_directory_entry(directory, entry)
+        # Numeric sorting needs every directory's direct stats, not just the current page.
+        entries = cached("direct-numeric", parent, lambda: [hydrate(entry, scan_direct) for entry in direct(parent)[0]])
     entries.sort(
-        key=lambda item: (
-            str(item["name"]).casefold(),
-            item["name"],
-            item["relative_path"],
-        ),
+        key=lambda item: (item.name.casefold(), item.name, item.relative_path),
         reverse=sort_by == "name" and sort_order == "desc",
     )
     if sort_by != "name":
-        entries.sort(key=lambda item: item[sort_by], reverse=sort_order == "desc")
+        entries.sort(key=lambda item: item.size if sort_by == "size" else item.updated_at, reverse=sort_order == "desc")
     # Keep folders first in either direction; ties retain deterministic names/paths.
-    entries.sort(key=lambda item: 0 if item["type"] == "directory" else 1)
+    entries.sort(key=lambda item: not item.is_dir)
     requested_page = max(1, int(page))
     normalized_page_size = min(100, max(1, int(page_size)))
     total_items = len(entries)
@@ -274,11 +226,22 @@ def _directory_listing(
     start = (current_page - 1) * normalized_page_size
     paged_entries = entries[start : start + normalized_page_size]
     if not normalized_search and sort_by == "name":
-        for entry in paged_entries:
-            _populate_directory_entry(directory, entry)
+        paged_entries = [hydrate(entry, direct) for entry in paged_entries]
     return {
         "summary": summary,
-        "entries": paged_entries,
+        "entries": [
+            {
+                "type": "directory" if entry.is_dir else "file",
+                "name": entry.name,
+                "relative_path": entry.relative_path,
+                "parent_path": entry.relative_path.rpartition("/")[0],
+                "size": entry.size,
+                "updated_at": entry.updated_at,
+                "extension": "" if entry.is_dir else PurePosixPath(entry.name).suffix.lower(),
+                "child_count": entry.child_count,
+            }
+            for entry in paged_entries
+        ],
         "path": normalized_path,
         "search": search.strip() if isinstance(search, str) else "",
         "sort_by": sort_by,
@@ -292,6 +255,8 @@ def _directory_listing(
             "has_next": current_page < total_pages,
         },
     }
+
+
 def _flat_files(directory: Path, *, relative_to: Path | None = None) -> list[dict[str, Any]]:
     base = relative_to or directory
     files: list[dict[str, Any]] = []

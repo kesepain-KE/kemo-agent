@@ -140,7 +140,8 @@ def invoke_bridge(service: ModuleWorkspaceService, token: str, body: dict[str, A
     elif method == "module.config.patch":
         result = service.save_config(instance["user"], instance["kind"], instance["scope"], instance["module"], params)
     elif method == "module.action.invoke":
-        result = service.action(instance["user"], instance["kind"], instance["scope"], instance["module"], params.get("action"), params.get("params", {}))
+        result = service.action(instance["user"], instance["kind"], instance["scope"], instance["module"],
+                                params.get("action"), params.get("params", {}), workspace_instance=True)
     else:
         result = {"subscribed": True, "interval_ms": 5000}
     # A response to an already-dispatched operation never revalidates/retries it:

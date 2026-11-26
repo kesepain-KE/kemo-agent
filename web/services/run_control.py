@@ -24,7 +24,7 @@ import queue
 from typing import Any
 
 from run.config import load_config
-from run.conversation import GuidanceInput, session_lock
+from run.conversation import GuidanceInput, GuidanceMode, session_lock
 from run.extensions import history_attachment_descriptors
 from run.cards import CardStore
 from run.history import other_presence
@@ -77,7 +77,14 @@ class RunControlServiceMixin:
                 active = next((run for run in reversed(self._finished_runs.values())
                                if (run.user, run.source, run.session_id) == (name, source, session_id)
                                and time.monotonic() - run.journal.finished_at <= 120), None)
-        return {"run": self._run_snapshot(active) if active else None}
+        if active is not None:
+            return {"run": self._run_snapshot(active)}
+        if source == "web":
+            from run.history import web_execution_state
+            execution = web_execution_state(self.root, name, session_id)
+            if execution is not None:
+                return {"run": None, "execution": execution}
+        return {"run": None}
 
     @staticmethod
     def _run_snapshot(active):
@@ -117,6 +124,7 @@ class RunControlServiceMixin:
         session_id: Any = "",
         guidance_id: Any = "",
         uploaded_files: Any = None,
+        mode: GuidanceMode = "interrupt",
     ) -> dict[str, Any]:
         name = self.require_user(user)
         normalized_source = self.require_source(source)
@@ -127,17 +135,15 @@ class RunControlServiceMixin:
         normalized_files = self.require_uploaded_files(name, uploaded_files)
         if not text and not normalized_files:
             raise InvalidRequestError("guidance 和 uploaded_files 不能同时为空")
-        # A bare text call remains a string for compatibility with integrations
-        # that consume GuidanceMailbox directly.  New web calls use the
-        # structured envelope so attachment-only and duplicate-text guidance
-        # can be acknowledged by id.
+        # Preserve the legacy string for default-mode guidance without an ID or files.
         value: str | GuidanceInput = (
             text
-            if not normalized_files and not normalized_id
+            if mode == "interrupt" and not normalized_files and not normalized_id
             else GuidanceInput(
                 id=normalized_id,
                 text=text,
                 uploaded_files=normalized_files,
+                mode=mode,
             )
         )
         with self._active_runs_lock:

@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, StrictBool, StrictStr, model_validator
 
+from run.conversation import GuidanceMode
+
 
 class ChatBody(BaseModel):
     user: str
@@ -49,6 +51,7 @@ class GuidanceBody(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     guidance_id: str = Field(default="", max_length=160)
     guidance: str = Field(default="", max_length=1_000_000)
+    mode: GuidanceMode = "interrupt"
     uploaded_files: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")

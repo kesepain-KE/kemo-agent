@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from run.history import other_presence, update_presence, valid_sequence
-from web.errors import InvalidRequestError, NotFoundError
+from web.errors import InvalidRequestError, NotFoundError, SessionClosedError
 
 
 def ordered_presence(service: Any, user: str, source: str, session_id: str,
@@ -16,6 +16,8 @@ def ordered_presence(service: Any, user: str, source: str, session_id: str,
         state = update_presence(service.root, user, source, session_id, client_id,
                                 sequence, release=release)
         if not state["exists"] and not release:
+            if state.get("closed"):
+                raise SessionClosedError("此对话已归档，历史仍可查看")
             raise NotFoundError("对话不存在、已经结束或已离线清理，请新建对话")
         if state["accepted"]:
             service._prune_session_leases_locked()

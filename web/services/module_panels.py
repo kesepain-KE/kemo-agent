@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from web.errors import InvalidRequestError
 from web.services._io import atomic_write
@@ -250,7 +250,7 @@ def _normalize_container(raw: Any, index: int, panel_kind: PanelKind) -> dict[st
         if not isinstance(control, dict):
             raise InvalidRequestError(f"{control_path} 必须是对象")
         control_type = _text(control.get("type"), f"{control_path}.type", maximum=40)
-        if control_type not in ({"button", "send"} if panel_kind == "expand" else {"button"}):
+        if control_type not in ({"button", "send", "copy"} if panel_kind == "expand" else {"button"}):
             raise InvalidRequestError(f"{control_path}.type 不受支持")
         command = _text(control.get("command"), f"{control_path}.command", maximum=128)
         if not _COMMAND_RE.fullmatch(command):
@@ -262,6 +262,8 @@ def _normalize_container(raw: Any, index: int, panel_kind: PanelKind) -> dict[st
             "label": _text(control.get("label", command), f"{control_path}.label", maximum=120),
             "command": command,
         }
+        if "confirm" in control:
+            normalized["confirm"] = _text(control["confirm"], f"{control_path}.confirm", maximum=240)
         inputs = control.get("inputs", [])
         if control_type == "send":
             if not isinstance(inputs, list) or not inputs or len(inputs) > 20:
@@ -300,6 +302,11 @@ def load_module_panel(module_root: Path, panel_kind: PanelKind) -> tuple[dict[st
                 for index, container in enumerate(containers)
             ],
         }
+        if "status_action" in raw:
+            command = _text(raw["status_action"], "panel.json.status_action", maximum=128)
+            if panel_kind != "expand" or not _COMMAND_RE.fullmatch(command):
+                raise InvalidRequestError("panel.json.status_action 必须是合法的拓展状态动作")
+            panel["status_action"] = command
         config_keys: set[str] = set()
         action_commands: set[str] = set()
         for container in panel["containers"]:
@@ -355,9 +362,33 @@ def _field_default(field: dict[str, Any]) -> Any:
     return ""
 
 
-def module_panel_response(module_root: Path, panel_kind: PanelKind) -> dict[str, Any]:
+def module_panel_response(
+    module_root: Path, panel_kind: PanelKind, *, read_status: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
     with module_execution_lock(module_root, timeout=15):
-        return _module_panel_response(module_root, panel_kind)
+        result = _module_panel_response(module_root, panel_kind)
+    panel = result["panel"]
+    if read_status and panel and panel.get("status_action"):
+        try:
+            status = read_status(panel["status_action"])
+            if not isinstance(status, dict):
+                raise InvalidRequestError("状态动作未返回对象")
+            error = ""
+        except (ValueError, OSError, RuntimeError):
+            # Do not present a cached "online" result as the live status.
+            status, error = {}, "实时状态读取失败，请刷新或检查拓展"
+        for container in panel["containers"]:
+            if container["kind"] == "status":
+                _set_panel_status(container, status, error)
+    return result
+
+
+def _set_panel_status(container: dict[str, Any], status: dict[str, Any], error: str = "") -> None:
+    container["data"] = {field["key"]: status.get(field["key"])
+                         for field in container["fields"] if not field.get("masked")}
+    container["secret_set"] = {field["key"]: status.get(field["key"]) not in (None, "")
+                               for field in container["fields"] if field.get("masked")}
+    container["data_error"] = error
 
 
 def _module_panel_response(module_root: Path, panel_kind: PanelKind) -> dict[str, Any]:
@@ -371,24 +402,9 @@ def _module_panel_response(module_root: Path, panel_kind: PanelKind) -> dict[str
             _, path = _safe_panel_path(module_root, container["source"], "status.source")
             try:
                 stored = _read_json_object(path, maximum=_VALUES_MAX_BYTES, missing={})
-                current["data"] = {
-                    field["key"]: stored.get(field["key"])
-                    for field in container["fields"]
-                    if not field.get("masked")
-                }
-                current["secret_set"] = {
-                    field["key"]: (
-                        field["key"] in stored
-                        and stored[field["key"]] is not None
-                        and stored[field["key"]] != ""
-                    )
-                    for field in container["fields"]
-                    if field.get("masked")
-                }
-                current["data_error"] = ""
+                _set_panel_status(current, stored)
             except InvalidRequestError as exc:
-                current["data"] = {}
-                current["data_error"] = str(exc)
+                _set_panel_status(current, {}, str(exc))
         elif container["kind"] == "config":
             values, secret_set, data_error = _public_config_values(container, module_root)
             current["current_values"] = values

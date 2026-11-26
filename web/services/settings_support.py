@@ -169,6 +169,7 @@ def validate_settings_patch(config: dict[str, Any], changes: dict[str, Any]) -> 
         "memory.important_memory_output_max_chars": (1, None, True),
         "agents.important_memory_review_hours": (1 / 60, None, False),
         "agent_runtime.timeout_survival_seconds": (0, None, False),
+        "agent_runtime.completion_drain_timeout_seconds": (0.01, None, False),
         "history_summary.poll_interval": (0.01, None, False),
         "history_summary.max_jobs_per_cycle": (1, None, True),
         "history_summary.max_attempts": (1, None, True),

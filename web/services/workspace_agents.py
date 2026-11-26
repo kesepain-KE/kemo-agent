@@ -1,7 +1,7 @@
 """Authenticated projections and explicit controls for durable agent tasks."""
 from __future__ import annotations
 
-from run.agents import TaskLedger, find_agent_scheduler
+from run.agents import TaskLedger, cancellation_state, find_agent_scheduler
 from run.agents import guide_task as enqueue_guidance
 from web.errors import ConflictError, InvalidRequestError, NotFoundError
 from run.agents import AgentRunError
@@ -147,20 +147,13 @@ def cancel(backend, user, task_id, *, source, session_id):
         if isinstance(exc, AgentTaskNotFoundError):
             raise ConflictError("子任务执行句柄已退出或不在当前进程，未改写任务状态") from None
         raise
-    if not requested:
-        current = ledger.get(task_id, source, session_id) or record
-        return {
-            "ok": True,
-            "task_id": task_id,
-            "status": current["status"],
-            "cancel_requested": False,
-            "process_terminated": False,
-        }
-    queued = requested and record["status"] == "queued"
+    current = ledger.get(task_id, source, session_id) or record
+    state = cancellation_state(current)
     return {
         "ok": True,
         "task_id": task_id,
-        "status": "cancelled" if queued else "cancelling" if requested else record["status"],
+        "status": current["status"],
         "cancel_requested": requested,
-        "process_terminated": queued,
+        "process_terminated": state.get("cancel_state") == "exited",
+        **state,
     }

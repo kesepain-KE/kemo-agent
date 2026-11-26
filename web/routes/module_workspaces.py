@@ -47,7 +47,8 @@ def register_module_workspace_routes(app: FastAPI, backend: WebRunService) -> No
         return await asyncio.to_thread(open_instance, service(), user, kind, scope, module, body.get("page"))
 
     @app.post("/api/module-ui/instances/{token}/rpc")
-    async def bridge(token: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def bridge(token: str, body: dict[str, Any], response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
         return await asyncio.to_thread(invoke_bridge, service(), token, body)
 
     @app.delete("/api/module-ui/instances/{token}")
@@ -69,7 +70,8 @@ def register_module_workspace_routes(app: FastAPI, backend: WebRunService) -> No
         return await asyncio.to_thread(install_import, service(), user, import_id)
 
     @app.post("/api/users/{user}/module-workspaces/{kind}/{scope}/{module}/action")
-    async def action(user: str, kind: str, scope: str, module: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def action(user: str, kind: str, scope: str, module: str, body: dict[str, Any], response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
         return {"result": await asyncio.to_thread(service().action, user, kind, scope, module, body.get("action"), body.get("params", {}))}
 
     @app.get("/module-ui/{token}/{path:path}")

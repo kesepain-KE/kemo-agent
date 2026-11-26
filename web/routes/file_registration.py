@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI, Body
 from web.service import WebRunService
 
@@ -71,8 +73,10 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         page_size: int = Query(default=6, ge=1, le=100),
         sort_by: str = Query(default="name", pattern="^(name|updated_at|size)$"),
         sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
+        refresh: bool = False,
     ) -> dict[str, _AnnotationAny]:
-        return backend.files(
+        return await asyncio.to_thread(
+            backend.files,
             user,
             scope,
             path=path,
@@ -81,6 +85,7 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
             page_size=page_size,
             sort_by=sort_by,
             sort_order=sort_order,
+            refresh=refresh,
         )
 
     @app.post("/api/users/{user}/files/{scope}/upload")
@@ -326,14 +331,17 @@ def register_file_routes(app: FastAPI, backend: WebRunService) -> None:
         page_size: int = Query(default=6, ge=1, le=100),
         sort_by: str = Query(default="name", pattern="^(name|updated_at|size)$"),
         sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
+        refresh: bool = False,
     ) -> dict[str, _AnnotationAny]:
-        return backend.tmp_files(
+        return await asyncio.to_thread(
+            backend.tmp_files,
             path=path,
             search=search,
             page=page,
             page_size=page_size,
             sort_by=sort_by,
             sort_order=sort_order,
+            refresh=refresh,
         )
 
     @app.post("/api/tmp/upload")

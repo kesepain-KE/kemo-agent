@@ -42,6 +42,10 @@ class NotFoundError(WebServiceError):
     status = 404
 
 
+class SessionClosedError(NotFoundError):
+    code = "session_closed"
+
+
 class ConflictError(WebServiceError):
     code = "conflict"
     status = 409

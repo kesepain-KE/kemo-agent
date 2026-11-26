@@ -25,7 +25,6 @@ from run.context import estimate_text_tokens
 from run.extensions import read_expand_runtime, record_expand_runtime
 from run.infra import LogStore
 from run.extensions import (
-    invoke_expand,
     module_update_timeout,
     record_module_health,
     run_module_updater,
@@ -41,6 +40,7 @@ from web.constants import (
 from web.errors import InvalidRequestError, NotFoundError, WebServiceError
 from web.services._paths import _flat_files, _reject_tree_links, _visible_children
 from run.modules.paths import module_path
+from web.services.module_workspace_actions import invoke_expand_action
 from web.services.module_panels import (
     load_module_panel,
     module_panel_response,
@@ -52,6 +52,7 @@ from web.services.module_panels import (
 class MessageExpandServiceMixin:
     if TYPE_CHECKING:
         _project_path = WebRunService._project_path
+        _preview_media_file = WebRunService._preview_media_file
         _runtime_status = WebRunService._runtime_status
         message_health_checker: Callable[[str, str], dict[str, Any]] | None
         message_transport_remover: Callable[[str, str], None] | None
@@ -274,6 +275,12 @@ class MessageExpandServiceMixin:
         except ValueError as exc:
             raise InvalidRequestError("文件必须位于当前消息模块的临时文件目录") from exc
         return target
+
+    def message_module_file_preview(
+        self, user: Any, module_name: Any, path: str
+    ) -> tuple[Path, str, str]:
+        target = self.message_module_file(user, module_name, path)
+        return self._preview_media_file(target, path)
 
     def check_message_module(self, user: Any, module_name: Any) -> dict[str, Any]:
         name, logical_name, _, config = self._message_module_directory(user, module_name)
@@ -704,17 +711,11 @@ class MessageExpandServiceMixin:
             command,
             params,
         )
-        timeout = module_update_timeout(load_config(name, self.root))
         try:
-            result = invoke_expand(
-                root=self.root,
-                user=name,
-                scope=normalized_scope,
-                module=logical_name,
-                command=normalized_command,
-                params=validated_params,
-                timeout=timeout,
-            )
+            result = invoke_expand_action(self.root, name, normalized_scope, logical_name,
+                                          normalized_command, validated_params, source="module_panel")
+        except WebServiceError:
+            raise
         except Exception as exc:
             raise WebServiceError(
                 f"拓展面板操作失败：{normalized_scope}:{logical_name}（{exc}）"

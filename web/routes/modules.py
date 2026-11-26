@@ -76,7 +76,9 @@ def register_module_routes(app: FastAPI, backend: WebRunService) -> None:
         scope: str,
         module_name: str,
         body: ModulePanelActionBody,
+        response: Response,
     ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
         return await asyncio.to_thread(
             backend.invoke_expand_panel_action,
             user,

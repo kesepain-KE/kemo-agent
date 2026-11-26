@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, Response
 
+from web.routes.files import _preview_response
 from web.schemas import SoulBody
 from web.service import WebRunService
 
@@ -37,6 +38,13 @@ def register_identity_routes(app: FastAPI, backend: WebRunService) -> None:
     async def message_file(user: str, module_name: str, path: str) -> FileResponse:
         target = await asyncio.to_thread(backend.message_module_file, user, module_name, path)
         return FileResponse(target, filename=target.name)
+
+    @app.get("/api/users/{user}/message/modules/{module_name}/files/preview")
+    async def message_file_preview(user: str, module_name: str, path: str) -> FileResponse:
+        target, media_type, _ = await asyncio.to_thread(
+            backend.message_module_file_preview, user, module_name, path
+        )
+        return _preview_response(target, media_type)
 
     @app.delete("/api/users/{user}/message/modules/{module_name}")
     async def delete_message_module(user: str, module_name: str) -> dict[str, Any]:

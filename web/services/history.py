@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from run.cards import CardStore, card_read_connection, session_key
-from run.history import find_record
+from run.cards import card_read_connection, session_key
+from run.history import session_record
 from run.extensions import public_media_assets
 from web.errors import NotFoundError, WebServiceError
 from web.services._paths import _reject_link_path, _safe_relative_target
@@ -82,15 +82,15 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
     name = service.require_user(user)
     source = service.require_history_source(source)
     identity = service.require_session_id(session_id)
-    record = find_record(service.root, name, source, identity)
-    if record is None:
-        raise NotFoundError(f"会话不存在：{identity}")
-    store, key = CardStore(service.root, name), session_key(source, identity)
+    key = session_key(source, identity)
     size = max(1, min(500, int(limit or 100)))
-    before_seq = max(1, int(before)) if before is not None else record["last_seq"] + 1
     with card_read_connection(service.root, name) as db:
-        if db is None:
+        row = db.execute("SELECT * FROM card_sessions WHERE session_key=? AND lifecycle!='deleted'",
+                         (key,)).fetchone() if db is not None else None
+        if row is None:
             raise NotFoundError(f"会话不存在：{identity}")
+        record = session_record(db, row)
+        before_seq = max(1, int(before)) if before is not None else record["last_seq"] + 1
         rows = db.execute("SELECT * FROM context_cards WHERE session_key=? AND seq<? "
                           "ORDER BY seq DESC LIMIT ?", (key, before_seq, size)).fetchall()[::-1]
         integrations = {row["integration_id"]: dict(row) for row in db.execute(
@@ -206,10 +206,14 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
             # The historical receipt remains RAW, including its original status.
             state = execution or payload.get("execution") or {}
             live = bool(state.get("execution_live", execution.get("execution_live", False)))
-            status = "timed_out_running" if live and state.get("status") in {
-                "timed_out_running", "interrupted_unknown"} else (
-                "running" if live else "success" if state.get("status") in {"completed", "duplicate_reused"}
-                and isinstance(result, dict) and result.get("ok") is True else "error")
+            if live:
+                status = ("timed_out_running" if state.get("status") in {
+                    "timed_out_running", "interrupted_unknown"} else "running")
+            elif state.get("status") == "handed_off":
+                status = "handed_off"
+            else:
+                status = ("success" if state.get("status") in {"completed", "duplicate_reused"}
+                          and isinstance(result, dict) and result.get("ok") is True else "error")
             previous = trace["tools"].get(eid)
             if row["raw_kind"] == "tool_call" and previous:
                 continue
@@ -243,6 +247,7 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
     first, last = (rows[0]["seq"], rows[-1]["seq"]) if rows else (0, 0)
     return {
         "user": name, "source": source, "session_id": identity, "engine": "cardstream",
+        "state": record["lifecycle"],
         "messages": messages, "cards": cards, "integrations": list(metrics.values()),
         "integration_traces": list(traces.values()),
         **({"user_messages": user_messages} if before is None else {}),

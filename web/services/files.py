@@ -119,6 +119,7 @@ class FileServiceMixin(SoundServiceMixin):
         page_size: int = 6,
         sort_by: str = "name",
         sort_order: str = "asc",
+        refresh: bool = False,
     ) -> dict[str, Any]:
         name, normalized_scope, directory = self._file_scope_root(user, scope)
         return {
@@ -133,6 +134,7 @@ class FileServiceMixin(SoundServiceMixin):
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                refresh=refresh,
             ),
         }
 
@@ -507,6 +509,10 @@ class FileServiceMixin(SoundServiceMixin):
             if target.stat().st_size > 4 * 1024 * 1024:
                 raise InvalidRequestError("文本预览上限（4 MB），请下载后查看")
             return target, "text/plain; charset=utf-8", "text"
+        return self._preview_media_file(target, relative)
+
+    @staticmethod
+    def _preview_media_file(target: Path, relative: str) -> tuple[Path, str, str]:
         preview_type = _MEDIA_PREVIEW_TYPES.get(target.suffix.lower())
         if preview_type is None:
             raise InvalidRequestError("该文件类型不支持网页预览")
@@ -572,6 +578,7 @@ class FileServiceMixin(SoundServiceMixin):
         page_size: int = 6,
         sort_by: str = "name",
         sort_order: str = "asc",
+        refresh: bool = False,
     ) -> dict[str, Any]:
         directory = self.root / "tmp"
         return {
@@ -584,6 +591,7 @@ class FileServiceMixin(SoundServiceMixin):
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                refresh=refresh,
             ),
         }
 
