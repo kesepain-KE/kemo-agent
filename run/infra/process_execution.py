@@ -10,12 +10,15 @@ import pickle
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from multiprocessing.connection import _ConnectionBase
+from multiprocessing.connection import wait as wait_for_connections
+from multiprocessing.context import SpawnProcess
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from run.infra.async_utils import run_awaitable
 from run.infra.runtime_diagnostics import diagnostic_text
@@ -47,6 +50,31 @@ _PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 # ``python.exe`` with no creation flags.  A console-less interpreter keeps
 # every framework-managed process-mode plugin from flashing a console.
 _ISOLATED_EXECUTABLE = _configure_isolated_process_context(_PROCESS_CONTEXT)
+
+
+class _ShellGroupProcess(SpawnProcess):
+    @staticmethod
+    def _Popen(process_obj):
+        from multiprocessing.popen_spawn_posix import Popen
+
+        class PinnedPopen(Popen):
+            reap_allowed = False
+
+            def poll(self, flag=os.WNOHANG):
+                # CPython also calls poll() from _cleanup() when another
+                # process starts. Keep our PID reserved until group cleanup.
+                return super().poll(flag) if self.reap_allowed else None
+
+            def wait(self, timeout=None):
+                if not self.reap_allowed:
+                    wait_for_connections([self.sentinel], timeout)
+                    return None
+                return super().wait(timeout)
+
+        return PinnedPopen(process_obj)
+
+    def release_pid(self) -> None:
+        self._popen.reap_allowed = True
 
 
 def _ensure_worker_stdio() -> None:
@@ -111,17 +139,28 @@ def _isolated_worker(
     context: dict[str, Any],
     cancel_event: Any,
     connection: _ConnectionBase,
+    own_shell_group: bool,
+    report_shell_command_started: bool = False,
 ) -> None:
     _ensure_worker_stdio()
-    if os.name != "nt":
-        try:
-            os.setsid()
-        except OSError:
-            pass
     try:
+        if os.name != "nt":
+            try:
+                os.setsid()
+            except OSError as exc:
+                if own_shell_group:
+                    raise RuntimeError("前台 Shell 无法建立独立进程组（setsid）") from exc
+            else:
+                if own_shell_group:
+                    # Report ownership before any plugin code can start a command.
+                    connection.send({"shell_group_ready": os.getpid()})
         function = _load_callable(module_path, function_name)
         invocation_context = dict(context)
         invocation_context["cancel_event"] = cancel_event
+        invocation_context["_tool_process_isolated"] = True
+        invocation_context["_shell_owner_group"] = own_shell_group
+        if report_shell_command_started:
+            invocation_context["_report_shell_command_started"] = connection.send
         kwargs = dict(arguments)
         if "context" in inspect.signature(function).parameters:
             kwargs["context"] = invocation_context
@@ -147,8 +186,29 @@ class IsolatedProcessCall:
     process: BaseProcess
     connection: _ConnectionBase
     cancel_event: Any
+    _shell_group: int | None = None
+    _on_shell_command_started: Callable[[dict[str, Any]], None] | None = None
 
     def receive(self, timeout: float) -> dict[str, Any] | None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            # Reclassify every frame without restarting the caller's wait budget.
+            value = self._receive_payload(deadline - time.monotonic())
+            if self._accept_group_notice(value):
+                continue
+            if value is None or value.get("kind") != "shell_command_started":
+                return value
+            if self._on_shell_command_started is not None:
+                self._on_shell_command_started(value)
+
+    def _accept_group_notice(self, value: dict[str, Any] | None) -> bool:
+        if (isinstance(self.process, _ShellGroupProcess) and value is not None
+                and value.get("shell_group_ready") == self.process.pid):
+            self._shell_group = self.process.pid
+            return True
+        return False
+
+    def _receive_payload(self, timeout: float) -> dict[str, Any] | None:
         if not self.connection.poll(max(0.0, timeout)):
             return None
         try:
@@ -172,11 +232,33 @@ class IsolatedProcessCall:
     def request_cancel(self) -> None:
         self.cancel_event.set()
 
+    def is_alive(self) -> bool:
+        if isinstance(self.process, _ShellGroupProcess):
+            return not self.wait(0)
+        return self.process.is_alive()
+
     def wait(self, timeout: float) -> bool:
+        if isinstance(self.process, _ShellGroupProcess):
+            timeout = max(0.0, timeout)
+            if not hasattr(os, "waitid"):
+                return bool(wait_for_connections([self.process.sentinel], timeout))
+            # A concurrent fork can inherit the sentinel writer, and EOF
+            # alone can arrive before the kernel marks the child waitable.
+            deadline = time.monotonic() + timeout
+            flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+            while os.waitid(os.P_PID, self.process.pid, flags) is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(0.005, remaining))
+            return True
         self.process.join(max(0.0, timeout))
         return not self.process.is_alive()
 
     def terminate(self) -> None:
+        if isinstance(self.process, _ShellGroupProcess):
+            self._terminate_shell_group()
+            return
         if not self.process.is_alive():
             self.process.join(timeout=0)
             return
@@ -206,8 +288,36 @@ class IsolatedProcessCall:
             self.process.kill()
             self.process.join(timeout=1)
 
+    def _terminate_shell_group(self) -> None:
+        if self._shell_group is None:
+            self._accept_group_notice(self._receive_payload(0))
+        if self._shell_group is None:
+            if self.is_alive():
+                self.process.kill()
+                self.wait(1)
+            # Cancellation can race with startup. A command can only have
+            # started if its worker sent the group notice before it exited.
+            self._accept_group_notice(self._receive_payload(0))
+        pid = self._shell_group
+        if pid is None:
+            return
+        try:
+            os.killpg(pid, signal.SIGTERM)
+            self.wait(1)
+            # The worker may already be dead while same-group descendants
+            # ignore SIGTERM. Escalate before permitting any waitpid().
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self.wait(1)
+
     def close(self) -> None:
         self.connection.close()
+        if isinstance(self.process, _ShellGroupProcess):
+            self._shell_group = None
+            self.process.release_pid()
+            if self.process.is_alive():
+                self.process.join(timeout=1)
         if not self.process.is_alive():
             try:
                 self.process.close()
@@ -221,7 +331,13 @@ def start_isolated_tool(
     function_name: str,
     arguments: dict[str, Any],
     context: dict[str, Any],
+    own_shell_group: bool = False,
+    on_shell_command_started: Callable[[dict[str, Any]], None] | None = None,
 ) -> IsolatedProcessCall:
+    own_shell_group = own_shell_group and os.name == "posix"
+    # A SIGCHLD handler or SIG_IGN can bypass PinnedPopen and reap the PID.
+    if own_shell_group and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise RuntimeError("前台 Shell 需要宿主保留隔离进程的回收权")
     safe_context = {
         key: value
         for key, value in context.items()
@@ -233,7 +349,8 @@ def start_isolated_tool(
         raise ValueError("工具上下文不能传入隔离进程；请声明 execution_mode=thread") from exc
     parent, child = _PROCESS_CONTEXT.Pipe(duplex=False)
     cancel_event = _PROCESS_CONTEXT.Event()
-    process = _PROCESS_CONTEXT.Process(
+    process_type = _ShellGroupProcess if own_shell_group else _PROCESS_CONTEXT.Process
+    process = process_type(
         target=_isolated_worker,
         args=(
             str(module_path.resolve()),
@@ -242,6 +359,8 @@ def start_isolated_tool(
             safe_context,
             cancel_event,
             child,
+            own_shell_group,
+            on_shell_command_started is not None,
         ),
         name=f"kemo-tool-{module_path.parent.name}",
     )
@@ -252,4 +371,6 @@ def start_isolated_tool(
         child.close()
         raise
     child.close()
-    return IsolatedProcessCall(process, parent, cancel_event)
+    return IsolatedProcessCall(
+        process, parent, cancel_event, _on_shell_command_started=on_shell_command_started,
+    )

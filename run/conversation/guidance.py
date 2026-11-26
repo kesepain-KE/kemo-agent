@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import queue
 import threading
-from dataclasses import dataclass, field
-from typing import Any
+import time
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
+
+
+GuidanceMode = Literal["interrupt", "background"]
 
 
 @dataclass(slots=True)
@@ -22,6 +26,8 @@ class GuidanceInput:
     id: str = ""
     text: str = ""
     uploaded_files: list[dict[str, Any]] = field(default_factory=list)
+    mode: GuidanceMode = "interrupt"
+    _offered_at: float = field(default=0.0, compare=False, repr=False)
 
     @property
     def display_text(self) -> str:
@@ -56,6 +62,9 @@ def normalize_guidance(value: Any) -> GuidanceInput | None:
     if isinstance(value, dict):
         text = value.get("text", value.get("guidance", ""))
         files = value.get("uploaded_files", [])
+        mode = value.get("mode", "interrupt")
+        if mode not in ("interrupt", "background"):
+            mode = "interrupt"
         if not isinstance(text, str):
             text = str(text or "")
         if not isinstance(files, list):
@@ -67,6 +76,7 @@ def normalize_guidance(value: Any) -> GuidanceInput | None:
             id=str(value.get("id", value.get("guidance_id", "")) or "").strip(),
             text=text.strip(),
             uploaded_files=normalized_files,
+            mode=mode,
         )
     return None
 
@@ -90,7 +100,9 @@ class GuidanceMailbox:
                 return False, 0
             # Keep bare strings as strings for compatibility with custom event
             # sources and third-party integrations that consume this mailbox.
-            self._queue.put_nowait(value if isinstance(value, str) else normalized)
+            if not isinstance(value, str):
+                value = replace(normalized, _offered_at=time.monotonic())
+            self._queue.put_nowait(value)
             return True, self._queue.qsize()
 
     def drain(self) -> list[Any]:

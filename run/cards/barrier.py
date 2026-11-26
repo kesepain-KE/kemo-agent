@@ -1,4 +1,4 @@
-"""The only automatic compression trigger: immediately before a main request."""
+"""The automatic compression barrier immediately before a Provider request."""
 from __future__ import annotations
 
 import json
@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import math
 from typing import Any, Callable
 
+from provider.protocol.models import Item
 from run.cards.assembly import DynamicTail, RequestSnapshot
 from run.cards.compaction import CompactionResult, compact, select_batch
 from run.cards.errors import CardCapacityError, CardCompactionError
@@ -23,6 +24,8 @@ class PreparedCardRequest:
     wire_tokens: int
     compaction: CompactionResult | None = None
     compaction_error: Exception | None = None
+    items: tuple[Item, ...] = ()
+    estimated_tokens: int = 0
 
 
 def prepare_request(
@@ -32,6 +35,8 @@ def prepare_request(
     ratio: float = .3, trigger_ratio: float = .8, force_compact: bool = False,
     skip_preventative: bool = False,
     virtual_items=(), transport: str = "", model: str = "",
+    project: Callable[[RequestSnapshot], tuple[list[Item], int]] | None = None,
+    check_cancel: Callable[[], None] | None = None,
     on_compaction_start: Callable[[dict[str, Any]], None] | None = None,
 ) -> PreparedCardRequest:
     """Synchronous appends have already committed RAW and initial VIEW together.
@@ -53,25 +58,35 @@ def prepare_request(
         dynamic_tokens += estimate_items_tokens(virtual_items)
     schema_tokens = estimate_tokens(tools) if tools else 0
 
-    def measure(snapshot):
+    def render(snapshot):
         request = RequestSnapshot(snapshot, system_prompt, tail, schema, virtual_json, transport, model)
-        occupancy = RequestOccupancy(fixed_tokens, snapshot.history_tokens, dynamic_tokens,
-                                     schema_tokens, input_limit)
-        items = request.items()
-        wire_tokens = store.calibrated_tokens(
-            estimate_request_tokens(system_prompt, items, tools), items=items)
-        return request, occupancy, wire_tokens
+        items, history_tokens = project(request) if project is not None else (request.items(), snapshot.history_tokens)
+        return request, items, history_tokens
+
+    _, fixed_items, _ = render(replace(history, cards=(), history_tokens=0))
+    if project is not None:
+        # An empty history isolates the exact projection's noncompressible input.
+        dynamic_tokens = estimate_items_tokens(fixed_items)
+
+    def measure(snapshot):
+        request, items, history_tokens = render(snapshot)
+        occupancy = RequestOccupancy(fixed_tokens, history_tokens, dynamic_tokens, schema_tokens, input_limit)
+        estimated = estimate_request_tokens(system_prompt, items, tools)
+        wire = store.calibrated_tokens(estimated, items=items)
+        return request, occupancy, wire, items, estimated
 
     def require_fit(snapshot):
-        _, measured, wire = measure(snapshot)
+        _, measured, wire, _, _ = measure(snapshot)
         measured.require_capacity()
         if wire > input_limit:
             raise CardCapacityError(
                 f"完整请求超过输入容量：{wire}>{input_limit}；候选摘要未提交，原始卡片保持不变")
+        if check_cancel is not None:
+            check_cancel()
 
-    request, occupancy, wire_tokens = measure(history)
+    request, occupancy, wire_tokens, items, estimated = measure(history)
     occupancy.require_fixed_capacity()
-    _, _, fixed_wire = measure(replace(history, cards=(), history_tokens=0))
+    fixed_wire = store.calibrated_tokens(estimate_request_tokens(system_prompt, fixed_items, tools), items=fixed_items)
     if fixed_wire >= input_limit:
         raise CardCapacityError(
             f"校准后的固定上下文、动态尾部和工具 Schema 已占满输入容量：{fixed_wire}>={input_limit}")
@@ -80,10 +95,10 @@ def prepare_request(
     fits = occupancy.total <= input_limit and wire_tokens <= input_limit
     if history.cards and (force_compact or not fits or not skip_preventative and (
             occupancy.should_compact(trigger_ratio) or wire_tokens > input_limit * trigger_ratio)):
-        scale = store.calibrated_tokens(1_000_000, items=request.items()) / 1_000_000
+        scale = store.calibrated_tokens(1_000_000, items=items) / 1_000_000
         available = min(input_limit - occupancy.fixed_occupancy,
                         math.floor((input_limit - fixed_wire) / scale))
-        target = min(math.floor(history.history_tokens * ratio), available)
+        target = min(math.floor(occupancy.history_tokens * ratio), available)
         empty_summary = {"checkpoint": "x"}
         minimum = store.meter.tokens("summary", empty_summary)
         # A high fixed prefix can cross the trigger even with an irreducibly
@@ -96,7 +111,7 @@ def prepare_request(
                     batch.cards[0], view_kind="summary", view_payload_json=json_text(empty_summary),
                     view_tokens=minimum, view_revision=batch.cards[0].view_revision + 1,
                 )
-                _, _, minimum_wire = measure(replace(
+                _, _, minimum_wire, _, _ = measure(replace(
                     history, cards=(placeholder, *history.cards[len(batch.cards):]),
                     history_tokens=minimum + batch.remaining_tokens,
                 ))
@@ -135,13 +150,13 @@ def prepare_request(
                     # that fits. Re-measure: asynchronous arrivals may not fit.
                     history = store.snapshot(source, session_id)
                     require_fit(history)
-                    request, occupancy, wire_tokens = measure(history)
+                    request, occupancy, wire_tokens, items, estimated = measure(history)
                     failure = error
                 # The already-frozen dynamic tail is not re-read during compaction.
                 if result is not None:
-                    request, occupancy, wire_tokens = measure(result.snapshot)
+                    request, occupancy, wire_tokens, items, estimated = measure(result.snapshot)
     occupancy.require_capacity()
     if wire_tokens > input_limit:
         raise CardCapacityError(
             f"适配后请求超出输入容量：{wire_tokens}>{input_limit}，未截断原始卡片或工具参数")
-    return PreparedCardRequest(request, occupancy, wire_tokens, result, failure)
+    return PreparedCardRequest(request, occupancy, wire_tokens, result, failure, tuple(items), estimated)

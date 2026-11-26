@@ -12,6 +12,12 @@ from run.cards.models import Card, json_text, session_key, utc_now
 from run.cards.store import CardStore
 
 _OWNER = uuid4().hex
+_RECOVERABLE = (
+    "(i.response_closed=0 OR (coalesce(json_extract(i.record_json,'$.recovery.tools_detached'),0)=0 "
+    "AND EXISTS(SELECT 1 FROM card_tool_executions t "
+    "WHERE t.integration_id=i.integration_id AND t.execution_live=1)))"
+)
+_RECOVERY_OWNER_FIELDS = ("owner_pid", "owner_token", "generation")
 
 
 class IntegrationStore:
@@ -28,10 +34,13 @@ class IntegrationStore:
         if row["owner_pid"] == os.getpid() and row["owner_token"] == _OWNER:
             return False
         expected = json.loads(row["record_json"]).get("owner_identity") or {}
+        try:
+            observed = process_snapshot(row["owner_pid"])
+        except (OSError, ValueError):
+            return False
         return process_identity_matches(
-            process_snapshot(row["owner_pid"]),
+            observed,
             process_started_at=expected.get("process_started_at", ""),
-            process_name=expected.get("process_name", ""),
         ) is False
 
     @staticmethod
@@ -71,12 +80,18 @@ class IntegrationStore:
     def resume_decisions(self) -> dict[str, Any]:
         """Claim a lost native wait without replaying any tool invocation."""
         from run.infra import process_snapshot
+        with self.store.db() as db:
+            observed = self._row(db)
+        if not self._owner_lost(observed):
+            raise CardConflictError("该整合仍有宿主或未确认的工具执行，不能自动恢复")
+        identity = process_snapshot(os.getpid())
         with self.store.db(write=True) as db:
             row = self._row(db)
-            if not self._owner_lost(row) or not self._decision_resumable(db, row):
+            if (any(row[key] != observed[key] for key in _RECOVERY_OWNER_FIELDS)
+                    or not self._decision_resumable(db, row)):
                 raise CardConflictError("该整合仍有宿主或未确认的工具执行，不能自动恢复")
             record = json.loads(row["record_json"])
-            record["owner_identity"] = process_snapshot(os.getpid())
+            record["owner_identity"] = identity
             db.execute(
                 "UPDATE card_integrations SET owner_pid=?,owner_token=?,status='resuming',"
                 "model_request_inflight=0,continuation_required=1,record_json=?,updated_at=? "
@@ -93,6 +108,11 @@ class IntegrationStore:
         from run.infra import process_snapshot
         owner_identity = process_snapshot(os.getpid())
         with self.store.db(write=True) as db:
+            current = db.execute("SELECT lifecycle,generation FROM card_sessions WHERE session_key=?",
+                                 (self.key,)).fetchone()
+            self.store._require_open(current)
+            if current["generation"] != self.generation:
+                raise CardConflictError("整合所属会话已改变代际")
             pending = db.execute(
                 "SELECT 1 FROM card_integrations i WHERE i.session_key=? AND "
                 "(i.response_closed=0 OR EXISTS(SELECT 1 FROM card_tool_executions t "
@@ -112,6 +132,17 @@ class IntegrationStore:
             )
         return state
 
+    @staticmethod
+    def interrupted_candidates(store, source, *, after, limit):
+        with store.db() as db:
+            return db.execute(
+                "SELECT s.session_key,s.session_id FROM card_sessions s "
+                "WHERE s.source=? AND s.lifecycle='open' AND s.session_key>? AND EXISTS("
+                "SELECT 1 FROM card_integrations i WHERE i.session_key=s.session_key "
+                f"AND i.generation=s.generation AND i.owner_token!=? AND {_RECOVERABLE}) "
+                "ORDER BY s.session_key LIMIT ?", (source, after, _OWNER, limit),
+            ).fetchall()
+
     def recover_interrupted(self) -> list[str]:
         """Only a confirmed lost process can retire its abandoned response.
 
@@ -119,27 +150,22 @@ class IntegrationStore:
         tool cards retire from VIEW, allowing a new integration to continue.
         A dead coordinator is not proof that an isolated child exited.
         """
-        from run.infra import process_identity_matches, process_snapshot
+        sql = ("SELECT i.* FROM card_integrations i JOIN card_sessions s USING(session_key) "
+               "WHERE s.session_key=? AND s.lifecycle='open' AND s.generation=i.generation AND "
+               f"{_RECOVERABLE}")
+        with self.store.db() as db:
+            rows = db.execute(sql, (self.key,)).fetchall()
+        lost = [row for row in rows if self._owner_lost(row)]
+        if not lost:
+            return []
         recovered = []
         with self.store.db(write=True) as db:
-            rows = db.execute(
-                "SELECT * FROM card_integrations i WHERE session_key=? AND "
-                "(response_closed=0 OR EXISTS(SELECT 1 FROM card_tool_executions t "
-                "WHERE t.integration_id=i.integration_id AND t.execution_live=1))", (self.key,),
-            ).fetchall()
-            for row in rows:
-                if row["owner_pid"] == os.getpid() and row["owner_token"] == _OWNER:
+            for observed in lost:
+                row = db.execute(sql + " AND i.integration_id=?",
+                                 (self.key, observed["integration_id"])).fetchone()
+                if row is None or any(row[key] != observed[key] for key in _RECOVERY_OWNER_FIELDS):
                     continue
                 record = json.loads(row["record_json"])
-                if row["response_closed"] and (record.get("recovery") or {}).get("tools_detached"):
-                    continue
-                expected = record.get("owner_identity") or {}
-                snapshot = process_snapshot(row["owner_pid"])
-                matches = process_identity_matches(snapshot,
-                    process_started_at=expected.get("process_started_at", ""),
-                    process_name=expected.get("process_name", ""))
-                if matches is not False:
-                    continue
                 if self._decision_resumable(db, row):
                     # A user question has no orphan process or unknown external
                     # effect. The recovery worker claims this same integration.
@@ -202,6 +228,24 @@ class IntegrationStore:
             raise CardConflictError("整合所属会话已改变代际")
         return row
 
+    def require_dependency_owner(self, generation, *, tool_call_id="", child_live=False):
+        """Validate a Web dependency before publishing its ledger/job record."""
+        from run.cards.schema import read_connection
+        with read_connection(self.store.root, self.store.user) as db:
+            if db is None:
+                raise CardConflictError("后台依赖没有可核对的会话登记")
+            row = self._row(db)
+            if row["generation"] != generation:
+                raise CardConflictError("依赖所属会话已改变代际")
+            if not row["response_closed"] or child_live:
+                return
+            if tool_call_id and db.execute(
+                "SELECT 1 FROM card_tool_executions WHERE integration_id=? AND tool_call_id=? "
+                "AND execution_live=1 AND status!='interrupted_unknown'", (self.id, tool_call_id),
+            ).fetchone():
+                return
+            raise CardConflictError("整合已关闭且没有活跃执行，不能登记新依赖")
+
     def request_started(self) -> None:
         with self.store.db(write=True) as db:
             row = self._row(db)
@@ -211,8 +255,8 @@ class IntegrationStore:
                        "continuation_required=1,updated_at=? WHERE integration_id=?", (utc_now(), self.id))
 
     def request_finished(self, *, accepted_seq: int | None = None,
-                         continuation_required: bool = False) -> None:
-        with self.store.db(write=True) as db:
+                         continuation_required: bool = False, transaction=None) -> None:
+        with (nullcontext(transaction) if transaction is not None else self.store.db(write=True)) as db:
             row = self._row(db)
             seq = row["acknowledged_seq"] if accepted_seq is None else accepted_seq
             last_seq = db.execute("SELECT last_seq FROM card_sessions WHERE session_key=?",
@@ -242,10 +286,13 @@ class IntegrationStore:
             db.execute("UPDATE card_integrations SET continuation_required=?,updated_at=? "
                        "WHERE integration_id=?", (int(required), utc_now(), self.id))
 
-    def register_tool(self, tool_call_id: str, original_call: dict[str, Any]) -> tuple[dict, bool]:
+    def register_tool(
+        self, tool_call_id: str, original_call: dict[str, Any], *,
+        planned: bool = False, transaction=None,
+    ) -> tuple[dict, bool]:
         """Registration + call RAW + initial VIEW are one transaction."""
         serialized = json_text(original_call)
-        with self.store.db(write=True) as db:
+        with (nullcontext(transaction) if transaction is not None else self.store.db(write=True)) as db:
             row = self._row(db)
             if row["response_closed"]:
                 raise CardConflictError("整合已关闭，不能启动新工具")
@@ -260,8 +307,9 @@ class IntegrationStore:
             execution_id, now = "exec_" + uuid4().hex, utc_now()
             db.execute(
                 "INSERT INTO card_tool_executions(execution_id,integration_id,tool_call_id,"
-                "original_call,status,started_at) VALUES(?,?,?,?,'running',?)",
-                (execution_id, self.id, tool_call_id, serialized, now),
+                "original_call,status,started_at) VALUES(?,?,?,?,?,?)",
+                (execution_id, self.id, tool_call_id, serialized,
+                 "planned" if planned else "running", "" if planned else now),
             )
             self.store.append(
                 self.source, self.session_id, self.id, "tool_call",
@@ -273,12 +321,27 @@ class IntegrationStore:
                                    (execution_id,)).fetchone()
             return dict(execution), True
 
+    def start_registered_tool(self, execution_id: str) -> None:
+        with self.store.db(write=True) as db:
+            row = self._row(db)
+            if row["response_closed"] or db.execute(
+                "UPDATE card_tool_executions SET status='running',started_at=? WHERE "
+                "execution_id=? AND integration_id=? AND status='planned' AND execution_live=1",
+                (utc_now(), execution_id, self.id),
+            ).rowcount != 1:
+                raise CardConflictError("工具没有待启动的执行登记，拒绝重复执行")
+
     def tool_result(
         self, execution_id: str, result: Any, *, status: str, duration_ms: int,
         execution_live: bool = False, transaction=None,
     ):
         with (nullcontext(transaction) if transaction is not None else self.store.db(write=True)) as db:
             row = self._row(db)
+            if status == "handed_off" and (
+                execution_live or row["response_closed"] or row["generation"] != self.generation
+                or row["owner_pid"] != os.getpid() or row["owner_token"] != _OWNER
+            ):
+                raise CardConflictError("原整合已关闭或不再拥有该执行，拒绝 Shell 移交")
             execution = db.execute(
                 "SELECT * FROM card_tool_executions WHERE execution_id=? AND integration_id=?",
                 (execution_id, self.id),
@@ -406,11 +469,12 @@ class IntegrationStore:
             db.execute("UPDATE card_integrations SET status=?,updated_at=? WHERE integration_id=? "
                        "AND response_closed=0", (status, utc_now(), self.id))
 
-    def finish(self, status: str, *, final_payload: dict | None = None, metadata: dict | None = None):
+    def finish(self, status: str, *, final_payload: dict | None = None,
+               metadata: dict | None = None, transaction=None):
         """Completion is a runtime transaction, never inferred from model text."""
         if status not in {"completed", "limited", "partial", "failed", "cancelled"}:
             raise ValueError("Invalid integration terminal state")
-        with self.store.db(write=True) as db:
+        with (nullcontext(transaction) if transaction is not None else self.store.db(write=True)) as db:
             row = self._row(db)
             if row["response_closed"]:
                 raise CardConflictError("整合已经关闭")

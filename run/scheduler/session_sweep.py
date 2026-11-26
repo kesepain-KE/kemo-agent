@@ -16,6 +16,8 @@ from run.history import (
     list_records,
     queue_summary,
     queue_memory_extraction,
+    queue_web_retirement,
+    retire_scheduled_web_session,
 )
 
 SESSION_SWEEP_INTERVAL_SECONDS = 3600
@@ -89,6 +91,8 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
                   and (
         pending_memory(record)
         or pending_summary(record)
+        or (record.get("source") == "web" and record.get("lifecycle") == "closed"
+            and record.get("offline_inspection_pending"))
         or (str(record.get("lifecycle") or "") not in {"closed", "deleted"}
             and (_timestamp(record.get("updated_at")) or float("inf")) <= cutoff)
     )]
@@ -103,6 +107,35 @@ def sweep_idle_sessions(root: Path, user: str, *, idle_seconds: int | float = SE
             continue
         if _session_lease_active(root, user, source, session_id, current):
             result["skipped_active"] += 1
+            continue
+        if source == "web":
+            was_closed = record["lifecycle"] == "closed"
+            try:
+                status = retire_scheduled_web_session(root, user, record, now=current)
+                if status != "closed":
+                    if status != "preserved":
+                        result["skipped_active"] += 1
+                    continue
+                if not was_closed:
+                    result["closed"] += 1
+                queued, summarized = queue_web_retirement(
+                    root, user, session_id, reason=queue_reason,
+                    memory=queue_memory_extraction if not was_closed or pending_memory(record) else None,
+                    summary=queue_summary if not was_closed or pending_summary(record) else None,
+                )
+                if queued.get("status") == "queued":
+                    result["queued_memory"] += 1
+                    if was_closed:
+                        result["requeued_closed"] += 1
+                if summarized and summarized.get("summary_status") == "queued":
+                    result["queued_summary"] += 1
+                if len(result["closed_sessions"]) < 20:
+                    result["closed_sessions"].append({"source": source, "session_id": session_id,
+                                                       "memory_status": queued.get("status", "unknown"),
+                                                       "summary_status": (summarized or {}).get("summary_status", "unknown")})
+            except Exception as exc:
+                result["errors"].append({"source": source, "session_id": session_id,
+                                         "exception_type": type(exc).__name__})
             continue
         lock = session_lock(root, user, source, session_id)
         if not lock.acquire(blocking=False):

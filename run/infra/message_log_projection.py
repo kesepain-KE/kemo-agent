@@ -62,4 +62,6 @@ def _body(row: Any) -> dict[str, Any]:
         "kind": diagnostic_identifier(row["kind"]),
         "status": "success" if row["success"] else "failed",
         "occurred_at": row["occurred_at"],
+        **({"mime": row["mime"]} if row["mime"] else {}),
+        **({"size": int(row["size"])} if row["size"] is not None else {}),
     }

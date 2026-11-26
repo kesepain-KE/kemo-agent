@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from pydantic import ValidationError
 
@@ -34,6 +34,8 @@ def _data_message(card: Card, label: str, payload: Any) -> MessageItem:
 
 def protocol_items(
     cards: tuple[Card, ...], *, model: str = "", historical_tools: bool = False,
+    native_items: bool = False,
+    transient_after: Mapping[int, Sequence[Item]] | None = None,
 ) -> list[Item]:
     """Native event order is authoritative, including pending/interleaved tools.
 
@@ -42,7 +44,8 @@ def protocol_items(
     Chat adapter, not in this native runtime projection. Read-only summaries use
     historical tool data so arbitrary prefix/fragment boundaries need no linkage.
     """
-    output: list[Item] = []
+    transient_after = transient_after or {}
+    output: list[Item] = list(transient_after.get(0, ()))
     calls: dict[str, dict[str, Any]] = {}
     completed: set[str] = set()
     for card in cards:
@@ -74,10 +77,12 @@ def protocol_items(
                 # Only opaque/signed state is projected. Never echo RAW thinking
                 # as historical assistant reasoning or manufactured instructions.
             content = user_content(payload) if role == "user" else payload.get("content")
-            if isinstance(content, list) and content:
+            if isinstance(content, list) and (content or native_items and payload.get("refusal")):
                 output.append(MessageItem.model_validate({
                     "id": _item_id(card), "role": role, "content": content,
                     "phase": payload.get("phase") if role == "assistant" else None,
+                    **{key: payload[key] for key in ("refusal", "annotations", "logprobs", "status")
+                       if native_items and key in payload and role == "assistant"},
                 }))
             else:
                 output.append(MessageItem.text(role, content if isinstance(content, str)
@@ -101,17 +106,20 @@ def protocol_items(
             if (identity in calls and identity not in completed
                     and calls[identity] == {key: original.get(key) for key in ("name", "arguments")}
                     and not execution.get("execution_live")):
-                output.append(ToolResultItem(
-                    id=_item_id(card, "result"), call_id=identity, name=calls[identity]["name"],
-                    is_error=execution.get("status") not in {"completed", "duplicate_reused"},
-                    content=[JsonContent(data=payload)],
-                ))
+                result = payload.get("result") if native_items else payload
+                output.append(ToolResultItem.model_validate({
+                    "id": _item_id(card, "result"), "call_id": identity, "name": calls[identity]["name"],
+                    "is_error": execution.get("status") not in {"completed", "duplicate_reused", "handed_off"},
+                    "content": result if native_items and isinstance(result, list)
+                    else [JsonContent(data=result)],
+                }))
                 completed.add(identity)
             else:
                 label = "tool_execution_update" if execution.get("execution_live") else "detached_tool_result"
                 output.append(_data_message(card, label, payload))
         else:
             raise ValueError(f"Unknown CardStream view kind: {card.view_kind}")
+        output.extend(transient_after.get(card.seq, ()))
     return output
 
 
@@ -150,8 +158,14 @@ class RequestSnapshot:
             self.virtual_items_json, self.transport, self.model,
         ]).encode()).hexdigest()
 
-    def items(self) -> list[Item]:
+    def items(
+        self, *, native_items: bool = False,
+        transient_after: Mapping[int, Sequence[Item]] | None = None,
+    ) -> list[Item]:
         from provider.adapters.image_content import message_item_type
         virtual = [message_item_type(self.transport).model_validate(item)
                    for item in json.loads(self.virtual_items_json)]
-        return [*protocol_items(self.history.cards, model=self.model), *virtual, *self.dynamic_tail.items()]
+        history = protocol_items(self.history.cards, model=self.model,
+                                 native_items=native_items,
+                                 transient_after=transient_after)
+        return [*history, *virtual, *self.dynamic_tail.items()]

@@ -3,6 +3,11 @@
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from run.infra import EngineError as EngineError
+    from run.conversation.provider_events import (
+        is_context_length_exceeded as is_context_length_exceeded,
+        response_terminal_error as response_terminal_error,
+    )
+    from run.conversation.provider_exchange import ProviderResponseError as ProviderResponseError
     from run.conversation.runtime import (
         handle_request as handle_request, compress_context as compress_context,
         iter_request_events as iter_request_events, stream_request as stream_request,
@@ -26,6 +31,7 @@ def __getattr__(name: str) -> Any:
         "usage",
         "session_runtime",
         "provider_events",
+        "provider_exchange",
         "runtime",
     ):
         module = import_module(f"run.conversation.{module_name}")

@@ -15,6 +15,7 @@ from run.history.session_api import (
 )
 from run.history.session_payload import session_payload
 from run.history.session_marks import favorite_count, update_session_marks
+from run.history.registry_store import session_record
 from run.history.store import (
     connection, database_path, mutate_registry_record, read_registry_record,
     session_page_cursor, upsert_registry_record,
@@ -24,7 +25,7 @@ from run.history.fulltext import search_rows as fulltext_search_rows
 
 _DOMAIN_MODULES = (
     "archive_catalog", "archive_reader", "lease_presence", "web_lifecycle",
-    "retention", "summary_scheduler",
+    "retention", "summary_scheduler", "web_execution",
 )
 
 

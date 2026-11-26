@@ -22,8 +22,10 @@ def update_presence(root, user, source, session_id, client_id, sequence, *, rele
         return result
     current, key = time.time() if now is None else float(now), session_key(source, session_id)
     with store.db(write=True) as db:
-        if not db.execute("SELECT 1 FROM card_sessions WHERE session_key=? AND lifecycle='open'",
-                          (key,)).fetchone():
+        row = db.execute("SELECT lifecycle FROM card_sessions WHERE session_key=?", (key,)).fetchone()
+        if row is None or row["lifecycle"] != "open":
+            if source == "web" and row is not None and row["lifecycle"] == "closed":
+                result["closed"] = True
             return result
         result["exists"] = True
         old = db.execute("SELECT * FROM card_leases WHERE session_key=? AND client_id=?",

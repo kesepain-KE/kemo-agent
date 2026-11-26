@@ -412,7 +412,8 @@ class LogStore:
             cron = sorted(cron, key=lambda row: (row["occurred_at_ms"], row["id"]), reverse=True)[:200]
             messages = connection.execute(
                 """SELECT id, event_key, occurred_at, occurred_at_ms, user, machine_id,
-                          platform, chat_type, chat_id, exchange_id, direction, kind, success, content
+                          platform, chat_type, chat_id, exchange_id, direction, kind, success, content,
+                          mime, size
                    FROM message_route_logs WHERE user=?
                    ORDER BY occurred_at_ms DESC, id DESC LIMIT 200""", (user,),
             ).fetchall()

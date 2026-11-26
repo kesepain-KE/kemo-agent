@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 import shutil
 import sqlite3
@@ -35,6 +36,31 @@ def _registry(path: Path) -> Iterator[sqlite3.Connection]:
         yield connection
 
 
+def _delete_expired(connection: sqlite3.Connection, now: float) -> int:
+    return connection.execute("DELETE FROM media_assets WHERE expires_at <= ?", (now,)).rowcount
+
+
+def purge_expired_media_assets(root: Path) -> int:
+    """Clear expired references from existing registries without deleting files."""
+    root = root.resolve()
+    now = time()
+    deleted = 0
+    for database in (root / "users").glob("*/runtime/media_assets.sqlite3"):
+        try:
+            if not database.is_file():
+                continue
+            _reject_linked_path(database, root)
+            with closing(sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5.0)) as connection, connection:
+                count = _delete_expired(connection, now)
+        except (AttachmentError, OSError, sqlite3.Error):
+            logging.getLogger(__name__).warning(
+                "清理用户 %s 的过期媒体引用失败", database.parents[1].name, exc_info=True,
+            )
+        else:
+            deleted += count
+    return deleted
+
+
 def _retain_references(
     root: Path, user: str, references: list[tuple[str, dict[str, Any]]], *,
     source: str, session_id: str, ttl_seconds: int,
@@ -46,7 +72,7 @@ def _retain_references(
     _reject_linked_path(database, root.resolve())
     database.parent.mkdir(parents=True, exist_ok=True)
     with _registry(database) as connection:
-        connection.execute("DELETE FROM media_assets WHERE expires_at <= ?", (now,))
+        _delete_expired(connection, now)
         connection.executemany("""
             INSERT INTO media_assets (source, session_id, asset_id, descriptor, expires_at)
             VALUES (?, ?, ?, ?, ?)
@@ -128,7 +154,7 @@ def resolve_retained_media(
     _reject_linked_path(database, root.resolve())
     now = time()
     with _registry(database) as connection:
-        connection.execute("DELETE FROM media_assets WHERE expires_at <= ?", (now,))
+        _delete_expired(connection, now)
         rows = connection.execute(
             "SELECT asset_id, descriptor, expires_at FROM media_assets "
             "WHERE source = ? AND session_id = ? AND asset_id IN ("

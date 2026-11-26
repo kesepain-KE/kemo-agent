@@ -148,6 +148,7 @@ class ProviderSummarizer:
         meter: CardMeter | None = None,
         capabilities=None, configured_token_limit: int | None = None,
         calibrate: Callable[[int], int] | None = None,
+        terminal_error: Callable[[KemoResponse], Exception | None] | None = None,
     ):
         self.provider, self.config, self.model = provider, config, model
         self.system_prompt, self.tools = system_prompt, tools or []
@@ -157,6 +158,7 @@ class ProviderSummarizer:
         self.meter = meter or CardMeter()
         self.capabilities, self.configured_token_limit = capabilities, configured_token_limit
         self.calibrate = calibrate or (lambda value: value)
+        self.terminal_error = terminal_error
 
     def __call__(self, batch: CompactionBatch) -> SummaryCandidate:
         from run.context import CompressionBudget
@@ -364,6 +366,8 @@ class ProviderSummarizer:
                     if response.request_id != request.request_id:
                         raise CardCompactionError("压缩响应不属于当前请求快照")
                     if response.status != "completed":
+                        if self.terminal_error is not None and (upstream := self.terminal_error(response)) is not None:
+                            raise upstream
                         error = _response_failure(response)
                         if error.incomplete_reason == IncompleteReason.OUTPUT_TRUNCATED.value:
                             current_output = request.generation.max_output_tokens or output_budget

@@ -135,7 +135,15 @@ class CronLogAggregator:
         total = max(0, int(window.get("total_duration_ms") or 0))
         counts = window["status_counts"]
         successes = counts.get("success", 0)
-        status = "success" if successes == runs else "partial" if successes else "failed"
+        cancelled = counts.get("cancelled", 0)
+        if successes == runs:
+            status = "success"
+        elif cancelled == runs:
+            status = "cancelled"
+        elif successes and not (cancelled and counts.get("failed", 0)):
+            status = "partial"
+        else:
+            status = "failed"
         record = {
             "schema_version": 1,
             "executed_at": str(window.get("last_executed_at") or ""),

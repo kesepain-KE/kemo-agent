@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from uuid import uuid4
-from typing import Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
+from events import RunEvent
 from provider.factory import provider_request_slot
 from provider.protocol.models import (
     AudioContent,
@@ -28,6 +30,10 @@ from run.extensions import (
 )
 from run.config import media_asset_ttl_seconds
 from run.conversation.request_input import content_for_message, uploaded_file_context
+from run.retry import HOST_CONTROL_EXCEPTIONS
+
+if TYPE_CHECKING:
+    from run.tools import ToolRuntime
 
 
 def guidance_failure_details(values: Iterable[Any], reason: str) -> list[dict[str, Any]]:
@@ -46,6 +52,73 @@ def guidance_failure_details(values: Iterable[Any], reason: str) -> list[dict[st
         )
         details.append(detail)
     return details
+
+
+@dataclass(slots=True)
+class InterruptGuidance:
+    """An interrupt and its foreground targets when the mailbox was drained."""
+
+    item: GuidanceInput
+    targets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    unconfirmed: set[str] = field(default_factory=set)
+
+    def _notice(self, target, status, message, **detail) -> RunEvent:
+        return RunEvent(
+            type="guidance_handoff", content=message, tool_name=target["name"],
+            tool_call_id=target["tool_call_id"], metadata={
+                "guidance_id": self.item.id, "execution_id": target["id"],
+                "status": status, **detail,
+            },
+        )
+
+    def advance(self, runtime: ToolRuntime) -> Iterable[RunEvent]:
+        from run.tools import ShellHandoffUncertain
+
+        for execution_id, target in list(self.targets.items()):
+            if runtime.cancel_event.is_set():
+                return
+            if execution_id in self.unconfirmed:
+                continue
+            state = runtime.shell_handoff_state(execution_id) if target["name"] == "shell" else None
+            if state == "waiting":
+                continue
+            if state is None:
+                if target["name"] == "shell" and runtime.has_events():
+                    continue  # A Shell owner can disappear after queuing its result.
+                del self.targets[execution_id]
+                yield self._notice(target, "failed", "当前工具不可移交，仍按原方式运行；引导将在阻塞结束后投递。",
+                                   reason="not_transferable")
+                continue
+            try:
+                runtime.handoff_shell(execution_id)
+            except HOST_CONTROL_EXCEPTIONS:
+                raise
+            except ShellHandoffUncertain:
+                # Only the original receipt or normal result can resolve this.
+                self.unconfirmed.add(execution_id)
+                yield self._notice(target, "unconfirmed", "暂时无法核对移交回执；引导已保留，不会重新启动命令。",
+                                   reason="receipt_unconfirmed")
+            except Exception as error:
+                if runtime.cancel_event.is_set() or runtime.shell_handoff_state(execution_id) != "ready":
+                    continue  # A terminal claim won while the job was being prepared.
+                del self.targets[execution_id]
+                if isinstance(error, ValueError) and str(error) == "后台活动作业数量已达到用户上限":
+                    reason, message = "quota_full", "后台作业名额已满"
+                else:
+                    logging.getLogger(__name__).exception("Shell 移交登记失败：%s", execution_id)
+                    reason, message = "registration_failed", "后台作业登记失败"
+                yield self._notice(target, "failed", f"{message}，命令仍在前台运行；引导将在阻塞结束后投递。",
+                                   reason=reason)
+
+    def observe(self, result: RunEvent) -> RunEvent | None:
+        if result.metadata.get("execution_live"):
+            return None
+        execution_id = result.metadata["execution_id"]
+        self.unconfirmed.discard(execution_id)
+        target = self.targets.pop(execution_id, None)
+        if target is not None and result.metadata.get("status") == "handed_off":
+            return self._notice(target, "handed_off", "已转后台", job_id=result.result["job_id"])
+        return None
 
 
 @dataclass(slots=True)
@@ -225,6 +298,7 @@ def prepare_guidance(
             id=item.id,
             text=item.text,
             uploaded_files=safe_attachments,
+            mode=item.mode,
         )
         result.inputs.append(acknowledged)
         result.history_details.append(acknowledged.history_detail())

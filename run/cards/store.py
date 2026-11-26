@@ -1,6 +1,7 @@
 """Append-only RAW and atomic mutable VIEW, without legacy-window dependencies."""
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import nullcontext
 from pathlib import Path
@@ -18,17 +19,23 @@ from run.tools import tool_result_card_view
 
 
 class CardStore:
-    def __init__(self, root: Path, user: str, *, meter: CardMeter | None = None):
+    def __init__(
+        self, root: Path, user: str, *, meter: CardMeter | None = None,
+        store_path: Path | None = None,
+    ):
         self.root = Path(root).resolve()
         self.user = user
         self.meter = meter or CardMeter()
+        self._store_path = store_path
 
     @property
     def path(self) -> Path:
+        if self._store_path is not None:
+            return self._store_path
         return self.root / "users" / self.user / "history" / "cards.sqlite3"
 
     def db(self, *, write=False):
-        return connection(self.root, self.user, write=write)
+        return connection(self.root, self.user, write=write, store_path=self._store_path)
 
     def ensure_session(self, source: str, session_id: str) -> dict[str, Any]:
         key, now = session_key(source, session_id), utc_now()
@@ -267,17 +274,21 @@ class CardStore:
             db.execute("UPDATE card_sessions SET record_json=?,updated_at=? WHERE session_key=?",
                        (json_text(record), utc_now(), key))
 
-    def observe_usage(self, snapshot, *, request_id: str, estimated: int, actual: int) -> None:
+    def observe_usage(self, snapshot, *, request_id: str, estimated: int, actual: int, items=None) -> None:
         """Calibration is evidence about this exact request, never a RAW rewrite."""
         if (snapshot.history.meter_key != self.meter.key or not request_id
                 or type(estimated) is not int or estimated < 1
                 or type(actual) is not int or actual < 0):
             raise ValueError("Usage calibration requires an exact model/request snapshot")
+        snapshot_id = snapshot.snapshot_id
+        if items is not None:
+            snapshot_id = hashlib.sha256(json_text([snapshot_id, [
+                item.model_dump(mode="json", exclude_none=True) for item in items
+            ]]).encode("utf-8")).hexdigest()
+        key = request_calibration_key(self.meter.key, self.meter.calibration_scope,
+                                      snapshot.items() if items is None else items)
         with self.db(write=True) as db:
-            key = request_calibration_key(
-                self.meter.key, self.meter.calibration_scope, snapshot.items()
-            )
-            values = (request_id, snapshot.snapshot_id, key, estimated, actual)
+            values = (request_id, snapshot_id, key, estimated, actual)
             old = db.execute("SELECT request_id,snapshot_id,meter_key,estimated_tokens,actual_tokens "
                              "FROM card_meter_observations WHERE request_id=?", (request_id,)).fetchone()
             if old and tuple(old) != values:

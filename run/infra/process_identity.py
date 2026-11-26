@@ -41,17 +41,13 @@ def _windows_snapshot(pid: int) -> dict[str, Any]:
     handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
     if not handle:
         error = ctypes.get_last_error()
-        if error == 5:
-            return {
-                "pid": pid,
-                "exists": True,
-                "query_status": "access_denied",
-                "identity_available": False,
-            }
+        # ERROR_INVALID_PARAMETER for a valid positive PID means no such
+        # process. Other query failures are not evidence of exit.
+        missing = error == 87 and 0 < pid <= 0xFFFFFFFF
         return {
             "pid": pid,
-            "exists": False,
-            "query_status": "not_found",
+            "exists": not missing,
+            "query_status": "not_found" if missing else "access_denied" if error == 5 else "query_failed",
             "identity_available": False,
         }
     try:
@@ -178,6 +174,8 @@ def process_identity_matches(
 ) -> bool | None:
     """Compare optional expected identity fields against a live snapshot."""
 
+    if snapshot.get("query_status") in {"query_failed", "access_denied", "identity_unavailable"}:
+        return None
     if not snapshot.get("exists"):
         return False
     expected_started = str(process_started_at or "").strip()

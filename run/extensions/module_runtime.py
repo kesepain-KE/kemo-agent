@@ -83,7 +83,6 @@ _MODULE_ENV_MAX_VALUE_CHARS = 64 * 1024
 MODULE_UPDATE_RUNNER = r'''
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import inspect
 import os
@@ -128,6 +127,8 @@ try:
         raise AttributeError("更新脚本必须提供可调用的 update() 或 main()")
     result = updater()
     if inspect.isawaitable(result):
+        import asyncio
+
         result = asyncio.run(result)
     if result is False:
         raise RuntimeError("更新脚本返回 False")
@@ -473,17 +474,19 @@ def run_protocol_process(
                     except subprocess.TimeoutExpired:
                         pass
                     raise ModuleRuntimeCancelled("模块调用因用户紧急停止而取消")
-                if time.monotonic() >= deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     terminate_process_tree(process)
                     try:
                         process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         pass
                     raise ModuleRuntimeTimeout(f"模块执行超时（{timeout:g} 秒）")
-                if cancel_event is not None:
-                    cancel_event.wait(_POLL_SECONDS)
-                else:
-                    time.sleep(_POLL_SECONDS)
+                wait_timeout = remaining if cancel_event is None else min(_POLL_SECONDS, remaining)
+                try:
+                    process.wait(timeout=wait_timeout)
+                except subprocess.TimeoutExpired:
+                    pass
 
             stdout = _tail(stdout_file)
             stderr = _tail(stderr_file)

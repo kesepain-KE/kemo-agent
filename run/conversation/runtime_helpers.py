@@ -111,7 +111,7 @@ def response_payloads(
 
 def build_failure_metadata(
     error, *, usage, context, guidance, argument_corrections, media_inputs,
-    request_diagnostics, receipt, live_tools, cancelled,
+    request_diagnostics, receipt, live_tools, cancelled, elapsed_ms: int,
 ) -> dict:
     """Keep provider evidence and unfinished work in the durable run receipt."""
     unfinished = [*(receipt.get("unfinished_tasks") or []), *live_tools]
@@ -128,6 +128,7 @@ def build_failure_metadata(
         "media_inputs": copy.deepcopy(media_inputs),
         "provider_request_diagnostics": copy.deepcopy(request_diagnostics),
         **receipt,
+        "elapsed_ms": elapsed_ms,
         "status": "partial" if receipt or live_tools else ("cancelled" if cancelled else "failed"),
         "unfinished_tasks": unfinished[:80],
         "unfinished_task_count": int(receipt.get("unfinished_task_count") or 0) + len(live_tools),
@@ -149,9 +150,8 @@ def call_is_explicitly_async(call) -> bool:
             and arguments.get("completion_mode") == "detached"
         )
     if call.name == "subagent_dispatch":
-        return (
-            arguments.get("action") in {"call", "resume"}
-            and arguments.get("wait") is False
+        return arguments.get("action") in {"call", "resume", "split"} and not (
+            arguments.get("action") == "call" and arguments.get("agent") == "task_plan"
         )
     if call.name == "user_decision":
         return arguments.get("action") == "ask" and arguments.get("mode") == "async"
@@ -299,7 +299,8 @@ def prepare_runtime_request(*, store, source, session_id, provider, config, runt
                             request_system_prompt, dynamic_tail, native_tools, tool_wire,
                             virtual_media, input_limit, ratio, retry, cancel_event, settings,
                             capabilities, force_compact, skip_preventative, run_id, trigger,
-                            compression_started, usage_total, context_stats, overflow_error):
+                            compression_started, usage_total, context_stats, overflow_error,
+                            extract_memory=True):
     from run.cards import CardCapacityError, ProviderSummarizer, prepare_request
     from run.infra import merge_usage_dict
     summarizer = ProviderSummarizer(
@@ -346,10 +347,11 @@ def prepare_runtime_request(*, store, source, session_id, provider, config, runt
         context_stats["compression_input_tokens"] += int(compaction.usage.get("input_tokens") or 0)
         context_stats["compression_output_tokens"] += int(compaction.usage.get("output_tokens") or 0)
         merge_usage_dict(usage_total, compaction.usage)
-        from run.history import queue_memory_extraction
-        queue_memory_extraction(store.root, store.user, source, session_id,
-                                target_seq=barrier.snapshot.history.last_seq,
-                                reason="cardstream_compaction")
+        if extract_memory:
+            from run.history import queue_memory_extraction
+            queue_memory_extraction(store.root, store.user, source, session_id,
+                                    target_seq=barrier.snapshot.history.last_seq,
+                                    reason="cardstream_compaction")
         yield RunEvent(type="context_compression", metadata={
             "status": "ready", "trigger": trigger,
             "run_id": run_id,

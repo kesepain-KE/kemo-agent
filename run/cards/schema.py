@@ -212,17 +212,17 @@ REQUIRED = {
 }
 
 
-def _safe_path(root: Path, user: str) -> Path:
+def _safe_path(root: Path, user: str, store_path: Path | None = None) -> Path:
     from plugins._creator_security import reject_link_components
 
     root = root.resolve()
     directory = user_dir(user, root)
-    path = directory / "history" / "cards.sqlite3"
+    path = root / store_path if store_path is not None else directory / "history" / "cards.sqlite3"
     reject_link_components(root, path, label="CardStream 数据库")
     if path.exists() and (not path.is_file() or path.stat().st_nlink > 1):
         raise ValueError("CardStream database must be an ordinary, non-linked user file")
     path.resolve().relative_to(directory.resolve())
-    if (directory / "cards.sqlite3").exists():
+    if store_path is None and (directory / "cards.sqlite3").exists():
         raise SchemaMigrationError(
             "CardStream 数据库仍在用户根目录；请先停止全部服务，"
             "通过更新器迁移到 history/cards.sqlite3 后再启动，避免建立空库或使用两份历史"
@@ -231,13 +231,17 @@ def _safe_path(root: Path, user: str) -> Path:
 
 
 @contextmanager
-def connection(root: Path, user: str, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+def connection(
+    root: Path, user: str, *, write: bool = False, store_path: Path | None = None,
+) -> Iterator[sqlite3.Connection]:
     """Short database ownership prevents Windows WAL close/path-check races."""
-    identity = os.path.normcase(str(root.resolve() / "users" / user / "history" / "cards.sqlite3"))
+    path = root.resolve() / (store_path if store_path is not None
+                             else Path("users", user, "history", "cards.sqlite3"))
+    identity = os.path.normcase(os.path.normpath(path))
     with _LOCK_GUARD:
         lock = _LOCKS.setdefault(identity, threading.RLock())
     with lock:
-        path = _safe_path(root, user)
+        path = _safe_path(root, user, store_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(path, timeout=5.0)) as db:
             db.row_factory = sqlite3.Row

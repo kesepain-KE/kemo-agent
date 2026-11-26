@@ -24,7 +24,7 @@ from provider.protocol.models import (
 )
 from provider.retry import RetryCancelled, RetryManager
 from provider.token_usage import reported_token_fields
-from run.agents import TaskCoordinator
+from run.agents import TaskCoordinator, delivery
 from run.cards import (
     CardMeter, CardStore, IntegrationStore, estimate_request_tokens,
     json_text,
@@ -47,8 +47,8 @@ from run.tools import (
     system_prompt_with_tool_argument_repair, tool_call_signature,
     validate_tool_call_batch,
 )
-from run.conversation.guidance import normalize_guidance
-from run.conversation.guidance_runtime import guidance_failure_details, prepare_guidance
+from run.conversation.guidance import GuidanceInput, normalize_guidance
+from run.conversation.guidance_runtime import InterruptGuidance, guidance_failure_details, prepare_guidance
 from run.conversation.media_routing import prepare_provider_request
 from run.conversation.provider_exchange import exchange
 from run.conversation.provider_events import is_context_length_exceeded
@@ -77,6 +77,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
     compression_started: dict[str, Any] = {}
     consumed_guidance: list[dict] = []
     pending_guidance: list[tuple[int, Any]] = []
+    delayed_guidance: list[tuple[int, GuidanceInput]] = []
+    interrupt_guidance: list[InterruptGuidance] = []
     preparing_guidance: list[Any] = []
     guidance_seqs: dict[str, int] = {}
     usage_total = new_usage_total()
@@ -237,12 +239,13 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             nonlocal final_payload
             if not values:
                 return
+            # Keep dequeued inputs owned even if a RAW write fails.
+            normalized = [item for raw in values if (item := normalize_guidance(raw)) is not None]
+            preparing_guidance.extend(normalized)
             if final_payload is not None:
                 store.append(source, session_id, integration_id, "agent_text", final_payload, level="interim")
                 final_payload = None
-            # Retain ownership of all drained inputs until RAW commits succeed.
-            normalized = persist_guidance(values)
-            preparing_guidance.extend(normalized)
+            persist_guidance(normalized)
             prepared_guidance = prepare_guidance(
                 normalized, root=root, user=user, source=source, session_id=session_id, config=config,
                 runtime_provider=runtime, provider=provider, cancel_event=cancel_event,
@@ -307,9 +310,14 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
         def close_limited(stop_reason, **extra):
             nonlocal finished
             tool_runtime.poll_decisions(cancel=True)
+            undelivered = ([entry.item for entry in interrupt_guidance]
+                           + [item for _, item in delayed_guidance] + _close(channel))
+            preparing_guidance.extend(item for raw in undelivered if (item := normalize_guidance(raw)) is not None)
+            delayed_guidance.clear()
+            interrupt_guidance.clear()
+            persist_guidance(preparing_guidance)
             consumed_guidance.extend(guidance_failure_details(
-                [item for _, item in pending_guidance] + preparing_guidance
-                + persist_guidance(_close(channel)),
+                [item for _, item in pending_guidance] + preparing_guidance,
                 stop_reason,
             ))
             pending_guidance.clear()
@@ -334,10 +342,14 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
             return outcome
 
         iteration, dispatched, invalid_batches, argument_corrections = 0, 0, 0, 0
+        tool_batch = 0
+        batch_dispatch_times: dict[str, float] = {}
         if resume_id:
             dispatched = len(prior)
         repair_pending, repair_tool_name = False, ""
         continuation = True
+        plan_call_id = None
+        child_notice = shell_notice = None
         while True:
             if cancel_event.is_set():
                 raise RetryCancelled("用户停止了当前整合")
@@ -394,18 +406,34 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                                      "result": payload, **event.metadata})
                 if event.tool_name == "subagent_dispatch" and isinstance(raw, dict):
                     business_result = raw.get("result")
-                    if (isinstance(business_result, dict)
-                            and business_result.get("status") == "completed"
-                            and business_result.get("task_id")):
-                        coordinator.acknowledge_sync(business_result["task_id"])
+                    if isinstance(business_result, dict) and business_result.get("task_id"):
+                        if (business_result.get("detached") is True
+                                and event.arguments.get("action") == "call"
+                                and event.arguments.get("agent") == "task_plan"):
+                            plan_call_id = event.tool_call_id
+                        elif business_result.get("status") == "completed":
+                            coordinator.acknowledge_sync(business_result["task_id"])
                 yield event
                 if cancel_event.is_set():
                     raise RetryCancelled("用户停止了当前整合")
+                for entry in interrupt_guidance:
+                    if (notice := entry.observe(event)) is not None:
+                        yield notice
                 boundary = detect_task_plan_creation_boundary(
                     tool_name=event.tool_name, arguments=event.arguments or {}, result_payload=payload,
                 )
                 if boundary is not None:
                     plan_boundary = boundary
+            if plan_call_id and (record := coordinator.plan_result(plan_call_id)):
+                plan_call_id = None
+                if record.get("stop_reason") == "plan_result_unverified":
+                    outcome = close_limited("plan_result_unverified", task_id=record["id"])
+                    yield RunEvent(type="done", metadata=outcome)
+                    return
+                plan_boundary = detect_task_plan_creation_boundary(
+                    tool_name="subagent_dispatch", arguments={"action": "call", "agent": "task_plan"},
+                    result_payload={"ok": record["status"] == "completed", "result": delivery(record)},
+                )
             if plan_boundary is not None:
                 outcome = close_limited(
                     plan_boundary.stop_reason, task_plan_id=plan_boundary.plan_id, plan_id=plan_boundary.plan_id,
@@ -413,30 +441,82 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 )
                 yield RunEvent(type="done", metadata=outcome)
                 return
-            new_guidance = _drain(channel)
-            append_guidance(new_guidance)
+            new_interrupts = []
+            for raw in _drain(channel):
+                item = normalize_guidance(raw)
+                if item is None:
+                    continue
+                if item.mode == "background":
+                    delayed_guidance.append((tool_batch, item))
+                else:
+                    item.id = item.id or "guidance_" + uuid4().hex
+                    new_interrupts.append(InterruptGuidance(item))
+            if new_interrupts:
+                interrupt_guidance.extend(new_interrupts)
+            # An offer cannot detach a call that had not been dispatched yet.
+            # Legacy bare strings have no handoff scope.
+            scoped_interrupts = [entry for entry in new_interrupts if entry.item._offered_at]
+            if scoped_interrupts and batch_dispatch_times:
+                targets = {tool["id"]: tool for tool in integration.live_executions()
+                           if tool["id"] in batch_dispatch_times and tool["id"] not in async_execution_ids}
+                for entry in scoped_interrupts:
+                    entry.targets = {key: target for key, target in targets.items()
+                                     if batch_dispatch_times[key] <= entry.item._offered_at}
+            for entry in interrupt_guidance:
+                if entry.targets:
+                    yield from entry.advance(tool_runtime)
             # Child and Shell notifications are runtime state in the virtual
             # tail, not invented user history or an extra persistence mechanism.
             live, unseen = integration.pending()
+            live_tools = integration.live_executions() if live and async_execution_ids else []
             # Async executions still hold completion, but cannot unblock a required tool.
             live_tool_waiting = bool(live) and (
                 not async_execution_ids or any(
                     execution["id"] not in async_execution_ids
-                    for execution in integration.live_executions()
+                    for execution in live_tools
                 )
             )
             # A result may commit after the event drain. Apply its boundary
             # before deciding whether the now-idle integration needs inference.
             if tool_runtime.has_events():
                 continue
-            child_notice, shell_notice = coordinator.notifications(), shell.take()
-            dependencies_pending = bool(live or coordinator.pending() or shell.pending())
-            needs_request = not live_tool_waiting and bool(
-                continuation or new_guidance or child_notice or shell_notice or unseen
+            pending_handoffs = {key for entry in interrupt_guidance for key in entry.targets}
+            allow_notifications = not (live_tool_waiting or pending_handoffs or tool_runtime.waiting_for_decision())
+            plan_waiting = plan_call_id is not None
+            if interrupt_guidance and allow_notifications and not plan_waiting:
+                # Result events (including the original handoff receipt) have
+                # passed through the normal tool path before guidance enters VIEW.
+                ready = [entry.item for entry in interrupt_guidance]
+                interrupt_guidance.clear()
+                append_guidance(ready)
+            if overflow_error is None:
+                # Reserve only when a request is permitted. Overflow recovery
+                # reuses the exact notices until the Provider accepts them.
+                child_notice = coordinator.notifications(heartbeat_only=plan_waiting) if allow_notifications else None
+                shell_notice = shell.take() if allow_notifications and not plan_waiting else None
+            if delayed_guidance and allow_notifications and not plan_waiting:
+                children, jobs = coordinator.pending(), shell.pending()
+                child_calls = {child["id"]: child.get("tool_call_id") for child in children}
+                # A child submission can still be registering its required task.
+                waiting_calls = [tool["tool_call_id"] for tool in live_tools
+                                 if tool["name"] == "subagent_dispatch"]
+                waiting_calls.extend(child_calls.values())
+                waiting_calls.extend(child_calls.get(job.get("owner_task_id")) or job.get("tool_call_id")
+                                     for job in jobs)
+                waiting_batches = {call_iterations.get(call_id, 0) for call_id in waiting_calls}
+                ready = [item for batch, item in delayed_guidance if batch not in waiting_batches]
+                delayed_guidance[:] = [(batch, item) for batch, item in delayed_guidance
+                                       if batch in waiting_batches]
+                append_guidance(ready)
+                dependencies_pending = bool(live or children or jobs)
+            else:
+                dependencies_pending = bool(live or pending_handoffs or coordinator.pending() or shell.pending() or plan_waiting)
+            needs_request = allow_notifications and bool(
+                continuation or pending_guidance or child_notice or shell_notice or unseen
                 or (final_payload is None and not dependencies_pending)
             )
-            if tool_runtime.waiting_for_decision():
-                needs_request = False
+            if plan_waiting:
+                needs_request = allow_notifications and bool(child_notice)
             if not needs_request:
                 if dependencies_pending:
                     integration.phase("waiting")
@@ -451,11 +531,28 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                         size = getattr(channel, "qsize", None)
                         return (tool_runtime.poll_decisions()
                                 or tool_runtime.changed.is_set()
-                                or bool(size() if callable(size) else False)
-                                or bool(shell.ready()))
+                                or bool(callable(size) and size())
+                                or bool(allow_notifications and not plan_waiting and shell.ready()))
+
+                    def waiting_tools():
+                        if not pending_handoffs:
+                            return integration.live_executions()
+                        # A commit can clear execution_live before its receipt
+                        # can be verified and published. Wait for that event too.
+                        tools = {tool["id"]: tool for tool in integration.live_executions()}
+                        for key in pending_handoffs - tools.keys():
+                            tools[key] = {
+                                "id": key, "status": (
+                                    "running" if tool_runtime.shell_execution(key) is not None else "result_commit_pending"
+                                ),
+                            }
+                        return list(tools.values())
+
                     if not coordinator.wait(
                         cancel_event, wake=wake,
-                        pending=integration.live_executions,
+                        pending=waiting_tools,
+                        allow_notifications=allow_notifications,
+                        heartbeat_only=plan_waiting, plan_call_id=plan_call_id,
                     ):
                         if cancel_event.is_set():
                             raise RetryCancelled("用户停止了当前整合")
@@ -484,7 +581,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 store.append(source, session_id, integration_id, "agent_text", final_payload, level="interim")
                 final_payload = None
             iteration += 1
-            native_tools = _native_tools(registry, failures.unavailable)
+            native_tools = [] if plan_waiting else _native_tools(registry, failures.unavailable)
             request_tools = list(native_tools)
             tool_wire = [item.model_dump(mode="json", exclude_none=True) for item in request_tools]
             if memory_revision is not None:
@@ -525,6 +622,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 skip_preventative=time.monotonic() < preventative_retry_at, run_id=run_id,
                 trigger=compression_trigger, compression_started=compression_started,
                 usage_total=usage_total, context_stats=context_stats, overflow_error=overflow_error,
+                extract_memory=not coordinator.heartbeats_delivered,
             )
             if barrier.compaction_error is not None or barrier.compaction is not None:
                 preventative_retry_at = time.monotonic() + 60
@@ -610,8 +708,8 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 store.observe_usage(barrier.snapshot, request_id=accepted.request.request_id,
                                     estimated=estimate_request_tokens(
                                         bundle.text, items, tool_wire), actual=actual_input)
-            calls = [item for item in response.output if isinstance(item, ToolCallItem)]
-            provider_argument_error = response_invalid_tool_arguments_error(response)
+            calls = [] if plan_waiting else [item for item in response.output if isinstance(item, ToolCallItem)]
+            provider_argument_error = None if plan_waiting else response_invalid_tool_arguments_error(response)
             schemas = {tool.name: tool.parameters for tool in request_tools}
             invalid = validate_tool_call_batch(calls, schemas)
             invalid_batch = bool(
@@ -671,7 +769,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 observed_reasoning.clear()
                 continue
             invalid_batches = 0
-            started_executions = []
+            started_executions: dict[str, float] = {}
             batch_signatures: set[str] = set()
             continuation = False
             for call, plan_generation in task_plan_creation_batch(calls, record=tool_runtime.record):
@@ -743,20 +841,24 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                             metadata={**event.metadata, "parent_run_id": run_id}))
                     if call.arguments.get("action") == "call":
                         context["task_ownership_factory"] = lambda call=call: coordinator.ownership(call.call_id)
-                    elif call.arguments.get("action") in {"resume", "guide"}:
+                    elif call.arguments.get("action") in {"resume", "guide", "split"}:
                         context["task_ownership"] = coordinator.ownership(call.call_id)
                 transform = None
                 if call.name == "attach_media":
                     transform = lambda value, call=call, definition=definition: media.accept(
                         definition, call.arguments, value, call_id=call.call_id, tool_records=tool_records)
+                dispatched_at = time.monotonic()
                 execution_id = tool_runtime.start(call, definition, context=context,
                     timeout=float(tool_settings.get("timeout", 240)), transform=transform)
-                started_executions.append(execution_id)
+                started_executions[execution_id] = dispatched_at
                 if explicitly_async:
                     async_execution_ids.add(execution_id)
                 live_signatures[signature] = execution_id
                 dispatched += 1
-            tool_runtime.handoff(started_executions)
+            tool_runtime.handoff(list(started_executions))
+            if started_executions:
+                tool_batch = iteration
+                batch_dispatch_times = started_executions
             observed_text.clear()
             observed_reasoning.clear()
     except BaseException as error:
@@ -786,13 +888,17 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 cleanup(lambda: tool_runtime.poll_decisions(cancel=True))
             if request_inflight:
                 cleanup(lambda: integration.request_finished())
-            final_guidance = cleanup(lambda: _close(channel)) or []
+            final_guidance = (preparing_guidance + [entry.item for entry in interrupt_guidance]
+                              + [item for _, item in delayed_guidance]
+                              + (cleanup(lambda: _close(channel)) or []))
             if "persist_guidance" in locals():
                 final_guidance = cleanup(lambda: persist_guidance(final_guidance)) or final_guidance
             consumed_guidance.extend(guidance_failure_details(
-                [item for _, item in pending_guidance] + preparing_guidance + final_guidance,
+                [item for _, item in pending_guidance] + final_guidance,
             "run_cancelled" if cancel_event.is_set() else "run_failed"))
             pending_guidance.clear()
+            interrupt_guidance.clear()
+            delayed_guidance.clear()
             preparing_guidance.clear()
             cancelled = (isinstance(error, (RetryCancelled, GeneratorExit))
                          or cancel_event.is_set() or getattr(error, "cancelled", False) is True)
@@ -811,6 +917,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 media_inputs=media.audit if media is not None else [],
                 request_diagnostics=request_diagnostics, receipt=receipt, live_tools=live_tools,
                 cancelled=cancelled,
+                elapsed_ms=round((time.monotonic() - started) * 1000),
             )
             cleanup(lambda: integration.finish(
                 failure_metadata["status"],
@@ -860,6 +967,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                     **(receipt or {}),
                     "status": "partial" if receipt or live_tools else "cancelled",
                     "unfinished_tools": live_tools,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
                 })
                 if coordinator is not None:
                     coordinator.finish("cancelled")
