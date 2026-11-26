@@ -51,6 +51,7 @@ def test_terminal_guidance_is_reported_and_persisted_not_claimed_applied(tmp_pat
     cancelled = threading.Event()
     late = GuidanceInput(id="late-guidance", text="do not silently discard", mode=mode)
     first = ChatResponse(text="", tool_calls=[ToolCall("first", "echo", {})])
+    failed = False
     if boundary in {"plan_boundary", "plan_boundary_write_failure"}:
         from types import SimpleNamespace
         monkeypatch.setattr("run.conversation.main_orchestration.detect_task_plan_creation_boundary",
@@ -58,7 +59,6 @@ def test_terminal_guidance_is_reported_and_persisted_not_claimed_applied(tmp_pat
                                              awaiting_user_approval=True))
     if boundary == "plan_boundary_write_failure":
         append = CardStore.append
-        failed = False
 
         def fail_first_guidance_write(self, *args, **kwargs):
             nonlocal failed

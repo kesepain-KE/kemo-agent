@@ -5,6 +5,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import replace
+from typing import Any
 
 import httpx
 from fastapi import Depends, Header, HTTPException, Query
@@ -42,7 +43,7 @@ def _chat_keys(peer: PeerIdentity, session_id: str, external_id: str) -> tuple[s
 def public_event(raw: str) -> dict | None:
     terminal = _terminal_status(raw)
     if terminal is not None:
-        result = {"type": "done", "status": terminal.status}
+        result: dict[str, Any] = {"type": "done", "status": terminal.status}
         if terminal.status in {"failed", "cancelled", "interrupted"}:
             result.update(code=terminal.code, transient=terminal.transient, phase=terminal.phase)
         return result

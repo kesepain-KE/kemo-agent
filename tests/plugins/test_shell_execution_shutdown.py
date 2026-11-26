@@ -95,6 +95,7 @@ def test_orderly_host_exit_cleans_shell_without_a_waiter(tmp_path, handed_off):
     else:
         command, shell_type = shlex.join(args), "sh"
     records = []
+    job_id = None
     host = subprocess.Popen(
         [sys.executable, "-c", _HOST, str(tmp_path), command, shell_type, str(handed_off)],
         cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -120,6 +121,7 @@ def test_orderly_host_exit_cleans_shell_without_a_waiter(tmp_path, handed_off):
         assert not stderr, stderr
         _wait_until(lambda: all(_matches(record) is False for record in records), timeout=5)
         if handed_off:
+            assert job_id is not None
             terminal = read_background_job(tmp_path, "alice", job_id)
             assert terminal["status"] == "cancelled" and terminal["finished_at"]
     finally:

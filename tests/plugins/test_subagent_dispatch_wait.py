@@ -130,7 +130,8 @@ def test_wait_rejects_unknown_task_and_wrong_source_or_session(scheduled):
 @pytest.fixture
 def ledger_only(root):
     coordinator = TaskCoordinator(root, "alice", "web", "s1", "run-ledger-only", {})
-    task = AgentTask("agent-task-ledger-only", "general_worker", {}, **SCOPE)
+    task = AgentTask("agent-task-ledger-only", "general_worker", {},
+                     source=SCOPE["source"], session_id=SCOPE["session_id"])
     coordinator.ledger.register(task, coordinator.ownership("dispatch-call"))
     return coordinator.ledger, task.id
 

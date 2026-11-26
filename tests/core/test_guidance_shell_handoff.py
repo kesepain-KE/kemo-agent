@@ -134,8 +134,9 @@ def chat(tmp_path, monkeypatch):
             except BaseException as error:
                 errors.append(error)
 
-        worker = threading.Thread(target=collect, daemon=True)
-        worker.start()
+        thread = threading.Thread(target=collect, daemon=True)
+        worker = thread
+        thread.start()
 
         def offer(mode="interrupt"):
             receipt = service.submit_guidance(
@@ -146,8 +147,8 @@ def chat(tmp_path, monkeypatch):
             assert "job_id" not in receipt
 
         def done():
-            worker.join(STARTUP)
-            assert not worker.is_alive() and not errors
+            thread.join(STARTUP)
+            assert not thread.is_alive() and not errors
             assert events[-1].type == "done", events[-1].error
             return events[-1]
 
@@ -218,12 +219,12 @@ def test_ctrl_before_confirmation_waits_without_resubmitting(chat, monkeypatch):
     entered, confirm = threading.Event(), threading.Event()
     original = _ShellExecution.command_started
 
-    def notice(owner, payload):
+    def delay_notice(owner, payload):
         entered.set()
         assert confirm.wait(STARTUP)
         original(owner, payload)
 
-    monkeypatch.setattr(_ShellExecution, "command_started", notice)
+    monkeypatch.setattr(_ShellExecution, "command_started", delay_notice)
     try:
         run = chat.start([chat.shell("early")])
         assert chat.waiting.wait(STARTUP) and entered.wait(STARTUP)

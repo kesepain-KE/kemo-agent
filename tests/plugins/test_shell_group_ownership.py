@@ -117,7 +117,7 @@ def _records(root, roles=ROLES):
 
 def _assert_group_exited(records):
     group, = {record[2] for record in records}
-    assert group != os.getpgrp()
+    assert group != os.getpgrp()  # pyright: ignore[reportAttributeAccessIssue]
 
     def exited():
         if _state(group) is not None or any(_alive(record) for record in records):
@@ -143,13 +143,13 @@ def workspace(tmp_path):
     for path in tmp_path.glob("*.pid"):
         record = tuple(map(int, path.read_text().split()))
         try:
-            fd = os.pidfd_open(record[0])
+            fd = os.pidfd_open(record[0])  # pyright: ignore[reportAttributeAccessIssue]
         except ProcessLookupError:
             continue
         try:
             if _alive(record):
                 try:
-                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)  # pyright: ignore[reportAttributeAccessIssue]
                 except ProcessLookupError:
                     pass
         finally:
@@ -178,7 +178,8 @@ def test_multiprocessing_event_reaches_real_shell(workspace):
         records = _records(root)
         for pid, *_ in records:
             # After stripping PID and the parenthesized comm field, pgrp is index 2.
-            assert int(_state(pid)[2]) == call.process.pid
+            state = _state(pid)
+            assert state is not None and int(state[2]) == call.process.pid
         call.request_cancel()
         payload = call.receive(2)
         if payload is None:  # receive() can consume only the pending startup notice.
@@ -229,7 +230,8 @@ def test_cancel_real_shell_reaps_all_descendants(workspace, monkeypatch, mode, h
             records = _records(root, ("root",) if mode == "single" else ROLES)
             assert all(_alive(record) for record in records)
             for pid, *_ in records:
-                assert int(_state(pid)[2]) == workers[0]
+                state = _state(pid)
+                assert state is not None and int(state[2]) == workers[0]
         finally:
             cancel.set()
         with pytest.raises(tools.ToolCancelledError):
@@ -285,14 +287,17 @@ def test_real_shell_internal_timeout_returns_original_result_and_cleans_group(wo
 def test_nonisolated_cancellable_shell_creates_its_own_group(workspace):
     root, _, context = workspace
     cancel = threading.Event()
+    arguments = _command(root, "single")
     with ThreadPoolExecutor() as pool:
-        future = pool.submit(run_shell, **_command(root, "single"),
+        future = pool.submit(run_shell, command=arguments["command"], shell_type=arguments["shell_type"],
                              context={**context, "tool_timeout": 20, "cancel_event": cancel})
         try:
             records = _records(root, ("root",))
             pid, _, group = records[0]
             assert _alive(records[0])
-            assert int(_state(pid)[2]) == group != os.getpgrp()
+            state = _state(pid)
+            assert state is not None
+            assert int(state[2]) == group != os.getpgrp()  # pyright: ignore[reportAttributeAccessIssue]
         finally:
             cancel.set()
         assert future.result(8)["cancelled"] is True
@@ -340,8 +345,9 @@ def test_concurrent_process_start_cannot_hide_or_reap_abnormal_exit(workspace, m
                 worker, = blocked
                 pid = worker.pid
                 assert pid == records[0][2]
-                flags = os.WEXITED | os.WNOWAIT | os.WNOHANG
-                assert os.waitid(os.P_PID, pid, flags).si_pid == pid
+                flags = os.WEXITED | os.WNOWAIT | os.WNOHANG  # pyright: ignore[reportAttributeAccessIssue]
+                info = os.waitid(os.P_PID, pid, flags)  # pyright: ignore[reportAttributeAccessIssue]
+                assert info is not None and info.si_pid == pid
                 if method == "spawn":
                     other.start()  # CPython Process.start() calls _cleanup() in this thread.
                 multiprocessing.active_children()
@@ -350,7 +356,8 @@ def test_concurrent_process_start_cannot_hide_or_reap_abnormal_exit(workspace, m
                 assert worker.is_alive()
                 with pytest.raises(ValueError):
                     worker.close()
-                assert os.waitid(os.P_PID, pid, flags).si_pid == pid
+                info = os.waitid(os.P_PID, pid, flags)  # pyright: ignore[reportAttributeAccessIssue]
+                assert info is not None and info.si_pid == pid
                 assert other.is_alive()
             finally:
                 resume.set()
@@ -360,7 +367,9 @@ def test_concurrent_process_start_cannot_hide_or_reap_abnormal_exit(workspace, m
                 "IsolatedProcessDisconnected" if method == "spawn" else "ToolProcessExited"
             )
             _assert_group_exited(records)
-            assert other.is_alive() and _state(other.pid)[0] not in {"Z", "X"}
+            assert other.is_alive()
+            state = _state(other.pid)
+            assert state is not None and state[0] not in {"Z", "X"}
     finally:
         if other.pid is not None:
             other.terminate()
@@ -396,7 +405,8 @@ def test_setsid_failure_does_not_execute_or_signal_unowned_group(workspace, monk
 def test_natural_exit_returns_the_same_fields_as_direct_shell(workspace):
     root, tool, context = workspace
     arguments = _command(root, "natural")
-    original = run_shell(**arguments, context={**context, "tool_timeout": 15})
+    original = run_shell(command=arguments["command"], shell_type=arguments["shell_type"],
+                         context={**context, "tool_timeout": 15})
     assert original["ok"] and original["exit_code"] == 0
     assert original["output"] == "STDOUT:\n正常完成\n\nSTDERR:\nstderr 保留"
     assert tools.execute_tool(tool, arguments, context=context, timeout=15) == original
@@ -406,7 +416,8 @@ def test_natural_exit_returns_the_same_fields_as_direct_shell(workspace):
 def test_isolated_shell_forwards_stdin_unchanged(workspace):
     root, tool, context = workspace
     arguments = {**_command(root, "stdin"), "stdin": "标准输入\n第二行\n"}
-    original = run_shell(**arguments, context={**context, "tool_timeout": 15})
+    original = run_shell(command=arguments["command"], shell_type=arguments["shell_type"],
+                         stdin=arguments["stdin"], context={**context, "tool_timeout": 15})
     assert original["output"] == "标准输入\n第二行"
     assert tools.execute_tool(tool, arguments, context=context, timeout=15) == original
 

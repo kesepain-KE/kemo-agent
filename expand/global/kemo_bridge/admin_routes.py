@@ -1,6 +1,7 @@
 """Dispatch management operations from the authorized host workspace, not the Bridge listener."""
 from __future__ import annotations
 
+from typing import cast
 from uuid import UUID
 
 import start_expand
@@ -41,10 +42,10 @@ def dispatch(operation: str, data: dict) -> dict:
     if operation == "replace_instance_uuid":
         return {"instance_uuid": peers.replace_instance_uuid()}
     if operation == "set_exposed_user":
-        peers.set_exposed_user(data.get("bound_user"))
+        peers.set_exposed_user(cast(str, data.get("bound_user")))
         return {"ok": True}
     if operation == "create_device":
-        return peers.create("device", data.get("bound_user"), label=data.get("label"))
+        return peers.create("device", cast(str, data.get("bound_user")), label=data.get("label"))
     if operation == "create_external":
         if data.keys() & {"channel", "bound_user"}:
             raise BridgeError(403, "peer_identity_immutable")

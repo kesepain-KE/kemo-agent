@@ -877,7 +877,7 @@ def test_panel_reads_under_real_host_lock_while_remote_chat_is_still_running(bri
     posts = []
 
     class Peer(BaseHTTPRequestHandler):
-        def log_message(self, *args):
+        def log_message(self, format, *args):
             pass
 
         def reply(self, run_id, data):

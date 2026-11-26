@@ -8,6 +8,8 @@ from conftest import peer_headers
 
 
 def test_peer_contract_and_database_identity_guards(bridge):
+    from peer_store import BridgeError
+
     module, _ = bridge
     store = module.PEERS
     device = store.create("device", "alice", label="phone")
@@ -17,7 +19,7 @@ def test_peer_contract_and_database_identity_guards(bridge):
     assert "secret" not in store.get(agent["peer_id"])
     assert all("secret" not in peer and "secret_hash" not in peer for peer in store.list())
     for field, rejected in (("channel", "device"), ("bound_user", "alice")):
-        with pytest.raises(RuntimeError) as caught:
+        with pytest.raises(BridgeError) as caught:
             store.update(agent["peer_id"], {field: rejected})
         assert caught.value.status == 403
         assert caught.value.code == "peer_identity_immutable"

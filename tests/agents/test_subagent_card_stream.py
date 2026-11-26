@@ -139,11 +139,15 @@ def test_replayed_tool_rounds_keep_their_valid_reasoning(workspace, monkeypatch)
     assert len(provider.requests) == 9
     for i, request in enumerate(provider.requests):
         reasoning = [item for item in request.input if isinstance(item, ReasoningItem)]
-        assert [item.provider_state.data for item in reasoning] == [f"opaque-step-{j}" for j in range(i)]
+        states = []
         for item in reasoning:
+            state, summary = item.provider_state, item.summary
+            assert state is not None and summary is not None
+            states.append(state.data)
             following = request.input[request.input.index(item) + 1]
             assert isinstance(following, ToolCallItem)
-            assert following.arguments["value"] == item.summary.removeprefix("private-step-")
+            assert following.arguments["value"] == summary.removeprefix("private-step-")
+        assert states == [f"opaque-step-{j}" for j in range(i)]
     assert [sum("msg_budget_" in item.id for item in request.input)
             for request in provider.requests] == [1, 0, 0, 0, 0, 0, 0, 1, 0]
     raw = agent_store(root, "alice", task_id).raw_page(SOURCE, task_id)

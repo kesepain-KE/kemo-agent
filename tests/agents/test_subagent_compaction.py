@@ -9,8 +9,9 @@ import threading
 import pytest
 
 from provider.adapters.compat import kemo_request_to_chat
+from provider.protocol.enums import ErrorCode, ResponseStatus
 from provider.protocol.models import (
-    KemoResponse, MessageItem, ModelCapabilities, ProviderState, ReasoningItem, ToolCallItem,
+    Item, KemoResponse, MessageItem, ModelCapabilities, ProviderState, ReasoningItem, ToolCallItem,
     ToolResultItem, UnifiedError, Usage,
 )
 from provider.schema import ProviderError
@@ -93,9 +94,14 @@ class SmallProvider:
             raise value
         if isinstance(value, KemoResponse):
             return value
-        output = value if isinstance(value, list) else [MessageItem.text(
-            "assistant", json.dumps(value) if isinstance(value, dict) else value)]
-        return KemoResponse(request_id=request.request_id, model=request.model, status="completed",
+        output: list[Item]
+        if isinstance(value, list):
+            output = value
+        else:
+            text = json.dumps(value) if isinstance(value, dict) else value
+            assert isinstance(text, str)
+            output = [MessageItem.text("assistant", text)]
+        return KemoResponse(request_id=request.request_id, model=request.model, status=ResponseStatus.COMPLETED,
                             output=output, usage=Usage(input_tokens=tokens(request),
                                                        output_tokens=17 if summary else 3))
 
@@ -192,7 +198,12 @@ def test_compaction_retires_reasoning_with_its_tool_round(scenario):
                if isinstance(item, ToolCallItem)]
         reasoning = [item for item in request.input if isinstance(item, ReasoningItem)]
         assert [item.summary for item in reasoning] == [f"private-reasoning-{i}" for i in ids]
-        assert [item.provider_state.data for item in reasoning] == [f"opaque-step-{i}" for i in ids]
+        states = []
+        for item in reasoning:
+            state = item.provider_state
+            assert state is not None
+            states.append(state.data)
+        assert states == [f"opaque-step-{i}" for i in ids]
         messages = kemo_request_to_chat(request, deepseek=True).messages
         assert [msg["reasoning_content"] for msg in messages if msg.get("tool_calls")] == [
             f"private-reasoning-{i}" for i in ids
@@ -251,8 +262,8 @@ def test_mandatory_compaction_preserves_network_and_cancellation_errors(scenario
             return SUMMARY
         if failure == "network":
             raise ConnectionError("fixture network unavailable")
-        return KemoResponse(request_id=request.request_id, status="failed", model=request.model,
-                            error=UnifiedError(code="PROVIDER_UNAVAILABLE", type="network_error",
+        return KemoResponse(request_id=request.request_id, status=ResponseStatus.FAILED, model=request.model,
+                            error=UnifiedError(code=ErrorCode.PROVIDER_UNAVAILABLE, type="network_error",
                                                message="fixture network unavailable", retryable=True))
 
     provider = SmallProvider(store, [round_output(1, 3100)], summarize=summarize)
@@ -275,8 +286,8 @@ def test_only_explicit_provider_context_overflow_compacts_and_retries(scenario, 
 
     def reject(request):
         if failure == "overflow_terminal":
-            return KemoResponse(request_id=request.request_id, status="failed", model=request.model,
-                                error=UnifiedError(code="PROVIDER_BAD_RESPONSE", type="context_length_exceeded",
+            return KemoResponse(request_id=request.request_id, status=ResponseStatus.FAILED, model=request.model,
+                                error=UnifiedError(code=ErrorCode.PROVIDER_BAD_RESPONSE, type="context_length_exceeded",
                                                    message="Maximum context length exceeded", provider_status=400))
         status = 413 if failure == "http_413" else 400
         message = "Malformed request" if failure == "unrelated_400" else "Maximum context length exceeded"
@@ -311,7 +322,7 @@ def test_compaction_does_not_send_or_persist_native_media_in_its_summary(scenari
     provider = SmallProvider(store, [[round_output(1, 2900)[0], attach], round_output(2, 20), OUTPUT])
 
     assert run_child(scenario, provider).data == OUTPUT
-    assert provider.summaries and provider.after[0].view_epoch == 1
+    assert provider.summaries and provider.after is not None and provider.after[0].view_epoch == 1
     assert [len(native_blocks(request)) for request in provider.business] == [0, 1, 0]
     encoded = base64.b64encode(PNG).decode("ascii")
     assert all(not native_blocks(request) and encoded not in request.model_dump_json()

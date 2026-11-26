@@ -5,9 +5,10 @@ import json
 import logging
 import os
 import traceback
+from io import TextIOWrapper
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, cast
 
 
 MAX_BYTES = 5 * 1024 * 1024
@@ -15,9 +16,11 @@ BACKUP_COUNT = 3
 
 
 class _ForensicsHandler(RotatingFileHandler):
-    def _open(self) -> TextIO:
-        return open(self.baseFilename, self.mode, encoding=self.encoding,
-                    opener=lambda path, flags: os.open(path, flags, 0o600))
+    def _open(self) -> TextIOWrapper:
+        return cast(TextIOWrapper, open(
+            self.baseFilename, self.mode, encoding=self.encoding,
+            opener=lambda path, flags: os.open(path, flags, 0o600),
+        ))
 
     def handleError(self, record: logging.LogRecord) -> None:
         # The default handler dumps failed writes to stderr, which is bridge.log.

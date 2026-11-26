@@ -167,7 +167,7 @@ def test_heartbeat_reaches_main_provider_and_acknowledges_only_the_frozen_sequen
         record = ledger.get(task_id, **SCOPE)
         assert record["handled"] and not record["execution_live"] and "_heartbeat" not in record
         assert len(delivered) == 1 and delivered[0]["result"] == OUTPUT
-        cards = CardStore(root, "alice").raw_page(**SCOPE)
+        cards = CardStore(root, "alice").raw_page(SCOPE["source"], SCOPE["session_id"])
         assert sum((card.event_key or "").startswith(f"subagent-result:{task_id}:") for card in cards) == 1
         assert all("heartbeat_seq" not in card.raw_payload_json for card in cards)
     finally:

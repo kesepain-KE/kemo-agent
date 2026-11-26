@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import Path as FastAPIPath
 
 if TYPE_CHECKING:
+    from bridge_auth import BranchRoutes
     from app import (
         APP_SOURCE as APP_SOURCE,
         ChatRequest as ChatRequest,
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     )
 
 
-def register_conversation_routes(routes: Any, context: dict[str, Any]) -> None:
+def register_conversation_routes(routes: BranchRoutes, context: dict[str, Any]) -> None:
     globals().update(context)
 
     async def stream(peer, run_id, session_id, *, after: int, endpoint: str):
@@ -51,7 +52,7 @@ def register_conversation_routes(routes: Any, context: dict[str, Any]) -> None:
                 await run_in_threadpool(PEERS.audit, "message_sent", peer, endpoint=endpoint)
                 logged = True
 
-    @app.get("/internal/health")
+    @routes.app.get("/internal/health")
     async def health() -> dict[str, Any]:
         upstream: dict[str, Any] | None = None
         try:

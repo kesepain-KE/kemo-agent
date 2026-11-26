@@ -3,6 +3,7 @@ import json
 import tracemalloc
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -317,7 +318,7 @@ def test_anchor_reads_closed_archive_and_empty_text_without_reopening(root):
     anchor = history.cards[-1]
     close_session(root, "alice", "web", "s1")
     closed = history.store.session("web", "s1")
-    assert closed["lifecycle"] == "closed"
+    assert closed is not None and closed["lifecycle"] == "closed"
     result = search(root, action="read", anchor_card_id=anchor.card_id)
     message = result["messages"][result["anchor"]["index"]]
     assert (message["card_id"], message["content"], message["partial"]) == (anchor.card_id, "", False)
@@ -441,7 +442,7 @@ def test_tool_preview_interleaves_only_the_original_text_window(root):
     opts = {"action": "read", "anchor_card_id": anchor.card_id}
     plain = search(root, **opts)
     assert search(root, **opts, include_tools=False, max_tool_chars=0) == plain
-    page = run(**opts, include_tools=True, max_tool_chars=200,
+    page = run(action="read", anchor_card_id=anchor.card_id, include_tools=True, max_tool_chars=200,
                context={"root": str(root), "user": "alice", "source": "message"})
     messages = page["messages"]
     assert [row["card_id"] for row in messages] == [
@@ -544,6 +545,7 @@ def test_30mb_tool_preview_keeps_raw_payload_out_of_python_and_never_writes_arti
     store.append("web", "s1", "mixed", "agent_text", {"text": "after"})
     opts = {"action": "read", "anchor_card_id": anchor.card_id, "include_tools": True}
 
+    page = None
     for cap in (2000, 0):
         tracemalloc.start()
         start = perf_counter()
@@ -560,6 +562,7 @@ def test_30mb_tool_preview_keeps_raw_payload_out_of_python_and_never_writes_arti
         assert peak < 8 * 1024 * 1024  # full RAW returned by sqlite3 alone would allocate ~30 MiB
         assert not (root / "users/alice/download/tool_results").exists()
 
+    assert page is not None
     tool = page["messages"][1]
     assert (tool["raw_card_bytes"], len(tool["result_preview"]), tool["result_truncated"]) == (size, 2000, True)
     assert tool["result_preview"].startswith('{"body":"xxx')
@@ -569,7 +572,10 @@ def test_tool_options_require_anchored_read_including_explicit_defaults(root, hi
     archive_id = search(root, action="list")["archives"][0]["archive_id"]
     first = search(root, action="read", archive_id=archive_id, limit=1)
     assert first["next_cursor"]
-    for opts in ({"include_tools": False}, {"include_tools": True}, {"max_tool_chars": 2000}, {"max_tool_chars": 0}):
+    options: tuple[dict[str, Any], ...] = (
+        {"include_tools": False}, {"include_tools": True}, {"max_tool_chars": 2000}, {"max_tool_chars": 0},
+    )
+    for opts in options:
         with pytest.raises(ValueError, match="仅适用于带 anchor_card_id 的 read"):
             search(root, action="read", archive_id=archive_id, cursor=first["next_cursor"], **opts)
         with pytest.raises(ValueError, match="仅适用于带 anchor_card_id 的 read"):

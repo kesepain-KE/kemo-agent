@@ -15,7 +15,7 @@ import pytest
 
 from plugins.shell import tool as shell_plugin
 from plugins.shell.tool import run as run_shell
-from provider.protocol.models import ToolResultItem
+from provider.protocol.models import JsonContent, ToolResultItem
 from run.cards import CardConflictError, CardStore, IntegrationStore, protocol_items
 from run.infra.process_execution import IsolatedProcessCall
 from run.infra.process_identity import process_identity_matches, process_snapshot
@@ -96,7 +96,9 @@ def shell(tmp_path):
         owners.append(owner)
         _wait_until(lambda: owner._command_started is not None)
         with owner._changed:
-            interpreter = owner._command_started["pid"]
+            started = owner._command_started
+            assert started is not None
+            interpreter = started["pid"]
         path = tmp_path / "pids.json"
         _wait_until(path.is_file)
         pids = json.loads(path.read_bytes())
@@ -342,7 +344,8 @@ def test_reconcile_never_owns_the_process_and_receipt_releases_barrier(shell, mo
     snapshot = case.integration.store.snapshot("web", "handoff")
     result, = [item for item in protocol_items(snapshot.cards, native_items=True)
                if isinstance(item, ToolResultItem)]
-    assert result.is_error is False and result.content[0].data == receipt
+    content = result.content[0]
+    assert result.is_error is False and isinstance(content, JsonContent) and content.data == receipt
     with pytest.raises(CardConflictError, match="拒绝完成整合"):
         case.integration.finish("completed")
     case.integration.request_finished(accepted_seq=card.seq)
