@@ -24,7 +24,6 @@ class SubagentInvocationError(ValueError):
 @dataclass(frozen=True, slots=True)
 class PreparedSubagentInvocation:
     payload: dict[str, Any]
-    synchronous_only: bool = False
 
 
 def _copy_input(input_data: dict[str, Any] | None) -> dict[str, Any]:
@@ -48,7 +47,6 @@ def _prepare_task_plan(
             input_data=payload,
             config=config,
         ),
-        synchronous_only=True,
     )
 
 
@@ -145,7 +143,7 @@ def persist_main_agent_result(
     session_id: str,
     config: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Run built-in post-processing required by a synchronous tool call."""
+    """Run built-in post-processing before publishing a terminal result."""
 
     if agent != "task_plan":
         return None
@@ -158,3 +156,16 @@ def persist_main_agent_result(
         session_id=session_id,
         config=config,
     )
+
+
+def main_agent_result_handler(*, root, user, agent, payload, source, session_id, config):
+    if agent != "task_plan":
+        return None
+
+    def persist(result):
+        result.metadata["plan"] = persist_main_agent_result(
+            root=root, user=user, agent=agent, payload=payload, result_data=result.data,
+            source=source, session_id=session_id, config=config,
+        )
+
+    return persist

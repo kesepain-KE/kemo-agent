@@ -1,4 +1,4 @@
-"""Private, bounded JSON checkpoints and cooperative timeout state.
+"""CardStream safe points, legacy checkpoint import and cooperative timeout state.
 
 No pickle, model-supplied file names, public metadata or Provider system prompts.
 Only builtin LLM business agents are resumable, not arbitrary Python executors.
@@ -9,22 +9,25 @@ import copy
 import hashlib
 import json
 import re
+import sqlite3
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter
 from provider.protocol.diagnostics import redact_diagnostic_text
-from provider.protocol.enums import MessageRole
 from provider.protocol.models import (
-    Item, JsonContent, MessageItem, ReasoningItem, ToolCallItem, ToolResultItem,
+    Item, MessageItem, ReasoningItem, ToolCallItem, ToolResultItem,
 )
 from run.config import user_dir, _contains_reparse_point
 
+if TYPE_CHECKING:
+    from run.agents.card_stream import AgentCardStream
+
 MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024
 MAX_RESUME_ROUNDS = 32
-_TASK = re.compile(r"agent-task-[a-f0-9]{32}")
+TASK_ID = re.compile(r"agent-task-[a-f0-9]{32}")
 _SECRETS = re.compile(r"(?:^|_)(?:api_key|api_token|password|passwd|secret|credential|credentials|authorization|cookie|cookies|private_key|access_token|refresh_token|session_token|auth_token|token)$")
 
 
@@ -73,15 +76,15 @@ def definition_digest(definition) -> str:
     return digest.hexdigest()
 
 
-def _private_data(value):
+def private_data(value):
     if isinstance(value, dict):
         result = {}
         for key, child in value.items():
             normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower().replace("-", "_")
-            result[key] = "[redacted]" if _SECRETS.search(normalized) else _private_data(child)
+            result[key] = "[redacted]" if _SECRETS.search(normalized) else private_data(child)
         return result
     if isinstance(value, list):
-        return [_private_data(v) for v in value]
+        return [private_data(v) for v in value]
     if isinstance(value, str):
         if value.lstrip().startswith(("{", "[")):
             try:
@@ -90,14 +93,15 @@ def _private_data(value):
                 pass
             else:
                 if isinstance(parsed, (dict, list)):
-                    return json.dumps(_private_data(parsed), ensure_ascii=False)
+                    safe = private_data(parsed)
+                    return json.dumps(safe, ensure_ascii=False) if safe != parsed else value
         return redact_diagnostic_text(value)
     return value
 
 
 class CheckpointStore:
     def __init__(self, root, user, task_id):
-        if not _TASK.fullmatch(task_id):
+        if not TASK_ID.fullmatch(task_id):
             raise ValueError("续跑任务 ID 无效")
         self.root = Path(root)
         self.base = user_dir(user, self.root)
@@ -113,7 +117,7 @@ class CheckpointStore:
 
     def write(self, payload):
         self.checked()
-        raw = json.dumps(_private_data(payload), ensure_ascii=False).encode("utf-8")
+        raw = json.dumps(private_data(payload), ensure_ascii=False).encode("utf-8")
         if len(raw) > MAX_CHECKPOINT_BYTES:
             raise ValueError("续跑快照超过安全上限")
         temporary = self.directory / f"{self.task_id}.{uuid.uuid4().hex}.tmp"
@@ -138,26 +142,26 @@ class CheckpointStore:
         return data
 
 
-def restore_items(data):
-    items = TypeAdapter(list[Item]).validate_python(data["items"])
-    items = [item for item in items if not item.id.startswith("msg_wrap_")]
-    return pair_pending(items)
+def load_resume_state(root, user, task_id, *, source, session_id, definition, run_count, version=None):
+    from run.agents.card_stream import agent_store, read_checkpoint
+
+    store = agent_store(root, user, task_id)
+    if version == 2 or store.path.exists():
+        data = read_checkpoint(store, task_id, run_count)
+        if (data.get("source") != source or data.get("session_id") != session_id
+                or data.get("definition_digest") != definition_digest(definition)
+                or not isinstance(data.get("input_data"), dict)):
+            raise ValueError("子代理续跑卡片安全点身份或定义不匹配")
+        return data
+    return CheckpointStore(root, user, task_id).load(
+        source=source, session_id=session_id, definition=definition, run_count=run_count,
+    )
 
 
-def pair_pending(items):
-    # A response can contain multiple calls. Never replay a call whose result
-    # is present; mark unstarted calls explicitly rather than emitting orphans.
-    paired = {item.call_id for item in items if isinstance(item, ToolResultItem)}
-    for item in list(items):
-        if isinstance(item, ToolCallItem) and item.call_id not in paired:
-            items.append(ToolResultItem(
-                id=f"result_{uuid.uuid4().hex}", call_id=item.call_id, name=item.name,
-                is_error=True, content=[JsonContent(data={
-                    "ok": False, "not_executed": True,
-                    "error": {"message": "上一轮在执行此调用前停止。未执行此操作；请根据已有结果重新决定。"},
-                })],
-            ))
-    return items
+def decode_legacy_items(data):
+    return [item for item in TypeAdapter(list[Item]).validate_python(data["items"])
+            if not isinstance(item, ReasoningItem)
+            and not item.id.startswith(("msg_wrap_", "msg_budget_", "msg_media_"))]
 
 
 class ContinuationState:
@@ -172,62 +176,51 @@ class ContinuationState:
         self.initial = resume_state
         self.enabled = (definition.executor == "builtin:llm"
                         and definition.execution != "background_serial"
-                        and bool(source and session_id) and bool(_TASK.fullmatch(task_id)))
-        self.store = CheckpointStore(runner.root, runner.user, task_id) if self.enabled else None
+                        and bool(source and session_id) and bool(TASK_ID.fullmatch(task_id)))
+        self.stream: AgentCardStream | None = None
         self.payload = {
-            "version": 1, "available": False, "task_id": task_id,
+            "version": 2, "task_id": task_id,
             "source": source, "session_id": session_id, "agent": definition.name,
             "definition_digest": definition_digest(definition),
             "input_data": copy.deepcopy(input_data), "run_count": run_count,
-            "items": [], "usage": {}, "response_ids": [], "conclusion": None,
+            "usage": {}, "response_ids": [], "conclusion": None,
         }
         if resume_state is not None:
             self.payload["conclusion"] = copy.deepcopy(resume_state.get("conclusion"))
         self.available = False
         self.error = ""
-        if self.enabled:
-            seed = restore_items(resume_state) if resume_state is not None else [
-                MessageItem.text(
-                    MessageRole.USER, json.dumps(input_data, ensure_ascii=False),
-                    item_id=f"msg_{uuid.uuid4().hex}",
-                )
-            ]
-            self.capture(seed, (resume_state or {}).get("usage", {}),
-                         (resume_state or {}).get("response_ids", []))
 
-    def capture(self, items, usage, response_ids, *, conclusion=None):
+    def capture(self, usage, response_ids, *, conclusion=None):
         if not self.enabled:
             return
         with self.lock:
             self.payload.update(
-                items=[i.model_dump(mode="json") for i in items
-                       if getattr(i, "type", "") != "reasoning"],
                 usage=copy.deepcopy(usage), response_ids=list(response_ids)[-160:],
             )
             if conclusion is not None:
                 self.payload["conclusion"] = copy.deepcopy(conclusion)
-            self.payload["available"] = True
             self._persist_locked()
 
     def _persist_locked(self):
+        if self.stream is None:
+            return
         try:
-            assert self.store is not None
-            self.store.write(self.payload)
-            self.available, self.error = True, ""
-        except (OSError, ValueError, RecursionError) as exc:
+            self.available = self.stream.checkpoint(self.payload)
+            self.error = ""
+        except (OSError, sqlite3.Error, ValueError, RecursionError) as exc:
             self.available, self.error = False, type(exc).__name__
-            # Revoke any older safe point, which might omit newer side effects.
-            try:
-                assert self.store is not None
-                self.store.write({**self.payload, "items": [], "available": False})
-            except (OSError, ValueError, RecursionError):
-                pass
+
+    def finish(self, stream: AgentCardStream, status: str):
+        with self.lock:
+            self.available = False
+            self.available = stream.finish(status, checkpoint=self.payload if self.enabled else None)
+            self.error = ""
 
     def partial(self, agent, model=""):
         from run.agents.contracts import AgentRunResult
         from run.agents.conclusions import conclusion_data
         with self.lock:
-            if self.enabled and self.available:
+            if self.enabled:
                 self._persist_locked()
             data = conclusion_data(self.payload.get("conclusion"))
             if not isinstance(data, dict):

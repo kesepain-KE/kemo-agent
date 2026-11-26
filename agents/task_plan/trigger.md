@@ -5,7 +5,7 @@
 - **职责**: 根据上下文+目标+工具/技能注入，创建或编辑结构化任务计划草案
 - **模型**: reasoning
 - **工具**: 无；仅使用调用方注入的技能全文
-- **输入**: `input.action=create/edit` 必填；创建时提供 `goal` 与相关 `context`，默认同步生成并持久化
+- **输入**: `input.action=create/edit` 必填；创建时提供 `goal` 与相关 `context`，提交即回执，由框架生成并持久化
 
 # 操作信息
 
@@ -46,7 +46,7 @@
 | `edit_request` | 编辑模式时的修改要求（可选） |
 | `completed_steps` | 编辑模式下不可修改的已完成步骤 ID 与标题 |
 
-通过 `subagent_dispatch` 调用时，框架会忽略调用方提交的同名权限字段，并根据当前用户配置强制注入真实的 `available_tools`、技能、`max_steps` 与 `auto_accept`。主智能体只需提供任务数据，不得手工伪造工具清单。任务计划必须同步调用，以便输出立即完成校验和持久化。
+通过 `subagent_dispatch` 调用时，框架会忽略调用方提交的同名权限字段，并根据当前用户配置强制注入真实的 `available_tools`、技能、`max_steps` 与 `auto_accept`。主智能体只需提供任务数据，不得手工伪造工具清单。以真实落库回执进入审批；提交回执不放行后续业务调用。
 
 ## 上下文隔离
 

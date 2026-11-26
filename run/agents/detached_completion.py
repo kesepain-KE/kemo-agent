@@ -42,6 +42,8 @@ def watch_detached_completion(scheduler, task, future: Any, continuation=None):
                 )
                 if user_cancel_requested:
                     detail["user_cancel_requested"] = True
+                if task.status == "cancelled":
+                    detail["stop_reason"] = "cancelled"
                 task.error = detail
                 if continuation is not None and task.status == "timed_out":
                     task.result = continuation.partial(task.agent)
@@ -59,7 +61,8 @@ def watch_detached_completion(scheduler, task, future: Any, continuation=None):
                 task.result = result
                 task.resumable = False
                 task.status = "cancelled"
-                task.error = {**(task.error or {}), "process_terminated": True}
+                task.error = {**(task.error or {}), "process_terminated": True,
+                              "message": "本地执行已退出", "stop_reason": "cancelled"}
                 task.finished_at = datetime.now(timezone.utc).isoformat()
                 scheduler._emit(task, "cancelled")
                 return

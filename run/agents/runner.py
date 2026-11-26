@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +28,7 @@ from agents._runtime.resources import (
     build_agent_tool_registry,
 )
 from run.agents import AgentDefinition, AgentRegistry, discover_agents
+from run.agents.card_stream import AgentCardStream
 from run.config import load_config
 from run.tools import (
     ExecutionCapacityError,
@@ -37,7 +39,7 @@ from run.tools import (
 )
 from run.agents.model_loop import run_model as _run_model_loop
 from run.agents.continuation import ContinuationState, definition_digest
-from run.agents.budgets import SegmentBudget, execution_error_detail
+from run.agents.budgets import SegmentBudget, execution_error_detail, execution_timeout
 from run.retry.loop import RetryLedger, RunAttemptContext, run_attempts
 from run.retry import HOST_CONTROL_EXCEPTIONS
 from run.tools import ToolRegistry
@@ -180,20 +182,34 @@ def _execute_agent(
         owned = _owned_serial_execution_keys()
         if serial_key is not None:
             owned.add(serial_key)
+        status = "failed"
         try:
             priority = 1 if context.definition.capabilities.exposure != "tool" else 2
             with provider_priority(priority), provider_request_scope(
                 context.runner.root, context.runner.user, context.source, context.session_id,
             ):
-                return _run_agent_with_retries(
+                result = _run_agent_with_retries(
                     function,
                     context,
                     input_data,
                     max_attempts=max_attempts,
                 )
+                status = "completed"
+                return result
         finally:
-            if serial_key is not None:
-                owned.discard(serial_key)
+            try:
+                stream = context.card_stream
+                if stream is not None and stream.opened:
+                    state = context.continuation
+                    if context.cancel_event.is_set():
+                        status = "cancelled"
+                    elif state is not None and state.wrap_up.is_set():
+                        status = "limited"
+                    if state is not None:
+                        state.finish(stream, status)
+            finally:
+                if serial_key is not None:
+                    owned.discard(serial_key)
 
     if serial_lock is not None:
         with serial_lock:
@@ -247,18 +263,23 @@ class AgentExecutionContext:
     retry_state: _AgentRetryState | None = field(default=None, repr=False)
     retry_ledger: RetryLedger | None = field(default=None, repr=False)
     continuation: ContinuationState | None = field(default=None, repr=False)
+    card_stream: AgentCardStream | None = field(default=None, repr=False)
     budget: Any = field(default=None, repr=False)
     input_token_limit: int | None = None
     compression_budget: Any = None
+    managed: bool = False
 
     def run_model(self, input_data: dict[str, Any]) -> AgentRunResult:
-        return self.runner._run_model(
-            self,
-            input_data,
-            retry_state=self.retry_state,
-            attempt=self.attempt,
-            max_attempts=self.max_attempts,
-        )
+        if self.cancel_event.is_set():
+            raise AgentCancelledError(f"子代理 {self.definition.name} 已取消")
+        with (self.budget.model_scope() if self.managed and self.budget.timeout is not None else nullcontext()):
+            return self.runner._run_model(
+                self,
+                input_data,
+                retry_state=self.retry_state,
+                attempt=self.attempt,
+                max_attempts=self.max_attempts,
+            )
 
 
 def _load_executor(
@@ -413,6 +434,7 @@ class AgentRunner:
         max_tool_calls: int | None = None,
         input_token_limit: int | None = None,
         compression_budget: Any = None,
+        managed: bool = False,
     ) -> AgentRunResult:
         definition = self.refresh_registry().get(name)
         if resume_state is not None and resume_state.get("definition_digest") != definition_digest(definition):
@@ -436,19 +458,11 @@ class AgentRunner:
                 expected_type=exc.expected_type, reason=exc.reason,
             ) from exc
         caller_cancel_event = cancel_event
-        stopped = threading.Event()
         if caller_cancel_event is not None and caller_cancel_event.is_set():
             raise AgentCancelledError(f"子代理 {name} 已取消")
-        if isinstance(timeout, bool):
-            raise AgentRunError("子代理 timeout 必须是正数")
-        try:
-            effective_timeout = float(
-                timeout if timeout is not None else definition.timeout
-            )
-        except (TypeError, ValueError) as exc:
-            raise AgentRunError("子代理 timeout 必须是正数") from exc
-        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
-            raise AgentRunError("子代理 timeout 必须是正数")
+        managed = bool(managed and source and session_id and task_id and caller_cancel_event is not None)
+        stopped = caller_cancel_event if managed and caller_cancel_event is not None else threading.Event()
+        effective_timeout = execution_timeout(definition, timeout, managed=managed)
         raw_survival = timeout_survival_seconds
         if raw_survival is None:
             raw_survival = (self.config.get("agent_runtime") or {}).get(
@@ -492,6 +506,7 @@ class AgentRunner:
             budget=SegmentBudget(definition, max_tool_calls, effective_timeout, resume_state),
             input_token_limit=input_token_limit,
             compression_budget=compression_budget,
+            managed=managed,
         )
         function = _load_executor(definition)
         _event(
@@ -520,6 +535,7 @@ class AgentRunner:
             else _serial_execution_lock(serial_key)
         )
         try:
+            context.budget.start_deadline()
             future = executor.submit(
                 _execute_agent,
                 function,
@@ -534,26 +550,30 @@ class AgentRunner:
             release_execution(execution_id)
             executor.shutdown(wait=False, cancel_futures=True)
             raise
-        deadline = time.monotonic() + effective_timeout
+
+        def cancel_execution():
+            stopped.set()
+            future.cancel()
+            cleanup_deadline = time.monotonic() + _AGENT_CANCEL_CLEANUP_GRACE
+            while not future.done() and time.monotonic() < cleanup_deadline:
+                time.sleep(0.05)
+            process_terminated = not abandon_execution(execution_id)
+            return AgentCancelledError(
+                (f"子代理 {name} 执行已退出" if process_terminated
+                 else f"子代理 {name} 已请求中断，底层执行仍在运行"),
+                process_terminated=process_terminated,
+                completion_future=(None if process_terminated else future),
+            )
+
         try:
             while True:
                 if caller_cancel_event is not None and caller_cancel_event.is_set():
-                    stopped.set()
-                    future.cancel()
-                    cleanup_deadline = time.monotonic() + _AGENT_CANCEL_CLEANUP_GRACE
-                    while not future.done() and time.monotonic() < cleanup_deadline:
-                        time.sleep(0.05)
-                    process_terminated = not abandon_execution(execution_id)
-                    raise AgentCancelledError(
-                        f"子代理 {name} 已取消",
-                        process_terminated=process_terminated,
-                        completion_future=(None if process_terminated else future),
-                    )
+                    raise cancel_execution()
                 if future.done():
                     result = future.result()
                     break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = context.budget.time_left()
+                if remaining is not None and remaining <= 0:
                     continuation = context.continuation
                     if continuation is not None and continuation.enabled:
                         continuation.timed_out.set()
@@ -565,22 +585,7 @@ class AgentRunner:
                                 caller_cancel_event is not None
                                 and caller_cancel_event.is_set()
                             ):
-                                stopped.set()
-                                future.cancel()
-                                cleanup_deadline = (
-                                    time.monotonic() + _AGENT_CANCEL_CLEANUP_GRACE
-                                )
-                                while (
-                                    not future.done()
-                                    and time.monotonic() < cleanup_deadline
-                                ):
-                                    time.sleep(0.05)
-                                process_terminated = not abandon_execution(execution_id)
-                                raise AgentCancelledError(
-                                    f"子代理 {name} 已取消",
-                                    process_terminated=process_terminated,
-                                    completion_future=(None if process_terminated else future),
-                                )
+                                raise cancel_execution()
                             survival_remaining = survival_deadline - time.monotonic()
                             if survival_remaining <= 0:
                                 break
@@ -662,7 +667,7 @@ class AgentRunner:
                 if future.done():
                     result = future.result()
                     break
-                stopped.wait(min(0.05, remaining))
+                stopped.wait(0.05 if remaining is None else min(0.05, remaining))
             if not isinstance(result, AgentRunResult):
                 raise AgentRunError(f"子代理 {name} executor 必须返回 AgentRunResult")
             _event(

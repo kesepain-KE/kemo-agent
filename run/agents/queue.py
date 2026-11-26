@@ -25,7 +25,7 @@ from run.agents.runner import (
 from run.agents.task_ledger import register_owned_task, task_progress
 from run.agents.queue_models import AgentTask, TaskStatus
 from run.agents.ready_queue import ReadyTaskQueue
-from run.agents.budgets import effective_limit, SegmentBudget
+from run.agents.budgets import effective_limit, SegmentBudget, execution_timeout
 from run.agents.contracts import (
     AgentProviderError,
     AgentToolLimitError,
@@ -36,7 +36,7 @@ from run.retry import HOST_CONTROL_EXCEPTIONS
 
 
 
-_TERMINAL = {"completed", "failed", "cancelled", "timed_out", "timed_out_running", "tool_limit"}
+SCHEDULER_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out", "timed_out_running", "tool_limit"}
 _RETAINABLE_TERMINAL = {"completed", "failed", "cancelled", "timed_out", "tool_limit"}
 _WORKER_IDLE_SECONDS = 300.0
 _MAX_RETAINED_TERMINAL_TASKS = 256
@@ -277,7 +277,12 @@ class AgentScheduler:
         normalized_session_id = str(session_id or "").strip()
         if bool(normalized_source) != bool(normalized_session_id):
             raise AgentQueueError("子代理 source 和 session_id 必须同时提供或同时省略")
-        if timeout_survival_seconds is None:
+        managed = ownership is not None
+        effective_timeout = (execution_timeout(definition, timeout, managed=managed)
+                             if isinstance(self.runner, AgentRunner) else timeout)
+        if managed and effective_timeout is None:
+            raw_survival = 0.0
+        elif timeout_survival_seconds is None:
             raw_survival = (self.runner.config.get("agent_runtime") or {}).get(
                 "timeout_survival_seconds", 0.0
             )
@@ -303,7 +308,7 @@ class AgentScheduler:
                 input_data=copy.deepcopy(input_data),
                 source=normalized_source,
                 session_id=normalized_session_id,
-                timeout=timeout,
+                timeout=effective_timeout,
                 survival_seconds=survival_seconds,
                 model_override=model_override,
                 max_tokens=max_tokens,
@@ -317,7 +322,7 @@ class AgentScheduler:
             if isinstance(self.runner, AgentRunner):
                 task.progress = {"status": "queued", "budget": SegmentBudget(
                     definition, max_tool_calls,
-                    timeout if timeout is not None else definition.timeout).snapshot()}
+                    effective_timeout).snapshot()}
                 task.progress["budget"]["elapsed_seconds"] = 0
             self._submission_counter += 1
             task.submission_order = self._submission_counter
@@ -463,7 +468,7 @@ class AgentScheduler:
             snapshot = task.snapshot()
             if task.ledger is not None:
                 record = task.ledger.get(task_id, source or task.source, session_id or task.session_id)
-                for key in ("background_jobs", "stop_reason"):
+                for key in ("background_jobs", "stop_reason", "plan"):
                     if record and record.get(key) is not None:
                         snapshot[key] = record[key]
             return snapshot
@@ -475,7 +480,7 @@ class AgentScheduler:
                 task
                 and task.source == source
                 and task.session_id == session_id
-                and task.status in {"queued", "running", "timed_out_running"}
+                and not self._is_retainable_terminal(task)
             )
 
     def resume(self, task_id: str, *, source: str, session_id: str,
@@ -533,7 +538,7 @@ class AgentScheduler:
                     and detail.get("process_terminated") is False
                 )
             )
-            if task.status in _TERMINAL and not still_running:
+            if task.status in SCHEDULER_TERMINAL_STATUSES and not still_running:
                 return False
             task.cancel_event.set()
             self._last_activity = time.monotonic()
@@ -541,6 +546,7 @@ class AgentScheduler:
                 detail = dict(detail)
                 detail["cancel_requested"] = True
                 detail["user_cancel_requested"] = True
+                detail.setdefault("message", "已请求中断，尚未确认底层执行退出")
                 task.error = detail
             if still_running:
                 detail = dict(detail)
@@ -690,6 +696,7 @@ class AgentScheduler:
                         max_tokens=task.max_tokens,
                         source=task.source,
                         session_id=task.session_id,
+                        **({"managed": True} if task.ledger is not None and isinstance(runner, AgentRunner) else {}),
                         **({"max_tool_calls": task.max_tool_calls} if task.max_tool_calls is not None else {}),
                         **({"resume_state": task.resume_state, "run_count": task.run_count}
                            if task.resume_state is not None else {}),
@@ -697,6 +704,8 @@ class AgentScheduler:
                 if task.cancel_event.is_set():
                     raise AgentCancelledError("子代理任务已取消", process_terminated=True)
                 if task.result_handler is not None:
+                    if task.ledger is not None and task.agent == "task_plan" and result.data.get("action") in {"create", "edit"}:
+                        task.ledger.update(task.id, _plan_persistence=result.data["action"])
                     task.result_handler(result)
             with self._lock:
                 task.result = result
@@ -705,6 +714,8 @@ class AgentScheduler:
                     and result.metadata.get("completed_after_timeout")
                 )
                 task.status = "completed"
+                if task.error and task.error.get("user_cancel_requested"):
+                    task.error["process_terminated"] = True
                 task.finished_at = datetime.now(timezone.utc).isoformat()
                 self._last_activity = time.monotonic()
                 self._prune_terminal_tasks_locked()
@@ -733,6 +744,8 @@ class AgentScheduler:
                 task.error = _agent_task_error_detail(exc)
                 if task.status == "cancelled":
                     task.error["stop_reason"] = "cancelled"
+                    task.error.update(cancel_requested=True,
+                                      process_terminated=getattr(exc, "process_terminated", True))
                 task.result = getattr(exc, "partial_result", None)
                 if previous_detail.get("user_cancel_requested"):
                     task.error["user_cancel_requested"] = True
@@ -759,17 +772,6 @@ class AgentScheduler:
                     and exc.partial_result is not None
                 ):
                     task.resumable = True
-                elif isinstance(exc, AgentCancelledError):
-                    task.error.update(
-                        {
-                            "cancel_requested": True,
-                            "process_terminated": getattr(
-                                exc,
-                                "process_terminated",
-                                True,
-                            ),
-                        }
-                    )
                 task.finished_at = datetime.now(timezone.utc).isoformat()
                 self._last_activity = time.monotonic()
                 self._prune_terminal_tasks_locked()

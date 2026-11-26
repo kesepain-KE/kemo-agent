@@ -5,7 +5,6 @@ import uuid
 
 from provider.protocol.enums import MessageRole
 from provider.protocol.models import MessageItem
-from run.agents.continuation import pair_pending
 from run.agents.contracts import AgentRunError
 from run.tools import _enforce_tool_result_limit, ToolResultTooLargeError, tool_result_payload
 from run.retry import HOST_CONTROL_EXCEPTIONS
@@ -18,7 +17,6 @@ def wrap_request(context, items, tool_definitions):
     if state.wrap_injected:
         raise AgentRunError("收尾请求已结束，不再开启新的工具或模型循环")
     state.wrap_injected = True
-    pair_pending(items)
     items.append(MessageItem.text(
         MessageRole.USER,
         ("[框架工具预算收尾指令] 本段工具额度已到。" if state.stop_reason == "tool_budget_exhausted"

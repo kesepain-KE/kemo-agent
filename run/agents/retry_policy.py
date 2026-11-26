@@ -9,7 +9,10 @@ import threading
 from typing import Any
 import uuid
 
+from provider.protocol.diagnostics import incomplete_retry_metadata, safe_provider_message
+from provider.protocol.enums import ResponseStatus
 from provider.protocol.models import JsonContent, ToolCallItem, ToolResultItem
+from run.agents.contracts import AgentProviderError
 from run.retry.policy import (
     MAX_ATTEMPTS,
     backoff_seconds,
@@ -42,6 +45,8 @@ class _AgentRetryState:
     response_ids: list[str] = field(default_factory=list)
     auxiliary: dict[str, Any] = field(default_factory=dict)
     progress: bool = False
+    heartbeat_at: float | None = None
+    heartbeat_seq: int = 0
 
 
 def _agent_json(value: Any) -> str:
@@ -207,6 +212,57 @@ def _agent_error_is_retryable(
     }:
         return False
     return should_retry(view_from_exception(error))
+
+
+def agent_response_error(response, continuation, agent, model) -> AgentProviderError:
+    """Preserve the terminal Provider error and explicit truncation resume contract."""
+    if (provider_error := response.error) is not None:
+        retryable = None
+        if "retryable" in provider_error.model_fields_set:
+            retryable = provider_error.retryable
+        elif isinstance(declared := provider_error.details.get("retryable"), bool):
+            retryable = declared
+        category = provider_error.type or "provider_error"
+        code = provider_error.code
+        status_code = provider_error.provider_status
+        retry_after_ms = provider_error.retry_after_ms
+        if response.status == ResponseStatus.INCOMPLETE:
+            incomplete = incomplete_retry_metadata(
+                response.incomplete_details, fallback_retryable=retryable,
+                fallback_category=provider_error.type, fallback_code=provider_error.code,
+                fallback_status_code=provider_error.provider_status,
+            )
+            retryable = incomplete["retryable"]
+            category = str(incomplete.get("category") or category)
+            code = code or str(incomplete["reason"])
+            status_code = incomplete.get("status_code", status_code)
+            retry_after_ms = incomplete.get("retry_after_ms", retry_after_ms)
+        elif response.status == ResponseStatus.CANCELLED:
+            retryable = False
+        message = safe_provider_message(provider_error.message, "Provider 响应失败")
+        return AgentProviderError(
+            f"子代理 Provider 响应失败：{message}", category=category, code=code,
+            status_code=status_code, retryable=retryable, retry_after_ms=retry_after_ms,
+            cancelled=response.status == ResponseStatus.CANCELLED,
+        )
+    if response.status == ResponseStatus.INCOMPLETE:
+        incomplete = incomplete_retry_metadata(response.incomplete_details, allow_output_truncated_retry=True)
+        error = AgentProviderError(
+            f"子代理 Provider 响应未完整结束：{incomplete['reason']}",
+            category=str(incomplete.get("category") or "provider_incomplete"),
+            code=str(incomplete["reason"]), status_code=incomplete.get("status_code"),
+            retryable=incomplete["retryable"], retry_after_ms=incomplete.get("retry_after_ms"),
+        )
+        if incomplete["reason"] == "output_truncated":
+            error.continuation = continuation
+            error.partial_result = continuation.partial(agent, model)
+            error.process_terminated = True
+        return error
+    return AgentProviderError(
+        f"子代理 Provider 响应失败：{response.status}", category="provider_error",
+        retryable=response.status != ResponseStatus.CANCELLED,
+        cancelled=response.status == ResponseStatus.CANCELLED,
+    )
 
 
 def _agent_retry_delay_seconds(error: BaseException, failed_attempt: int) -> float:

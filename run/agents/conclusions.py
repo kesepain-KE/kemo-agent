@@ -16,6 +16,26 @@ def conclusion_data(value: Any) -> Any:
     return public_tool_data(value, hide_private_fields=False)
 
 
+def cancellation_state(snapshot: dict[str, Any]) -> dict[str, Any]:
+    error = snapshot.get("error") or {}
+    status = snapshot.get("status")
+    fields = {}
+    if error.get("user_cancel_requested") or status in {"cancelled", "cancelling"}:
+        if error.get("process_terminated") is True:
+            state = "exited"
+            message = ("本地执行已确认退出；这不代表已撤销先前副作用。" if snapshot.get("started_at")
+                       else "任务在排队时取消，未启动执行。")
+        elif error.get("process_terminated") is False:
+            state, message = "still_running", "已请求中断，底层执行仍在运行。"
+        else:
+            state, message = "requested", "已请求中断，尚未确认底层执行退出。"
+        fields.update(cancel_state=state, message=message)
+    if str(snapshot.get("agent") or "").startswith("external:") and status in {"failed", "cancelled", "cancelling"}:
+        fields["remote_exit_confirmed"] = False
+        fields["message"] = (fields.get("message", "") + " 外部调用未能核实远端是否退出。").strip()
+    return fields
+
+
 def delivery(snapshot: dict[str, Any]) -> dict[str, Any]:
     result = snapshot.get("result")
     result_usage = result.get("usage") if isinstance(result, dict) else None
@@ -41,7 +61,7 @@ def delivery(snapshot: dict[str, Any]) -> dict[str, Any]:
         ),
         "data": conclusion_data(result),
     }
-    for key in ("submission_order", "usage", "error", "budget", "progress", "stop_reason", "background_jobs", "origin_task_id"):
+    for key in ("submission_order", "usage", "error", "budget", "progress", "stop_reason", "background_jobs", "origin_task_id", "plan"):
         if snapshot.get(key) is not None:
             response[key] = numeric_usage(snapshot[key]) if key == "usage" else conclusion_data(snapshot[key])
     if "usage" not in response and result_usage is not None:
@@ -60,6 +80,7 @@ def delivery(snapshot: dict[str, Any]) -> dict[str, Any]:
         response["message"] = "旧版工具额度失败记录；可显式 resume，仍须通过最新安全点、定义、权限及退出核验。"
     if snapshot.get("status") in {"failed", "interrupted"}:
         response["ok"] = False
+    response.update(cancellation_state(snapshot))
     return response
 
 

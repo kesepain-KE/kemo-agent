@@ -13,7 +13,7 @@ import stat
 import threading
 import uuid
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,7 @@ from run.agents.public_trace import public_tool_data
 _OWNER = uuid.uuid4().hex
 _SIGNAL = threading.Condition()
 _LIVE = {"queued", "running", "timed_out_running", "cancelling"}
-_FINAL = {"completed", "limited", "partial", "failed", "cancelled", "interrupted", "timed_out", "tool_limit"}
+FINAL_TASK_STATUSES = {"completed", "limited", "partial", "failed", "cancelled", "interrupted", "timed_out", "tool_limit"}
 # The main loop can be waiting for the dispatch tool itself to finish preparing
 # a child. Waiting is an open execution phase, not a terminal/cancellation fence.
 _OPEN_PARENT = frozenset({"running", "waiting_children", "merging"})
@@ -137,9 +137,15 @@ def ensure_session_execution_available(root, user, source, session_id):
         for child in children:
             current = ledger._reconciled(child)
             if (current and current.get("cardstream_integration_id")
-                    and current["status"] in _FINAL and not current.get("execution_live")
+                    and current["status"] in FINAL_TASK_STATUSES and not current.get("execution_live")
                     and not current.get("card_result_seq")):
                 ledger._append_card_result(current["id"], source, session_id)
+        from run.tools import ShellInbox
+        from run.tools import publish_background_result, required_shell_state
+        inbox = ShellInbox(root, user, source, session_id, root_task_id=parent["id"])
+        for job in inbox.required_records(owned_task_ids={child["id"] for child in children}):
+            if required_shell_state(job) == "result_pending":
+                publish_background_result(root, user, job)
         with ledger.db(write=True) as db:
             ledger._refresh_closed_parent(db, parent["id"])
         parent = ledger.get(parent["id"], source, session_id)
@@ -164,13 +170,13 @@ class TaskLedger:
         self._db_lock = _database_lock(self.path)
 
     @contextmanager
-    def db(self, *, write: bool = False):
+    def db(self, *, write: bool = False, read_only: bool = False):
         with self._db_lock:
-            with self._connection(write=write) as db:
+            with self._connection(write=write, read_only=read_only) as db:
                 yield db
 
     @contextmanager
-    def _connection(self, *, write: bool = False):
+    def _connection(self, *, write: bool = False, read_only: bool = False):
         for path in (self.path.parent, self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             try:
                 info = path.lstat()
@@ -179,16 +185,19 @@ class TaskLedger:
             if (_contains_reparse_point(path, self.root)
                     or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)):
                 raise ValueError("智能体任务存储不能是链接")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.path, timeout=5)
+        if not read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        path = self.path.resolve().as_uri() + "?mode=ro" if read_only else self.path
+        db = sqlite3.connect(path, uri=read_only, timeout=5)
         db.row_factory = sqlite3.Row
         try:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("""CREATE TABLE IF NOT EXISTS agent_tasks(
-                id TEXT PRIMARY KEY, parent TEXT NOT NULL, source TEXT NOT NULL,
-                session TEXT NOT NULL, updated TEXT NOT NULL, record TEXT NOT NULL)""")
-            db.execute("CREATE INDEX IF NOT EXISTS agent_tasks_scope ON agent_tasks(source,session,updated)")
-            db.execute("CREATE INDEX IF NOT EXISTS agent_tasks_parent ON agent_tasks(parent)")
+            if not read_only:
+                db.execute("PRAGMA journal_mode=WAL")
+                db.execute("""CREATE TABLE IF NOT EXISTS agent_tasks(
+                    id TEXT PRIMARY KEY, parent TEXT NOT NULL, source TEXT NOT NULL,
+                    session TEXT NOT NULL, updated TEXT NOT NULL, record TEXT NOT NULL)""")
+                db.execute("CREATE INDEX IF NOT EXISTS agent_tasks_scope ON agent_tasks(source,session,updated)")
+                db.execute("CREATE INDEX IF NOT EXISTS agent_tasks_parent ON agent_tasks(parent)")
             if write:
                 db.execute("BEGIN IMMEDIATE")
             yield db
@@ -241,10 +250,24 @@ class TaskLedger:
                 record["reconcile_error_type"] = type(exc).__name__
                 return record
             alive = False
-        if not alive:
+        if alive:
+            record.pop("reconcile_unverified", None)
+            record.pop("reconcile_error_type", None)
+        elif (record.get("error") or {}).get("process_terminated") is False:
+            # The ledger identifies the owner, not the separate execution
+            # that cancellation explicitly left running.
+            record.update(reconcile_unverified=True, reconcile_error_type="ExecutionExitUnverified")
+        else:
+            record.pop("reconcile_unverified", None)
+            record.pop("reconcile_error_type", None)
             record.update(status="partial" if record.get("response_closed") else "interrupted",
                           stop_reason="interrupted", finished_at=record.get("finished_at") or now(), updated_at=now(),
                           execution_live=False, error={"message": "执行进程已退出；未自动重放有副作用操作"})
+            record.pop("_heartbeat", None)
+            if record.get("_plan_persistence"):
+                record.update(stop_reason="plan_result_unverified", error={
+                    "message": "计划保存回执未确认；请核对已有计划，不要重新创建。",
+                })
         return record
 
     def _refresh_closed_parent(self, db, parent_id):
@@ -254,42 +277,82 @@ class TaskLedger:
         children = [self.decode(row) for row in db.execute(
             "SELECT * FROM agent_tasks WHERE parent=?", (parent_id,),
         ).fetchall()]
-        children_live = any(child["status"] not in _FINAL or child.get("execution_live")
+        children_live = any(child["status"] not in FINAL_TASK_STATUSES or child.get("execution_live")
                             or (parent.get("cardstream_integration_id")
                                 and not child.get("card_result_seq"))
                             for child in children)
         from run.tools import ShellInbox
-        shell_live = bool(ShellInbox(
+        from run.tools import required_shell_state
+        shell_live = any(required_shell_state(job) for job in ShellInbox(
             self.root, self.user, parent["source"], parent["session_id"],
             root_task_id=parent_id,
-        ).pending(owned_task_ids={child["id"] for child in children}))
+        ).required_records(owned_task_ids={child["id"] for child in children}))
         if not children_live and not shell_live:
             parent.update(execution_live=False, execution_finished_at=now(), updated_at=now())
             self.put(db, parent)
         return parent
 
     def _reconciled(self, row):
-        record = self.decode(row)
-        if not record or self.reconcile(record.copy()) == record:
+        return self.reconcile_execution(self.decode(row))
+
+    def reconcile_execution(self, record):
+        if not record:
             return record
-        # Ordinary polling stays read-only. Recovery rechecks under the writer
-        # lock so it cannot overwrite a scheduler update observed after the read.
+        reconciled = self.reconcile(record.copy())
+        if reconciled == record:
+            return record
+        # Probe the process before taking the writer lock; a changed row wins.
         with self.db(write=True) as db:
             current = self.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?",
                                             (record["id"],)).fetchone())
-            if current:
-                reconciled = self.reconcile(current.copy())
-                if reconciled != current:
-                    self.put(db, reconciled)
-                    self._refresh_closed_parent(db, current.get("root_task_id", ""))
+            if current == record:
+                self.put(db, reconciled)
+                self._refresh_closed_parent(db, current.get("root_task_id", ""))
                 return reconciled
-        return None
+            return current
 
     def get(self, task_id: str, source: str, session_id: str) -> Any:
         with self.db() as db:
             row = db.execute("SELECT * FROM agent_tasks WHERE id=? AND source=? AND session=?",
                              (task_id, source, session_id)).fetchone()
         return self._reconciled(row)
+
+    def peek(self, task_id, source, session_id):
+        if not self.path.exists():
+            return None
+        with self.db(read_only=True) as db:
+            return self.decode(db.execute("SELECT * FROM agent_tasks WHERE id=? AND source=? AND session=?",
+                                          (task_id, source, session_id)).fetchone())
+
+    def execution_records(self, source, session_id):
+        if not self.path.exists():
+            return []
+        with self.db(read_only=True) as db:
+            return [self.decode(row) for row in db.execute(
+                "SELECT * FROM agent_tasks WHERE source=? AND session=?", (source, session_id),
+            )]
+
+    def web_dependency_sessions(self):
+        if not self.path.exists():
+            return set()
+        with self.db(read_only=True) as db:
+            return {row[0] for row in db.execute(
+                "SELECT DISTINCT session FROM agent_tasks WHERE source='web' AND parent!='' "
+                "AND coalesce(json_extract(record, '$.required'),1)=1 AND "
+                "(json_extract(record, '$.execution_live')=1 OR "
+                "coalesce(json_extract(record, '$.card_result_seq'),0)=0)",
+            )}
+
+    def dependency_admission(self, source):
+        from run.history import index_lock
+        return index_lock(self.root, self.user) if source == "web" else nullcontext()
+
+    def require_dependency_owner(self, parent):
+        if parent["source"] != "web" or not parent.get("cardstream_integration_id"):
+            return
+        from run.cards import CardStore, IntegrationStore
+        IntegrationStore(CardStore(self.root, self.user), "web", parent["session_id"],
+                         parent["cardstream_integration_id"]).require_dependency_owner(parent.get("cardstream_generation"))
 
     def records(self, source: str = "", session_id: str = "", *, parent: str | None = None,
                 with_children: bool = False, offset: int = 0, limit: int = 50):
@@ -320,14 +383,19 @@ class TaskLedger:
                     *, cardstream_integration_id="", cardstream_generation="",
                     cardstream_meter_key=""):
         import psutil
-        with self.db(write=True) as db:
+        owner = {"source": source, "session_id": session_id,
+                 "cardstream_integration_id": cardstream_integration_id,
+                 "cardstream_generation": cardstream_generation}
+        process_started = psutil.Process().create_time()
+        with self.dependency_admission(source), self.db(write=True) as db:
+            self.require_dependency_owner(owner)
             existing = self.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone())
             if existing:
                 if (existing["source"], existing["session_id"]) != (source, session_id):
                     raise ValueError("主任务作用域不匹配")
                 existing.update(status="running", run_id=run_id, attempt_id=attempt_id, updated_at=now(),
                                 finished_at="", owner=_OWNER, pid=os.getpid(),
-                                process_started=psutil.Process().create_time(),
+                                process_started=process_started,
                                 cardstream_integration_id=cardstream_integration_id,
                                 cardstream_generation=cardstream_generation,
                                 cardstream_meter_key=cardstream_meter_key)
@@ -342,17 +410,18 @@ class TaskLedger:
                 "cardstream_meter_key": cardstream_meter_key,
                 "created_at": now(), "updated_at": now(), "finished_at": "",
                 "owner": _OWNER, "pid": os.getpid(),
-                "process_started": psutil.Process().create_time(),
+                "process_started": process_started,
             })
 
     def register(self, task, ownership):
-        with self.db(write=True) as db:
+        with self.dependency_admission(task.source), self.db(write=True) as db:
             parent = self.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?",
                                             (ownership["root_task_id"],)).fetchone())
             if (not parent or parent["status"] not in _OPEN_PARENT
                     or parent["source"] != task.source or parent["session_id"] != task.session_id
                     or parent["attempt_id"] != ownership["attempt_id"]):
                 raise ValueError("主任务已收束或子任务归属无效")
+            self.require_dependency_owner(parent)
             description = (task.input_data.get("task") or task.input_data.get("instruction")
                            or task.input_data.get("request") or task.agent)
             previous_count = db.execute("SELECT count(*) FROM agent_tasks WHERE parent=?",
@@ -368,7 +437,8 @@ class TaskLedger:
                 "status": "queued", "created_at": task.created_at, "updated_at": now(),
                 "started_at": "", "finished_at": "", "events": [], "result": None,
                 "error": None, "delivered": False, "handled": False,
-                "run_count": 1, "resumable": False,
+                "run_count": 1, "resumable": False, "_checkpoint_version": 2,
+                "timeout": getattr(task, "timeout", None),
                 "origin_task_id": getattr(task, "origin_task_id", ""),
                 "budget": getattr(task, "progress", {}).get("budget", {}),
                 "cardstream_integration_id": parent.get("cardstream_integration_id", ""),
@@ -398,6 +468,19 @@ class TaskLedger:
             if record:
                 if metadata.get("run_count", 1) != record.get("run_count", 1):
                     return False
+                if metadata.get("heartbeat") is True:
+                    if record["status"] != "running":
+                        return False
+                    pending = record.get("_heartbeat")
+                    if pending and pending["heartbeat_seq"] >= metadata["heartbeat_seq"]:
+                        return False
+                    record["_heartbeat"] = {key: metadata[key] for key in (
+                        "phase", "agent", "task_id", "status", "heartbeat", "elapsed_seconds",
+                        "usage", "tool_calls_used", "budget", "recent_cards", "run_count", "heartbeat_seq",
+                    )}
+                    record["updated_at"] = now()
+                    self.put(db, record)
+                    return True
                 record["events"] = [*record.get("events", []), entry][-160:]
                 if isinstance(metadata.get("budget"), dict):
                     record["budget"] = safe(metadata["budget"])
@@ -409,6 +492,15 @@ class TaskLedger:
                 self.put(db, record)
                 return True
         return False
+
+    def acknowledge_heartbeats(self, acknowledgments):
+        with self.db(write=True) as db:
+            for task_id, run_count, seq in acknowledgments:
+                record = self.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone())
+                heartbeat = (record or {}).get("_heartbeat") or {}
+                if (heartbeat.get("run_count"), heartbeat.get("heartbeat_seq")) == (run_count, seq):
+                    record.pop("_heartbeat")
+                    self.put(db, record)
 
     def scheduler_update(self, task, status):
         snapshot = task.snapshot()
@@ -425,6 +517,8 @@ class TaskLedger:
         if isinstance(result, dict):
             data = result["data"] if "agent" in result and "data" in result else result
             public_result = conclusion_data(data)
+        metadata = getattr(task.result, "metadata", None)
+        plan = metadata.get("plan") if isinstance(metadata, dict) else None
         usage = result.get("usage") if isinstance(result, dict) else (task.resume_state or {}).get("usage")
         background = None
         if not live:
@@ -458,6 +552,16 @@ class TaskLedger:
                               "failed": "execution_error", "cancelled": "cancelled", "interrupted": "interrupted"}.get(actual)),
                           background_jobs=background,
                           updated_at=now())
+            if actual != "running":
+                record.pop("_heartbeat", None)
+            if isinstance(plan, dict) and actual == "completed":
+                record["plan"] = {key: plan[key] for key in ("plan_id", "status", "auto_accept", "revision")}
+                record.pop("_plan_persistence", None)
+            elif not live and record.get("_plan_persistence"):
+                record.update(stop_reason="plan_result_unverified", error={
+                    **(record["error"] or {}),
+                    "message": "计划保存回执未确认；请核对已有计划，不要重新创建。",
+                })
             self.put(db, record)
             self._refresh_closed_parent(db, record.get("root_task_id", ""))
         self.event(task.id, {"status": status, "run_count": task.run_count})
@@ -471,9 +575,13 @@ class TaskLedger:
                 self.update(task.id, card_result_error_type=type(exc).__name__)
 
     def _append_card_result(self, task_id, source, session_id):
+        with self.dependency_admission(source):
+            self._publish_card_result(task_id, source, session_id)
+
+    def _publish_card_result(self, task_id, source, session_id):
         record = self.get(task_id, source, session_id)
         if (not record or record.get("card_result_seq")
-                or record["status"] not in _FINAL or record.get("execution_live")):
+                or record["status"] not in FINAL_TASK_STATUSES or record.get("execution_live")):
             return
         integration_id = str(record.get("cardstream_integration_id") or "")
         generation = str(record.get("cardstream_generation") or "")
@@ -507,15 +615,22 @@ class TaskLedger:
         # Recover that exact event instead of rebuilding a changed notification.
         from run.cards import session_key
         with store.db(write=True) as card_db:
+            key = session_key(source, session_id)
+            owner = card_db.execute(
+                "SELECT generation FROM card_integrations WHERE integration_id=? AND session_key=?",
+                (integration_id, key),
+            ).fetchone()
+            if owner is None or owner["generation"] != generation:
+                raise RuntimeError("子任务结果与整合身份或代际不匹配")
             old = card_db.execute(
                 "SELECT seq,integration_id FROM context_cards WHERE session_key=? AND event_key=?",
-                (session_key(source, session_id), event_key),
+                (key, event_key),
             ).fetchone()
             if old is not None and old["integration_id"] != integration_id:
                 raise RuntimeError("子任务结果卡归属冲突")
             state = card_db.execute(
                 "SELECT meter_key FROM card_sessions WHERE session_key=?",
-                (session_key(source, session_id),),
+                (key,),
             ).fetchone()
             if state is not None:
                 store.meter = CardMeter(key=state["meter_key"])
@@ -540,7 +655,8 @@ class TaskLedger:
     def public(record):
         public = {k: v for k, v in record.items() if k not in {
             "owner", "pid", "process_started", "attempt_id", "last_submission_order", "_guidance",
-            "cardstream_generation", "cardstream_meter_key",
+            "cardstream_generation", "cardstream_meter_key", "_checkpoint_version",
+            "_heartbeat", "_plan_persistence",
         }}
         public["guidance_pending"] = len(record.get("_guidance") or [])
         public["guidance_delivered"] = int(record.get("guidance_delivered_count") or 0)

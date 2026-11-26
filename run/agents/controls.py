@@ -1,20 +1,15 @@
 """Explicit main-agent controls and small read projections, never tool traces."""
 from __future__ import annotations
 
-import math
-import uuid
-
 from agents._runtime.resources import build_agent_tool_registry, effective_knowledge_scopes
-from provider.protocol.enums import MessageRole
-from provider.protocol.models import MessageItem
-from run.agents.budgets import effective_limit, overridable, BUDGET_STOPS
+from run.agents.budgets import effective_limit, overridable, requested_timeout, BUDGET_STOPS
 from run.agents.contracts import AgentRunError
 from run.agents.task_ledger import TaskLedger, _OPEN_PARENT, now
 
 
 def describe_agent(root, user, definition, config):
     return {
-        "default_timeout": definition.timeout,
+        "default_timeout": None if definition.executor == "builtin:llm" else definition.timeout,
         "max_iterations": effective_limit(definition),
         "supports_budget_override": overridable(definition),
         "supports_resume": overridable(definition),
@@ -89,7 +84,7 @@ def guide_task(root, user, task_id, source, session_id, ownership, guidance, *,
             "message": "指导将在下一请求安全点交付，不扩权、不启动另一个执行器。"}
 
 
-def take_guidance(context, items):
+def take_guidance(context, stream):
     if not context.task_id or not context.source or not context.session_id:
         return
     ledger = TaskLedger(context.runner.root, context.runner.user)
@@ -105,22 +100,16 @@ def take_guidance(context, items):
                 or record["status"] != "running"):
             return
         messages = record.pop("_guidance", [])
-        record["guidance_delivered_count"] = (
-            int(record.get("guidance_delivered_count") or 0) + len(messages)
-        )
+        delivered = int(record.get("guidance_delivered_count") or 0)
+        stream.guidance(messages, delivered)
+        record["guidance_delivered_count"] = delivered + len(messages)
         ledger.put(db, record)
-    for text in messages:
-        items.append(MessageItem.text(MessageRole.USER,
-            "[主智能体运行中指导；不改变当前权限与用户授权]\n" + text,
-            item_id=f"msg_guidance_{uuid.uuid4().hex}"))
 
 
 def split_task(scheduler, task_id, *, source, session_id, ownership=None, tasks,
                timeout=None, max_tool_calls=None, config=None, event_callback=None):
     from run.agents.contracts import validate_json_schema
-    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                                or not math.isfinite(timeout) or timeout <= 0):
-        raise AgentRunError("split timeout 必须是正数")
+    timeout = requested_timeout(timeout, field="split timeout")
     if not isinstance(tasks, list) or not 1 <= len(tasks) <= 8:
         raise AgentRunError("split 需要 1..8 个显式子任务输入")
     ledger = TaskLedger(scheduler.runner.root, scheduler.runner.user)
@@ -162,7 +151,7 @@ def failure_advice(records):
         if reason in {"tool_budget_exhausted", "timeout"}:
             groups.setdefault(reason, []).append(record["id"])
     return [{"stop_reason": reason, "count": len(ids), "task_ids": ids[:8],
-             "recommendation": "多个子任务因同类预算停止；可显式 resume 调整额度/时长，或 split 拆分剩余工作。不会自动重派。"}
+            "recommendation": "多个子任务因同类预算停止；可显式 resume 调整工具额度，或 split 拆分剩余工作。不会自动重派。"}
             for reason, ids in groups.items() if len(ids) >= 2]
 
 

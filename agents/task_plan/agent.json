@@ -1,6 +1,6 @@
 {
   "name": "task_plan",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "根据显式任务数据创建或编辑结构化任务计划草案，不直接执行工具或写文件。",
   "trigger": "trigger.md"
 }

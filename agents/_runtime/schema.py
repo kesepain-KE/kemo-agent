@@ -75,7 +75,7 @@ class AgentCapabilities:
     allowed_callers: tuple[str, ...] = ()
     plugin_tools: tuple[str, ...] = ()
     plugin_permissions: tuple[str, ...] = ("read", "write", "delete", "external")
-    max_tool_iterations: int = 1
+    max_tool_iterations: int = 0
     shared_skills: tuple[str, ...] = ()
     user_skills: tuple[str, ...] = ()
     global_expand: tuple[str, ...] = ()
@@ -199,6 +199,13 @@ def _plugin_permissions(container: Any, *, path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(container))
 
 
+def _load_max_tool_iterations(tools: dict[str, Any], *, path: Path) -> int:
+    value = tools.get("max_iterations", 0)
+    if type(value) is not int or value < 0:
+        raise AgentManifestError(f"tools.max_iterations 必须是非负整数：{path}")
+    return value
+
+
 def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabilities:
     if path is None:
         return AgentCapabilities()
@@ -222,9 +229,7 @@ def _load_legacy_capabilities(path: Path | None, *, legacy: bool) -> AgentCapabi
     plugins_raw = tools_raw.get("plugins") or {}
     plugin_tools = _allow_list(plugins_raw, "allow", field="tools.plugins", path=path)
     plugin_permissions = _plugin_permissions(plugins_raw.get("permissions"), path=path)
-    max_iterations = tools_raw.get("max_iterations", 1)
-    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations < 1:
-        raise AgentManifestError(f"tools.max_iterations 必须是正整数：{path}")
+    max_iterations = _load_max_tool_iterations(tools_raw, path=path)
     prompt_raw = raw.get("prompt_sources") or {}
     if not isinstance(prompt_raw, dict):
         raise AgentManifestError(f"prompt_sources 必须是对象：{path}")
@@ -316,13 +321,7 @@ def _load_capabilities(path: Path) -> AgentCapabilities:
         field="tools.user_skills",
         path=path,
     )
-    max_iterations = tools_raw.get("max_iterations", 80)
-    if (
-        isinstance(max_iterations, bool)
-        or not isinstance(max_iterations, int)
-        or max_iterations < 1
-    ):
-        raise AgentManifestError(f"tools.max_iterations 必须是正整数：{path}")
+    max_iterations = _load_max_tool_iterations(tools_raw, path=path)
     scopes = tuple(
         scope
         for scope, enabled in (

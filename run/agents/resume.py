@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import copy
-import math
 import os
 import queue
 
-from run.agents.continuation import CheckpointStore, MAX_RESUME_ROUNDS
+from run.agents.continuation import MAX_RESUME_ROUNDS, load_resume_state
 from run.agents.queue_models import AgentTask
 from run.agents.task_ledger import TaskLedger, _OPEN_PARENT, _OWNER, now
-from run.agents.budgets import BUDGET_STOPS, effective_limit, SegmentBudget, legacy_tool_stop, upgrade_legacy_budget
+from run.agents.budgets import (
+    BUDGET_STOPS, effective_limit, requested_timeout, SegmentBudget, legacy_tool_stop, upgrade_legacy_budget,
+)
 
 
 def _output_truncation_stop(record):
@@ -30,16 +31,10 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
         raise AgentQueueError("续跑需要完整对话身份和本地子代理执行器")
     if not isinstance(guidance, str) or len(guidance) > 8000:
         raise AgentQueueError("续跑指导必须是最多 8000 字符的文本")
-    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                                or not math.isfinite(timeout) or timeout <= 0):
-        raise AgentQueueError("续跑 timeout 必须是正数")
+    requested_timeout(timeout, field="续跑 timeout")
     runner = scheduler.runner
     ledger = TaskLedger(runner.root, runner.user)
     current_config = copy.deepcopy(config if config is not None else runner.config)
-    survival = (current_config.get("agent_runtime") or {}).get("timeout_survival_seconds", 120)
-    if (isinstance(survival, bool) or not isinstance(survival, (int, float))
-            or not math.isfinite(survival) or survival < 0):
-        raise AgentQueueError("收尾宽限必须是非负有限数")
     with scheduler._lock:
         if scheduler._closed:
             raise AgentQueueClosedError("子代理调度队列已关闭")
@@ -55,7 +50,7 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
         task: AgentTask | None = None
         enqueued = False
         try:
-            with ledger.db(write=True) as db:
+            with ledger.dependency_admission(source), ledger.db(write=True) as db:
                 record = ledger.decode(db.execute(
                     "SELECT * FROM agent_tasks WHERE id=? AND source=? AND session=?",
                     (task_id, source, session_id)).fetchone())
@@ -75,9 +70,10 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                         or definition.executor != "builtin:llm"
                         or definition.execution == "background_serial"):
                     raise AgentQueueError("当前子代理不支持恢复或已不再公开")
-                restored = CheckpointStore(runner.root, runner.user, task_id).load(
+                restored = load_resume_state(
+                    runner.root, runner.user, task_id,
                     source=source, session_id=session_id, definition=definition,
-                    run_count=round_number,
+                    run_count=round_number, version=record.get("_checkpoint_version"),
                 )
                 upgrade_legacy_budget(restored)
                 if not isinstance(ownership, dict):
@@ -88,6 +84,10 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                         or parent["source"] != source or parent["session_id"] != session_id
                         or parent["attempt_id"] != ownership.get("attempt_id")):
                     raise AgentQueueError("主任务已收束或续跑归属无效")
+                ledger.require_dependency_owner(parent)
+                if (source == "web" and record.get("cardstream_integration_id")
+                        and not record.get("card_result_seq")):
+                    raise AgentQueueError("上一轮结果卡待提交，不能覆盖原回执")
                 if record.get("root_task_id") != parent["id"]:
                     previous_parent = ledger.decode(db.execute("SELECT * FROM agent_tasks WHERE id=?",
                                                (record.get("root_task_id"),)).fetchone())
@@ -105,8 +105,7 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                     id=task_id, agent=record["agent"], input_data=restored["input_data"],
                     source=source, session_id=session_id,
                     submission_order=record.get("submission_order", 0),
-                    created_at=record["created_at"], timeout=timeout or previous_budget.get("timeout") or definition.timeout,
-                    survival_seconds=float(survival),
+                    created_at=record["created_at"], timeout=None, survival_seconds=0,
                     config=current_config, serial=False, event_callback=event_callback,
                     ledger=ledger, run_count=round_number + 1, resume_state=restored,
                     previous_elapsed_ms=record.get("active_elapsed_ms", 0),
@@ -130,7 +129,8 @@ def resume_task(scheduler, task_id, *, source, session_id, guidance="", timeout=
                     round_history=history, owner=_OWNER, pid=os.getpid(),
                     process_started=parent["process_started"],
                     stop_reason=None, budget=task.progress["budget"], progress={},
-                    _guidance=[],
+                    timeout=None, _heartbeat=None,
+                    _guidance=[], _checkpoint_version=2,
                     cardstream_integration_id=parent.get("cardstream_integration_id", ""),
                     cardstream_generation=parent.get("cardstream_generation", ""),
                     cardstream_meter_key=parent.get("cardstream_meter_key", ""),
