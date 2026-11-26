@@ -1,12 +1,11 @@
 # 插件开发与工具运行机制
 
-子代理默认派发：普通公开本地非串行 LLM 子代理 call/resume 省略 wait 默认后台；
-显式 wait=true 同步，特殊同步规划、串行维护、自定义执行器与外部代理默认同步。
-list.default_wait 披露缺省策略；后台提交仍受必要依赖完成屏障约束，不能当作已完成。
+子代理派发的 call/resume 成功入队即返回回执，旧 wait=true/false 均可用但不等待结果。
+提交不解除必要依赖完成屏障；计划审批以真实落库回执为准。
 
-子代理结果与续跑：`subagent_dispatch` 的 call/status/resume 默认仅返回结论、必要证据、
-产物和未完成事项，不回传 tool_calls、事件或原始 metadata。工具详情保留在认证网页详情。
-本地 LLM 业务任务时间或工具预算耗尽且真实退出后可显式 resume 同 task_id，
+子代理结果与续跑：`subagent_dispatch` 的提交回执只返任务句柄；终态另行交付结论、必要证据、产物和
+未完成事项，不回传工具调用轨迹或原始 metadata。工具详情见认证网页。符合条件且已退出的
+历史超时、工具额度停止或输出截断任务可显式 resume 同 task_id，
 每轮重新计时并分配新段工具额度，累计调用/用量保留；私有快照恢复
 已配对协议项而不重放已完成操作；仍活着的工具/线程保留屏障且不可恢复。
 外部代理、自定义执行器与串行维护不支持此恢复合同，详见 `knowledge/global/runtime/agent-task-coordination.md`。
@@ -102,7 +101,7 @@ origin: builtin
 | `permission` | 否 | `read` / `write` / `delete` / `external`，默认 `write` |
 | `origin` | 否 | `builtin`（默认）或 `user`；更新、回滚和打包归属，不发给 Provider |
 | `strict` | 否 | Provider 结构化参数严格模式，默认 `false` |
-| `timeout_policy` | 否 | `argument_or_default` 或 `agent_runtime` |
+| `timeout_policy` | 否 | `argument_or_default`、`agent_runtime` 或 `submission` |
 | `timeout_grace_seconds` | 否 | 显式 `timeout` 的外层看门狗清理宽限，默认 0、范围 0～30 秒；只用于整理正常结果，不得增加业务等待时长 |
 | `execution_mode` | 否 | `process`（默认）在独立子进程执行并可在超时后终止；只有必须访问进程内对象的插件才声明 `thread` |
 
@@ -124,6 +123,9 @@ origin: builtin
 
 `process` 模式只向子进程传递可序列化的运行上下文，并重新加载清单声明的入口；超时或用户取消会终止整个隔离进程树。普通插件若依赖进程内连接池等不可序列化对象，可显式声明 `thread` 并实现协作取消。`file` 写操作、`shell` 和 `external_message` 的清单入口强制进程隔离，不接受清单线程降级；框架直接注入的内存 callable 仍保留现有执行边界。外部消息由主宿主验证存活注册、用户归属及能力，再将目录 Transport 的发送出口快照交给子进程；只加载 output，不启动 input/轮询/WebSocket，不传整个注册表。没有可隔离出口的自定义内存 Transport 明确拒绝，不能偷偷线程发送。
 
+POSIX 前台 Shell 在建立独立进程组并通知宿主后才执行命令。宿主保留组长的 PID 到清理结束；取消、命令超时和隔离进程异常退出时，即使组长已退出，也清理同组后代。建立进程组失败则不运行命令，不尝试清理未经确认的组。显式后台作业仍走原作业管理路径。
+前台外部命令通过取消信号的 `is_set()` 协作停止；POSIX 隔离命令继承宿主负责的进程组，插件只终止和回收直接命令，不等其他组成员关闭输出管道。
+
 ### strict 的边界
 
 `strict=true` 只有在整个参数 Schema 都满足目标 Provider 的严格结构化输出子集时才可使用。
@@ -140,9 +142,9 @@ origin: builtin
 - 工具 Schema 明确声明 `timeout`，且调用参数提供该字段时，使用调用值；
 - 否则使用 `config/global_config.yaml → tools.timeout`，当前默认 240 秒。
 
-`agent_runtime` 只用于 `subagent_dispatch` 这类自身管理子代理整体期限的调度工具。它使用
-子代理整体期限并增加外层看门狗宽限，避免普通工具超时先于子代理运行时。普通插件不得借该
-策略无限延长执行时间。
+`subagent_dispatch` 使用 `submission`：看门狗只保护提交阶段，使用 `tools.timeout`，
+不读取模型传入的旧 `timeout` 或 `agent_runtime.default_timeout`。旧插件声明的 `agent_runtime`
+策略仍按原独立时限计算。
 
 少数工具会在内部等待期限恰好到达时返回正常的 `timeout` 业务结果。此类工具可以声明很短的
 `timeout_grace_seconds`，使框架外层看门狗采用“显式 timeout + 清理宽限”；传入插件的业务参数
@@ -153,6 +155,12 @@ origin: builtin
 框架已跟踪的 required 作业自动等待结果；无宿主跟踪的作业才用返回的 `job_id` 等待，不猜测裸 PID。
 服务就绪可等待端口等实际条件；外部进程才使用 `process_exit`，并尽量提供可靠的进程创建时间。条件满足会提前返回；到达上限
 返回正常的 `status=timeout`，并利用很短的清理宽限让业务结果先于框架外层看门狗落地。
+
+已有 Shell 作业用原 `job_id` 查询：`shell(action="status")` 默认立即返回快照；`wait=true` 时可续等
+1～60 秒，默认 30 秒，外层看门狗单独加 5 秒以接收快照。查询超时只返回 `wait_outcome=timeout`，
+不改作业状态或期限，也不取消作业。需要主动终止才调用 `cancel`，不要重复 `run`。
+子代理 `subagent_dispatch.status(task_id)` 与用户决策 `user_decision.get(decision_id)` 沿用同一查询约定：
+`wait=true` 时才解释查询 `timeout` 并返回 `wait_outcome=finished/timeout`，各工具仍保留原 action、句柄和状态字段。
 
 受管理 Shell 后台作业每个用户最多同时保留 8 个活动记录。创建新作业前会检查超过 30 秒未更新的 `starting/running/cancelling` 记录：先核对工作进程和管理进程的创建时间身份，再把已经丢失的旧记录收口为 `interrupted/failed/cancelled`，随后重新执行配额检查。30 秒内的新 `starting` 记录不会被抢先对账，避免并发启动尚未登记 worker 身份时被误判。身份不完整或 PID 已复用时仍坚持安全失败，不按裸 PID 终止进程。
 
@@ -266,7 +274,7 @@ def run(text: str, *, context: dict[str, Any]) -> dict[str, Any]:
 单工具超时、连续相同调用、失败防护、取消及上下文容量检查继续生效。
 子代理保留各自独立的工具与时间预算。
 公开本地 LLM 非串行业务子代理可由主智能体通过 call/resume 的 `max_tool_calls`
-覆盖本段额度，0 为不限次数；仍受独立 timeout、重复调用、连续失败、取消和 API 池保护。
+覆盖本段额度，0 为不限次数；仍受独立工具时限、重复调用、连续失败、取消和 API 池保护。
 超额返回 tool_limit / tool_budget_exhausted，保留安全点、结论和用量，显式续跑不重放副作用；
 框架内部重试不重置本段计数。`guide` 安全点引导，`split` 显式拆分剩余工作，
 预算预警与完整恢复合同见 `knowledge/global/runtime/agent-task-coordination.md`。

@@ -13,6 +13,7 @@ shared、user；Sense 当前只有 global，不新增用户感知模型。
 声明位于 `message.json` 的 `ui` 字段，自定义动作使用 `ui.action_entry`，
 身份限定为绑定用户的 `message/user/<模块目录名>`，不加入感知或拓展的运行时注册表。
 外部消息保留专用的状态、文件、消息、日志、诊断标签，不展示采集/提示词注入功能。
+文件、消息和日志可预览仍可读取的图片、音频和视频；临时原件被消息适配器回收后，日志只保留记录与元数据。
 具体接入见 [外部消息路由创建文档](external-message-route-creation.md#可选的模块工作区)。
 
 ## 声明与目录
@@ -22,11 +23,12 @@ shared、user；Sense 当前只有 global，不新增用户感知模型。
 ```yaml
 ui:
   workspace: module/workspace.json
-  # 仅 Sense 的自定义网页动作需要；不会开放主智能体操控工具。
+  # 独立的 Web 动作入口；不会开放给主智能体操控工具。
   action_entry: ui_actions.py
 ```
 
-Expand 网页动作复用 `control_script`，不声明 `action_entry`。UI 文件支持模块内多级相对路径；
+Expand 不声明 `action_entry` 时，网页与通用面板动作仍使用 `control_script`；显式声明时，
+两者改走该 Web 专用入口，`expand_call` 仍只走原操控入口。UI 文件支持模块内多级相对路径；
 采集、Prompt 数据与操控入口仍遵循原来直接子级文件合同。任何声明路径均不得越界或经过链接。
 
 ```text
@@ -128,12 +130,13 @@ kemo.onEvent((event, value) => {
 ```
 
 `npm --prefix web/frontend run build:module-uis` 构建三个内置拓展的专属控制台：
-`expand/global/kemo_app/ui`（桥接生命周期、在线设备、端口、Token 和用户绑定）、
+`expand/global/kemo_bridge/ui`（内嵌连接与凭据管理；服务启停在通用配置）、
 `expand/global/kemo_gateway_status/ui`（网关快照、模型、调用记录与地址）、
 `expand/global/kemo_graph/ui`（文档库、实时状态、检索与连接），以及 `template/sense-web/ui` 示例。
 控制台通过声明的 Bridge 动作复用各自的现有后端入口，通用配置面板同时保留。
-三个内置控制台提供本地初始化与待配置提示；App、网关使用 `initialize`，
+三个内置拓展提供本地初始化与待配置提示；Bridge 在通用配置调用 `initialize`，网关使用同名动作，
 Graph 使用 `initialize_config`，初始化保留已有配置，不自动启动服务或联网。
+Bridge 管理动作只接受经宿主鉴权且已授予 `module.action.invoke` 的页面实例 RPC，不另设控制台解锁，也不走桥接监听器或直接工作区动作路由。
 网关连接设置还可提交独立 `STATUS_TOKEN` 验证并激活，后端不向网页返回 Token。
 完整宿主构建也运行此步骤。
 自建模块自行构建 `ui/dist` 后随模块分发，部署机无需 Node.js。
@@ -145,7 +148,8 @@ Graph 使用 `initialize_config`，初始化保留已有配置，不自动启动
 
 现有 Web 认证是实例管理员认证；`user` 选择数据空间，不是独立认证租户。
 网页首次请求能力时由管理员审查。全局/共享模块的授权按物理模块保存，用户模块按用户隔离，
-授权文件为实例本地 `config/module_ui_grants.json`，不随源码提交或安装包分发。
+授权文件为实例本地 `config/module_ui_grants.json`，不随源码提交或安装包分发；升级和源码回滚均保留。
+文件由工作台保存权限时写入。模块改名后，旧键不会授权新模块，管理员须在新工作台重新审查并授权。
 
 | Bridge 方法 | 所需权限 | 行为 |
 |---|---|---|
@@ -168,8 +172,10 @@ RPC 有并发、频率和消息大小限制。静态资源能力 URL 只可读�
 网页应保留草稿并让用户重新读取。SDK 返回错误 code 和 message，禁止把失败当作成功。
 调用等待超时或页面关闭不代表后端副作用已取消；核对真实状态后再决定是否重试。
 
-自定义动作的 `handler` 对应现有 `execute(command, params, context=None)`；Sense 从
-`ui.action_entry` 加载，Expand 复用操控入口。`handler="refresh"` 直接调用原采集链。
+自定义动作的 `handler` 对应 `execute(command, params, context=None)`。`handler="refresh"` 直接调用原采集链。
+Web 专用入口由宿主在上下文标记 `module_ui`（网页动作）、`module_panel`（通用面板按钮）或
+`module_panel_status`（可选 `panel.json.status_action`）。状态动作必须只读，返回值按状态字段白名单与遮蔽规则投影，失败显示为未知而非缓存在线。
+通用面板的 `copy` 控件仅在显式点击后把该动作返回的 `result.clipboard_text` 写入剪贴板，不在面板回显；可用 `confirm` 声明执行前的确认。需要隔离的复制动作只声明在 `panel.json`，不在 `workspace.json` 暴露。
 输入使用 JSON Schema object，禁止未声明顶层字段及 `$ref`、`$dynamicRef`。
 动作需返回 JSON 兼容结果，读取自建文件时由模块负责脱敏。网页授权限制浏览器能力，
 后端插件仍以现有本机权限执行，并非操作系统安全沙箱。

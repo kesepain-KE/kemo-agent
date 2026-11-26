@@ -512,7 +512,7 @@ def execute(context, input_data: dict):
 因为外部服务尚未共享 kemo-agent 的持久任务状态、取消和恢复合同。远程服务的认证信息必须由
 拓展从模块目录自己的 `.env` 或其他私有配置读取，不能依赖框架根目录的 Provider/Web 环境，也不能写入桥接清单、Prompt、回复或日志。模块子进程只继承 PATH、临时目录、证书路径等运行必需环境；运行时生成的本机 Web 地址由框架单独传入。模块 `.env` 中不要重复定义同名变量；损坏、重复或过大的文件只会让该模块本次运行失败，不会改变框架进程环境。
 
-子智能体整体期限来自 `agent_runtime.default_timeout`，与其内部每次工具调用的 `tools.timeout` 相互独立。同步调用的 `subagent_dispatch` 使用调用方传入的 `timeout` 作为本次等待期限，不会在普通工具默认期限到达时提前截断；期限到达后，如果子代理仍在排队或运行，会先返回 `task_id`，继续保留任务用于状态追踪和取消。收尾存活期内自然完成时记录 `completed_after_timeout`；如果调用方已经收到超时结果、底层线程之后才完成，状态会从 `timed_out_running` 收敛到 `completed`，并在结果元数据中标记 `completed_after_detach`。收尾后执行线程仍未退出时记录 `timed_out_running`，该状态仍允许发起取消请求，不能描述成已经强制终止。
+主对话拥有且可取消的本地模型循环不设任务总时限；自定义 Python 执行器在模型循环之外仍有期限，独立维护及直调保留原保护。提交立即返回 `task_id`，不等执行退出。单次工具、Provider I/O、外部传输和取消收尾分别受各自期限约束。历史超时状态仍可读取；取消请求与真实退出的区分见子代理协作专题。
 
 ---
 
@@ -734,7 +734,7 @@ masked 字段仍不回显。
 面板完全由框架 React 组件渲染，不接受模块自带 HTML、CSS、JavaScript、iframe、事件处理器或
 `innerHTML`。新增原语时必须同步后端归一化/校验、前端类型与渲染、模板、专题文档和回归测试。
 
-内置实例可参考 `expand/global/kemo_app/module/`、`expand/global/kemo_gateway_status/module/` 和
+内置实例可参考 `expand/global/kemo_bridge/module/`、`expand/global/kemo_gateway_status/module/` 和
 `expand/global/kemo_graph/module/`：它们分别演示 masked Token 状态与替换、用户身份绑定、
 连接端点配置和只读在线检测。实例仍遵守同一边界：面板只声明允许操作的 command，模块入口必须
 再次做权限、范围和失败语义校验；配置值与状态不会因为出现在面板中就自动进入数据注入层。
