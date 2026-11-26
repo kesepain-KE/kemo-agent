@@ -1,0 +1,114 @@
+<div id="workspace">
+  <div data-panel="overview">
+    <dl class="metrics" aria-label="运行摘要">
+      <div><dt>当前状态</dt><dd><span id="bridge-state" class="badge">—</span></dd></div>
+      <div><dt>绑定的手机用户</dt><dd id="mobile-users">—</dd></div>
+      <div><dt>外部实例</dt><dd id="external-count">—</dd></div>
+      <div><dt>近 24 小时日志</dt><dd id="traffic-count">—</dd></div>
+    </dl>
+    <section class="card identity-card">
+      <div><h2>本机 UUID</h2><code id="instance-uuid">—</code></div>
+      <div class="controls">
+        <button type="button" id="copy-uuid" disabled>复制</button>
+        <button type="button" id="replace-uuid" disabled>更换 UUID</button>
+      </div>
+    </section>
+  </div>
+  <div data-panel="bindings" hidden>
+    <div class="binding-grid">
+      <section class="card" aria-labelledby="mobile-title">
+        <h2 id="mobile-title">手机通道</h2>
+        <form id="create-phone">
+          <label>绑定用户<select name="bound_user" required></select></label>
+          <label>备注<input name="label" maxlength="120"></label>
+          <button type="button" class="primary" data-submit>绑定手机</button>
+        </form>
+        <div id="phones" class="phone-list"></div>
+      </section>
+      <section class="card" aria-labelledby="external-title">
+        <h2 id="external-title">对外用户绑定</h2>
+        <form id="exposed-form">
+          <label>对外开放的用户<select name="bound_user" required></select></label>
+          <button type="button" class="primary" data-submit>保存绑定</button>
+        </form>
+        <form id="public-url-form">
+          <label>对端访问地址<input name="public_url" type="url" maxlength="2048" placeholder="https://bridge.example.com"></label>
+          <button type="button" data-submit>保存地址</button>
+        </form>
+      </section>
+    </div>
+    <details class="card grants-panel">
+      <summary>产物授权</summary>
+      <form id="create-grant">
+        <label>对端<select name="peer_id" required></select></label>
+        <label>文件绝对路径<input name="file_path" required maxlength="4096"></label>
+        <label>显示名<input name="display_name" maxlength="240"></label>
+        <label>类型<select name="media_kind"><option value="file">文件</option><option value="image">图片</option><option value="audio">音频</option><option value="video">视频</option></select></label>
+        <button type="button" data-submit>登记产物</button>
+      </form>
+      <div class="table"><table aria-label="产物授权"><thead><tr><th>文件</th><th>对端</th><th>大小</th><th>下载次数</th><th>状态</th><th>操作</th></tr></thead><tbody id="grants"></tbody></table></div>
+    </details>
+  </div>
+  <div data-panel="outbound" hidden>
+    <div class="section-actions">
+      <button type="button" id="external-user-needed" hidden>先绑定对外用户</button>
+      <button type="button" class="primary" id="add-instance" disabled>新增实例</button>
+    </div>
+    <div id="external-cards"></div>
+    <p class="empty" id="no-externals">暂无外部实例</p>
+    <details class="card">
+      <summary>导入出站凭据</summary>
+      <p>这里填对端签给本机的密钥和本机在对端登记的 UUID，不使用上方本机签发的密钥。</p>
+      <form id="outbound-credential-form" method="post" autocomplete="off">
+        <label>对端桥接基址<input name="url" type="url" placeholder="https://bridge.example.org" maxlength="2048" required></label>
+        <label>本机在对端登记的 UUID<input name="peer_id" maxlength="36" required></label>
+        <label>备注<input name="label" maxlength="128"></label>
+        <label>对端签给本机的密钥<input name="secret" type="password" maxlength="512" required></label>
+        <label>获准使用的本机用户<input name="allowed_users" placeholder="逗号分隔；留空仅 kesepain"></label>
+        <button type="button" data-submit class="primary">保存出站凭据</button>
+      </form>
+    </details>
+    <details id="legacy-credentials" class="card" hidden>
+      <summary>已收存的出站凭据</summary>
+      <div class="table"><table aria-label="已收存的出站凭据"><thead><tr><th>备注</th><th>地址</th><th>UUID</th><th>操作</th></tr></thead><tbody id="legacy-rows"></tbody></table></div>
+    </details>
+  </div>
+  <div data-panel="logs" hidden>
+    <section class="card">
+      <form id="logs-form">
+        <label>对端<select name="peer_id"><option value="">全部对端</option></select></label>
+        <button type="button" data-submit>筛选</button>
+      </form>
+      <div class="table"><table aria-label="连接日志"><thead><tr><th>时间</th><th>事件</th><th>对端</th><th>通道</th><th>端点</th></tr></thead><tbody id="logs"></tbody></table></div>
+    </section>
+  </div>
+</div>
+<template id="external-template">
+  <form class="external-card">
+    <label>备注名称<input name="label" maxlength="120"></label>
+    <label>对方 UUID<input name="peer_id" maxlength="36" pattern="[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}" required spellcheck="false" autocomplete="off"></label>
+    <div class="key-field">
+      <span>连接密钥</span>
+      <div class="key-box">
+        <input name="secret" aria-label="连接密钥" type="password" readonly autocomplete="off">
+        <button type="button" class="icon-button rotate-button" data-rotate title="刷新密钥" aria-label="刷新密钥" disabled>↻</button>
+        <button type="button" class="icon-button" data-copy title="复制密钥" aria-label="复制密钥" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="controls card-actions"><button type="button" class="primary" data-submit>保存</button><button type="button" class="danger" data-delete>删除</button></div>
+  </form>
+</template>
+<dialog id="credential" aria-labelledby="credential-title">
+  <h2 id="credential-title"></h2>
+  <p>UUID：<code id="credential-id"></code></p>
+  <label>密钥<input id="credential-secret" readonly spellcheck="false"></label>
+  <p id="copy-feedback" role="status"></p>
+  <div class="controls dialog-actions"><button type="button" id="copy-credential">复制密钥</button><button type="button" class="primary" id="dismiss">关闭</button></div>
+</dialog>
+<dialog id="question" aria-labelledby="question-title">
+  <h2 id="question-title"></h2>
+  <label id="question-label">备注<input id="question-input" maxlength="120"></label>
+  <div class="controls dialog-actions"><button type="button" id="decline">取消</button><button type="button" class="primary" id="accept">确认</button></div>
+</dialog>

@@ -1,0 +1,58 @@
+.card, dialog { padding: clamp(14px, 2.3vw, 24px); border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); }
+h2 { font-size: 17px; margin: 0 0 8px; line-height: 1.3; }
+form, .controls { display: flex; align-items: end; flex-wrap: wrap; gap: 8px 10px; min-width: 0; }
+form { margin-top: 12px; }
+label, .key-field { display: grid; gap: 4px; flex: 1 1 10rem; color: var(--muted); min-width: 0; }
+input, select, button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; min-width: 0; }
+button { cursor: pointer; white-space: nowrap; }
+button:disabled { cursor: default; opacity: .6; }
+button:hover:not(:disabled) { border-color: var(--focus); }
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.primary { background: var(--inset); color: var(--focus); font-weight: 650; }
+.danger { color: var(--text-error, #be3d48); }
+.metrics { margin: 0 0 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+.metrics > div { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.metrics dt, th, .empty { color: var(--muted); }
+.metrics dd { margin: 5px 0 0; font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
+.badge { display: inline-block; border-radius: 999px; padding: 1px 8px; background: var(--inset); color: var(--muted); font-size: .9em; }
+.badge[data-online=true] { color: var(--text-success, #27834d); }
+.identity-card { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+code { overflow-wrap: anywhere; }
+.binding-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.phone-list, .grants-panel, #legacy-credentials { margin-top: 14px; }
+.phone { padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line); }
+.phone-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.phone code { display: block; margin: 4px 0 8px; color: var(--muted); }
+summary { cursor: pointer; font-weight: 650; }
+.section-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px; }
+.external-card {
+  display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(12rem, 1.5fr) minmax(10rem, 1.2fr) auto;
+  margin: 0 0 10px; padding: 14px; gap: 10px; border-radius: 10px;
+  background: color-mix(in srgb, #3380cf 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, #3380cf 35%, var(--line));
+}
+.key-box { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 5px; }
+.icon-button { display: grid; width: 35px; height: 36px; place-items: center; padding: 0; }
+.rotate-button { border-radius: 50%; font-size: 21px; line-height: 1; }
+.card-actions { flex-wrap: nowrap; gap: 6px; }
+.empty { padding: 14px 0; }
+.table { overflow-x: auto; margin-top: 12px; }
+table { width: 100%; border-collapse: collapse; }
+td, th { padding: 8px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+td { white-space: pre-line; overflow-wrap: anywhere; }
+th { white-space: nowrap; }
+td button { margin: 0 4px 4px 0; }
+dialog { width: min(32rem, calc(100vw - 24px)); }
+dialog::backdrop { background: rgb(0 0 0 / 40%); }
+dialog p, dialog label { margin: 8px 0; overflow-wrap: anywhere; }
+.dialog-actions { justify-content: end; margin-top: 14px; }
+@media (max-width: 880px) {
+  .external-card { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card-actions { justify-content: flex-end; }
+}
+@media (max-width: 730px) {
+  .binding-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .external-card { grid-template-columns: minmax(0, 1fr); }
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "default_page": "dashboard",
+  "pages": [
+    {"id":"dashboard","label":"桥接控制台","type":"web","entry":"ui/dist/index.html","permissions":["module.action.invoke"]},
+    {"id":"guide","label":"接入契约","type":"markdown","source":"expand_control.md"}
+  ],
+  "actions": [
+    {
+      "id": "bridge_admin", "label": "管理桥接", "handler": "bridge_admin",
+      "input_schema": {
+        "type": "object",
+        "required": ["operation"],
+        "properties": {
+          "operation": {"enum": [
+            "snapshot", "replace_instance_uuid", "save_public_url", "set_exposed_user",
+            "create_device", "create_external", "edit_peer", "rotate_peer", "revoke_peer",
+            "copy_external_key", "create_grant", "revoke_grant", "logs",
+            "list_legacy_credentials", "copy_legacy_key", "import_outbound_credential"
+          ]},
+          "data": {"type": "object", "maxProperties": 12}
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}

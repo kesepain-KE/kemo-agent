@@ -1,0 +1,40 @@
+:root {
+  color-scheme: light;
+  --bg: var(--bg-app, #f5f7fb);
+  --surface: var(--bg-surface, #fff);
+  --inset: var(--bg-inset, #eef2f8);
+  --ink: var(--text-primary, #1b2939);
+  --muted: var(--text-secondary, #536578);
+  --line: var(--border, #d6e0eb);
+  --focus: var(--accent, #275b9e);
+  font: 14px/1.55 system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+.workbench { display: grid; grid-template-columns: clamp(148px, 25vw, 216px) minmax(0, 1fr); min-height: 100vh; }
+.sidebar { background: var(--surface); padding: 24px clamp(10px, 2vw, 16px); border-right: 1px solid var(--line); }
+.brand { display: flex; gap: 8px; align-items: center; padding: 4px 2px; margin-bottom: 24px; }
+.brand strong, .brand small { display: block; }
+.brand strong { white-space: nowrap; }
+.brand-mark { display: grid; place-items: center; font-weight: 700; color: var(--focus); background: var(--inset); border-radius: 8px; width: 34px; height: 34px; flex: none; }
+small { color: var(--muted); }
+nav { display: grid; gap: 6px; }
+nav button { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; min-height: 40px; border-color: transparent; }
+nav button[aria-current="page"] { color: var(--focus); background: var(--inset); border-color: var(--line); font-weight: 650; }
+.detail { min-width: 0; padding: clamp(16px, 3vw, 38px); }
+.detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+.detail-header h1 { font-size: clamp(24px, 3vw, 34px); margin: 2px 0 4px; line-height: 1.2; }
+.clipboard-buffer { position: fixed; left: -10000px; top: 0; }
+p { margin: 0; }
+#message { border-left: 3px solid var(--focus); padding: 8px 12px; margin-bottom: 12px; background: var(--inset); overflow-wrap: anywhere; }
+#message:empty { display: none; }
+@media (max-width: 520px) {
+  .workbench { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .sidebar { padding: 12px; border: 0; border-bottom: 1px solid var(--line); }
+  .brand { margin-bottom: 8px; }
+  nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  nav button { justify-content: center; padding-inline: 3px; white-space: normal; }
+}

@@ -1,0 +1,25 @@
+# Local bridge configuration and authentication material
+config.json
+users.json
+credential_registry.json
+_admin_key.sha256
+_workspace_credentials.yaml
+
+# Runtime state
+_connections.json
+_device_commands.json
+_device_commands.json.lock
+_bridge_runs.sqlite3*
+_bridge_peers.sqlite3*
+_runtime.json
+_activated.json
+_server.pid
+_lifecycle.lock
+_last_run.json
+.module.execution.lock
+.runtime.lock
+logs/
+module/panel.values.json
+__pycache__/
+*.pyc
+*.tmp

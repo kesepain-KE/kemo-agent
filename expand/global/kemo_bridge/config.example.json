@@ -1,0 +1,17 @@
+{
+  "host": "0.0.0.0",
+  "port": 8742,
+  "bridge": {"public_url": null, "upload_extensions": null},
+  "session_secret": "",
+  "users_path": "users.json",
+  "pbkdf2_iterations": 310000,
+  "upstream": "http://127.0.0.1:1357",
+  "upstream_token": "",
+  "upstream_username": "",
+  "upstream_password": "",
+  "poll_interval": 5,
+  "request_timeout": 30,
+  "run_replay_retention_seconds": 604800,
+  "run_replay_max_terminal_per_user": 500,
+  "note": "Initialize locally and use the host web console to create peers. Inactive by default. Never commit local configuration, accounts or bridge databases."
+}

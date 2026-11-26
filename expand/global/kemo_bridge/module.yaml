@@ -1,0 +1,14 @@
+kind: expand
+name: kemo_bridge
+explain: kemo-bridge v2.1.0，在单一端口连接手机工作台与其他 kemo-agent 实例，按通道和本地用户绑定隔离身份及能力。
+input_open: false
+input_file: input_data.md
+health: 正常
+update_script: data_update.py
+control_open: true
+control_script: start_expand.py
+control_entry: expand_control.md
+ui:
+  workspace: module/workspace.json
+  action_entry: workspace_actions.py
+recent_update: '2026-11-22 00:08:25'

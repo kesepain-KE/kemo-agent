@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kemo Bridge · 桥接控制台</title>
+  <link rel="stylesheet" href="./style.css"><link rel="stylesheet" href="./admin.css">
+  <script type="module" src="./main.js"></script>
+</head>
+<body>
+<main class="workbench">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">KB</span><div><strong>桥接控制台</strong><small>Kemo Bridge · 2.1.0</small></div></div>
+    <nav aria-label="桥接功能">
+      <button type="button" data-view="overview" aria-current="page" disabled>总览</button>
+      <button type="button" data-view="bindings" disabled>本机绑定</button>
+      <button type="button" data-view="outbound" disabled>对外凭据</button>
+      <button type="button" data-view="logs" disabled>日志</button>
+    </nav>
+  </aside>
+  <article class="detail">
+    <header class="detail-header">
+      <h1 id="view-title">总览</h1>
+      <button type="button" id="refresh" disabled>刷新</button>
+    </header>
+    <p id="message" role="status" aria-live="polite"></p>
+    <!-- bridge-admin -->
+  </article>
+</main>
+</body>
+</html>
