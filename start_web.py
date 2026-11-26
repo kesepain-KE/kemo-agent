@@ -281,7 +281,7 @@ def _publish_runtime_web_endpoint(host: str, port: int) -> str:
     """Publish the selected local Web endpoint to child Expand processes.
 
     The value is process-local environment state, not user configuration.  It
-    lets the kemo_app bridge follow an automatically selected fallback port
+    lets the kemo_bridge bridge follow an automatically selected fallback port
     while preserving an explicitly configured non-local upstream gateway.
     """
 
@@ -445,7 +445,7 @@ def _run_main(
         return 1
 
     # Publish the actual endpoint before RuntimeHost can launch any isolated
-    # Expand child.  kemo_app inherits this value when it starts and can use it
+    # Expand child.  kemo_bridge inherits this value when it starts and can use it
     # for a local upstream instead of assuming the legacy 1357 port.
     endpoint = _publish_runtime_web_endpoint(web_host, chosen_port)
 

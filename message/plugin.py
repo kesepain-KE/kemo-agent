@@ -672,7 +672,7 @@ class FileMessageTransport:
         else:
             outbound = f"处理失败：{(result.error or {}).get('message', '未知错误')}"
         store = LogStore(self.config.root)
-        files_root = self.config.files_path.relative_to(self.config.root).as_posix()
+        module_root = self.config.directory.relative_to(self.config.root).as_posix()
         entries: list[dict[str, Any]] = []
         for message in messages:
             timestamp = datetime.fromisoformat(
@@ -718,7 +718,7 @@ class FileMessageTransport:
                         "direction": "receive",
                         "kind": "file",
                         "content": attachment.name,
-                        "file_path": f"{files_root}/{attachment.name}",
+                        "file_path": f"{module_root}/{attachment.path}",
                         "mime": attachment.mime,
                         "size": attachment.size,
                         "success": True,

@@ -209,8 +209,6 @@ def read_manifest(
             if workspace.suffix != ".json":
                 raise ValueError("ui.workspace 必须是 JSON 文件")
             if "action_entry" in ui:
-                if kind_hint != "sense":
-                    raise ValueError("Expand UI 动作复用 control_script")
                 action_entry = module_path(module_dir, ui["action_entry"])
                 if action_entry.suffix != ".py":
                     raise ValueError("ui.action_entry 必须是 Python 文件")
