@@ -659,14 +659,14 @@ class WebBackendTests(unittest.TestCase):
         with (
             patch("web.services._paths._DIRECTORY_SCAN_MAX_ENTRIES", 5),
             patch(
-                "web.services._paths._visible_children",
-                wraps=path_helpers._visible_children,
-            ) as visible_children,
+                "web.services._paths._scandir_children",
+                wraps=path_helpers._scandir_children,
+            ) as scandir_children,
         ):
             page = service.files("alice", "file_upload", page=1, page_size=6)
 
         self.assertEqual([entry["relative_path"] for entry in page["entries"]], ["deep"])
-        self.assertLessEqual(visible_children.call_count, 8)
+        self.assertLessEqual(scandir_children.call_count, 8)
         self.assertEqual(page["summary"]["scanned_entries"], 5)
         self.assertTrue(page["summary"]["truncated"])
 
@@ -686,10 +686,14 @@ class WebBackendTests(unittest.TestCase):
                 page=1,
                 page_size=100,
             )
+            browse = service.files("alice", "file_upload", page=2)
 
         self.assertEqual(page["summary"]["scanned_entries"], 5)
         self.assertTrue(page["summary"]["truncated"])
         self.assertEqual(page["pagination"]["total_items"], 5)
+        self.assertEqual(browse["summary"], page["summary"])
+        self.assertEqual(browse["pagination"]["total_items"], 20)
+        self.assertEqual(len(browse["entries"]), 6)
 
     def test_file_summary_cache_is_reused_and_web_mutations_invalidate_it(self) -> None:
         _, root = self.make_root()
@@ -698,14 +702,17 @@ class WebBackendTests(unittest.TestCase):
         (upload_root / "first.txt").write_text("first", "utf-8")
         service = WebRunService(root)
 
-        with patch(
-            "web.services._paths._scan_directory_summary",
-            wraps=path_helpers._scan_directory_summary,
-        ) as scan_summary:
+        with (
+            patch.object(path_helpers, "_scan_directory_snapshot", wraps=path_helpers._scan_directory_snapshot) as scan_summary,
+            patch.object(path_helpers, "_scan_direct_children", wraps=path_helpers._scan_direct_children) as scan_direct,
+        ):
             first = service.files("alice", "file_upload")
             second = service.files("alice", "file_upload")
+            found = service.files("alice", "file_upload", search="first")
             self.assertEqual(scan_summary.call_count, 1)
+            self.assertEqual(scan_direct.call_count, 1)
             self.assertEqual(first["summary"], second["summary"])
+            self.assertEqual(found["entries"], first["entries"])
 
             service.save_file(
                 "alice",
@@ -718,6 +725,105 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(scan_summary.call_count, 2)
         self.assertEqual(refreshed["summary"]["total_files"], 2)
         self.assertEqual(refreshed["summary"]["total_dirs"], 1)
+        self.assertEqual(refreshed["pagination"]["total_items"], 2)
+
+    def test_file_space_explicit_refresh_reloads_search_and_browse(self) -> None:
+        _, root = self.make_root()
+        app = create_app(service=WebRunService(root))
+        for area, endpoint in (
+            (root / "users/alice/download", "/api/users/alice/files/download"),
+            (root / "tmp", "/api/tmp"),
+        ):
+            with self.subTest(endpoint=endpoint):
+                area.mkdir(parents=True, exist_ok=True)
+                first = self.request(app, "GET", endpoint)
+                self.assertEqual(first.status_code, 200, first.text)
+                self.assertEqual(first.json()["entries"], [])
+                (area / "fresh.txt").write_text("fresh", "utf-8")
+                cached = self.request(app, "GET", endpoint + "?search=fresh")
+                self.assertEqual(cached.json()["entries"], [])
+                refreshed = self.request(app, "GET", endpoint + "?search=fresh&refresh=true")
+                self.assertEqual(refreshed.status_code, 200, refreshed.text)
+                self.assertEqual([item["name"] for item in refreshed.json()["entries"]], ["fresh.txt"])
+                browse = self.request(app, "GET", endpoint)
+                self.assertEqual(browse.status_code, 200, browse.text)
+                self.assertEqual(browse.json()["entries"], refreshed.json()["entries"])
+
+    def test_file_space_larger_page_keeps_both_snapshots(self) -> None:
+        _, root = self.make_root()
+        directory = root / "users/alice/download"
+        for index in range(12):
+            (directory / f"folder-{index}").mkdir(parents=True)
+        service = WebRunService(root)
+        first = service.files("alice", "download", page_size=12)
+        self.assertEqual(len(first["entries"]), 12)
+        with patch.object(path_helpers, "_scandir_children", wraps=path_helpers._scandir_children) as scan:
+            self.assertEqual(service.files("alice", "download", page_size=12), first)
+        scan.assert_not_called()
+
+    def test_file_space_cold_scan_does_not_block_auth_status(self) -> None:
+        _, root = self.make_root()
+        app = create_app(service=WebRunService(root))
+        scan = path_helpers._scan_directory_snapshot
+
+        async def check(endpoint: str) -> None:
+            loop = asyncio.get_running_loop()
+            started = asyncio.Event()
+            release = threading.Event()
+
+            def paused_scan(directory: Path):
+                loop.call_soon_threadsafe(started.set)
+                self.assertTrue(release.wait(5), "冷扫描占住了事件循环")
+                return scan(directory)
+
+            transport = httpx.ASGITransport(app=app)
+            with patch.object(path_helpers, "_scan_directory_snapshot", paused_scan):
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    listing = asyncio.create_task(client.get(endpoint))
+                    try:
+                        await asyncio.wait_for(started.wait(), timeout=2)
+                        auth = await asyncio.wait_for(client.get("/api/auth/status"), timeout=2)
+                        self.assertEqual(auth.status_code, 200, auth.text)
+                        self.assertFalse(listing.done(), "认证状态必须在释放冷扫描之前返回")
+                    finally:
+                        release.set()
+                        response = await listing
+            self.assertEqual(response.status_code, 200, response.text)
+
+        for endpoint in ("/api/users/alice/files/download", "/api/tmp"):
+            with self.subTest(endpoint=endpoint):
+                asyncio.run(check(endpoint))
+
+    def test_file_space_excludes_linked_and_hidden_children(self) -> None:
+        _, root = self.make_root()
+        directory = root / "users/alice/download"
+        directory.mkdir(parents=True, exist_ok=True)
+        outside = root / "outside"
+        outside.mkdir()
+        (outside / "foreign.txt").write_text("not visible", "utf-8")
+        link = directory / "linked"
+        if os.name == "nt":
+            import subprocess
+
+            subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+        else:
+            link.symlink_to(outside, target_is_directory=True)
+        for name in ("plain.txt", ".hidden.txt", "__pycache__"):
+            (directory / name).write_text("sample", "utf-8")
+
+        service = WebRunService(root)
+        browse = service.files("alice", "download")
+        self.assertEqual([item["name"] for item in browse["entries"]], ["plain.txt"])
+        self.assertEqual(browse["summary"]["scanned_entries"], 1)
+        self.assertEqual(service.files("alice", "download", search="foreign")["entries"], [])
+
+        folder = directory / "folder"
+        folder.mkdir()
+        service.files("alice", "download", refresh=True, page=2, page_size=1)
+        folder.rmdir()
+        link.rename(folder)
+        entry = service.files("alice", "download", page_size=1)["entries"][0]
+        self.assertEqual((entry["name"], entry["size"], entry["child_count"]), ("folder", 0, 0))
 
     def test_generated_artifact_resolves_nested_move_by_checksum(self) -> None:
         _, root = self.make_root()
@@ -2440,6 +2546,25 @@ class WebBackendTests(unittest.TestCase):
         upload.unlink()
         self.assertFalse(service.history("alice", "s1")["messages"][0]["attachments"][0]["available"])
 
+    def test_history_replays_recorded_failure_elapsed_ms_with_legacy_zero_default(self):
+        _, root = self.make_root()
+        store = CardStore(root, "alice")
+        reserve_session(root, "alice", "web", "s1")
+        for identity, metadata in (("old_failure", {}), ("new_failure", {"elapsed_ms": 125})):
+            integration = IntegrationStore(store, "web", "s1", identity)
+            integration.start()
+            store.append("web", "s1", identity, "user_text", {"text": identity}, level="initial")
+            integration.finish("failed", metadata=metadata)
+
+        app = create_app(service=WebRunService(root))
+        response = self.request(app, "GET", "/api/users/alice/sessions/s1/history")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {item["integration_id"]: (item["status"], item["elapsed_ms"])
+             for item in response.json()["integrations"]},
+            {"old_failure": ("failed", 0), "new_failure": ("failed", 125)},
+        )
+
     def test_history_paginates_raw_sequences_from_newest_to_oldest(self):
         _, root = self.make_root()
         texts = [text for n in range(1, 46) for text in (f"question {n}", f"answer {n}")]
@@ -3381,6 +3506,24 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(response["error"]["code"], "guidance_closed")
         self.assertEqual(response["queued"], 0)
         self.assertEqual(active.guidance.qsize(), 0)
+
+    def test_web_guidance_post_preserves_both_modes_in_the_mailbox(self) -> None:
+        _, root = self.make_root()
+        service = WebRunService(root)
+        active = ActiveRun("run_guidance_modes", "alice", "guided-session")
+        service._active_runs[active.run_id] = active
+        app = create_app(service=service)
+        for mode in ("background", "interrupt"):
+            with self.subTest(mode=mode):
+                response = self.request(app, "POST", "/api/runs/run_guidance_modes/guidance", json={
+                    "user": "alice", "source": "web", "session_id": "guided-session",
+                    "guidance_id": mode, "guidance": "adjust target", "mode": mode,
+                })
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["status"], "accepted_current_run")
+                self.assertEqual(active.guidance.get_nowait(), GuidanceInput(
+                    id=mode, text="adjust target", mode=mode,
+                ))
 
     def test_web_run_controls_require_matching_session_and_source(self) -> None:
         _, root = self.make_root()

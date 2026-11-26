@@ -216,6 +216,8 @@ def test_closed_parent_controls_are_scoped_and_never_expose_guidance_text(backen
 
         def cancel(self, task_id, *, source, session_id):
             self.cancelled.append((task_id, source, session_id))
+            coordinator.ledger.update(task_id, status="cancelling", execution_live=True,
+                                      error={"cancel_requested": True})
             return True
 
     scheduler = Scheduler()
@@ -264,6 +266,8 @@ def test_closed_parent_controls_are_scoped_and_never_expose_guidance_text(backen
             )
             assert cancel_response.status_code == 200, cancel_response.text
             assert cancel_response.json()["status"] == "cancelling"
+            assert cancel_response.json()["cancel_state"] == "requested"
+            assert cancel_response.json()["process_terminated"] is False
 
     asyncio.run(exercise())
     assert queued and queued[0][1]["allow_closed_parent"] is True

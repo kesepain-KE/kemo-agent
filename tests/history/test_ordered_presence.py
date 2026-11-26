@@ -6,9 +6,10 @@ import json
 import pytest
 
 from run.cards import card_connection, session_key
-from run.history import reserve_session
+from run.history import close_session, reserve_session
 from run.history.lease_presence import other_presence, update_presence
 from run.history.web_lifecycle import active_session_lease_clients, touch_session_lease
+from tests.card_history_support import seed_history
 from web.service import WebRunService
 from web.app import create_app
 from fastapi.testclient import TestClient
@@ -149,3 +150,24 @@ def test_http_ignores_stale_request_without_reporting_missing_session(root):
         response = client.post(base, json={"client_id": "web_document", "lease_sequence": 1})
         assert response.status_code == 200
         assert response.json()["ignored"] and not response.json()["leased"]
+
+
+def test_http_distinguishes_readable_closed_session_from_missing_lease_target(root):
+    seed_history(root, "alice", "web", "archived", [
+        {"role": "user", "content": "hello"}, {"role": "assistant", "content": "saved answer"},
+    ])
+    close_session(root, "alice", "web", "archived")
+    with TestClient(create_app(service=WebRunService(root)), base_url="http://127.0.0.1",
+                    client=("127.0.0.1", 50000)) as client:
+        base = "/api/users/alice/sessions"
+        body = {"client_id": "web_document", "lease_sequence": 1}
+        archived = client.post(base + "/archived/lease", json=body)
+        missing = client.post(base + "/missing/lease", json=body)
+        assert archived.status_code == missing.status_code == 404
+        history = client.get(base + "/archived/history")
+        assert history.status_code == 200
+        assert history.json()["session_id"] == "archived"
+        assert [item["content"] for item in history.json()["messages"]] == ["hello", "saved answer"]
+        assert client.get(base + "/missing/history").status_code == 404
+        assert missing.json()["error"]["code"] == "not_found"
+        assert archived.json()["error"]["code"] == "session_closed"

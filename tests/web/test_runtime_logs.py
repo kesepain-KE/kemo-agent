@@ -15,6 +15,7 @@ import httpx
 
 from run.infra import LogStore
 from run.infra import runtime_diagnostics as diagnostics
+from run.infra.message_log_projection import _body
 from run.tools import ToolDefinition, execute_tool
 from web.app import create_app
 from web.errors import NotFoundError
@@ -135,7 +136,7 @@ class RuntimeLogTests(unittest.TestCase):
         self.store.append_message_entries([
             {**common, 'direction': 'receive', 'kind': 'text', 'content': 'input A'},
             {**common, 'direction': 'receive', 'kind': 'file', 'content': 'note.txt',
-             'file_path': '/private/file/path'},
+             'file_path': '/private/file/path', 'mime': 'text/plain', 'size': 8},
             {**common, 'direction': 'send', 'kind': 'text', 'content': 'output A'},
             {**common, 'chat_id': 'chat-b', 'direction': 'receive', 'kind': 'text', 'content': 'input B'},
             {**common, 'machine_id': 'different', 'direction': 'send', 'kind': 'text', 'content': 'output C'},
@@ -145,11 +146,25 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(len(result['entries']), 3)
         paired = next(row for row in result['entries'] if len(row['inputs']) == 2)
         self.assertEqual([part['content'] for part in paired['inputs']], ['input A', 'note.txt'])
+        self.assertEqual(paired['inputs'][1]['mime'], 'text/plain')
+        self.assertEqual(paired['inputs'][1]['size'], 8)
         self.assertEqual(paired['outputs'][0]['content'], 'output A')
         self.assertTrue(any(not row['outputs'] for row in result['entries']))
         self.assertTrue(any(not row['inputs'] for row in result['entries']))
         self.assertNotIn('/private/file/path', json.dumps(result))
         self.assertNotIn('hidden', json.dumps(result))
+
+    def test_message_body_only_exports_present_media_metadata(self):
+        row = {'event_key': 'media', 'content': 'image.png', 'kind': 'file',
+               'success': True, 'occurred_at': self.now, 'file_path': '/private/image.png'}
+        body = _body({**row, 'mime': 'image/png', 'size': 0})
+        self.assertEqual((body['mime'], body['size']), ('image/png', 0))
+        self.assertNotIn('file_path', body)
+
+        body = _body({**row, 'mime': None, 'size': None})
+        self.assertNotIn('mime', body)
+        self.assertNotIn('size', body)
+        self.assertNotIn('file_path', body)
 
     def test_ambiguous_legacy_messages_are_not_paired_by_timestamp(self):
         common = {'user': 'alice', 'machine_id': 'bridge', 'platform': 'test',

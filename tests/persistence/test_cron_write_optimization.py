@@ -277,7 +277,7 @@ def test_repeated_identical_partial_results_are_aggregated_after_first_record() 
             scheduler._record_system_execution(
                 action="expand_update", user="__system__", task_id="expand_update",
                 executed_at=datetime.now(BEIJING), duration_ms=2,
-                result={"status": "partial", "failed": ["global/kemo_app"]},
+                result={"status": "partial", "failed": ["global/kemo_bridge"]},
             )
         rows = LogStore(root).list_cron("__system__")
         assert len(rows) == 20

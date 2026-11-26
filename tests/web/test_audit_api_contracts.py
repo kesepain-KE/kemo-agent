@@ -69,9 +69,13 @@ def test_retired_plan_mutation_methods_remain_unavailable(backend, method, path)
     asyncio.run(request())
 
 
-@pytest.mark.parametrize("sections", ["prompt", "tokens", "api", "external", "maintenance", "congestion", "summary", ""])
+@pytest.mark.parametrize("sections", ["prompt", "tokens", "api", "external", "maintenance", "congestion", "summary", "", None])
 def test_every_lazy_runtime_section_preserves_response_contract(backend, sections):
-    result = RuntimeResponse.model_validate(backend.runtime_status("alice", sections=sections))
+    payload = backend.runtime_status("alice") if sections is None else backend.runtime_status("alice", sections=sections)
+    assert payload["included_sections"] == (
+        [sections] if sections else ["api", "congestion", "external", "maintenance", "prompt", "summary", "tokens"]
+    )
+    result = RuntimeResponse.model_validate(payload)
     assert result.tokens.timezone == "Asia/Shanghai"
     assert not any(key.startswith("_status_") for key in result.tokens.model_dump())
 

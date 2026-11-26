@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from provider.protocol.models import IncompleteDetails, Usage
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -25,12 +27,15 @@ from provider.protocol.models import (
     text_from_content,
 )
 from provider.protocol.streaming import ProviderStreamEvent
+from provider.retry import RetryCancelled
 from provider.schema import ProviderError
 from run.cards import CardConflictError, CardStore, IntegrationStore, compact
 from run.conversation import GuidanceMailbox
+from run.conversation.runtime_helpers import build_failure_metadata
 from run.engine import handle_request, iter_request_events
 from run.infra import EngineError
 from run.tools import MAX_TOOL_RESULT_CHARS, ToolDefinition, ToolRegistry, ToolRuntime
+from tests.card_history_support import session_history
 from tests.type_assertions import require_present
 
 
@@ -93,6 +98,58 @@ def run(root, provider, *, text="hello", tools=(), **extra):
 
 def history(root):
     return CardStore(root, "alice").raw_page("web", "s1", limit=500)
+
+
+@pytest.fixture
+def run_clock(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr("run.conversation.main_orchestration.time", SimpleNamespace(monotonic=lambda: clock.now))
+    return clock
+
+
+@pytest.mark.parametrize(("status", "event_type"), [("completed", "done"), ("failed", "error"), ("cancelled", "done")])
+def test_run_terminal_history_stores_measured_elapsed_ms(root, run_clock, status, event_type):
+    class Provider:
+        def create(self, request):
+            run_clock.now = 0.125
+            if status == "failed":
+                raise RuntimeError("terminal timing fixture")
+            if status == "cancelled":
+                raise RetryCancelled("用户停止了当前整合")
+            return response(request)
+
+    terminal = list(run(root, Provider()))[-1]
+    assert terminal.type == event_type and terminal.metadata["status"] == status
+    record, = require_present(session_history(root, "alice", "web", "s1")).integrations
+    assert record["status"] == status and record["response_closed"]
+    assert record["elapsed_ms"] == 125
+    if event_type == "done":
+        assert terminal.metadata["elapsed_ms"] == record["elapsed_ms"]
+
+
+def test_close_during_compression_failure_stores_cancelled_elapsed_ms(root, monkeypatch, run_clock):
+    def fail_after_start(*, compression_started, **kwargs):
+        compression_started["trigger"] = "occupancy"
+        run_clock.now = 0.125
+        raise RuntimeError("compression failed")
+
+    monkeypatch.setattr("run.conversation.main_orchestration.prepare_runtime_request", fail_after_start)
+    with closing(run(root, object())) as events:
+        failed = next(events)
+        assert failed.type == "context_compression" and failed.metadata["status"] == "failed"
+
+    record, = require_present(session_history(root, "alice", "web", "s1")).integrations
+    assert record["status"] == "cancelled" and record["response_closed"]
+    assert record["elapsed_ms"] == 125
+
+
+def test_failure_elapsed_ms_overrides_coordinator_receipt():
+    metadata = build_failure_metadata(
+        RuntimeError("terminal timing fixture"), usage={}, context={}, guidance=[], argument_corrections=0,
+        media_inputs=[], request_diagnostics=[], receipt={"elapsed_ms": 0}, live_tools=[],
+        elapsed_ms=125, cancelled=False,
+    )
+    assert metadata["elapsed_ms"] == 125
 
 
 def test_public_runtime_writes_only_cards_and_restores_native_history(root):

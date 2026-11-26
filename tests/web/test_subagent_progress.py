@@ -14,6 +14,37 @@ from web.service import WebRunService
 
 
 class SubagentProgressTests(unittest.TestCase):
+    def test_heartbeat_sends_only_public_progress_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "users" / "alice" / "history").mkdir(parents=True)
+
+            def source(request, **_kwargs):
+                request["_subagent_event_callback"](RunEvent(
+                    type="subagent_progress", tool_call_id="call-worker",
+                    content="private body", metadata={
+                        "phase": "subagent", "status": "running", "task_id": "task-worker",
+                        "heartbeat": True, "elapsed_seconds": 600.5,
+                        "recent_cards": [{"summary": "private card"}],
+                        "usage": {"input_tokens": 300}, "budget": {"timeout": None},
+                    },
+                ))
+                yield RunEvent(type="done")
+
+            stream = WebRunService(root, event_source=source).stream_chat(
+                "alice", "session-a", "执行", run_id="run_heartbeat", cancel_event=threading.Event(),
+            )
+            try:
+                event = next(stream)
+                self.assertEqual(event.type, "subagent_progress")
+                self.assertIs(event.metadata["heartbeat"], True)
+                self.assertEqual(event.metadata["elapsed_seconds"], 600.5)
+                self.assertFalse({"recent_cards", "usage", "budget"} & event.metadata.keys())
+                self.assertNotIn("private", str(event.to_dict()))
+                self.assertEqual([e.type for e in stream], ["done"])
+            finally:
+                stream.close()
+
     def test_progress_reaches_client_before_tool_finishes_and_is_ui_safe(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -80,15 +111,14 @@ class SubagentProgressTests(unittest.TestCase):
                         kwargs["event_callback"](RunEvent(type="reasoning_delta", metadata={"phase": "subagent", "agent": agent, "status": "queued"}))
                         return "task-a"
 
-                result = tool.AgentRunResult(
-                    agent="custom", data={}, raw_text="", usage={}, model="mock",
-                )
+                    def get(self, task_id, **scope):
+                        return {"id": task_id, "agent": "custom", "status": "queued"}
+
                 with (
                     patch.object(tool, "_public", return_value=[SimpleNamespace(name="custom", timeout=1)]),
                     patch.object(tool, "load_config", return_value={}),
                     patch.object(tool, "prepare_main_agent_invocation", return_value=SimpleNamespace(synchronous_only=False, payload={})),
                     patch.object(tool, "get_agent_scheduler", return_value=Scheduler()),
-                    patch.object(tool, "_wait_for_task", return_value=(True, result)),
                 ):
                     tool.run(action="call", agent="custom", wait=wait, context={
                         "root": temporary, "user": "alice", "source": "web", "session_id": "session-a",

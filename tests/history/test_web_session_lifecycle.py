@@ -7,6 +7,7 @@ import time
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from multiprocessing import get_context
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -102,6 +103,43 @@ def test_empty_grace_is_independent_of_data_idle_threshold(root):
     assert found_record["lifecycle"] == "open"
 
 
+def test_cron_sweep_rechecks_lease_renewed_before_archive(root):
+    sid, client = "stale-web", "web_racing_client"
+    seed(root, sid, data=True, age=6000)
+    now = time.time()
+    update_presence(root, "alice", "web", sid, client, 1,
+                    now=now - web_lifecycle.WEB_LEASE_SECONDS - 1)
+    assert not web_lifecycle.active_session_lease_clients(root, "alice", "web", sid, now=now)
+    original, renewed = CardStore.db, False
+
+    @contextmanager
+    def renew_before_write(store, *, write=False):
+        nonlocal renewed
+        # The cron candidate and its initial lease check are already read.
+        # Commit the new heartbeat in another process before the first write.
+        if write and not renewed:
+            worker = get_context("spawn").Process(
+                target=update_presence, args=(root, "alice", "web", sid, client, 2), kwargs={"now": now},
+            )
+            worker.start()
+            worker.join(10)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(5)
+            assert worker.exitcode == 0, "The lease writer did not exit successfully"
+            assert web_lifecycle.active_session_lease_clients(root, "alice", "web", sid, now=now) == [client]
+            renewed = True
+        with original(store, write=write) as db:
+            yield db
+
+    with patch.object(CardStore, "db", renew_before_write):
+        result = sweep_idle_sessions(root, "alice", idle_seconds=5400, now=now)
+
+    assert renewed and not result["errors"], result
+    assert require_present(find_record(root, "alice", "web", sid))["lifecycle"] == "open"
+    assert result["closed"] == 0
+
+
 @pytest.mark.parametrize("inspect", [cleanup_empty_web_sessions, inspect_stale_web_sessions])
 def test_closed_empty_sessions_are_recycled_after_grace(root, inspect):
     seed(root, "closed-empty")
@@ -117,6 +155,32 @@ def test_closed_empty_sessions_are_recycled_after_grace(root, inspect):
     assert find_record(root, "alice", "web", "closed-empty") is None
     record = find_record(root, "alice", "web", "closed-data")
     assert record is not None and record["last_seq"] == 2
+
+
+def test_zero_card_session_with_execution_record_is_not_an_empty_draft(root):
+    sid = "failed-before-first-card"
+    seed(root, sid, age=0)
+    seed(root, "blank-draft", age=0)
+    store = CardStore(root, "alice")
+    integration = IntegrationStore(store, "web", sid, "provider-startup")
+    integration.start()
+    integration.finish("failed")
+    before = require_present(find_record(root, "alice", "web", sid))
+    assert before["last_seq"] == 0 and before["integration_count"] == 1
+    assert before["run_state"] == "idle"
+    now = time.time()
+
+    result = inspect_stale_web_sessions(
+        root, "alice", now=now + web_lifecycle.WEB_EMPTY_GRACE_SECONDS + 1, idle_seconds=5400,
+    )
+    assert "blank-draft" in result["deleted_sessions"]
+    assert require_present(store.session("web", sid))["lifecycle"] == "open", result
+
+    inspect_stale_web_sessions(root, "alice", now=now + 5401, idle_seconds=5400)
+    archived = require_present(find_record(root, "alice", "web", sid))
+    assert archived["lifecycle"] == "closed"
+    assert archived["session_generation"] == before["session_generation"]
+    assert archived["integration_count"] == 1
 
 
 @pytest.mark.parametrize("inspect", [inspect_stale_web_sessions, sweep_idle_sessions])
@@ -182,6 +246,97 @@ def test_active_integration_and_maintenance_claim_are_protected(root):
     assert not result["closed_sessions"] and not result["deleted_sessions"]
     assert result["skipped_busy"] >= 1
     integration.tool_result(execution["execution_id"], {"ok": True}, status="completed", duration_ms=1)
+
+
+def _leave_provider_request_inflight(root, sid, integration_id):
+    integration = IntegrationStore(CardStore(root, "alice"), "web", sid, integration_id)
+    integration.start()
+    integration.request_started()
+
+
+def test_web_startup_inspection_reconciles_lost_provider_owner_without_replay(root):
+    sid, integration_id = "lost-provider", "orphan-inflight"
+    history = require_present(seed(root, sid, data=True))
+    store = history.store
+    old_host = get_context("spawn").Process(target=_leave_provider_request_inflight, args=(root, sid, integration_id))
+    old_host.start()
+    old_host.join(10)
+    if old_host.is_alive():
+        old_host.terminate()
+        old_host.join(5)
+    assert old_host.exitcode == 0, "The old host did not leave a durable request"
+    with store.db() as db:
+        before = db.execute("SELECT * FROM card_integrations WHERE integration_id=?", (integration_id,)).fetchone()
+    assert before["owner_pid"] == old_host.pid
+    assert (before["response_closed"], before["model_request_inflight"]) == (0, 1)
+    cards = history.cards
+    assert update_presence(root, "alice", "web", sid, "web_returning_page", 1)["active"]
+    event_source = Mock()
+    service = WebRunService(root, event_source=event_source)
+    assert service.current_run("alice", sid)["run"] is None
+
+    result = service.inspect_conversation_spaces_on_startup()
+
+    event_source.assert_not_called()
+    assert result["errors"] == 0, result
+    with store.db() as db:
+        after = db.execute("SELECT * FROM card_integrations WHERE integration_id=?", (integration_id,)).fetchone()
+    assert (after["response_closed"], after["model_request_inflight"], after["status"]) == (1, 0, "failed")
+    recovery = json.loads(after["record_json"])["recovery"]
+    assert recovery["reason"] == "owner_lost" and not recovery["replay_permitted"]
+    record = require_present(find_record(root, "alice", "web", sid))
+    assert record["lifecycle"] == "open" and record["session_generation"] == before["generation"]
+    assert history.cards == cards
+
+
+def test_web_sweep_preserves_terminal_shell_job_with_uncommitted_receipt(root):
+    from run.agents import TaskCoordinator
+    from run.tools.background_jobs import prepare_background_job, publish_background_result, read_background_job
+    from run.tools.background_worker import _finish
+
+    sid = "pending-receipt"
+    history = require_present(seed(root, sid, data=True))
+    store = history.store
+    integration = IntegrationStore(store, "web", sid, "shell-integration")
+    integration.start()
+    coordinator = TaskCoordinator(root, "alice", "web", sid, "run-shell", {
+        "_cardstream_integration_id": integration.id,
+        "_cardstream_generation": integration.generation,
+        "_cardstream_meter_key": store.meter.key,
+        "_cancel_subagents_event": threading.Event(),
+    })
+    coordinator.ensure_started()
+    call = {"name": "shell", "arguments": {}}
+    execution, _ = integration.register_tool("shell-call", call)
+    job, _ = prepare_background_job(
+        root, "alice", source="web", session_id=sid, working_dir=str(root),
+        shell_type="auto", command_digest="test-only", completion_mode="required",
+        ownership={"root_task_id": coordinator.id, "cardstream_integration_id": integration.id,
+                   "cardstream_generation": integration.generation, "cardstream_meter_key": store.meter.key,
+                   "original_call": call, "tool_call_id": "shell-call"},
+    )
+    job_id = job["job_id"]
+    integration.tool_result(execution["execution_id"], {"ok": True, "job_id": job_id},
+                            status="completed", duration_ms=1)
+    assert not integration.live_executions()
+    receipt = require_present(coordinator.finish("cancelled", defer_terminal=True))
+    assert receipt["status"] == "partial"
+    # The host can stop after committing the response, before sealing the root ledger.
+    integration.finish("partial", metadata=receipt)
+
+    with patch("run.tools.background_notifications.persist_shell_result", side_effect=OSError("test-only receipt write failure")):
+        _finish(root, "alice", job_id, exit_code=0, output_tail=["late result"])
+        terminal = read_background_job(root, "alice", job_id)
+        assert terminal["status"] == "completed" and not terminal.get("card_result_seq")
+        result = inspect_stale_web_sessions(root, "alice", idle_seconds=5400, now=time.time() + 6000)
+
+    lifecycle = require_present(find_record(root, "alice", "web", sid))["lifecycle"]
+    published = publish_background_result(root, "alice", terminal)
+    assert (lifecycle, bool(published.get("card_result_seq"))) == ("open", True), (
+        result, published.get("card_result_error_type"),
+    )
+    cards = [card for card in store.raw_page("web", sid) if card.event_key == f"shell-result:{job_id}"]
+    assert len(cards) == 1 and cards[0].seq == published["card_result_seq"]
 
 
 def test_stale_processing_claim_can_return_to_offline_recovery(root):

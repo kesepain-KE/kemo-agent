@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -88,8 +89,10 @@ def _response_with_tool(
     )
 
 
-def _runner(provider: RecoveryProvider, *, retries: int = 2) -> AgentRunner:
-    root = Path(__file__).resolve().parents[2]
+def _runner(provider: RecoveryProvider, root: Path, *, retries: int = 2) -> AgentRunner:
+    repository = Path(__file__).resolve().parents[2]
+    shutil.copytree(repository / "agents/history_summary", root / "agents/history_summary")
+    (root / "users/alice").mkdir(parents=True)
     config = {
         "provider": {
             "type": "kemo",
@@ -106,7 +109,7 @@ def _runner(provider: RecoveryProvider, *, retries: int = 2) -> AgentRunner:
     }
     return AgentRunner(
         root,
-        "kesepain",
+        "alice",
         config=config,
         provider_factory=lambda _: provider,
     )
@@ -289,7 +292,7 @@ def test_malformed_tool_identifier_cannot_bypass_diagnostic_redaction() -> None:
     assert error["call_id"] == "callid_identifier_secret"
 
 
-def test_subagent_retries_malformed_structured_tool_arguments() -> None:
+def test_subagent_retries_malformed_structured_tool_arguments(tmp_path: Path) -> None:
     provider = RecoveryProvider(
         [
             _response_with_tool(
@@ -302,7 +305,7 @@ def test_subagent_retries_malformed_structured_tool_arguments() -> None:
     )
 
     with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
-        result = _runner(provider).run(
+        result = _runner(provider, tmp_path).run(
             "history_summary",
             _history_summary_input(),
             structured_output_tool=True,
@@ -318,7 +321,7 @@ def test_subagent_retries_malformed_structured_tool_arguments() -> None:
     assert "provider_tool_argument_repair" in provider.requests[1].system_prompt
 
 
-def test_subagent_stops_at_configured_malformed_argument_retry_limit() -> None:
+def test_subagent_stops_at_configured_malformed_argument_retry_limit(tmp_path: Path) -> None:
     provider = RecoveryProvider(
         [
             _response_with_tool(
@@ -336,7 +339,7 @@ def test_subagent_stops_at_configured_malformed_argument_retry_limit() -> None:
 
     with patch.dict(os.environ, {"KEMO_API_KEY": "secret"}, clear=False):
         with pytest.raises(AgentRunError, match="已重试 1/1 次"):
-            _runner(provider, retries=1).run(
+            _runner(provider, tmp_path, retries=1).run(
                 "history_summary",
                 _history_summary_input(),
                 structured_output_tool=True,

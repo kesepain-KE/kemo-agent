@@ -165,6 +165,27 @@ class WebMessageApiTests(unittest.TestCase):
         response = self.request("GET", "/api/users/alice/message/modules/bob_files/files/download?path=report.txt")
         self.assertEqual(response.status_code, 404, response.text)
 
+    def test_media_preview_reuses_bound_module_and_inline_media_policy(self) -> None:
+        alice = self.create_module("alice_files", "alice")
+        bob = self.create_module("bob_files", "bob")
+        media = b"sample png file"
+        for module in (alice, bob):
+            (module / "files" / "nested").mkdir()
+            (module / "files" / "nested" / "image.png").write_bytes(media)
+        (alice / "files" / "note.txt").write_text("text file", "utf-8")
+        url = "/api/users/alice/message/modules/alice_files/files/preview"
+        response = self.request("GET", f"{url}?path=nested%2Fimage.png")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.content, media)
+        self.assertEqual(response.headers["content-type"], "image/png")
+        self.assertIn("inline;", response.headers["content-disposition"])
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        for path in ("../message.json", "note.txt"):
+            response = self.request("GET", f"{url}?path={path}")
+            self.assertEqual(response.status_code, 400, response.text)
+        denied = self.request("GET", f"{url.replace('alice_files', 'bob_files')}?path=nested%2Fimage.png")
+        self.assertEqual(denied.status_code, 404, denied.text)
+
     def test_message_workspace_reuses_permissions_panels_and_real_actions(self) -> None:
         (self.root / "config" / "global_config.yaml").write_text("{}", "utf-8")
         (self.root / "users" / "alice" / "user_config.yaml").write_text("{}", "utf-8")

@@ -27,14 +27,19 @@ from unittest import mock
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy"
+# Load the standalone CLI as it loads its own modules, without letting
+# deploy/deploy.py shadow the repository's deploy namespace in other tests.
 sys.path.insert(0, str(DEPLOY))
-from core import cli, config, runtime, sync
-from core.common import DeployError, digest, json_bytes, target, version_key
-from core.locking import Lock
-from core.policy import local_module, protected, user_plugin_directories
-from core.source import Bundle, obtain, parse_archive, release
-from core.yamllite import dumps, loads
-from pack import clean_definition, publishable, write_bundle
+try:
+    from core import cli, config, runtime, sync
+    from core.common import DeployError, digest, json_bytes, target, version_key
+    from core.locking import Lock
+    from core.policy import local_module, protected, user_plugin_directories
+    from core.source import Bundle, obtain, parse_archive, release
+    from core.yamllite import dumps, loads
+    from pack import clean_definition, publishable, write_bundle
+finally:
+    sys.path.remove(str(DEPLOY))
 
 
 def fixture(ver='1.3.0', extra=None):
@@ -445,7 +450,7 @@ def main(argv, *, on_ready):
 
     def test_private_data_and_config_survive_upgrade(self):
         old = self.install()
-        secrets = {'kemo.yaml': b'LOCAL=1', 'users/u/memory.json': b'local memory', 'expand/global/kemo_app/credential_registry.json': b'local registry', 'expand/global/kemo_graph/module/panel.values.json': b'local panel', 'message/out/q.json': b'queue'}
+        secrets = {'kemo.yaml': b'LOCAL=1', 'users/u/memory.json': b'local memory', 'expand/global/kemo_bridge/credential_registry.json': b'local registry', 'expand/global/kemo_graph/module/panel.values.json': b'local panel', 'message/out/q.json': b'queue'}
         for name, data in secrets.items():
             p = target(self.root, name)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -667,10 +672,18 @@ commit(root,[Change('run/example.py',b'broken'),Change('run/new.py',b'new')],old
     def test_pack_excludes_runtime_and_includes_templates(self):
         for name in ('kemo.yaml', 'users/a/data.txt', 'deploy/artifacts/release.zip', 'web/frontend/node_modules/a.js'):
             self.assertFalse(publishable(name), name)
-        for name in ('config.json', 'users.json', 'credential_registry.json', '_server.pid'):
-            path = f'expand/global/kemo_app/{name}'
+        for name in (
+            'config.json', 'users.json', 'credential_registry.json', '_admin_key.sha256', '_workspace_credentials.yaml',
+            '_bridge_peers.sqlite3', '_bridge_runs.sqlite3-wal', '_connections.json',
+            '_device_commands.json', '_activated.json', '_lifecycle.lock', '_server.pid',
+            'logs/bridge.log', 'module/status.json', 'module/panel.values.json', 'input_data.md',
+        ):
+            path = f'expand/global/kemo_bridge/{name}'
             self.assertTrue(protected(path), path)
             self.assertFalse(publishable(path), path)
+        for name in ('peer_store.py', 'artifact_store.py', 'module/workspace.json', 'workspace_actions.py',
+                     'ui/admin/index.html', 'ui/dist/index.html', 'ui/dist/admin.js', 'ui/dist/admin.css'):
+            self.assertTrue(publishable(f'expand/global/kemo_bridge/{name}'), name)
         self.assertTrue(publishable('template/expand/module/panel.values.json'))
         self.assertTrue(publishable('web/frontend/dist/index.html'))
         self.assertTrue(publishable('provider/assets/deepseek_v4_tokenizer.zip'))

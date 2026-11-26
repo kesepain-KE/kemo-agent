@@ -525,7 +525,8 @@ timestamp: 2026-07-18T14:32:25+08:00
         self.assertFalse(list(self.directory.glob("*.processing.md")))
         logs = LogStore(self.root).list_messages("msg_filedemo")
         self.assertIn("请分析附件", {item["content"] for item in logs})
-        self.assertIn("screenshot.png", {item["content"] for item in logs})
+        screenshot = next(item for item in logs if item["content"] == "screenshot.png")
+        self.assertEqual(screenshot["file_path"], image.relative_to(self.root).as_posix())
         state = LogStore(self.root).read_message_route_state("msg_filedemo")
         self.assertIsNotNone(state)
         assert state is not None

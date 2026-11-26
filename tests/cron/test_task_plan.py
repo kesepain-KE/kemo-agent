@@ -1788,84 +1788,60 @@ class PlanGenerationTests(unittest.TestCase):
         self.assertFalse(payload["auto_accept"])
         self.assertEqual(payload["context"], "keep me")
 
-    def test_dispatch_task_plan_uses_authoritative_payload_and_requires_wait(self) -> None:
+    def test_dispatch_task_plan_uses_authoritative_payload_and_persists_before_terminal(self) -> None:
         _, root = _make_root(["alice"])
-        definition = SimpleNamespace(
-            name="task_plan",
-            timeout=600.0,
-            execution="background_serial",
-        )
+        definition = SimpleNamespace(name="task_plan", timeout=600.0, execution="background_serial")
         enriched = {
             "action": "create",
             "goal": "test",
             "available_tools": [{"name": "shell", "description": "执行系统命令"}],
         }
-        result = AgentRunResult(
-            agent="task_plan",
-            data={"action": "skip", "message": "simple"},
-            raw_text="",
-            usage={"total_tokens": 1},
-            model="mock",
-        )
         context = {"root": str(root), "user": "alice", "source": "web", "session_id": "s1"}
-        submitted: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        submitted = []
 
         class RecordingScheduler:
             def submit(self, *args, **kwargs):
                 submitted.append((args, kwargs))
-                handler = kwargs.get("result_handler")
-                if handler is not None:
-                    handler(result)
                 return "agent-task-test"
 
-            def wait(self, task_id, timeout=None, **kwargs):
-                del task_id, timeout
-                del kwargs
-                return result
+            def get(self, task_id, **scope):
+                return {"id": task_id, "agent": "task_plan", "status": "queued"}
 
-        scheduler = RecordingScheduler()
+            def wait(self, *args, **kwargs):
+                raise AssertionError("plan submission must not wait")
+
         with (
             patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
             patch("plugins.subagent_dispatch.tool.load_config", return_value=CONFIG),
             patch(
                 "plugins.subagent_dispatch.tool.prepare_main_agent_invocation",
-                return_value=SimpleNamespace(payload=enriched, synchronous_only=True),
+                return_value=SimpleNamespace(payload=enriched),
             ) as prepare,
             patch(
                 "plugins.subagent_dispatch.tool.get_agent_scheduler",
-                return_value=scheduler,
+                return_value=RecordingScheduler(),
             ),
-            patch("plugins.subagent_dispatch.tool.persist_main_agent_result", return_value=None) as persist,
+            patch("run.agents.subagent_invocation.persist_main_agent_result", return_value=None) as persist,
         ):
-            dispatched = dispatch_subagent(
-                "call",
-                agent="task_plan",
-                input={"action": "create", "goal": "test"},
-                context=context,
-            )
+            for wait in (None, False, True):
+                with self.subTest(wait=wait):
+                    dispatched = dispatch_subagent(
+                        "call", agent="task_plan", input={"action": "create", "goal": "test"},
+                        wait=wait, context=context,
+                    )
+                    self.assertEqual(dispatched["status"], "queued")
+                    self.assertTrue(dispatched["detached"])
+                    self.assertNotIn("plan", dispatched)
 
-        prepare.assert_called_once()
-        self.assertEqual(submitted[0][0], ("task_plan", enriched))
-        self.assertTrue(submitted[0][1]["allow_sync"])
-        persist.assert_called_once()
-        self.assertEqual(dispatched["data"]["action"], "skip")
-
-        with (
-            patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
-            patch("plugins.subagent_dispatch.tool.load_config", return_value=CONFIG),
-            patch(
-                "plugins.subagent_dispatch.tool.prepare_main_agent_invocation",
-                return_value=SimpleNamespace(payload=enriched, synchronous_only=True),
-            ),
-        ):
-            with self.assertRaisesRegex(ValueError, "必须同步调用"):
-                dispatch_subagent(
-                    "call",
-                    agent="task_plan",
-                    input={"action": "create", "goal": "test"},
-                    wait=False,
-                    context=context,
-                )
+            self.assertEqual(prepare.call_count, 3)
+            persist.assert_not_called()
+            for args, kwargs in submitted:
+                self.assertEqual(args, ("task_plan", enriched))
+                self.assertTrue(kwargs["allow_sync"])
+                result = AgentRunResult("task_plan", {"action": "skip", "message": "simple"}, "", {}, "mock")
+                kwargs["result_handler"](result)
+                self.assertIn("plan", result.metadata)
+            self.assertEqual(persist.call_count, 3)
 
     def test_edit_allows_failed_but_rejects_running_completed_and_cancelled(self) -> None:
         _, root = _make_root(["alice"])

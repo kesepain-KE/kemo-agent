@@ -14,8 +14,10 @@ import httpx
 import pytest
 import yaml
 
+from run.extensions import ExpandRuntimeError, invoke_expand
 from run.modules import read_manifest
 from web.app import create_app
+from web.auth import WebAuthConfig
 from web.errors import ConflictError, InvalidRequestError, WebServiceError
 from web.service import WebRunService
 from web.services.module_import import install_import, preview_import
@@ -372,42 +374,7 @@ def test_inventory_disk_reads_do_not_block_web_requests(
     asyncio.run(run())
 
 
-def test_builtin_app_console_binds_real_instance_users_and_reports_errors(service: ModuleWorkspaceService):
-    source = Path(__file__).resolve().parents[2] / "expand/global/kemo_app"
-    target = service.root / "expand/global/kemo_app"
-    (target / "module").mkdir(parents=True)
-    for path in source.glob("*.py"):
-        shutil.copy2(path, target / path.name)
-    for relative in ("module.yaml", "expand_control.md", "input_data.md", "module/panel.json", "module/workspace.json"):
-        shutil.copy2(source / relative, target / relative)
-    shutil.copytree(source / "ui/dist", target / "ui/dist")
-    (target / "config.json").write_text('{"users_path":"users.json"}', "utf-8")
-    (target / "users.json").write_text('{"mobile":{"enabled":true,"salt":"salt","hash":"hash"}}', "utf-8")
-    item, _ = service.describe("alice", "expand", "global", "kemo_app")
-    service.set_permissions("alice", "expand", "global", "kemo_app", {
-        "authorization_revision": item["authorization_revision"], "permissions": item["requested_permissions"],
-    })
-    token = open_instance(service, "alice", "expand", "global", "kemo_app", "dashboard")["nonce"]
-    response = invoke_bridge(service, token, {"method": "module.action.invoke", "params": {
-        "action": "bind_user", "params": {"app_username": "mobile", "agent_username": "bob"},
-    }})
-    assert response["result"]["result"]["agent_user"] == "bob"
-    persisted = json.loads((target / "users.json").read_text("utf-8"))
-    assert persisted["mobile"]["agent_user"] == "bob"
-    with pytest.raises(WebServiceError, match="智能体用户不存在"):
-        invoke_bridge(service, token, {"method": "module.action.invoke", "params": {
-            "action": "bind_user", "params": {"app_username": "mobile", "agent_username": "missing"},
-        }})
-
-
-@pytest.mark.parametrize("module,action", [
-    ("kemo_app", "initialize"),
-    ("kemo_gateway_status", "initialize"),
-    ("kemo_graph", "initialize_config"),
-])
-def test_builtin_consoles_initialize_local_config_and_preserve_existing_values(
-    service: ModuleWorkspaceService, module: str, action: str,
-):
+def _stage_builtin_workspace(service: ModuleWorkspaceService, module: str) -> Path:
     source = Path(__file__).resolve().parents[2] / "expand/global" / module
     target = service.root / "expand/global" / module
     (target / "module").mkdir(parents=True)
@@ -418,6 +385,49 @@ def test_builtin_consoles_initialize_local_config_and_preserve_existing_values(
     if (source / "config.example.json").is_file():
         shutil.copy2(source / "config.example.json", target / "config.example.json")
     shutil.copytree(source / "ui/dist", target / "ui/dist")
+    return target
+
+
+def test_builtin_bridge_console_requires_fresh_grant(service: ModuleWorkspaceService):
+    _stage_builtin_workspace(service, "kemo_bridge")
+    identity = ("alice", "expand", "global", "kemo_bridge")
+    item, _ = service.describe(*identity)
+    permission = {
+        "authorization_revision": item["authorization_revision"], "permissions": item["requested_permissions"],
+    }
+    # Even a legacy grant with an otherwise valid revision cannot authorize the renamed workspace.
+    old_key = "expand:global:kemo_app"
+    old_grant = {**permission, "generation": "old-workspace"}
+    service.grant_path.write_text(json.dumps({old_key: old_grant}), "utf-8")
+    with pytest.raises(WorkspaceForbidden, match="授予插件 UI 权限"):
+        open_instance(service, *identity, "dashboard")
+    assert json.loads(service.grant_path.read_text("utf-8")) == {old_key: old_grant}
+    service.set_permissions(*identity, permission)
+    grants = json.loads(service.grant_path.read_text("utf-8"))
+    assert grants[old_key] == old_grant
+    assert grants["expand:global:kemo_bridge"]["permissions"] == ["module.action.invoke"]
+    token = open_instance(service, *identity, "dashboard")["nonce"]
+    assert b"./main.js" in static_asset(service, token, "index.html")[0]
+    assert b"./__kemo__/bridge.js" in static_asset(service, token, "main.js")[0]
+    snapshot = invoke_bridge(service, token, {"method": "module.action.invoke", "params": {
+        "action": "bridge_admin", "params": {"operation": "snapshot"},
+    }})["result"]
+    assert snapshot["instance_uuid"] and snapshot["state"]["bridge_state"] == "未初始化"
+    with pytest.raises(InvalidRequestError, match="动作未在 workspace.json 中声明"):
+        invoke_bridge(service, token, {"method": "module.action.invoke", "params": {
+            "action": "create_peer", "params": {"channel": "device", "bound_user": "alice"},
+        }})
+
+
+@pytest.mark.parametrize("module,action", [
+    ("kemo_bridge", "initialize"),
+    ("kemo_gateway_status", "initialize"),
+    ("kemo_graph", "initialize_config"),
+])
+def test_builtin_consoles_initialize_local_config_and_preserve_existing_values(
+    service: ModuleWorkspaceService, module: str, action: str,
+):
+    target = _stage_builtin_workspace(service, module)
     item, _ = service.describe("alice", "expand", "global", module)
     assert not item["ui_error"]
     service.set_permissions("alice", "expand", "global", module, {
@@ -426,17 +436,20 @@ def test_builtin_consoles_initialize_local_config_and_preserve_existing_values(
     token = open_instance(service, "alice", "expand", "global", module, "dashboard")["nonce"]
 
     def initialize():
+        if module == "kemo_bridge":
+            return service.backend.invoke_expand_panel_action("alice", "global", module, action, {})["result"]
         return invoke_bridge(service, token, {
             "method": "module.action.invoke", "params": {"action": action, "params": {}},
         })["result"]["result"]
 
     result = initialize()
     assert result["ok"] and result["initialized"]
-    if module == "kemo_app":
+    if module == "kemo_bridge":
         config_path = target / "config.json"
         config = json.loads(config_path.read_text("utf-8"))
         assert len(config["session_secret"]) >= 32
-        assert not config["token_sha256"] and not result["configured"]
+        assert "token_sha256" not in config and result["configured"]
+        assert config["bridge"]["public_url"] is None
         assert config["session_secret"] not in json.dumps(result)
         assert not (target / "_activated.json").exists()
     elif module == "kemo_gateway_status":
@@ -456,10 +469,78 @@ def test_builtin_consoles_initialize_local_config_and_preserve_existing_values(
     preserved = config_path.read_bytes()
     again = initialize()
     assert again["ok"] and json.loads(config_path.read_text("utf-8")) == config
-    if module != "kemo_app":
+    if module != "kemo_bridge":
         assert config_path.read_bytes() == preserved
     if module == "kemo_gateway_status":
         assert config["status_token"] not in json.dumps(again)
+
+
+def test_bridge_management_requires_web_session_and_workspace_permission(service: ModuleWorkspaceService):
+    target = _stage_builtin_workspace(service, "kemo_bridge")
+    (target / "module/status.json").write_text('{"bridge_state":"在线"}', "utf-8")
+    app = create_app(service=service.backend, auth_config=WebAuthConfig(access_token="test-web-token"))
+    native = "/api/users/alice/expand/global/kemo_bridge/panel/action"
+    workspace = "/api/users/alice/module-workspaces/expand/global/kemo_bridge"
+
+    async def run():
+        transport = httpx.ASGITransport(app=app, client=("10.66.0.42", 32000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://kemo.test") as client:
+            async def open_dashboard():
+                return await client.post(workspace + "/instances", json={"page": "dashboard"})
+
+            assert (await open_dashboard()).status_code == 401
+            assert (await client.post(native, json={"command": "initialize", "params": {}})).status_code == 401
+            assert not (target / "config.json").exists()
+            assert (await client.post("/api/auth/token", json={"token": "test-web-token"})).status_code == 200
+            panel = await client.get(workspace + "/panel")
+            assert panel.json()["panel"]["containers"][0]["data"]["bridge_state"] == "未初始化"
+            assert "访问密钥" not in panel.text
+            assert (await open_dashboard()).status_code == 403
+            item, _ = service.describe("alice", "expand", "global", "kemo_bridge")
+            async def set_permissions(permissions):
+                return await client.put(workspace + "/permissions", json={
+                    "authorization_revision": item["authorization_revision"], "permissions": permissions,
+                })
+
+            assert (await set_permissions(item["requested_permissions"])).status_code == 200
+            opened = await open_dashboard()
+            assert opened.status_code == 200
+            rpc = f"/api/module-ui/instances/{opened.json()['nonce']}/rpc"
+
+            def action(operation, data=None):
+                return {"action": "bridge_admin", "params": {"operation": operation, "data": data or {}}}
+
+            async def admin(operation, data=None):
+                return await client.post(rpc, json={"method": "module.action.invoke", "params": action(operation, data)})
+
+            assert (await admin("snapshot")).status_code == 200
+            assert (await admin("unlock")).status_code == 400
+            assert (await client.post(workspace + "/action", json={"action": "start", "params": {}})).status_code == 400
+            assert (await admin("set_exposed_user", {"bound_user": "alice"})).status_code == 200
+            peer = {"peer_id": "b9ced30a-960c-443f-b31b-f11ee537c177", "label": "对端"}
+            created = await admin("create_external", peer)
+            assert created.status_code == 200
+            key = created.json()["result"]["secret"]
+            assert key not in (await admin("snapshot")).text
+            copied = await admin("copy_external_key", peer)
+            assert copied.status_code == 200 and copied.headers["Cache-Control"] == "no-store"
+            assert copied.json()["result"]["clipboard_text"] == key
+            blocked = await client.post(workspace + "/action", json=action("copy_external_key", peer))
+            assert blocked.status_code == 403 and key not in blocked.text
+            await client.post("/api/auth/logout")
+            assert (await admin("copy_external_key", peer)).status_code == 401
+            assert (await client.post("/api/auth/token", json={"token": "test-web-token"})).status_code == 200
+            assert (await set_permissions([])).status_code == 200
+            assert (await admin("copy_external_key", peer)).status_code == 404
+            reopened = await open_dashboard()
+            assert reopened.status_code == 200 and reopened.json()["permissions"] == []
+            rpc = f"/api/module-ui/instances/{reopened.json()['nonce']}/rpc"
+            assert (await admin("copy_external_key", peer)).status_code == 403
+
+    asyncio.run(run())
+    with pytest.raises(ExpandRuntimeError, match="unknown_bridge_command"):
+        invoke_expand(root=service.root, user="alice", scope="global", module="kemo_bridge", command="bridge_admin",
+                      params={"operation": "snapshot"}, timeout=5)
 
 
 def test_concurrent_panel_writes_compare_revision_under_lock(service: ModuleWorkspaceService):

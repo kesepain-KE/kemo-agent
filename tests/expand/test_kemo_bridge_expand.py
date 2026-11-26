@@ -5,11 +5,11 @@ from typing import Any
 from tests.type_assertions import require_present
 
 import asyncio
-import hashlib
-import importlib.util
+import importlib
 import yaml
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -17,169 +17,66 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+from contextlib import contextmanager
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_ROOT = ROOT / "expand" / "global" / "kemo_app"
+MODULE_ROOT = ROOT / "expand" / "global" / "kemo_bridge"
 
 
-def _load_module(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, MODULE_ROOT / filename)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {filename}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+@contextmanager
+def _bridge_imports():
+    # The expansion entry points import siblings as top-level scripts. Do not
+    # leave those names or their directory on the import path of other tests.
+    names = {path.stem for path in MODULE_ROOT.glob("*.py")}
+    saved = {name: sys.modules.pop(name) for name in names if name in sys.modules}
+    sys.path.insert(0, str(MODULE_ROOT))
+    try:
+        yield
+    finally:
+        sys.path.remove(str(MODULE_ROOT))
+        for name in names:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved)
 
 
-_missing_module = None
-bridge_auth = _load_module("kemo_app_test_auth", "auth.py")
-bridge_upstream = _load_module("kemo_app_test_upstream", "upstream.py")
-bridge_device_commands = _load_module("device_commands", "device_commands.py")
-_previous_upstream = sys.modules.get("upstream", _missing_module)
-sys.modules["upstream"] = bridge_upstream
-try:
-    bridge_run_broker = _load_module("kemo_app_test_run_broker", "run_broker.py")
-finally:
-    if _previous_upstream is None:
-        sys.modules.pop("upstream", None)
-    else:
-        sys.modules["upstream"] = _previous_upstream
-_previous_upstream_for_events = sys.modules.get("upstream", _missing_module)
-sys.modules["upstream"] = bridge_upstream
-try:
-    bridge_events = _load_module("kemo_app_test_events", "events.py")
-finally:
-    if _previous_upstream_for_events is None:
-        sys.modules.pop("upstream", None)
-    else:
-        sys.modules["upstream"] = _previous_upstream_for_events
-_previous_lifecycle = sys.modules.get("lifecycle", _missing_module)
-_previous_start_expand = sys.modules.get("start_expand", _missing_module)
-_previous_initialize = sys.modules.get("initialize_config", _missing_module)
-_previous_panel_control = sys.modules.get("panel_control", _missing_module)
-try:
-    bridge_lifecycle = _load_module("lifecycle", "lifecycle.py")
-    bridge_initialize = _load_module("kemo_app_test_initialize", "initialize_config.py")
-    sys.modules["initialize_config"] = bridge_initialize
-    bridge_panel_control = _load_module("panel_control", "panel_control.py")
-    bridge_start = _load_module("kemo_app_test_start", "start_expand.py")
-    sys.modules["start_expand"] = bridge_start
-    bridge_update = _load_module("kemo_app_test_update", "data_update.py")
-finally:
-    if _previous_start_expand is None:
-        sys.modules.pop("start_expand", None)
-    else:
-        sys.modules["start_expand"] = _previous_start_expand
-    if _previous_lifecycle is None:
-        sys.modules.pop("lifecycle", None)
-    else:
-        sys.modules["lifecycle"] = _previous_lifecycle
-    if _previous_initialize is None:
-        sys.modules.pop("initialize_config", None)
-    else:
-        sys.modules["initialize_config"] = _previous_initialize
-    if _previous_panel_control is None:
-        sys.modules.pop("panel_control", None)
-    else:
-        sys.modules["panel_control"] = _previous_panel_control
+with _bridge_imports():
+    bridge_auth = importlib.import_module("auth")
+    bridge_config = importlib.import_module("bridge_config")
+    bridge_upstream = importlib.import_module("upstream")
+    bridge_run_broker = importlib.import_module("run_broker")
+    bridge_events = importlib.import_module("bridge_events")
+    bridge_device_commands = importlib.import_module("device_commands")
+    bridge_lifecycle = importlib.import_module("lifecycle")
+    bridge_initialize = importlib.import_module("initialize_config")
+    bridge_start = importlib.import_module("start_expand")
+    bridge_update = importlib.import_module("data_update")
+    bridge_peer_store = importlib.import_module("peer_store")
 
 from run.modules import read_manifest, ModuleSpecError  # noqa: E402
 from web.services.module_panels import load_module_panel  # noqa: E402
 
 
-class KemoAppExpandTests(unittest.TestCase):
-    def test_dashboard_reports_devices_without_returning_private_connection_fields(self) -> None:
-        runtime = {"running": True, "active": True, "activated": True, "pid": 123}
-        with (
-            mock.patch.object(bridge_start, "status", return_value=runtime),
-            mock.patch.object(bridge_start, "_read_connections", return_value={
-                "websocket_connections": 2,
-                "devices": [{"user": "alice", "device_id": "phone-1", "connections": 2,
-                             "connected_at": 123, "token": "private-device-token"}],
-            }),
-        ):
-            result = bridge_start.execute("dashboard_data")
-            self.assertEqual(result["devices"], [{
-                "user": "alice", "device_id": "phone-1", "connections": 2, "connected_at": 123,
-            }])
-            self.assertEqual(result["websocket_connections"], 2)
-            self.assertNotIn("private-device-token", json.dumps(result))
-            runtime["running"] = False
-            self.assertEqual(bridge_start.execute("dashboard_data")["devices"], [])
+class KemoBridgeExpandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(bridge_start, "LIFECYCLE_LOCK_PATH", str(scratch / "_lifecycle.lock")))
+        self.enterContext(mock.patch.object(bridge_update, "write_status"))
 
-    def test_user_panel_declares_only_port_token_and_user_binding_controls(self) -> None:
+    def test_lifecycle_is_native_panel_only(self) -> None:
         panel, error = load_module_panel(MODULE_ROOT, "expand")
         self.assertEqual(error, "")
-        self.assertIsNotNone(panel)
-        commands = {
-            control["command"]
-            for container in require_present(panel)["containers"]
-            if container["kind"] == "action"
-            for control in container["controls"]
-        }
-        self.assertEqual(commands, {
-            "panel_set_port",
-            "panel_set_token",
-            "panel_bind_user",
-            "panel_unbind_user",
-        })
-
-    def test_panel_token_is_hashed_and_user_binding_survives_password_reset(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            users_root = root / "agent-users"
-            (users_root / "alice").mkdir(parents=True)
-            config_path = root / "config.json"
-            users_path = root / "users.json"
-            status_path = root / "module" / "status.json"
-            config_path.write_text(json.dumps({
-                "host": "127.0.0.1",
-                "port": 8742,
-                "users_path": "users.json",
-            }), "utf-8")
-            store = bridge_auth.UserStore(users_path, 100_000)
-            store.set_password("mobile", "long-enough-password")
-            token = "plain-device-token-1234567890abcdef"
-            with mock.patch.multiple(
-                bridge_panel_control,
-                BASE_DIR=root,
-                CONFIG_PATH=config_path,
-                PANEL_STATUS_PATH=status_path,
-                USERS_DIR=users_root,
-            ):
-                written = bridge_panel_control.set_device_token(token)
-                bound = bridge_panel_control.bind_user("mobile", "alice")
-                public = bridge_panel_control.public_status()
-                store.set_password("mobile", "replacement-password")
-                rebound_store = bridge_auth.UserStore(users_path, 100_000)
-
-            persisted_config = json.loads(config_path.read_text("utf-8"))
-            self.assertTrue(written["ok"])
-            self.assertNotIn(token, config_path.read_text("utf-8"))
-            self.assertEqual(persisted_config["token_sha256"], hashlib.sha256(token.encode()).hexdigest())
-            self.assertEqual(bound["agent_user"], "alice")
-            self.assertEqual(public["bindings"], {"mobile": "alice"})
-            self.assertNotIn(token, json.dumps(public, ensure_ascii=False))
-            self.assertEqual(rebound_store.agent_user("mobile"), "alice")
-
-    def test_running_panel_change_reports_restart_failure_after_config_was_applied(self) -> None:
-        events: list[str] = []
-        with (
-            mock.patch.object(bridge_start, "status", return_value={"running": True, "active": True, "port": 8742}),
-            mock.patch.object(bridge_start, "stop", side_effect=lambda: events.append("stop") or {"ok": True}),
-            mock.patch.object(bridge_start, "set_port", side_effect=lambda value: events.append(f"write:{value}") or {"ok": True, "port": int(value)}),
-            mock.patch.object(bridge_start, "start", side_effect=lambda: events.append("start") or {"ok": False, "active": False, "running": False, "port": 9753, "error": "boom"}),
-            mock.patch.object(bridge_start, "write_status"),
-        ):
-            result = bridge_start.execute("panel_set_port", {"port": 9753})
-
-        self.assertEqual(events, ["stop", "write:9753", "start"])
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["config_applied"])
-        self.assertEqual(result["error"], "boom")
-        self.assertIn("配置已保存", result["message"])
+        containers = require_present(panel)["containers"]
+        self.assertEqual([container["kind"] for container in containers], ["status", "action"])
+        self.assertEqual(
+            {control["command"] for container in containers[1:] for control in container["controls"]},
+            {"initialize", "start", "deactivate", "restart"},
+        )
+        workspace = json.loads((MODULE_ROOT / "module/workspace.json").read_text("utf-8"))
+        self.assertEqual(
+            {action["id"] for action in workspace["actions"]},
+            {"bridge_admin"},
+        )
 
     def test_bridge_follows_runtime_local_web_endpoint(self) -> None:
         with mock.patch.dict(
@@ -232,26 +129,26 @@ class KemoAppExpandTests(unittest.TestCase):
         self.assertIsNot(sys.modules.get("lifecycle"), bridge_lifecycle)
 
     def test_bridge_declares_current_version(self) -> None:
-        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
-        manifest = yaml.safe_load((MODULE_ROOT / "module.yaml").read_text(encoding="utf-8"))
-        self.assertIn('VERSION = "1.1.5"', source)
-        self.assertIn("v1.1.5", manifest["explain"])
-        self.assertIn("**1.1.5**", (MODULE_ROOT / "README.md").read_text(encoding="utf-8"))
+        manifest = yaml.safe_load((MODULE_ROOT / "module.yaml").read_text("utf-8"))
+        self.assertEqual(bridge_config.VERSION, "2.1.0")
+        self.assertEqual(manifest["name"], "kemo_bridge")
+        self.assertIn(f"v{bridge_config.VERSION}", manifest["explain"])
+        self.assertIn(bridge_config.VERSION, (MODULE_ROOT / "README.md").read_text("utf-8"))
 
     def test_bridge_keeps_android_conversations_in_app_partition(self) -> None:
         source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
         self.assertIn('APP_SOURCE = "app"', source)
         self.assertIn('"source": APP_SOURCE', source)
         self.assertIn('params={"source": APP_SOURCE}', source)
-        self.assertIn('@app.get("/v1/conversations/active")', source)
+        self.assertIn('@routes.route("GET", "/conversations/active", "chat")', source)
         self.assertIn('params={"source": APP_SOURCE, "client_id": client_id}', source)
         self.assertNotIn('"web" if source == "app" else source', source)
 
     def test_bridge_exposes_detached_run_snapshot_and_resume_routes(self) -> None:
         source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
-        self.assertIn('@app.get("/v1/runs/active")', source)
-        self.assertIn('@app.get("/v1/runs/{run_id}/snapshot")', source)
-        self.assertIn('@app.get("/v1/runs/{run_id}/stream")', source)
+        self.assertIn('@routes.route("GET", "/runs/active", "run_status")', source)
+        self.assertIn('@routes.route("GET", "/runs/{run_id}/snapshot", "run_status")', source)
+        self.assertIn('@routes.route("GET", "/runs/{run_id}/stream", "run_status")', source)
         self.assertIn("record = await RUNS.start(session.username, payload)", source)
         self.assertNotIn('UPSTREAM.open_stream("POST", "/api/chat"', source)
 
@@ -510,7 +407,7 @@ class KemoAppExpandTests(unittest.TestCase):
 
     def test_bridge_task_and_status_routes_keep_explicit_session_scope(self) -> None:
         source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
-        events = (MODULE_ROOT / "events.py").read_text(encoding="utf-8")
+        events = (MODULE_ROOT / "bridge_events.py").read_text(encoding="utf-8")
         self.assertIn(
             'data = await _tasks(session.username, session_id=requested_session)',
             source,
@@ -683,8 +580,8 @@ class KemoAppExpandTests(unittest.TestCase):
 
     def test_conversation_delete_and_close_forward_android_client_id(self) -> None:
         source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
-        self.assertIn('@app.delete("/v1/conversations/{session_id}")', source)
-        self.assertIn('@app.post("/v1/conversations/{session_id}/close")', source)
+        self.assertIn('@routes.route("DELETE", "/conversations/{session_id}", "chat")', source)
+        self.assertIn('@routes.route("POST", "/conversations/{session_id}/close", "chat")', source)
         self.assertGreaterEqual(source.count('client_id: str = Query("", max_length=128)'), 3)
         self.assertGreaterEqual(source.count('params["client_id"] = client_id'), 2)
         self.assertIn("RUNS.delete_user(session.username)", source)
@@ -692,7 +589,7 @@ class KemoAppExpandTests(unittest.TestCase):
 
     def test_bridge_exposes_user_scoped_model_capabilities(self) -> None:
         source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
-        self.assertIn('@app.get("/v1/models/capabilities")', source)
+        self.assertIn('@device.route("GET", "/models/capabilities", "config")', source)
         self.assertIn('f"/api/users/{user}/provider/model-capabilities"', source)
         self.assertIn('params={"model": model, "refresh": str(refresh).lower()}', source)
 
@@ -722,8 +619,8 @@ class KemoAppExpandTests(unittest.TestCase):
 
     def test_published_status_is_inactive_and_has_initialization_entrypoints(self) -> None:
         initial = (MODULE_ROOT / "input_data.md").read_text(encoding="utf-8")
-        self.assertIn("未激活", initial)
-        self.assertIn("未完成", initial)
+        status = next((line for line in initial.splitlines() if line.startswith("- 状态: ")), "")
+        self.assertIn(status, {"- 状态: **未激活**", "- 状态: **已停用**"})
         self.assertNotIn("上游: online", initial)
         self.assertNotIn("在线设备", initial)
         for name in ("initialize_config.py", "lifecycle.py"):
@@ -731,7 +628,7 @@ class KemoAppExpandTests(unittest.TestCase):
 
     def test_example_configuration_contains_no_live_credentials(self) -> None:
         config = json.loads((MODULE_ROOT / "config.example.json").read_text(encoding="utf-8"))
-        self.assertEqual(config["token_sha256"], "")
+        self.assertNotIn("token_sha256", config)
         self.assertEqual(config["session_secret"], "")
         self.assertEqual(config["upstream_token"], "")
         self.assertEqual(config["upstream_username"], "")
@@ -748,18 +645,18 @@ class KemoAppExpandTests(unittest.TestCase):
             config = json.loads((root / "config.json").read_text(encoding="utf-8"))
             self.assertTrue(result["ok"])
             self.assertTrue(result["initialized"])
-            self.assertFalse(result["configured"])
+            self.assertTrue(result["configured"])
+            self.assertFalse((root / "_activated.json").exists())
             self.assertGreaterEqual(len(config["session_secret"]), 32)
-            self.assertEqual(config["token_sha256"], "")
+            self.assertNotIn("token_sha256", config)
             self.assertEqual(json.loads((root / "users.json").read_text(encoding="utf-8")), {})
 
-    def test_lifecycle_becomes_configured_only_after_all_local_credentials_exist(self) -> None:
+    def test_lifecycle_becomes_configured_with_local_secret_and_valid_upstream(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = json.loads((MODULE_ROOT / "config.example.json").read_text(encoding="utf-8"))
             config.update(
                 {
-                    "token_sha256": "a" * 64,
                     "session_secret": "s" * 48,
                     "upstream": "http://127.0.0.1:1457",
                 }
@@ -788,7 +685,6 @@ class KemoAppExpandTests(unittest.TestCase):
                 mock.patch.object(bridge_update, "BASE_DIR", root),
                 mock.patch.object(bridge_update, "INPUT_PATH", input_path),
                 mock.patch.object(bridge_update, "MANIFEST_PATH", manifest_path),
-                mock.patch.object(bridge_update, "CONNECTIONS_PATH", root / "_connections.json"),
                 mock.patch.object(bridge_update.urllib.request, "urlopen") as urlopen,
             ):
                 result = bridge_update.update()
@@ -883,7 +779,7 @@ class KemoAppExpandTests(unittest.TestCase):
                     bridge_start,
                     "_health",
                     return_value={
-                        "service": "kemo_app",
+                        "service": "kemo_bridge",
                         "process_pid": 1234,
                         "instance_id": "instance-a",
                     },
@@ -914,7 +810,7 @@ class KemoAppExpandTests(unittest.TestCase):
                     bridge_start,
                     "_health",
                     return_value={
-                        "service": "kemo_app",
+                        "service": "kemo_bridge",
                         "process_pid": 9999,
                         "instance_id": "other-instance",
                     },
@@ -961,7 +857,7 @@ class KemoAppExpandTests(unittest.TestCase):
                     bridge_start,
                     "_health",
                     return_value={
-                        "service": "kemo_app",
+                        "service": "kemo_bridge",
                         "process_pid": 5678,
                         "instance_id": "instance-a",
                     },
@@ -982,7 +878,7 @@ class KemoAppExpandTests(unittest.TestCase):
                 encoding="utf-8",
             )
             health = {
-                "service": "kemo_app",
+                "service": "kemo_bridge",
                 "process_pid": 5678,
                 "instance_id": "instance-a",
             }
@@ -1092,7 +988,7 @@ class KemoAppExpandTests(unittest.TestCase):
                     side_effect=[
                         None,
                         {
-                            "service": "kemo_app",
+                            "service": "kemo_bridge",
                             "process_pid": 5678,
                             "instance_id": mock.ANY,
                         },
@@ -1106,7 +1002,7 @@ class KemoAppExpandTests(unittest.TestCase):
                     if health.call_count == 1:
                         return None
                     nonce = json.loads(pid_path.read_text(encoding="utf-8"))["instance_id"]
-                    return {"service": "kemo_app", "process_pid": 5678, "instance_id": nonce}
+                    return {"service": "kemo_bridge", "process_pid": 5678, "instance_id": nonce}
 
                 health.side_effect = health_side_effect
                 result = bridge_start.start()
@@ -1132,7 +1028,7 @@ class KemoAppExpandTests(unittest.TestCase):
             fake_process.poll.return_value = None
 
             def fake_popen(*_args, **kwargs):
-                spawned["instance_id"] = kwargs["env"]["KEMO_APP_INSTANCE_ID"]
+                spawned["instance_id"] = kwargs["env"]["KEMO_BRIDGE_INSTANCE_ID"]
                 return fake_process
 
             def fake_health(_port):
@@ -1140,7 +1036,7 @@ class KemoAppExpandTests(unittest.TestCase):
                 if not nonce:
                     return None
                 return {
-                    "service": "kemo_app",
+                    "service": "kemo_bridge",
                     "process_pid": int(spawned["pid"]),
                     "instance_id": nonce,
                 }
@@ -1248,7 +1144,7 @@ class KemoAppExpandTests(unittest.TestCase):
                 mock.patch.object(bridge_update, "INPUT_PATH", input_path),
                 mock.patch.object(bridge_update, "MANIFEST_PATH", manifest_path),
                 mock.patch.object(bridge_update, "ACTIVATION_PATH", root / "_activated.json"),
-                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "127.0.0.1", "port": 8742}, state)),
+                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "127.0.0.1", "port": 8742, "session_secret": "test-internal-secret"}, state)),
                 mock.patch.object(bridge_update.start_expand, "status") as status,
             ):
                 result = bridge_update.update()
@@ -1273,7 +1169,7 @@ class KemoAppExpandTests(unittest.TestCase):
                 mock.patch.object(bridge_update, "INPUT_PATH", input_path),
                 mock.patch.object(bridge_update, "MANIFEST_PATH", manifest_path),
                 mock.patch.object(bridge_update, "ACTIVATION_PATH", activation),
-                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "127.0.0.1", "port": 8742}, state)),
+                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "127.0.0.1", "port": 8742, "session_secret": "test-internal-secret"}, state)),
                 mock.patch.object(bridge_update.start_expand, "status") as status,
                 mock.patch.object(bridge_update.start_expand, "execute") as execute,
             ):
@@ -1392,8 +1288,7 @@ class KemoAppExpandTests(unittest.TestCase):
                 mock.patch.object(bridge_update, "INPUT_PATH", input_path),
                 mock.patch.object(bridge_update, "MANIFEST_PATH", manifest_path),
                 mock.patch.object(bridge_update, "ACTIVATION_PATH", activation),
-                mock.patch.object(bridge_update, "CONNECTIONS_PATH", root / "connections.json"),
-                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "0.0.0.0", "port": 8742}, state)),
+                mock.patch.object(bridge_update, "load_ready_config", return_value=({"host": "0.0.0.0", "port": 8742, "session_secret": "test-internal-secret"}, state)),
                 mock.patch.object(
                     bridge_update.start_expand,
                     "status",
@@ -1407,65 +1302,18 @@ class KemoAppExpandTests(unittest.TestCase):
             self.assertIn("桥接启动进程提前退出", output)
             self.assertIn("下次允许重试", output)
 
-    def test_device_token_user_password_and_session_lifecycle(self) -> None:
-        raw_token = "test-device-token-with-at-least-32-characters"
-        config = {"token_sha256": hashlib.sha256(raw_token.encode()).hexdigest()}
-        self.assertTrue(bridge_auth.token_ok(f"Bearer {raw_token}", config))
-        self.assertFalse(bridge_auth.token_ok("Bearer wrong", config))
-
+    def test_existing_local_account_password_and_binding_survive_password_reset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = bridge_auth.UserStore(Path(directory) / "users.json", 100_000)
             store.set_password("mobile-user", "long-enough-password")
             self.assertTrue(store.verify("mobile-user", "long-enough-password"))
             self.assertFalse(store.verify("mobile-user", "wrong-password"))
-
-        sessions = bridge_auth.SessionManager("test-session-secret", 300)
-        token, expires_at = sessions.issue("mobile-user")
-        self.assertGreater(expires_at, 0)
-        self.assertEqual(sessions.verify(token).username, "mobile-user")
-        sessions.revoke(token)
-        self.assertIsNone(sessions.verify(token))
-
-    def test_bridge_client_ip_resolution_trusts_only_configured_proxies(self) -> None:
-        trusted = bridge_auth.trusted_proxy_networks(["127.0.0.1", "10.0.0.0/8"])
-        self.assertEqual(
-            bridge_auth.resolve_client_ip(
-                "127.0.0.1",
-                "198.51.100.7, 10.1.2.3",
-                trusted,
-            ),
-            "198.51.100.7",
-        )
-        self.assertEqual(
-            bridge_auth.resolve_client_ip(
-                "203.0.113.9",
-                "198.51.100.7",
-                trusted,
-            ),
-            "203.0.113.9",
-        )
-        self.assertEqual(
-            bridge_auth.resolve_client_ip(
-                "127.0.0.1",
-                "not-an-ip",
-                trusted,
-            ),
-            "127.0.0.1",
-        )
-        with self.assertRaisesRegex(ValueError, "无效 IP"):
-            bridge_auth.trusted_proxy_networks(["invalid-network"])
-
-    def test_websocket_credentials_are_header_only(self) -> None:
-        source = "\n".join((MODULE_ROOT / name).read_text(encoding="utf-8") for name in ("app.py", "conversation_routes.py"))
-        websocket_source = source[source.index('@app.websocket("/v1/ws")'):]
-        self.assertIn('websocket.headers.get("authorization", "")', websocket_source)
-        self.assertIn('websocket.headers.get("x-kemo-session", "")', websocket_source)
-        self.assertIn('websocket.headers.get("x-kemo-device-id", "")', websocket_source)
-        self.assertNotIn('query_params.get("device_token"', websocket_source)
-        self.assertNotIn('query_params.get("session_token"', websocket_source)
-        self.assertIn('lease_client_id = "app_ws_"', websocket_source)
-        self.assertIn('json_body={"client_id": lease_client_id}', websocket_source)
-        self.assertIn('lease_path + "/release"', websocket_source)
+            accounts = json.loads(store.path.read_text("utf-8"))
+            accounts["mobile-user"]["agent_user"] = "alice"
+            store.path.write_text(json.dumps(accounts), "utf-8")
+            store.set_password("mobile-user", "replacement-password")
+            self.assertTrue(store.verify("mobile-user", "replacement-password"))
+            self.assertEqual(store.agent_user("mobile-user"), "alice")
 
     def test_sse_stream_has_unbounded_read_timeout_but_rest_stays_bounded(self) -> None:
         client = bridge_upstream.UpstreamClient(
@@ -1609,37 +1457,41 @@ class KemoAppExpandTests(unittest.TestCase):
                 )
 
     def test_device_action_stdin_preserves_framework_user_context(self) -> None:
-        request = {
-            "command": "device_action",
-            "params": {
-                "device_id": "phone-context-test",
-                "action": "timer.start",
-                "arguments": {"duration_seconds": 60},
-            },
-            "context": {"user": "mobile-user", "scope": "global", "module": "kemo_app"},
-        }
-        commands_path = MODULE_ROOT / "_device_commands.json"
-        lock_path = MODULE_ROOT / "_device_commands.json.lock"
-        try:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "expand" / "global" / "kemo_bridge"
+            target.mkdir(parents=True)
+            (root / "users" / "mobile-user").mkdir(parents=True)
+            for file in MODULE_ROOT.glob("*.py"):
+                shutil.copyfile(file, target / file.name)
+            peers = bridge_peer_store.PeerStore(target / "_bridge_peers.sqlite3", root / "users")
+            device = peers.create("device", "mobile-user")
+            request = {
+                "command": "device_action",
+                "params": {
+                    "user": "forged-user",
+                    "device_id": device["peer_id"],
+                    "action": "timer.start",
+                    "arguments": {"duration_seconds": 60},
+                },
+                "context": {"user": "mobile-user", "scope": "global", "module": "kemo_bridge"},
+            }
             process = subprocess.run(
-                [sys.executable, str(MODULE_ROOT / "start_expand.py")],
-                input=json.dumps(request, ensure_ascii=False),
-                text=True,
+                [sys.executable, str(target / "start_expand.py")],
+                input=json.dumps(request),
                 capture_output=True,
-                check=False,
                 encoding="utf-8",
                 env={**os.environ, "PYTHONUTF8": "1"},
+                timeout=15,
+                check=False,
             )
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             payload = json.loads(process.stdout)
-            self.assertEqual(process.returncode, 0, process.stderr)
             self.assertTrue(payload["ok"], payload)
-            self.assertEqual(payload["device_id"], "phone-context-test")
-            saved = json.loads(commands_path.read_text(encoding="utf-8"))
-            command = next(item for item in saved["commands"] if item["command_id"] == payload["command_id"])
-            self.assertEqual(command["user"], "mobile-user")
-        finally:
-            commands_path.unlink(missing_ok=True)
-            lock_path.unlink(missing_ok=True)
+            self.assertEqual(payload["device_id"], device["peer_id"])
+            store = bridge_device_commands.DeviceCommandStore(target / "_device_commands.json")
+            self.assertIsNotNone(store.get(payload["command_id"], username="mobile-user"))
+            self.assertIsNone(store.get(payload["command_id"], username="forged-user"))
 
     def test_device_action_does_not_accept_user_from_untrusted_params(self) -> None:
         result = bridge_start.execute(

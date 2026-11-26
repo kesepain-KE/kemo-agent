@@ -107,6 +107,13 @@ class UpdateModuleTests(unittest.TestCase):
                     for name in ("module/README.md", "module/panel.json")
                     if (module / name).is_file()
                 )
+                if relative == core_update.KEMO_BRIDGE_EXPAND:
+                    expected.update({".gitignore", "README.md", "config.example.json",
+                                     "expand_control.md", "module/workspace.json"})
+                    expected.update(path.relative_to(module).as_posix()
+                                    for path in (module / "ui").rglob("*")
+                                    if path.suffix in {".py", ".html", ".js", ".css"} and path.is_file())
+                    self.assertEqual(set(files), expected)
                 missing = expected - set(files)
                 self.assertFalse(missing, missing)
                 self.assertNotIn("module/status.json", files)
@@ -674,18 +681,17 @@ class UpdateModuleTests(unittest.TestCase):
             manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
             self.assertTrue(manifest["input_open"])
 
-    def test_core_updates_kemo_app_expand_and_preserves_local_runtime(self) -> None:
+    def test_core_updates_kemo_bridge_expand_and_preserves_local_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
             target = root / "target"
-            module = Path(core_update.KEMO_APP_EXPAND)
-            for name in core_update.KEMO_APP_EXPAND_FILES:
+            module = Path(core_update.KEMO_BRIDGE_EXPAND)
+            for name in core_update.KEMO_BRIDGE_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "module.yaml", {'name': 'kemo app 桥接服务', 'input_open': False, 'health': '异常', 'kind': 'expand'})
+            write_json(source / module / "module.yaml", {'name': 'kemo_bridge', 'input_open': False, 'health': '异常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "config.json", {
-                "token_sha256": "a" * 64,
                 "session_secret": "s" * 32,
                 "upstream": "http://127.0.0.1:1457",
                 "users_path": "users.json",
@@ -730,18 +736,17 @@ class UpdateModuleTests(unittest.TestCase):
             self.assertEqual(manifest["health"], "正常")
             self.assertEqual(manifest["recent_update"], "2026-08-11 20:00:00")
 
-    def test_core_preserves_active_kemo_app_when_readiness_is_temporarily_invalid(self) -> None:
+    def test_core_preserves_active_kemo_bridge_when_readiness_is_temporarily_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
             target = root / "target"
-            module = Path(core_update.KEMO_APP_EXPAND)
-            for name in core_update.KEMO_APP_EXPAND_FILES:
+            module = Path(core_update.KEMO_BRIDGE_EXPAND)
+            for name in core_update.KEMO_BRIDGE_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "module.yaml", {'name': 'kemo app 桥接服务', 'input_open': False, 'health': '异常', 'kind': 'expand'})
+            write_json(source / module / "module.yaml", {'name': 'kemo_bridge', 'input_open': False, 'health': '异常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "config.json", {
-                "token_sha256": "a" * 64,
                 "session_secret": "",
                 "upstream": "http://127.0.0.1:1457",
                 "users_path": "users.json",
@@ -762,18 +767,17 @@ class UpdateModuleTests(unittest.TestCase):
                 {},
             )
 
-    def test_core_does_not_activate_configured_but_stopped_kemo_app(self) -> None:
+    def test_core_does_not_activate_configured_but_stopped_kemo_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
             target = root / "target"
-            module = Path(core_update.KEMO_APP_EXPAND)
-            for name in core_update.KEMO_APP_EXPAND_FILES:
+            module = Path(core_update.KEMO_BRIDGE_EXPAND)
+            for name in core_update.KEMO_BRIDGE_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
             write_json(source / module / "module.yaml", {"input_open": False})
             write(source / module / "input_data.md", "source inactive")
             write_json(target / module / "config.json", {
-                "token_sha256": "a" * 64,
                 "session_secret": "s" * 32,
                 "upstream": "http://127.0.0.1:1457",
                 "users_path": "users.json",
@@ -789,15 +793,15 @@ class UpdateModuleTests(unittest.TestCase):
             manifest = yaml.safe_load((target / module / "module.yaml").read_text("utf-8"))
             self.assertFalse(manifest["input_open"])
 
-    def test_core_keeps_new_kemo_app_install_inactive(self) -> None:
+    def test_core_keeps_new_kemo_bridge_install_inactive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
             target = root / "target"
-            module = Path(core_update.KEMO_APP_EXPAND)
-            for name in core_update.KEMO_APP_EXPAND_FILES:
+            module = Path(core_update.KEMO_BRIDGE_EXPAND)
+            for name in core_update.KEMO_BRIDGE_EXPAND_FILES:
                 write(source / module / name, f"new {name}")
-            write_json(source / module / "module.yaml", {'name': 'kemo app 桥接服务', 'input_open': False, 'health': '异常', 'kind': 'expand'})
+            write_json(source / module / "module.yaml", {'name': 'kemo_bridge', 'input_open': False, 'health': '异常', 'kind': 'expand'})
             write(source / module / "input_data.md", "source inactive")
 
             core_update.update(source, target, assume_yes=True)

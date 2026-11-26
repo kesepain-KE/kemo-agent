@@ -1,6 +1,7 @@
 """R1 4.1: only proven unchanged success is quiet; hourly metrics retain runs."""
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
@@ -44,6 +45,29 @@ def test_proven_unchanged_success_has_only_one_hourly_row_and_mixed_metrics(tmp_
     assert summary["success_rate"] == pytest.approx(2 / 3)
     assert summary["average_duration_ms"] == 30 and summary["max_duration_ms"] == 50
     assert summary["status_counts"] == {"success": 2, "partial": 1}
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        pytest.param(("cancelled", "cancelled"), "cancelled", id="all-cancelled"),
+        pytest.param(("cancelled", "success"), "partial", id="cancelled-and-success"),
+        pytest.param(("failed", "cancelled"), "failed", id="failed-and-cancelled"),
+        pytest.param(("success", "success"), "success", id="all-success"),
+        pytest.param(("success", "failed", "cancelled"), "failed", id="failed-and-cancelled-with-success"),
+    ],
+)
+def test_hourly_status_distinguishes_cancellation(tmp_path, statuses, expected):
+    scheduler = CronScheduler(tmp_path, config={})
+    for index, status in enumerate(statuses):
+        record(scheduler, index=index, task="perception_update", result={"status": status, "data_changed": False})
+    scheduler.flush_persistence()
+
+    rows = LogStore(tmp_path).list_cron("alice")
+    aggregates = [row for row in rows if row["result"].get("aggregated")]
+    assert len(aggregates) == 1
+    assert aggregates[0]["result"]["status_counts"] == Counter(statuses)
+    assert aggregates[0]["status"] == expected
 
 
 @pytest.mark.parametrize("status", ["partial", "failed"])
