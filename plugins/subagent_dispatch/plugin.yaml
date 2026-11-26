@@ -101,7 +101,7 @@ input_schema:
     wait:
       type: boolean
       default: false
-      description: 仅 status 使用；true 等待任务终态，false 立即查询。call/resume/split/guide/cancel 等其他 action 忽略它
+      description: status 的 true 等待任务终态，false 立即查询。call/resume 的 true 让主对话等提交回执再继续推理，不同步等待任务终态；其他 action 忽略它
     timeout:
       type:
         - number

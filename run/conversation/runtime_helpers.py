@@ -248,8 +248,12 @@ def call_is_explicitly_async(call) -> bool:
             and arguments.get("completion_mode") == "detached"
         )
     if call.name == "subagent_dispatch":
-        return arguments.get("action") in {"call", "resume", "split"} and not (
-            arguments.get("action") == "call" and arguments.get("agent") == "task_plan"
+        action = arguments.get("action")
+        # Legacy synchronous dispatches still need their real tool receipt.
+        # The built-in submission receipt does not wait for the child itself.
+        return action == "split" or (
+            action in {"call", "resume"} and arguments.get("wait") is not True
+            and not (action == "call" and arguments.get("agent") == "task_plan")
         )
     if call.name == "user_decision":
         return arguments.get("action") == "ask" and arguments.get("mode") == "async"

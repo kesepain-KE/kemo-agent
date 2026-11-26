@@ -108,12 +108,13 @@
   当前调用未启动，不应自动重试或把它报告为子代理业务失败。若工具有可验证 entrypoint，
   shell、external_message 和非只读 file 仍按进程隔离。
 - `call` / `resume`：成功入队即返回 `task_id`、`queued/running` 和 `detached: true`；
-  `wait=true`、`false` 或省略均不再同步等结果。回执不是结论，子任务仍是主对话必要依赖。
+  `wait=true` 让主对话等提交回执再继续推理；它不让插件同步等待子任务终态。
+  回执不是结论，子任务仍是主对话必要依赖。
   多个独立业务任务可直接提交；有依赖时先等框架交付真实结果再提交下一步，无需反复 status 轮询。
   调度并发、失败和取消见 `knowledge/global/runtime/agent-task-coordination.md`。
 - `status`：用原 `task_id` 立即查询；加 `wait=true` 可续等终态，`timeout` 为 1～60 秒的整数，默认 30，只约束查询。
   `wait_outcome=finished` 表示已到终态，仍须查看原 `status` 和 `error`；`timeout` 返回最后快照，不取消或重新派发子任务。
-  其他 action 的 `wait` 仍仅作兼容忽略。
+  除 `call`、`resume`、`status` 外，其他 action 忽略 `wait`。
 - `resume`：继续同一对话空间内已“超时停止”“工具额度停止”或符合条件的 `output_truncated`
   且可恢复的任务；使用原 task_id，
   可附 guidance 限定剩余工作；旧 timeout 和 wait 不再为这类任务设置总时限或同步等待。
