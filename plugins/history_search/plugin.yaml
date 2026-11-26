@@ -1,5 +1,5 @@
 name: history_search
-description: 查询当前用户历史归档：dates 查看日期目录，list 列出归档，read 通过 archive_id/next_cursor 分页读取正文，search（默认）按关键词搜索；相关正文优先显式选 match_mode=fulltext，使用 simple 中文分词和 BM25。只含用户、引导和智能体正文，不含工具、参数、回执或思考。
+description: 查询当前用户历史归档：dates 查看日期目录，list 列出归档，read 通过 archive_id/cursor 分页或通过 anchor_card_id 预览上下文，search（默认）按关键词搜索；相关正文优先显式选 match_mode=fulltext，使用 simple 中文分词和 BM25。默认只读正文；仅锚点读取可显式开启工具卡预览，不含思考。
 input_schema:
   type: object
   properties:
@@ -19,17 +19,47 @@ input_schema:
     archive_id:
       type: string
       maxLength: 4096
-      description: read 必填；原样使用 list 返回的归档标识，不是文件路径
+      description: 仅用于 read；游标分页必填，锚点读取可省略，提供时必须与锚点属于同一归档代际
     cursor:
       type: string
       maxLength: 8192
-      description: read 续页时原样使用 next_cursor；需保持相同 archive_id/role
+      description: read 续页时原样使用 next_cursor；需保持相同 archive_id/role，与 anchor_card_id 互斥
+    anchor_card_id:
+      type: string
+      maxLength: 200
+      default: ''
+      description: 仅用于 read；直接使用 search 返回的正文 card_id，预览其前后正文，不生成续读游标
+    before:
+      type: integer
+      minimum: 0
+      maximum: 20
+      default: 5
+      description: 锚点前最多读取多少条正文，跳过工具卡
+    after:
+      type: integer
+      minimum: 0
+      maximum: 20
+      default: 5
+      description: 锚点后最多读取多少条正文，跳过工具卡
+    include_tools:
+      type: boolean
+      default: false
+      description: 仅用于锚点读取；开启时在正文窗口内插入工具调用与回执预览，不改变窗口边界
+    max_tool_chars:
+      type: integer
+      minimum: 0
+      maximum: 20000
+      anyOf:
+        - {"const": 0}
+        - {"minimum": 200}
+      default: 2000
+      description: 仅用于锚点读取；工具参数与结果预览各自的字符上限。0 为不截断探头，超整页预算或十万字符上限时报错
     query:
       type: string
       description: 仅用于 search 的关键词；regex=true 时为正则表达式；空白返回空匹配
     limit:
       type: integer
-      description: 本页匹配数/日期数/归档数/消息片段数上限
+      description: 本页匹配数/日期数/归档数/消息片段数上限；锚点读取由 before/after 控制
       minimum: 1
       maximum: 100
       default: 10
@@ -48,7 +78,7 @@ input_schema:
       - user
       - assistant
       default: any
-      description: 正文角色过滤；user 包含引导，assistant 包含阶段与最终正文，any 包含全部正文
+      description: 正文角色过滤；user 包含引导，assistant 包含阶段与最终正文；锚点读取不按角色过滤
     match_mode:
       type: string
       enum:
@@ -91,7 +121,7 @@ input_schema:
       minimum: 1000
       maximum: 90000
       default: 80000
-      description: 本页结果项紧凑 JSON 字符预算（不含外层元数据）；read 长消息自动分片可续读
+      description: 单页预算；锚点预览计量整个紧凑 JSON 的 UTF-8 字节数，游标 read 的长消息可分片续读
     source:
       type: string
       maxLength: 200

@@ -1,17 +1,20 @@
 # history_search
 
-查询当前用户的历史归档：`dates` 查看归档日期目录，`list` 列出某天或全部归档，`read` 分页读取指定归档真实正文，`search` 搜索用户正文、引导正文与智能体正文。搜索命中、相邻上下文和 read 均只提取正文 text，不返回工具调用、参数、回执、思考或其他载荷；工具 RAW 仍完整保存在历史库中。
+查询当前用户的历史归档：`dates` 查看归档日期目录，`list` 列出某天或全部归档，`read` 分页读取归档正文或预览锚点上下文，`search` 搜索用户正文、引导正文与智能体正文。搜索、普通分页和默认锚点预览只读正文；只有锚点预览可显式加入工具卡，单独投影工具参数、结果预览和状态。
 
 ## 归档目录与正文读取
 
 - **先目录，后正文**：不知道日期时调用 `{"action":"dates"}`；知道日期时调用 `{"action":"list","date":"2026-10-24","limit":20}`；再将返回的 `archive_id` 原样传给 `{"action":"read","archive_id":"...","limit":20}`。list 不要求关键词，不读取正文；read 返回真实已保存文本，不是摘要。
+- **从搜索命中直接预览**：拿到 `search` 返回的 `card_id` 后，调用 `{"action":"read","anchor_card_id":"...","before":3,"after":5}`，无需先执行 `list`。两侧独立按正文条数计，各默认 5、范围 0–20，跳过工具卡；`limit` 和 `role` 不改变该窗口。`cursor` 与锚点互斥；如一并传 `archive_id`，它必须与锚点属于同一归档代际。预览先保留锚点正文，预算不够时可截断正文或裁去邻居，不提供无损续读游标；要完整读归档，用 `archive.archive_id` 发起一次普通分页 `read`。
+- **按需查看工具卡**：在锚点 `read` 加 `"include_tools":true`。先按正文确定两端 `seq`，再插入区间内的工具卡；首条正文前、末条正文后的工具卡不在窗口内。页预算先给锚点，再给按 `seq` 排列的工具卡，最后给邻居正文。预算不足时会标记 `window_clipped`；可降低 `max_tool_chars` 来容纳更多整条工具卡预览。
+- **不截断探头**：`max_tool_chars` 默认 2000，正数范围 200–20000，分别限制每张工具卡的参数或结果预览字符数。设为 `0` 会尝试取完整的预览字段；序列化结果超过十万字符，或完整工具卡预览放不进 `page_char_limit` 时明确报错，不生成 artifact。可缩小 `before/after` 或改用正数 `max_tool_chars`。两个工具参数都不用于普通分页。
+- **外部消息**：工具卡预览是否开放由消息模块自身决定，框架不按来源做默认限制。消息模块要关闭时，应在执行前拒绝 `include_tools=true` 或强制设为 `false`，不必禁用正文检索或锚点读取。
 - **日期口径**：dates/list 按物理归档的最后更新时间（`updated_at`）换算 `Asia/Shanghai` 自然日，缺失时回退创建时间、旧窗口名日期；返回 `date_basis`、`timezone` 及原始创建/更新时间。无法确定日期的归档在日期目录中为 `date=null`，可在未限定日期的 list 中找到。跨天会话只归属最后更新日，不代表当天逐条发言活动。**旧 search 的 since/until 仍按创建日期，不改变既有语义**。
 - **目录分页**：dates/list 都支持 source/session_id 精确过滤、since/until 日期区间，以及 limit/offset/page_char_limit；用 next_offset 续页。目录 total 是筛选后日期组数或物理归档数，不是当前页条数。列表按最后更新时间倒序，日期按天倒序；无日期项在最后。分页期间归档增删可能影响 offset，应重新查询目录。
-- **区分物理归档**：同一逻辑会话可能对应多个归档，必须使用 list 返回的 archive_id，不能用 session_id 代替。ID 只在当前用户数据库内解析，不是可读取的文件路径。summary 是该逻辑会话已有的摘要（summary_source=session），可能为空，不触发生成摘要；正文以 read 为准。
-- **正文双边界分页**：read 的 limit 表示本页消息片段数，page_char_limit 限制 messages 项的紧凑 JSON 字符总量（不含外层元数据）；超长单条消息也会分片。has_more=true 时必须将 next_cursor 原样带回相同 archive_id/role 续读，直到 false 才表示读完。read 可选 role=user/assistant；默认 any。不能以页面不满 limit 推断已结束。
-- **片段定位**：message_index 保留原始索引，round_number 为存储投影中的轮次；content_offset/next_content_offset/total_content_bytes 使用 UTF-8 字节定位（offset_unit=utf8_bytes），message_complete 表示本条是否结束。相同 message_index 的 content 顺序拼接可以无损恢复长正文，不需手工计算游标。当前表结构没有独立可信的逐消息时间列，因此 read 不返回消息时间；不得把消息行存储时间或归档创建/更新时间冒充发言时间，也不为读取时间而加载 message_json 中可能含媒体负载的数据。
-- **游标与权限**：游标绑定当前用户、物理归档、角色与归档元数据/消息数量及正文总字节数。常规归档更新后游标过期，需重新从头读取；不要跨归档使用。删除后旧 ID 不可读。四个 action 同受插件白名单和 memory.history_read_enabled 控制。只读访问不会创建空历史库、修改更新时间、重开会话、触发记忆或摘要。
-- **参数分工**：query/匹配方式/上下文参数仅用于 search；date 仅用于 list；archive_id/cursor 仅用于 read，read 不接受 since/until/source/session_id/offset。不要把搜索参数混到目录查询中。
+- **区分物理归档**：分页使用 `list` 或锚点预览返回的 `archive_id`，不能用 `session_id` 代替。ID 只在当前用户数据库内解析，不是文件路径。`summary` 是已保存的会话摘要，可能为空，不触发生成摘要；正文以 `read` 为准。
+- **游标无损分页**：`limit` 表示本页消息片段数，超长正文会按 `page_char_limit` 分片。`has_more=true` 时将 `next_cursor` 原样带回相同的 `archive_id` 和 `role`，不能以页面不满 `limit` 推断已结束。相同 `seq` 的 `content` 按 `byte_offset`（UTF-8 字节）顺序拼接，可无损恢复正文。不要把消息行的存储时间冒充发言时间。
+- **游标与权限**：游标绑定当前用户、物理归档代际、角色及首读时的 `through_seq`；后续追加不会进入这条续读链。删除后旧 ID 不可读。四个 action 同受插件白名单和 `memory.history_read_enabled` 控制。只读访问不会创建空历史库、修改更新时间、重开会话、触发记忆或摘要。
+- **参数分工**：`query`、匹配方式与 `context_messages` 仅用于 `search`；`date` 仅用于 `list`；`archive_id`、`cursor`、`anchor_card_id`、`before`、`after` 仅用于 `read`，`read` 不接受 `since/until/source/session_id/offset`。
 
 ## 使用原则
 
@@ -21,7 +24,7 @@
 4. **上下文按需获取**：需要还原对话脉络时传入 `context_messages`，一般取 2–3；前后各 N 条按正文消息计数，跳过中间工具卡片，不因工具调用较多而丢掉相邻发言。只确认是否提到某个词时保持默认值 0。
 5. **搜索精度**：搜索 `AI` 等缩写且不希望命中 `main`、`email` 时，使用 `match_mode=word`。只有用户明确需要模式匹配时才启用 `regex=true`。
 6. **优先限定会话范围**：已知入口或逻辑会话时，在 search 或 list 中传入 `source`、`session_id` 精确过滤。list 仍会按不同物理归档分别返回，不会把同 session_id 的多个窗口混成一个 archive。
-7. **控制返回规模并分页**：search 使用 `next_offset`；dates/list 使用 `next_offset`，可同时设 `limit` 与 `page_char_limit`；read 使用 `next_cursor`（必须重复同一个 archive_id/role）。只有 `has_more=false` 表示已读完。search 可按需缩小 `max_snippet` 与 `context_messages`；read 的 `page_limited_by_chars=true` 表示长消息被切成片段，可无损接着读。
+7. **控制返回规模并分页**：search、dates/list 使用 `next_offset`；普通 read 使用 `next_cursor`，以 `has_more=false` 为读完。search 可缩小 `max_snippet` 与 `context_messages`；锚点预览可按需缩小 `before`、`after` 或 `page_char_limit`。
 
 ## 中文全文检索
 
@@ -61,8 +64,11 @@
 | `total` / `offset` / `next_offset` / `has_more` | dates/list 的筛选后总日期/归档数及分页状态 |
 | `date_basis` / `timezone` | dates/list 的日期计算口径标识及 `Asia/Shanghai` |
 | `archive` | read 当前物理归档的元数据 |
-| `messages` | read 的用户、引导与智能体正文片段；不返回媒体负载、思考或工具数据，total_messages/has_more 也只计正文 |
-| `message_index` / `round_number` | read 的原始消息索引与轮次 |
-| `content_offset` / `next_content_offset` / `total_content_bytes` | read 当前消息片段的 UTF-8 字节范围 |
-| `message_complete` | 当前片段是否包含整条消息；片段可跨页 |
-| `next_cursor` / `has_more` | read 的连续分页标识；同一 archive_id/role 续页直至 has_more=false |
+| `messages` | read 的正文片段；只有 `include_tools=true` 的锚点预览会额外插入 `kind=tool_call/tool_result` 的条目 |
+| `arguments_preview` / `result_preview` | 工具参数的 JSON 字符串 / 工具结果的文本预览；可能不构成完整 JSON，用对应的 `*_truncated` 判断是否因单卡上限而截断 |
+| `ok` / `execution_status` / `execution_live` | 工具结果的原始布尔回执、状态与是否还在运行；`ok` 缺失或非布尔时为 `null`，`execution_live=true` 时不可用 `ok` 判断已完成 |
+| `raw_card_bytes` | 整张工具结果 RAW 卡的字节数，不是结果字段或预览的字节数 |
+| `byte_offset` / `partial` | 游标分页片段的 UTF-8 字节起点 / 正文是否还有剩余；锚点预览中的 `partial` 表示片段被截短 |
+| `next_cursor` / `has_more` | 普通 read 的连续分页标识；同一 archive_id/role 续页直至 has_more=false |
+| `mode` / `anchor` | 锚点预览为 `mode=anchor`；`anchor` 含 `card_id`、`seq` 和在 `messages` 中从 0 开始的 `index` |
+| `window_clipped` / `page_limited_by_chars` | 锚点预览是否因页预算丢掉窗口内卡片 / 是否因页预算丢掉卡片或截短正文；单卡上限和自然到达会话首尾不算页裁剪 |

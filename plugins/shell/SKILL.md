@@ -8,7 +8,7 @@
 2. **不可逆操作先确认**：执行 rm / del / format / 覆盖写入 / 批量删除等不可逆操作前，必须先列目录确认目标范围，向用户展示将要影响的内容，获确认后再执行。
 3. **匹配当前平台**：未指定 `shell_type` 时由框架自动选择；Windows 只根据未加引号的 Shell 层命令位置识别明确的 PowerShell 语法，普通程序的引号参数不会改变解释器，其余命令保持 cmd 兼容。macOS/Linux 使用各自的非登录 Shell 优先级。只有命令确实依赖某种语法或登录配置时才显式指定解释器。Windows 不要直接使用 Unix 专属的 `head`；PowerShell 按条目限制可用 `Select-Object -First`，文件分段读取优先使用 `file.read_range`。
 4. **连续失败即停止**：同一命令连续失败 2 次即停止重试，向用户报告操作目标、错误信息和需要的帮助，不得以相同参数反复尝试。
-5. **合理设置超时**：编译、下载、数据处理等长时间命令应主动设置 `timeout`；未显式设置时使用 `global_config.yaml → tools.timeout` 注入的运行时默认值，显式有效值会同时覆盖 shell 内部期限和框架外层看门狗。
+5. **合理设置超时**：`action=run` 执行编译、下载、数据处理等长时间命令时应主动设置 `timeout`；未显式设置时使用 `global_config.yaml → tools.timeout` 注入的运行时默认值，显式有效值会同时覆盖 shell 内部期限和框架外层看门狗。
 6. **哈希能力降级**：Windows PowerShell 若缺少 `Get-FileHash`，优先改用 `file` 工具的 `hash` action；必须走系统命令时使用 `certutil -hashfile <path> SHA256`。shell 会在识别到这类失败时保留原错误并附加 `hint`。
 7. **默认同步执行**：当前任务需要命令结果才能继续或交付时，使用默认 `background=false`，由工具调用等待命令结束并返回输出。只有适合脱离当前步骤继续运行的工作才使用受管理后台作业；不要用 `wait_for_condition` 等待框架已经跟踪的作业，也不要自行拼接 `Start-Process -PassThru`、`$!` 或猜测 PID。
 
@@ -19,8 +19,11 @@
 - 在框架主/子代理调用中，有限任务默认 `completion_mode=required`，宿主等待并回送完成结果后才允许最终交付。常驻服务、监听器使用 `completion_mode=detached`，启动后验证就绪即可交付，不等待进程退出。
 - 每个用户最多同时存在 8 个活动后台作业。新建前会在 30 秒启动宽限后核对旧的 `starting/running/cancelling` 记录；进程和 worker 都已丢失的旧记录会先收口并释放配额，刚启动但尚未登记 worker 身份的记录不会被误判。
 - Windows 下同步命令、后台 Worker 和后台命令默认都不显示终端窗口。只有单次调用明确传入 `show_terminal=true` 时，命令才会在新的可见控制台中运行；该参数不写入会话或用户配置。后台管理 Worker 本身始终隐藏。Linux/macOS 只启动无 TTY 的解释器子进程，不拉起终端模拟器。
-- `action=status, job_id=...`：查询并收敛一个后台作业的状态。
+- `action=status, job_id=...`：立即返回作业状态快照；`wait=false` 同样不等待。
+- `action=status, job_id=..., wait=true`：续等同一个作业。可设 `timeout` 为 1～60 秒的整数，默认 30 秒，只约束本次查询。返回 `wait_outcome=finished` 表示观察到终态，是否成功仍看 `job_succeeded` 和退出码；`wait_outcome=timeout` 表示待到期限仍未观察到终态，返回最后快照，不取消作业。停止整个运行仍走宿主取消流程。
 - `action=cancel, job_id=...`：请求取消作业并终止已登记且身份校验通过的进程树；已结束作业重复取消是幂等操作。返回值中的 `ok` 表示取消请求是否被接受，`job_succeeded` 表示作业是否实际成功完成。
+
+收到带 `job_id` 的作业回执（包括移交回执）后，用原 ID 查看或续等；主动终止才用 `cancel`，不要重新 `run`。
 
 后台作业按用户、来源和对话空间隔离。持久作业记录不保存原始命令，只保存命令摘要；原始命令请求由管理进程读取后立即删除。用户命令若自行再次创建完全脱离的子进程，不属于该作业的可靠生命周期范围。
 在框架主/子代理中，新后台作业绑定发起任务。有限任务默认 `completion_mode=required`：

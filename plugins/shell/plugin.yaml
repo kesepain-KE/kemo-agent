@@ -1,5 +1,5 @@
 name: shell
-description: 执行本地系统命令。支持同步执行与受管理后台作业；有限后台任务由框架等待结果，常驻服务显式 detached。作业可按 job_id 查询、取消。
+description: 执行本地系统命令。支持同步执行与受管理后台作业；有限后台任务由框架等待结果，常驻服务显式 detached。作业可按 job_id 查询、续等或取消。
 input_schema:
   type: object
   properties:
@@ -36,6 +36,10 @@ input_schema:
     job_id:
       type: string
       description: action=status/cancel 使用的后台作业 ID
+    wait:
+      type: boolean
+      default: false
+      description: action=status 时是否等待作业进入终态；false 立即返回当前快照
     working_dir:
       type: string
       description: 工作目录，默认继承会话 cwd 或项目根
@@ -43,7 +47,7 @@ input_schema:
       type: integer
       minimum: 1
       maximum: 3600
-      description: 超时秒数，默认来自 global_config.yaml → tools.timeout
+      description: run 的超时秒数默认来自 global_config.yaml → tools.timeout；status 且 wait=true 时为本次查询的等待上限（1..60 秒，默认 30），不改变作业期限
     stdin:
       type: string
       description: 标准输入文本

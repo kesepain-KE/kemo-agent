@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import subprocess
 
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Callable
 
 @dataclass(frozen=True)
 class ProcessRuntimeDependencies:
@@ -35,6 +36,21 @@ class ProcessRuntimeDependencies:
     public_background_job: Any
 
 
+@contextmanager
+def _windows_launch_error_mode():
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    previous = kernel32.GetThreadErrorMode()
+    # Return loader errors to Popen instead of waiting for a system dialog.
+    if not kernel32.SetThreadErrorMode(previous | 0x0001, None):  # SEM_FAILCRITICALERRORS
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        kernel32.SetThreadErrorMode(previous, None)
+
+
 def run_process(
     command: str,
     *,
@@ -42,9 +58,12 @@ def run_process(
     env_extra: dict[str, str],
     stdin: str,
     timeout: float,
-    cancel_event: threading.Event | None,
+    is_cancelled: Callable[[], bool] | None,
     shell_type: str = "auto",
     show_terminal: bool = False,
+    isolated: bool = False,
+    own_shell_group: bool = False,
+    report_command_started: Callable[[dict[str, Any]], None] | None = None,
     deps: ProcessRuntimeDependencies,
 ) -> dict[str, Any]:
     process_command, use_shell, resolved_shell_type, environment = (
@@ -56,21 +75,19 @@ def run_process(
         )
     )
     decode_output = partial(deps.decode_output, shell_type=resolved_shell_type)
-    if cancel_event is None:
+    console_options = deps.visible_subprocess_kwargs if show_terminal else deps.hidden_subprocess_kwargs
+    input_data = stdin.encode("utf-8") if stdin else None
+    if is_cancelled is None:
         try:
             completed = deps.subprocess.run(
                 process_command,
                 shell=use_shell,
                 cwd=str(cwd),
                 env=environment,
-                input=stdin.encode("utf-8") if stdin else None,
+                input=input_data,
                 timeout=timeout,
                 capture_output=True,
-                **(
-                    deps.visible_subprocess_kwargs()
-                    if show_terminal
-                    else deps.hidden_subprocess_kwargs()
-                ),
+                **console_options(),
             )
         except deps.subprocess.TimeoutExpired as exc:
             stdout = decode_output(exc.stdout or b"")
@@ -103,36 +120,77 @@ def run_process(
             "truncated": truncated,
             "shell_type": resolved_shell_type,
         }
-    process = deps.subprocess.Popen(
-        process_command,
-        shell=use_shell,
-        cwd=str(cwd),
-        env=environment,
-        stdin=deps.subprocess.PIPE if stdin else deps.subprocess.DEVNULL,
-        stdout=deps.subprocess.PIPE,
-        stderr=deps.subprocess.PIPE,
-        **deps.cancellable_subprocess_kwargs(show_terminal=show_terminal),
+    # POSIX inherits the host-owned group; Windows isolation keeps its old flags.
+    isolated = own_shell_group or isolated
+    options = (
+        console_options() if isolated
+        else deps.cancellable_subprocess_kwargs(show_terminal=show_terminal)
     )
-    input_data = stdin.encode("utf-8") if stdin else None
-    deadline = deps.time.monotonic() + timeout
+    error_mode = _windows_launch_error_mode() if isolated and deps.sys.platform == "win32" else nullcontext()
+    with error_mode:
+        process = deps.subprocess.Popen(
+            process_command,
+            shell=use_shell,
+            cwd=str(cwd),
+            env=environment,
+            stdin=deps.subprocess.PIPE if stdin else (None if isolated else deps.subprocess.DEVNULL),
+            stdout=deps.subprocess.PIPE,
+            stderr=deps.subprocess.PIPE,
+            **options,
+        )
+    started_at = deps.time.monotonic()
+    deadline = started_at + timeout
     cancelled = False
     timed_out = False
-    while True:
-        if cancel_event is not None and cancel_event.is_set():
-            cancelled = True
-            deps.terminate_process_tree(process)
-        remaining = deadline - deps.time.monotonic()
-        if remaining <= 0 and process.poll() is None:
-            timed_out = True
-            deps.terminate_process_tree(process)
+    stdout_data = stderr_data = None
+    # Preserve subprocess.run's pipe close and direct-child reap for isolation.
+    with process if isolated else nullcontext():
         try:
-            stdout_data, stderr_data = process.communicate(
-                input=input_data, timeout=max(0.01, min(0.1, max(0.0, remaining)))
-            )
-            break
-        except deps.subprocess.TimeoutExpired:
-            input_data = None
-            continue
+            if report_command_started is not None:
+                report_command_started({
+                    "kind": "shell_command_started",
+                    "pid": process.pid,
+                    "cwd": str(cwd),
+                    "shell_type": resolved_shell_type,
+                    "started_at": started_at,
+                    "deadline_at": deadline,
+                })
+            while True:
+                if is_cancelled():
+                    cancelled = True
+                    if own_shell_group:
+                        # The host owns the group. Do not signal it here or wait
+                        # for EOF from descendants still holding the pipes.
+                        process.kill()
+                        break
+                    # Windows isolation keeps the existing host tree cleanup.
+                    if not isolated:
+                        deps.terminate_process_tree(process)
+                remaining = deadline - deps.time.monotonic()
+                if remaining <= 0 and isolated:
+                    timed_out = True
+                    process.kill()
+                    if not own_shell_group:
+                        # Windows subprocess.run collects output after killing.
+                        stdout_data, stderr_data = process.communicate()
+                    break
+                if remaining <= 0 and process.poll() is None:
+                    timed_out = True
+                    deps.terminate_process_tree(process)
+                interval = min(0.1, remaining)
+                if not isolated:
+                    interval = max(0.01, interval)
+                try:
+                    stdout_data, stderr_data = process.communicate(input=input_data, timeout=interval)
+                    break
+                except deps.subprocess.TimeoutExpired as exc:
+                    if own_shell_group:
+                        stdout_data, stderr_data = exc.stdout, exc.stderr
+                    input_data = None
+        except BaseException:
+            if isolated:
+                process.kill()
+            raise
     if cancelled or timed_out:
         stdout = decode_output(stdout_data or b"")
         stderr = decode_output(stderr_data or b"")
@@ -147,7 +205,7 @@ def run_process(
             ),
             "exit_code": -1,
             "timed_out": timed_out,
-            "cancelled": cancelled,
+            **({"cancelled": cancelled} if cancelled or not isolated else {}),
             "truncated": truncated,
             "shell_type": resolved_shell_type,
         }

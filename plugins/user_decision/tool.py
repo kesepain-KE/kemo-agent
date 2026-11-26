@@ -1,12 +1,17 @@
 """Interactive questions exposed through the standard tool-plugin entrypoint."""
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 from pathlib import Path
+import time
 from typing import Any
 
 from run.cards import CardStore
 from run.config import interactive_decisions_enabled, load_config
-from run.tools import DecisionError, DecisionStore, validate_question
+from run.tools import DEFAULT_QUERY_WAIT_SECONDS, DecisionError, DecisionStore, query_wait_seconds, validate_question
+
+
+_TERMINAL = {"answered", "expired", "cancelled", "resolved_by_agent"}
 
 
 def run(action: str, *, context: dict[str, Any], **arguments) -> dict[str, Any]:
@@ -24,8 +29,26 @@ def run(action: str, *, context: dict[str, Any], **arguments) -> dict[str, Any]:
     if not isinstance(decision_id, str) or not decision_id:
         raise DecisionError("decision_id 必须为非空文本")
     if action == "get":
-        store.refresh(source, session_id, integration_id=context["integration_id"])
-        return {"ok": True, **store.get(source, session_id, decision_id)}
+        deadline = (
+            time.monotonic() + query_wait_seconds(arguments.get("timeout", DEFAULT_QUERY_WAIT_SECONDS), action="get")
+            if arguments.get("wait") is True else None
+        )
+        cancel_event = context.get("cancel_event") if deadline is not None else None
+        while True:
+            store.refresh(source, session_id, integration_id=context["integration_id"])
+            snapshot = store.get(source, session_id, decision_id)
+            if deadline is None:
+                return {"ok": True, **snapshot}
+            if snapshot["status"] in _TERMINAL:
+                return {"ok": True, **snapshot, "wait_outcome": "finished"}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"ok": True, **snapshot, "wait_outcome": "timeout"}
+            interval = min(2.0, remaining)
+            if cancel_event is None:
+                time.sleep(interval)
+            elif cancel_event.wait(interval):
+                raise CancelledError("已停止等待用户决策")
     if action == "close":
         return store.settle(
             source, session_id, decision_id, status="resolved_by_agent",

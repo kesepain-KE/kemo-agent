@@ -34,6 +34,7 @@ from run.infra import (
     visible_subprocess_kwargs,
 )
 from run.infra import process_snapshot
+from plugins.shell.job_operations import run_job_operation
 from plugins.shell.process_runtime import ProcessRuntimeDependencies, run_process, start_background
 from plugins.shell.shell_detection import (
     _WINDOWS_HEAD_PIPE_RE,
@@ -41,7 +42,6 @@ from plugins.shell.shell_detection import (
     _mask_quoted_shell_content,
 )
 from run.tools import (
-    assert_background_job_access,
     cancel_background_job,
     prepare_background_job,
     public_background_job,
@@ -641,7 +641,7 @@ _execute = _execution_wrapper("_execute")
 def run(
     command: str = "",
     working_dir: str = "",
-    timeout: int = 0,
+    timeout: int | None = None,
     stdin: str = "",
     env: dict[str, Any] | None = None,
     session_id: str = "",
@@ -655,6 +655,7 @@ def run(
     label: str = "",
     completion_mode: str = "required",
     *,
+    wait: bool = False,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     if action not in {"run", "status", "cancel"}:
@@ -677,31 +678,12 @@ def run(
     if action in {"status", "cancel"}:
         if not user:
             raise ValueError("后台作业操作需要工具上下文 user")
-        current = read_background_job(root, user, job_id)
-        assert_background_job_access(
-            current,
-            source=str(context.get("source") or context.get("caller") or ""),
-            session_id=str(context.get("session_id") or context.get("task_id") or ""),
+        if action == "status" and not isinstance(wait, bool):
+            raise ValueError("wait 必须是布尔值")
+        return run_job_operation(
+            action, root=root, user=user, job_id=job_id, context=context, wait=wait, timeout=timeout,
+            operate=cancel_background_job if action == "cancel" else reconcile_background_job,
         )
-        current = (
-            cancel_background_job(root, user, job_id)
-            if action == "cancel"
-            else reconcile_background_job(root, user, job_id)
-        )
-        operation_ok = (
-            True
-            if action == "status"
-            else current.get("status") in {"cancelling", "cancelled"}
-            or bool(current.get("cancel_requested"))
-        )
-        return {
-            "ok": operation_ok,
-            "operation_ok": operation_ok,
-            "job_succeeded": current.get("status") == "completed",
-            "operation": action,
-            "output": f"后台作业状态：{current.get('status')}",
-            **public_background_job(current, root=root),
-        }
     if not isinstance(command, str) or not command.strip():
         raise ValueError("action=run 时 command 不能为空")
     if background and stdin:
@@ -712,8 +694,6 @@ def run(
     effective_timeout = float(timeout or context_timeout)
     effective_timeout = max(1.0, min(effective_timeout, 3600.0))
     cancel_event = context.get("cancel_event")
-    if cancel_event is not None and not isinstance(cancel_event, threading.Event):
-        cancel_event = None
     key = _session_key(context, root, session_id) if session_id else None
     if reset_session:
         if key is None:
@@ -745,7 +725,7 @@ def run(
                 shell_type=shell_type,
                 context=context,
                 timeout=effective_timeout,
-                cancel_event=cancel_event,
+                cancel_event=cancel_event if isinstance(cancel_event, threading.Event) else None,
                 show_terminal=show_terminal,
             )
             if background
@@ -760,6 +740,9 @@ def run(
                 shell_type=shell_type,
                 chain_timeout_mode=chain_timeout_mode,
                 show_terminal=show_terminal,
+                isolated=context.get("_tool_process_isolated") is True,
+                own_shell_group=context.get("_shell_owner_group") is True,
+                report_command_started=context.get("_report_shell_command_started"),
             )
         )
         hint = _failure_hint(

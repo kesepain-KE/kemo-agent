@@ -18,6 +18,7 @@ from run.config import (
 )
 
 PLUGIN_META_FILENAME = "plugin.yaml"
+TOOL_TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime", "submission"})
 _manifest_cache = BoundedReadCache(max_entries=256, max_bytes=8 * 1024 * 1024, per_owner=128)
 
 
@@ -80,13 +81,9 @@ def _validate_plugin_tool(raw: dict[str, Any], path: Path, title: str) -> None:
             f"插件 permission 必须是 read、write、delete 或 external：{path}"
         )
     timeout_policy = raw.get("timeout_policy", "argument_or_default")
-    if not isinstance(timeout_policy, str) or timeout_policy not in {
-        "argument_or_default",
-        "agent_runtime",
-    }:
+    if not isinstance(timeout_policy, str) or timeout_policy not in TOOL_TIMEOUT_POLICIES:
         raise PluginManifestError(
-            "插件 timeout_policy 必须是 argument_or_default 或 agent_runtime："
-            f"{path}"
+            f"插件 timeout_policy 必须是 {', '.join(sorted(TOOL_TIMEOUT_POLICIES))}：{path}"
         )
     execution_mode = raw.get("execution_mode", "process")
     if execution_mode not in {"process", "thread"}:

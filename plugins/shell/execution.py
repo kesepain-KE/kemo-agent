@@ -42,7 +42,7 @@ if TYPE_CHECKING:
         write_job_request as write_job_request,
     )
 
-from typing import Any
+from typing import Any, Callable
 
 def _process_command(
     command: str,
@@ -180,14 +180,18 @@ def _run_process(
     env_extra: dict[str, str],
     stdin: str,
     timeout: float,
-    cancel_event: threading.Event | None,
+    is_cancelled: Callable[[], bool] | None,
     shell_type: str = "auto",
     show_terminal: bool = False,
+    isolated: bool = False,
+    own_shell_group: bool = False,
+    report_command_started: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     return run_process(
         command, cwd=cwd, env_extra=env_extra, stdin=stdin, timeout=timeout,
-        cancel_event=cancel_event, shell_type=shell_type, show_terminal=show_terminal,
-        deps=_process_runtime_dependencies(),
+        is_cancelled=is_cancelled, shell_type=shell_type, show_terminal=show_terminal,
+        isolated=isolated, own_shell_group=own_shell_group,
+        report_command_started=report_command_started, deps=_process_runtime_dependencies(),
     )
 
 
@@ -217,11 +221,14 @@ def _execute(
     environment: dict[str, str],
     stdin: str,
     timeout: float,
-    cancel_event: threading.Event | None,
+    cancel_event: Any,
     session: dict[str, Any] | None,
     shell_type: str = "auto",
     chain_timeout_mode: str = "total",
     show_terminal: bool = False,
+    isolated: bool = False,
+    own_shell_group: bool = False,
+    report_command_started: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     commands: list[str] = []
     operators: list[str] = []
@@ -235,18 +242,24 @@ def _execute(
             commands = []
 
     if not commands or not all(_is_builtin_command(segment) for segment in commands):
+        is_cancelled = getattr(cancel_event, "is_set", None)
         result = _run_process(
             command,
             cwd=cwd,
             env_extra=environment,
             stdin=stdin,
             timeout=timeout,
-            cancel_event=cancel_event,
+            is_cancelled=is_cancelled if callable(is_cancelled) else None,
             shell_type=shell_type,
             show_terminal=show_terminal,
+            isolated=isolated,
+            own_shell_group=own_shell_group,
+            report_command_started=report_command_started,
         )
         return {**result, "cwd": str(cwd)}
 
+    if not isinstance(cancel_event, threading.Event):
+        cancel_event = None
     deadline = time.monotonic() + timeout if chain_timeout_mode == "total" else None
     results: list[dict[str, Any]] = []
     current_cwd = cwd

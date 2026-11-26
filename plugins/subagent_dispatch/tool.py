@@ -1,38 +1,27 @@
 from __future__ import annotations
 
-import math
 import json
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from agents._runtime.user_packages import create_user_agent_package
-from run.agents import get_agent_scheduler
 from run.agents import (
-    AgentError,
-    AgentCancelledError,
-    AgentQueueError,
-    AgentTaskWaitTimeout,
-    AgentRunResult,
-    ExternalAgentError,
-    call_external_agent,
-    discover_agents,
-    discover_external_agents,
-    resolve_external_agent,
+    FINAL_TASK_STATUSES, SCHEDULER_TERMINAL_STATUSES,
+    AgentCancelledError, AgentError, AgentInputError, AgentQueueError, AgentRunError,
+    AgentTaskNotFoundError, AgentTaskWaitTimeout, ExternalAgentError,
+    agent_input_hint, bounded_schema_hint, call_external_agent, cancellation_state,
+    delivery, describe_agent, discover_agents, discover_external_agents,
+    get_agent_scheduler, guide_task, main_agent_result_handler, prepare_main_agent_invocation,
+    requested_timeout, resolve_external_agent, split_task, validate_json_schema,
 )
 from run.config import load_config
 from run.retry import HOST_CONTROL_EXCEPTIONS
-from run.agents import AgentInputError, validate_json_schema, agent_input_hint, bounded_schema_hint
-from run.agents import conclusion_data, delivery, describe_agent, guide_task, split_task, numeric_usage
-from run.agents import (
-    persist_main_agent_result,
-    prepare_main_agent_invocation,
-)
+from run.tools import DEFAULT_QUERY_WAIT_SECONDS, query_wait_seconds
 
 
-_DEFAULT_DETACHED_SURVIVAL_SECONDS = 120.0
-_MAX_DETACHED_SURVIVAL_SECONDS = 3_600.0
-_MAX_EXTERNAL_REQUEST_TIMEOUT_SECONDS = 3_600.0
+_MAX_EXTERNAL_REQUEST_TIMEOUT_SECONDS = 3600.0
+_STATUS_TERMINAL = SCHEDULER_TERMINAL_STATUSES | FINAL_TASK_STATUSES
 
 
 def _scope(context: dict[str, Any]) -> tuple[str, str]:
@@ -68,31 +57,6 @@ def _scheduler_get(
     return scheduler.get(task_id)
 
 
-def _scheduler_wait(
-    scheduler: Any,
-    task_id: str,
-    *,
-    timeout: float | None = None,
-    source: str = "",
-    session_id: str = "",
-) -> Any:
-    if source and session_id:
-        try:
-            return scheduler.wait(
-                task_id,
-                timeout=timeout,
-                source=source,
-                session_id=session_id,
-            )
-        except TypeError as exc:
-            if "unexpected keyword argument" in str(exc):
-                raise AgentError(
-                    "子代理调度器不支持对话空间作用域，已拒绝无作用域等待"
-                ) from exc
-            raise
-    return scheduler.wait(task_id, timeout=timeout)
-
-
 def _scheduler_cancel(
     scheduler: Any,
     task_id: str,
@@ -112,130 +76,30 @@ def _scheduler_cancel(
     return scheduler.cancel(task_id)
 
 
-def _detached_survival_seconds(config: dict[str, Any]) -> float:
-    runtime = config.get("agent_runtime") or {}
-    if not isinstance(runtime, dict):
-        runtime = {}
-    raw = runtime.get("timeout_survival_seconds", _DEFAULT_DETACHED_SURVIVAL_SECONDS)
-    if isinstance(raw, bool):
-        return _DEFAULT_DETACHED_SURVIVAL_SECONDS
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_DETACHED_SURVIVAL_SECONDS
-    if not math.isfinite(value) or value <= 0:
-        return _DEFAULT_DETACHED_SURVIVAL_SECONDS
-    return min(_MAX_DETACHED_SURVIVAL_SECONDS, max(120.0, value))
-
-
-def _positive_timeout(value: Any, *, field: str) -> float:
-    if isinstance(value, bool):
-        raise AgentError(f"{field} 必须是正数")
-    try:
-        timeout = float(value)
-    except (TypeError, ValueError) as exc:
-        raise AgentError(f"{field} 必须是正数") from exc
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise AgentError(f"{field} 必须是正数")
-    return timeout
-
-
-def _wait_for_task(
-    scheduler: Any,
-    task_id: str,
-    *,
-    timeout: float,
-    cancel_event: Any = None,
-    source: str = "",
-    session_id: str = "",
-) -> tuple[bool, Any]:
-    """Wait up to the caller deadline without cancelling a live task."""
-
-    deadline = time.monotonic() + timeout
-    while True:
-        if cancel_event is not None and cancel_event.is_set():
-            _scheduler_cancel(scheduler, task_id, source=source, session_id=session_id)
-            raise AgentCancelledError("子代理调用已取消")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
-            status = snapshot.get("status")
-            if status in {"queued", "running", "timed_out_running"}:
-                return False, snapshot
-            if status in {"failed", "interrupted"}:
-                return True, delivery(snapshot)
-            try:
-                return True, _scheduler_wait(
-                    scheduler,
-                    task_id,
-                    timeout=0,
-                    source=source,
-                    session_id=session_id,
-                )
-            except AgentTaskWaitTimeout:
-                continue
-        try:
-            return True, _scheduler_wait(
-                scheduler,
-                task_id,
-                timeout=min(0.1, remaining),
-                source=source,
-                session_id=session_id,
-            )
-        except AgentTaskWaitTimeout:
-            continue
-        except AgentQueueError:
-            snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
-            if snapshot.get("status") in {"queued", "running", "timed_out_running"}:
-                return False, snapshot
-            if snapshot.get("status") in {"failed", "interrupted"}:
-                return True, delivery(snapshot)
-            raise
-
-
-def _running_task_response(
-    snapshot: dict[str, Any],
-    *,
-    agent: str,
-    timeout: float,
-    managed: bool = False,
-) -> dict[str, Any]:
-    status = str(snapshot.get("status") or "running")
-    if status not in {"queued", "running", "timed_out_running"}:
-        status = "running"
+def _submission(scheduler, task_id, source, session_id, *, wait):
+    snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
+    # Even if execution has already finished, this receipt describes accepted
+    # submission, not a second delivery of the terminal result.
+    status = "running" if snapshot["status"] == "running" else "queued"
     return {
-        "ok": status != "timed_out_running",
-        "status": status,
-        "agent": agent,
-        "task_id": str(snapshot.get("id") or ""),
-        "timeout": timeout,
-        "detached": True,
-        "budget": snapshot.get("budget", {}),
-        "progress": snapshot.get("progress", {}),
-        "usage": snapshot.get("usage", {}),
-        "message": (
-            "子代理仍在运行；框架会自动续接结果，主任务等待必要依赖后才会完成，"
-            "无需反复查询状态。"
-            if managed else
-            "子代理仍在运行；可用 action=status 追踪状态，"
-            "或用 action=cancel 停止任务"
-        ),
+        "ok": True, "status": status, "agent": snapshot["agent"], "task_id": task_id,
+        "detached": True, "run_count": snapshot.get("run_count", 1),
+        "status_at": "submission",
+        "budget": snapshot.get("budget") or {},
+        "message": ("wait=true 仅作兼容，不再同步等待。 " if wait is True else "")
+                   + "已提交；主对话仍等待必要依赖，由框架交付实际结果。",
     }
+
+
+def _timeout(value, *, field="timeout"):
+    try:
+        return requested_timeout(value, field=field)
+    except AgentRunError as exc:
+        raise AgentError(str(exc)) from exc
 
 
 def _public(root: Path, user: str):
     return discover_agents(root, user).public_agents("main_agent")
-
-
-def _effective_wait(value: bool | None, definition: Any, *, synchronous_only: bool = False) -> bool:
-    """Only ordinary local LLM business agents default to background submission."""
-    if value is not None:
-        return value
-    return (
-        synchronous_only
-        or getattr(definition, "execution", "") == "background_serial"
-        or getattr(definition, "executor", "") != "builtin:llm"
-    )
 
 
 def run(
@@ -275,7 +139,7 @@ def run(
                 "source": definition.source,
                 "execution": definition.execution,
                 "input_schema": definition.input_schema,
-                "default_wait": _effective_wait(None, definition),
+                "default_wait": False,
                 **describe_agent(root, user, definition, config),
             }
             for definition in public.values()
@@ -288,7 +152,8 @@ def run(
                     "version": "external",
                     "source": "external",
                     "execution": "sync",
-                    "default_wait": True,
+                    "default_wait": False,
+                    "default_timeout": binding.timeout,
                     "input_schema": binding.input_schema,
                     "output_schema": binding.output_schema,
                 }
@@ -300,7 +165,6 @@ def run(
             "status": "created",
             "agent": create_user_agent_package(root, user, definition or {}),
         }
-    config = load_config(user, root)
     if action == "guide":
         source, session_id = _require_control_scope(context)
         return guide_task(root, user, task_id, source, session_id, context.get("task_ownership"), guidance)
@@ -313,82 +177,33 @@ def run(
         # Every queued child agent must have a complete conversation scope so
         # status/wait/cancel cannot later fall back to a user-wide wildcard.
         _require_control_scope(context)
-        if timeout is not None:
-            if isinstance(timeout, bool):
-                raise AgentError("timeout 必须是正数")
-            try:
-                timeout_value = float(timeout)
-            except (TypeError, ValueError) as exc:
-                raise AgentError("timeout 必须是正数") from exc
-            if not math.isfinite(timeout_value) or timeout_value <= 0:
-                raise AgentError("timeout 必须是正数")
-            timeout = timeout_value
+        timeout = _timeout(timeout)
         if str(agent or "").startswith("external:"):
             if max_tool_calls is not None:
                 raise AgentError("外部代理不支持覆盖本地工具预算")
-            if wait is False:
-                raise AgentError("外部子代理当前只支持同步调用；请使用 wait=true")
             try:
                 binding = resolve_external_agent(root, user, agent)
-                requested_timeout = _positive_timeout(
-                    timeout if timeout is not None else binding.timeout,
-                    field="外部子代理 timeout",
-                )
-                if requested_timeout > _MAX_EXTERNAL_REQUEST_TIMEOUT_SECONDS:
-                    raise AgentError(
-                        "外部子代理 timeout 不能超过 3600 秒"
-                    )
-                survival = _detached_survival_seconds(config)
-                execution_timeout = requested_timeout + survival
-                external_input = {} if input is None else input
-                if not isinstance(external_input, dict):
-                    raise AgentError("外部子代理 input 必须是对象")
-                if callable(context.get("task_ownership_factory")):
-                    event_options["ownership"] = context["task_ownership_factory"]()
-                scheduler = get_agent_scheduler(root, user, config=config)
-                task_id = scheduler.submit_callable(
-                    agent,
-                    external_input,
-                    lambda task_cancel: call_external_agent(
-                        root,
-                        user,
-                        agent,
-                        external_input,
-                        timeout=execution_timeout,
-                        cancel_event=task_cancel,
-                    ),
-                    timeout=execution_timeout,
-                    timeout_survival_seconds=survival,
-                    **event_options,
-                    source=scope_source,
-                    session_id=scope_session,
-                )
-                completed, value = _wait_for_task(
-                    scheduler,
-                    task_id,
-                    timeout=requested_timeout,
-                    cancel_event=context.get("cancel_event"),
-                    source=scope_source,
-                    session_id=scope_session,
-                )
-                if completed and isinstance(value, dict) and value.get("ok") is False:
-                    return value
-                if not completed:
-                    return _running_task_response(
-                        value,
-                        agent=agent,
-                        timeout=requested_timeout,
-                        managed=bool(context.get("task_ownership")),
-                    )
-                if isinstance(value, dict):
-                    # The external bridge returns a runtime envelope around data.
-                    value = {key: item for key, item in value.items() if key != "metadata"}
-                    value["task_id"] = task_id
-                return conclusion_data(value)
-            except AgentQueueError as exc:
-                raise AgentError(str(exc)) from exc
             except ExternalAgentError as exc:
                 raise AgentError(str(exc)) from exc
+            transport_timeout = binding.timeout if timeout is None or timeout == 0 else timeout
+            if not 0 < transport_timeout <= _MAX_EXTERNAL_REQUEST_TIMEOUT_SECONDS:
+                raise AgentError("外部子代理 timeout 必须大于 0 且不能超过 3600 秒")
+            external_input = {} if input is None else input
+            if not isinstance(external_input, dict):
+                raise AgentError("外部子代理 input 必须是对象")
+            if callable(context.get("task_ownership_factory")):
+                event_options["ownership"] = context["task_ownership_factory"]()
+            scheduler = get_agent_scheduler(root, user, config=config)
+            task_id = scheduler.submit_callable(
+                agent, external_input,
+                lambda task_cancel: call_external_agent(
+                    root, user, agent, external_input, timeout=transport_timeout,
+                    cancel_event=task_cancel,
+                ),
+                timeout=transport_timeout, timeout_survival_seconds=0, **event_options,
+                source=scope_source, session_id=scope_session,
+            )
+            return _submission(scheduler, task_id, scope_source, scope_session, wait=wait)
         agent_definition = public.get(agent)
         if agent_definition is None:
             raise AgentError(f"子代理未公开或不存在：{agent}")
@@ -399,9 +214,6 @@ def run(
             input_data=input,
             config=config,
         )
-        wait = _effective_wait(wait, agent_definition, synchronous_only=invocation.synchronous_only)
-        if invocation.synchronous_only and not wait:
-            raise ValueError(f"{agent} 必须同步调用，以便完成校验和持久化")
         payload = invocation.payload
         try:
             input_schema = agent_definition.input_schema
@@ -435,95 +247,16 @@ def run(
             event_options["ownership"] = context["task_ownership_factory"]()
         if max_tool_calls is not None:
             event_options["max_tool_calls"] = max_tool_calls
-        if wait:
-            requested_timeout = _positive_timeout(
-                timeout if timeout is not None else agent_definition.timeout,
-                field="子代理 timeout",
-            )
-            persisted_holder: dict[str, Any] = {}
-
-            def persist_result(result: Any) -> None:
-                data = getattr(result, "data", None)
-                if isinstance(data, dict):
-                    persisted_holder["plan"] = persist_main_agent_result(
-                        root=root,
-                        user=user,
-                        agent=agent,
-                        payload=payload,
-                        result_data=data,
-                        source=str(context.get("source") or "web"),
-                        session_id=str(context.get("session_id") or "web"),
-                        config=config,
-                    )
-
-            scheduler = get_agent_scheduler(root, user, config=config)
-            task_id = scheduler.submit(
-                agent,
-                payload,
-                timeout=timeout,
-                timeout_survival_seconds=_detached_survival_seconds(config),
-                result_handler=persist_result if agent == "task_plan" else None,
-                **event_options,
-                allow_sync=True,
-                config=config,
-                source=scope_source,
-                session_id=scope_session,
-            )
-            completed, value = _wait_for_task(
-                scheduler,
-                task_id,
-                timeout=requested_timeout,
-                cancel_event=context.get("cancel_event"),
-                source=scope_source,
-                session_id=scope_session,
-            )
-            if completed and isinstance(value, dict) and value.get("ok") is False:
-                return value
-            if not completed:
-                return _running_task_response(
-                    value,
-                    agent=agent,
-                    timeout=requested_timeout,
-                    managed=bool(context.get("task_ownership")),
-                )
-            if not isinstance(value, AgentRunResult):
-                raise AgentError("本地子代理返回了无效的执行结果类型")
-            result = cast(Any, value)  # Public facade is lazy; runtime type was checked above.
-            persisted = persisted_holder.get("plan")
-            reason = str(result.metadata.get("stop_reason") or "") if result.metadata.get("partial") else ""
-            response = {
-                "ok": not bool(result.metadata.get("partial")),
-                "task_id": task_id, "agent": result.agent,
-                "status": {"timeout": "timed_out", "tool_budget_exhausted": "tool_limit"}.get(reason, "completed"),
-                "data": conclusion_data(result.data), "model": result.model, "usage": numeric_usage(result.usage),
-                "resumable": bool(result.metadata.get("resumable")),
-                "run_count": result.metadata.get("run_count", 1),
-                "budget": result.metadata.get("budget", {}), "stop_reason": reason or None,
-            }
-            if result.metadata.get("background_jobs") is not None:
-                response["background_jobs"] = result.metadata["background_jobs"]
-            if agent == "task_plan":
-                response["plan"] = persisted
-            return response
         scheduler = get_agent_scheduler(root, user, config=config)
-        submit_kwargs = {"timeout": timeout, "config": config} if timeout is not None else {"config": config}
-        submitted = scheduler.submit(
-            agent,
-            payload,
-            **submit_kwargs,
-            **event_options,
-            allow_sync=True,
-            source=scope_source,
-            session_id=scope_session,
+        task_id = scheduler.submit(
+            agent, payload, timeout=timeout, config=config, **event_options, allow_sync=True,
+            result_handler=main_agent_result_handler(
+                root=root, user=user, agent=agent, payload=payload, source=scope_source,
+                session_id=scope_session, config=config,
+            ),
+            source=scope_source, session_id=scope_session,
         )
-        budget = {}
-        if hasattr(agent_definition, "capabilities"):
-            from run.agents import SegmentBudget
-            budget = SegmentBudget(agent_definition, max_tool_calls,
-                                   timeout if timeout is not None else agent_definition.timeout).snapshot()
-            budget["elapsed_seconds"] = 0
-        return {"ok": True, "status": "queued", "agent": agent, "task_id": submitted,
-                "budget": budget}
+        return _submission(scheduler, task_id, scope_source, scope_session, wait=wait)
     scheduler = get_agent_scheduler(root, user, config=config)
     if action == "resume":
         if not task_id:
@@ -532,27 +265,43 @@ def run(
         snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
         if snapshot.get("agent") not in public:
             raise AgentError("子代理未公开或不存在")
-        wait = _effective_wait(wait, public[snapshot["agent"]])
         scheduler.resume(
-            task_id, source=source, session_id=session_id, guidance=guidance, timeout=timeout,
-            config=config, **event_options,
-            **({"max_tool_calls": max_tool_calls} if max_tool_calls is not None else {}),
+            task_id, source=source, session_id=session_id, guidance=guidance,
+            timeout=_timeout(timeout, field="续跑 timeout"), config=config,
+            **event_options, max_tool_calls=max_tool_calls,
         )
-        if wait:
-            completed, value = _wait_for_task(
-                scheduler, task_id,
-                timeout=_positive_timeout(timeout if timeout is not None else public[snapshot["agent"]].timeout,
-                                          field="续跑 timeout"),
-                cancel_event=context.get("cancel_event"), source=source, session_id=session_id,
-            )
-            if completed:
-                return delivery(_scheduler_get(scheduler, task_id, source=source, session_id=session_id))
-        return delivery(_scheduler_get(scheduler, task_id, source=source, session_id=session_id))
+        return _submission(scheduler, task_id, source, session_id, wait=wait)
     if action == "status":
         if not task_id:
             raise ValueError("status 需要 task_id")
         source, session_id = _require_control_scope(context)
-        return delivery(_scheduler_get(scheduler, task_id, source=source, session_id=session_id))
+        snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
+        if wait is not True:
+            return delivery(snapshot)
+        seconds = query_wait_seconds(DEFAULT_QUERY_WAIT_SECONDS if timeout is None else timeout)
+        deadline = time.monotonic() + seconds
+        wait_outcome = "finished"
+        if snapshot["status"] not in _STATUS_TERMINAL:
+            try:
+                scheduler.wait(task_id, max(0.0, deadline - time.monotonic()),
+                               source=source, session_id=session_id)
+            except AgentTaskWaitTimeout:
+                wait_outcome = "timeout"
+            except AgentTaskNotFoundError:
+                # wait 只认本进程；每次仍按现有作用域查，真正缺失时让 get 抛错。
+                while True:
+                    snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
+                    if snapshot["status"] in _STATUS_TERMINAL:
+                        return {**delivery(snapshot), "wait_outcome": "finished"}
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return {**delivery(snapshot), "wait_outcome": "timeout"}
+                    time.sleep(min(2.0, remaining))
+            except (AgentCancelledError, AgentQueueError):
+                # 等待已结束；成功与否仍由刷新后的任务状态和错误信息表达。
+                wait_outcome = "finished"
+            snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
+        return {**delivery(snapshot), "wait_outcome": wait_outcome}
     if action == "cancel":
         if not task_id:
             raise ValueError("cancel 需要 task_id")
@@ -560,9 +309,11 @@ def run(
         cancelled = _scheduler_cancel(
             scheduler, task_id, source=source, session_id=session_id,
         )
+        snapshot = _scheduler_get(scheduler, task_id, source=source, session_id=session_id)
+        state = cancellation_state(snapshot)
         return {
-            "ok": bool(cancelled),
-            "task_id": task_id,
-            "cancelled": cancelled,
+            "task_id": task_id, "status": snapshot["status"], **state,
+            "ok": bool(cancelled), "cancel_requested": bool(cancelled),
+            "cancelled": state.get("cancel_state") == "exited",
         }
     raise ValueError(f"未知 action：{action}")

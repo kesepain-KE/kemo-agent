@@ -50,6 +50,13 @@ input_schema:
     decision_id:
       type: string
       description: get/close 必需；使用同一会话中 ask 返回的 decision_id。get 可读旧问题终态，close 只能关闭尚未结束的问题
+    wait:
+      type: boolean
+      default: false
+      description: 仅 get 使用；true 等待问题终态，false 立即查询。不改变 ask 的 mode
+    timeout:
+      type: integer
+      description: 仅 get 且 wait=true 时使用；本次查询最长等待 1..60 秒，默认 30，不改变问题本身的到期时间
     resolution:
       type: string
       maxLength: 4000

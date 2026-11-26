@@ -13,6 +13,7 @@ from run.infra import compile_query as _compile_query, match_span as _match_span
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ROLES = frozenset({"any", "user", "assistant"})
 _MATCH_MODES = frozenset({"substring", "word", "exact", "fulltext"})
+_UNSET = object()
 
 
 def _normalize_date(value: str, *, field: str) -> str | None:
@@ -244,6 +245,11 @@ def run(
     date: str = "",
     archive_id: str = "",
     cursor: str = "",
+    anchor_card_id: str = "",
+    before: int = 5,
+    after: int = 5,
+    include_tools: Any = _UNSET,
+    max_tool_chars: Any = _UNSET,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     """Keep the old positional search contract; new operations are keyword-only."""
@@ -256,9 +262,19 @@ def run(
     if not isinstance(source, str) or not isinstance(session_id, str):
         raise ValueError("source 和 session_id 必须是字符串")
     for field, value, maximum in (("date", date, 10), ("archive_id", archive_id, 4096),
-                                   ("cursor", cursor, 8192)):
+                                   ("cursor", cursor, 8192), ("anchor_card_id", anchor_card_id, 200)):
         if not isinstance(value, str) or len(value) > maximum:
             raise ValueError(f"{field} 必须是长度不超过 {maximum} 的字符串")
+    if anchor_card_id or (before, after) != (5, 5):
+        if action != "read" or not anchor_card_id:
+            raise ValueError("anchor_card_id/before/after 仅适用于带 anchor_card_id 的 read")
+        if cursor:
+            raise ValueError("anchor_card_id 与 cursor 不能同时使用")
+    tool_options = {name: value for name, value in (
+        ("include_tools", include_tools), ("max_tool_chars", max_tool_chars),
+    ) if value is not _UNSET}
+    if tool_options and (action != "read" or not anchor_card_id):
+        raise ValueError("include_tools/max_tool_chars 仅适用于带 anchor_card_id 的 read")
     if action == "search":
         if date or archive_id or cursor:
             raise ValueError("search 不接受 date/archive_id/cursor，请用 since/until/offset")
@@ -278,6 +294,14 @@ def run(
         root, user = Path(context["root"]), str(context["user"])
     except (KeyError, TypeError):
         raise ValueError("context 必须包含 root 和 user") from None
+    if anchor_card_id:
+        if date or since or until or source or session_id or offset:
+            raise ValueError("锚点读取不接受目录过滤或 offset")
+        from run.history import read_archive_anchor
+        return {"ok": True, **read_archive_anchor(
+            root, user, anchor_card_id=anchor_card_id, archive_id=archive_id,
+            before=before, after=after, page_char_limit=page_char_limit, **tool_options,
+        )}
     if action == "read":
         if not archive_id:
             raise ValueError("read 必须提供 list 返回的 archive_id")
