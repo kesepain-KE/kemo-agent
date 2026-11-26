@@ -3,16 +3,180 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError
 import copy
+import logging
+from multiprocessing.util import Finalize, is_exiting
 import queue
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from events import RunEvent
-from run.cards import IntegrationStore
+from run.cards import Card, IntegrationStore
 from run.infra import diagnostic_text
 from run.retry import HOST_CONTROL_EXCEPTIONS
-from run.tools import ToolCancelledError, ToolTimeoutError, execute_tool, tool_result_payload
+from run.tools import (
+    ToolCancelledError, ToolTimeoutError, _CancellationSignal, _is_foreground_shell_run,
+    execute_tool, tool_result_payload,
+)
+
+if TYPE_CHECKING:
+    from run.tools.foreground_handoff import ForegroundHandoff
+
+
+class _ShellExecution:
+    """Control and terminal reply for a foreground Shell driven by one tool thread."""
+
+    def __init__(self, run_cancel: _CancellationSignal, runtime_changed: threading.Event,
+                 publish_recovered_handoff: Callable[[Card], None]):
+        self._run_cancel = run_cancel
+        self._publish_recovered_handoff = publish_recovered_handoff
+        self._runtime_changed = runtime_changed
+        self._cancel = threading.Event()
+        self._changed = threading.Condition()
+        self._command_started: dict[str, Any] | None = None
+        self._terminal_claimed = False
+        self._preparing_handoff = False
+        self._handoff_job: ForegroundHandoff | None = None
+        self._handoff_card: Card | None = None
+        self._next_cancel_poll = 0.0
+        self._reply: tuple[Any, BaseException | None] | None = None
+
+    def command_started(self, notice: dict[str, Any]) -> None:
+        with self._changed:
+            self._command_started = notice
+            self._runtime_changed.set()
+
+    def claim_terminal(self) -> None:
+        # Claim before cleanup, which may take time even after a reply arrived.
+        with self._changed:
+            self._terminal_claimed = True
+
+    def is_set(self) -> bool:
+        with self._changed:
+            if self._cancel.is_set():
+                return True
+            job = self._handoff_job
+            if job is None:
+                return self._run_cancel.is_set()
+            # Once committed (or unresolved), the original Run cannot stop this job.
+            now = time.monotonic()
+            if now < self._next_cancel_poll:
+                return False
+            self._next_cancel_poll = now + .2
+        if job.cancel_requested():
+            self.request_cancel()
+            return True
+        return False
+
+    def request_cancel(self) -> None:
+        with self._changed:
+            self._cancel.set()
+
+    def _has_handoff_job(self) -> bool:
+        with self._changed:
+            return self._handoff_job is not None
+
+    def _recover_handoff_card(self, job: ForegroundHandoff) -> Card | None:
+        # The caller holds _changed, so at most one observer publishes a
+        # receipt recovered from an uncertain commit.
+        if self._handoff_card is None:
+            card = job.receipt()
+            if card is not None:
+                self._handoff_card = card
+                self._publish_recovered_handoff(card)
+        return self._handoff_card
+
+    def close(self) -> None:
+        # Shutdown only asks the execution thread to cancel. That thread still
+        # owns IPC, group cleanup and PID release.
+        self.request_cancel()
+        with self._changed:
+            self._changed.wait_for(lambda: self._reply is not None)
+
+    def subscribe(self) -> _ShellReply:
+        return _ShellReply(self)
+
+    def _settle(self, value: Any, error: BaseException | None) -> None:
+        with self._changed:
+            self._terminal_claimed = True
+            job, card = self._handoff_job, self._handoff_card
+        try:
+            # Never acquire the user metadata lock while holding _changed.
+            # A terminal claim prevents a new commit while this write runs.
+            if job is not None and card is None:
+                from run.tools.foreground_handoff import ShellHandoffUncertain
+                try:
+                    with self._changed:
+                        card = self._recover_handoff_card(job)
+                        if card is None:
+                            self._handoff_job = None
+                except Exception as exc:
+                    # Preserve the terminal snapshot behind the same visibility
+                    # gate. A failed read is not proof that we can publish anew.
+                    job.finish(value, error)
+                    raise ShellHandoffUncertain("无法核对原 Shell 移交回执") from exc
+                if card is None:
+                    try:
+                        job.discard()
+                    except OSError:
+                        logging.getLogger(__name__).exception("未提交的 Shell 移交记录无法撤销")
+                    job = None
+            if job is not None:
+                job.finish(value, error)
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            with self._changed:
+                self._reply = (value, error)
+                self._changed.notify_all()
+
+    def drive(self, invoke: Callable[[], Any]) -> Any:
+        # Run before multiprocessing joins children or releases its Event
+        # resources. A daemon thread alone is not a shutdown guarantee.
+        shutdown = Finalize(None, self.close, exitpriority=1)
+        try:
+            if is_exiting():
+                self.request_cancel()
+            value = invoke()
+        except BaseException as error:
+            self._settle(None, error)
+            if not self._has_handoff_job():
+                raise
+            return None
+        else:
+            self._settle(value, None)
+            return value
+        finally:
+            shutdown.cancel()
+
+
+class _ShellReply:
+    def __init__(self, execution: _ShellExecution):
+        self._execution = execution
+        self._subscribed = True
+
+    def wait_reply(self, timeout: float | None = None) -> Any:
+        """Return the original outcome, or None if this waiter unsubscribed."""
+        execution = self._execution
+        with execution._changed:
+            if not execution._changed.wait_for(
+                lambda: not self._subscribed or execution._reply is not None, timeout,
+            ):
+                raise TimeoutError("等待前台 Shell 结果超时")
+            if not self._subscribed:
+                return None
+            reply = execution._reply
+        assert reply is not None
+        value, error = reply
+        if error is not None:
+            raise error
+        return value
+
+    def unsubscribe(self) -> None:
+        with self._execution._changed:
+            self._subscribed = False
+            self._execution._changed.notify_all()
 
 
 class ToolRuntime:
@@ -26,6 +190,112 @@ class ToolRuntime:
         self.changed = threading.Event()
         self._decision_sequences: set[int] = set()
         self._has_decisions = False
+        self._shell_executions: dict[str, _ShellExecution] = {}
+
+    def shell_execution(self, execution_id: str) -> _ShellExecution | None:
+        """Find an in-flight Shell controller in this runtime, not a job record."""
+        with self._publish_lock:
+            return self._shell_executions.get(execution_id)
+
+    def shell_handoff_state(self, execution_id: str) -> Literal["ready", "waiting"] | None:
+        """Schedule an attempt; only handoff_shell can authorize the commit."""
+        shell = self.shell_execution(execution_id)
+        if shell is None:
+            return None
+        with shell._changed:
+            if (shell._command_started is None or shell._terminal_claimed
+                    or shell._preparing_handoff or shell._handoff_job is not None):
+                return "waiting"
+            return "ready"
+
+    def handoff_shell(self, execution_id: str) -> dict[str, Any] | None:
+        """Commit a running Shell's receipt, or return None if it is not eligible."""
+        from run.history import index_lock
+        from run.tools.background_jobs import _jobs_dir, _reconcile_stale_jobs
+        from run.tools.foreground_handoff import ForegroundHandoff, ShellHandoffUncertain, find_handoff_receipt
+
+        integration = self.integration
+        root, user = integration.store.root, integration.store.user
+        shell = self.shell_execution(execution_id)
+        if shell is None:
+            card = find_handoff_receipt(
+                root, user, integration.source, integration.session_id, integration.id,
+                integration.generation, execution_id,
+            )
+            return card.raw_payload["result"] if card is not None else None
+        with shell._changed:
+            shell._changed.wait_for(lambda: not shell._preparing_handoff)
+            if shell._handoff_job is not None:
+                try:
+                    card = shell._recover_handoff_card(shell._handoff_job)
+                except Exception as exc:
+                    raise ShellHandoffUncertain("无法核对原 Shell 移交回执") from exc
+                return card.raw_payload["result"] if card is not None else None
+            notice = shell._command_started
+            if notice is None or shell._terminal_claimed or shell.is_set():
+                return None
+            shell._preparing_handoff = True
+
+        try:
+            _reconcile_stale_jobs(root, user, _jobs_dir(root, user))
+            with index_lock(root, user):
+                job = ForegroundHandoff.prepare(integration, execution_id, notice)
+                keep_record = False
+                try:
+                    with shell._changed, self._publish_lock:
+                        if shell._command_started is not notice or shell._terminal_claimed or shell.is_set():
+                            return None
+                        receipt = {
+                            "ok": True, "status": "handed_off", "job_id": job.job_id,
+                            "message": "命令已转为后台作业，请查询或续等此 job_id，不要重新 run。",
+                            "next_action": {"name": "shell", "arguments": {
+                                "action": "status", "job_id": job.job_id,
+                            }},
+                        }
+                        interrupted = None
+                        try:
+                            with integration.store.db(write=True) as db:
+                                if shell.is_set():
+                                    return None
+                                card = integration.tool_result(
+                                    execution_id, receipt, status="handed_off", execution_live=False,
+                                    duration_ms=round((time.monotonic() - notice["started_at"]) * 1000),
+                                    transaction=db,
+                                )
+                        except BaseException as error:
+                            # A writer can fail after SQLite committed. The
+                            # original result event, not a file flag, decides.
+                            try:
+                                card = job.receipt()
+                            except Exception as exc:
+                                shell._handoff_job = job
+                                keep_record = True
+                                if not isinstance(error, Exception):
+                                    raise error from exc
+                                raise ShellHandoffUncertain("无法核对原 Shell 移交回执") from exc
+                            if card is None:
+                                raise
+                            if not isinstance(error, Exception):
+                                interrupted = error
+                        shell._handoff_job, shell._handoff_card = job, card
+                        keep_record = True
+                        self._publish_card(card)
+                        self.changed.set()
+                        if interrupted is not None:
+                            raise interrupted
+                        return card.raw_payload["result"]
+                finally:
+                    if not keep_record:
+                        job.discard()
+        finally:
+            with shell._changed:
+                shell._preparing_handoff = False
+                shell._changed.notify_all()
+
+    def _publish_recovered_handoff(self, card: Card) -> None:
+        with self._publish_lock:
+            self._publish_card(card)
+            self.changed.set()
 
     def start(self, call, definition, *, context: dict[str, Any], timeout: float,
               transform=None) -> str:
@@ -49,9 +319,10 @@ class ToolRuntime:
                               "execution_live": True},
                 ))
                 self.changed.set()
-            if call.name == "user_decision":
-                # Native coordination is a short DB operation. In particular,
-                # waiting for a person never starts an executor or watchdog.
+            decision_wait = (call.name == "user_decision" and call.arguments.get("action") == "get"
+                             and call.arguments.get("wait") is True)
+            if call.name == "user_decision" and not decision_wait:
+                # Ask (including mode=wait) and ordinary queries stay on the short DB path.
                 started = time.monotonic()
                 try:
                     value = definition.load_callable()(
@@ -76,13 +347,24 @@ class ToolRuntime:
                     else:
                         self._publish(execution, value, "completed", started)
                 return execution["execution_id"]
+            shell = (
+                _ShellExecution(self.cancel_event, self.changed, self._publish_recovered_handoff)
+                if _is_foreground_shell_run(definition.name, original["arguments"]) else None
+            )
             thread = threading.Thread(
                 target=self._execute, daemon=True, name=f"card-tool-{execution['execution_id']}",
-                args=(execution, definition, original, dict(context), timeout, transform),
+                args=(execution, definition, original, dict(context), timeout, transform, shell),
             )
+            if shell is not None:
+                with self._publish_lock:
+                    self._shell_executions[execution["execution_id"]] = shell
             try:
                 thread.start()
             except BaseException as error:
+                if shell is not None:
+                    shell._settle(None, error)
+                    with self._publish_lock:
+                        self._shell_executions.pop(execution["execution_id"])
                 self._publish(execution, self._error(error), "failed", time.monotonic())
                 raise
         return execution["execution_id"]
@@ -218,7 +500,7 @@ class ToolRuntime:
             self.changed.wait(min(.05, remaining))
             self.changed.clear()
 
-    def _execute(self, execution, definition, original, context, timeout, transform):
+    def _execute(self, execution, definition, original, context, timeout, transform, shell):
         started = time.monotonic()
         def finish_value(value):
             if transform is not None:
@@ -233,12 +515,21 @@ class ToolRuntime:
             )
             self._publish(execution, payload, self._status(payload), started)
 
-        try:
-            value = execute_tool(
+        def invoke():
+            return execute_tool(
                 definition, original["arguments"], context=context, timeout=timeout,
-                cancel_event=self.cancel_event, preserve_result=True,
+                cancel_event=shell if shell is not None else self.cancel_event, preserve_result=True,
+                shell_execution=shell,
             )
+
+        try:
+            # The existing thread runs the entire isolated call, including its
+            # receive loop, cleanup and any handed-off terminal record.
+            value = shell.drive(invoke) if shell is not None else invoke()
         except BaseException as error:
+            if shell is not None and shell._has_handoff_job():
+                logging.getLogger(__name__).exception("Shell 移交作业收尾失败：%s", execution["execution_id"])
+                return
             if isinstance(error, HOST_CONTROL_EXCEPTIONS):
                 self._publish(execution, self._error(error), "failed", started)
                 with self._publish_lock:
@@ -267,7 +558,12 @@ class ToolRuntime:
                           "timed_out" if isinstance(error, ToolTimeoutError) else "failed")
                 self._publish(execution, self._error(error), status, started)
         else:
-            finish_value(value)
+            if shell is None or not shell._has_handoff_job():
+                finish_value(value)
+        finally:
+            if shell is not None:
+                with self._publish_lock:
+                    self._shell_executions.pop(execution["execution_id"])
 
     def events(self) -> list[RunEvent]:
         with self._publish_lock:

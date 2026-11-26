@@ -203,6 +203,10 @@ def run(request_path: Path) -> int:
     except (TypeError, ValueError):
         deadline_at = None
 
+    if deadline_at is not None and time.time() >= deadline_at:
+        _finish(root, user, job_id, exit_code=None, error_code="background_timeout")
+        return 0
+
     process: subprocess.Popen[Any] | None = None
     capture_threads: list[threading.Thread] = []
     tail = OutputTail()

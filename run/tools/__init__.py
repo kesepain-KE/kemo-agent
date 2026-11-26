@@ -5,14 +5,24 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from run.tools.runtime import ToolRuntime as ToolRuntime, _ShellExecution
+    from run.tools.foreground_handoff import ShellHandoffUncertain as ShellHandoffUncertain
     from run.tools.background_notifications import ShellInbox as ShellInbox
     from run.tools.background_jobs import (
+        FOREGROUND_HANDOFF as FOREGROUND_HANDOFF,
+        JOB_SCHEMA_VERSION as JOB_SCHEMA_VERSION,
+        MAX_BACKGROUND_JOB_RECORD_BYTES as MAX_BACKGROUND_JOB_RECORD_BYTES,
+        background_job_visible as background_job_visible,
         cancel_background_job as cancel_background_job,
         prepare_background_job as prepare_background_job,
         public_background_job as public_background_job,
+        publish_background_result as publish_background_result,
         read_background_job as read_background_job,
         reconcile_background_job as reconcile_background_job,
+        required_shell_state as required_shell_state,
+        settle_required_shell_exit as settle_required_shell_exit,
         update_background_job as update_background_job,
+        web_shell_sessions as web_shell_sessions,
         write_job_request as write_job_request,
     )
 
@@ -22,6 +32,7 @@ import importlib.util
 import inspect
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -29,9 +40,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
-from plugins.manifest import PluginManifest, PluginManifestError, discover_plugin_manifests
+from plugins.manifest import TOOL_TIMEOUT_POLICIES, PluginManifest, PluginManifestError, discover_plugin_manifests
 from provider.request_scope import provider_request_scope
 from run.tools.execution_watchdog import (
     ExecutionCapacityError,
@@ -61,12 +72,10 @@ from run.tools.result_limits import (
 )
 
 
-_TIMEOUT_POLICIES = frozenset({"argument_or_default", "agent_runtime"})
 _TOOL_PERMISSIONS = frozenset({"read", "write", "delete", "external"})
 _TOOL_TIMEOUT_CLEANUP_GRACE = 1.0
 _TOOL_CANCEL_CLEANUP_GRACE = 0.1
 _AGENT_TOOL_WATCHDOG_GRACE = 5.0
-_SUBAGENT_DEFAULT_WATCHDOG_SECONDS = 3_600.0
 
 
 def _enforce_tool_result_limit(
@@ -385,6 +394,19 @@ def _positive_timeout(value: Any, *, field: str) -> float:
     return timeout
 
 
+DEFAULT_QUERY_WAIT_SECONDS = 30
+
+
+def query_wait_seconds(timeout: Any, *, action: str = "status") -> int:
+    if type(timeout) is not int or not 1 <= timeout <= 60:
+        raise ValueError(f"{action} 等待的 timeout 必须是 1..60 秒的整数")
+    return timeout
+
+
+def shell_status_wait_seconds(timeout: int | None) -> int:
+    return query_wait_seconds(DEFAULT_QUERY_WAIT_SECONDS if timeout is None else timeout)
+
+
 def resolve_tool_timeout(
     tool: ToolDefinition,
     arguments: dict[str, Any],
@@ -395,10 +417,24 @@ def resolve_tool_timeout(
     """Resolve one tool watchdog deadline from its declared runtime policy."""
 
     default = _positive_timeout(default_timeout, field="tools.timeout")
-    if tool.timeout_policy not in _TIMEOUT_POLICIES:
+    if tool.timeout_policy not in TOOL_TIMEOUT_POLICIES:
         raise ToolValidationError(
             f"工具 {tool.name} timeout_policy 无效：{tool.timeout_policy}"
         )
+    action = arguments.get("action")
+    if arguments.get("wait") is True and (
+        (tool.name in {"shell", "subagent_dispatch"} and action == "status")
+        or (tool.name == "user_decision" and action == "get")
+    ):
+        try:
+            wait_seconds = query_wait_seconds(arguments.get("timeout", DEFAULT_QUERY_WAIT_SECONDS), action=action)
+        except ValueError as exc:
+            raise ToolValidationError(str(exc)) from exc
+        # 预留执行启动、最后一次查状态和回传的时间，不延长查询本身的等待。
+        return wait_seconds + 5.0
+    # user_decision 的 timeout 只属于上面的等待查询，其他操作仍用原默认期限。
+    if tool.timeout_policy == "submission" or tool.name == "user_decision":
+        return default
     properties = tool.input_schema.get("properties") or {}
     timeout_rule = properties.get("timeout")
     if tool.timeout_policy == "agent_runtime":
@@ -415,18 +451,6 @@ def resolve_tool_timeout(
                 )
             return requested + grace
         runtime_timeout = (context or {}).get("agent_timeout", default)
-        if tool.name == "subagent_dispatch" and isinstance(timeout_rule, dict):
-            # External bindings may declare a 3600-second default.  Keep the
-            # dispatch wrapper alive long enough to return a task handle even
-            # when the model omits an explicit timeout argument.
-            runtime_timeout = max(
-                _positive_timeout(
-                    runtime_timeout,
-                    field="agent_runtime.default_timeout",
-                ),
-                _SUBAGENT_DEFAULT_WATCHDOG_SECONDS,
-            )
-            return runtime_timeout + _AGENT_TOOL_WATCHDOG_GRACE
         return _positive_timeout(
             runtime_timeout,
             field="agent_runtime.default_timeout",
@@ -458,14 +482,23 @@ def _invoke(function: Callable[..., Any], arguments: dict[str, Any], context: di
         return result
 
 
+class _CancellationSignal(Protocol):
+    def is_set(self) -> bool: ...
+
+
+def _is_foreground_shell_run(name: str, arguments: dict[str, Any]) -> bool:
+    return name == "shell" and arguments.get("action", "run") == "run" and not arguments.get("background")
+
+
 def _execute_tool_process(
     tool: ToolDefinition,
     arguments: dict[str, Any],
     *,
     context: dict[str, Any],
     effective_timeout: float,
-    cancel_event: threading.Event | None,
+    cancel_event: _CancellationSignal | None,
     preserve_result: bool = False,
+    shell_execution: _ShellExecution | None = None,
 ) -> Any:
     file_name, separator, function_name = tool.entrypoint.partition(":")
     if not separator or not file_name or not function_name:
@@ -475,27 +508,37 @@ def _execute_tool_process(
         from message.isolated_output import prepare_outbound
         snapshot, outbound_transport = prepare_outbound(context, str(arguments.get("platform") or ""))
         context = {**context, "_outbound_snapshot": snapshot}
+    own_shell_group = os.name == "posix" and _is_foreground_shell_run(tool.name, arguments)
     try:
         call = start_isolated_tool(
             module_path=tool.directory / file_name,
             function_name=function_name,
             arguments=arguments,
             context={**context, "tool_timeout": effective_timeout},
+            own_shell_group=own_shell_group,
+            on_shell_command_started=(
+                shell_execution.command_started if shell_execution is not None else None
+            ),
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise ToolError(f"工具 {tool.name} 隔离进程启动失败：{exc}") from exc
     deadline = time.monotonic() + effective_timeout
+    clean_shell_group = own_shell_group
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
+                if shell_execution is not None:
+                    shell_execution.claim_terminal()
                 call.request_cancel()
-                if not call.wait(_TOOL_CANCEL_CLEANUP_GRACE):
+                if not call.wait(_TOOL_CANCEL_CLEANUP_GRACE) and not own_shell_group:
                     call.terminate()
                 raise ToolCancelledError("工具调用因用户紧急停止而取消")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if shell_execution is not None:
+                    shell_execution.claim_terminal()
                 call.request_cancel()
-                if not call.wait(_TOOL_TIMEOUT_CLEANUP_GRACE):
+                if not call.wait(_TOOL_TIMEOUT_CLEANUP_GRACE) and not own_shell_group:
                     call.terminate()
                 raise ToolTimeoutError(
                     f"工具 {tool.name} 执行超时（{effective_timeout:g}s）；隔离进程已终止",
@@ -503,7 +546,7 @@ def _execute_tool_process(
                 )
             payload = call.receive(min(0.05, remaining))
             if payload is None:
-                if not call.process.is_alive():
+                if not call.is_alive():
                     payload = call.receive(0)
                     if payload is None:
                         raise ToolProcessError({
@@ -512,9 +555,15 @@ def _execute_tool_process(
                         })
                 else:
                     continue
+            if shell_execution is not None:
+                shell_execution.claim_terminal()
             call.wait(1)
             if payload.get("ok") is True:
                 value = payload.get("value")
+                if own_shell_group:
+                    clean_shell_group = isinstance(value, dict) and (
+                        value.get("timed_out") is True or value.get("cancelled") is True
+                    )
                 if outbound_transport is not None and isinstance(value, dict) and value.get("ok") is True:
                     try:
                         outbound_transport._update_state(
@@ -530,10 +579,23 @@ def _execute_tool_process(
                 )
             detail = payload.get("error")
             raise ToolProcessError(detail if isinstance(detail, dict) else {})
+    except BaseException:
+        if shell_execution is not None:
+            shell_execution.claim_terminal()
+        raise
     finally:
-        if call.process.is_alive():
-            call.terminate()
-        call.close()
+        if own_shell_group:
+            # For foreground Shell, cancellation, internal timeout or missing
+            # results can leave the group live even after the worker exits.
+            try:
+                if clean_shell_group or call.is_alive():
+                    call.terminate()
+            finally:
+                call.close()
+        else:
+            if call.process.is_alive():
+                call.terminate()
+            call.close()
 
 
 def _execute_tool_impl(
@@ -542,8 +604,9 @@ def _execute_tool_impl(
     *,
     context: dict[str, Any],
     timeout: float,
-    cancel_event: threading.Event | None = None,
+    cancel_event: _CancellationSignal | None = None,
     preserve_result: bool = False,
+    shell_execution: _ShellExecution | None = None,
 ) -> Any:
     if tool.name == "file" and isinstance(arguments, dict):
         mode = arguments.get("mode")
@@ -580,6 +643,7 @@ def _execute_tool_impl(
             effective_timeout=effective_timeout,
             cancel_event=cancel_event,
             preserve_result=preserve_result,
+            shell_execution=shell_execution,
         )
     tool_cancel_event = threading.Event()
     invocation_context = dict(context)
@@ -651,8 +715,9 @@ def execute_tool(
     *,
     context: dict[str, Any],
     timeout: float,
-    cancel_event: threading.Event | None = None,
+    cancel_event: _CancellationSignal | None = None,
     preserve_result: bool = False,
+    shell_execution: _ShellExecution | None = None,
 ) -> Any:
     """Observe execution without copying arguments, output or exception messages."""
     started = time.monotonic()
@@ -660,7 +725,7 @@ def execute_tool(
     try:
         result = _execute_tool_impl(
             tool, arguments, context=context, timeout=timeout, cancel_event=cancel_event,
-            preserve_result=preserve_result,
+            preserve_result=preserve_result, shell_execution=shell_execution,
         )
         if isinstance(result, dict):
             reported = result.get("status")
@@ -705,6 +770,7 @@ _DOMAIN_MODULES = (
     "provider_tool_recovery",
     "background_jobs",
     "background_notifications",
+    "foreground_handoff",
 )
 
 

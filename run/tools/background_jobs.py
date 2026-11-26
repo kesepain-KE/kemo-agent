@@ -7,13 +7,11 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
 import stat
 import time
 from typing import Any, Callable
 import uuid
 
-from run.config import user_dir
 from run.history import index_lock
 from run.infra import (
     process_identity_matches,
@@ -21,88 +19,35 @@ from run.infra import (
     replace_with_retry,
     terminate_pid_tree,
 )
+from run.tools.background_job_files import (
+    _JOB_ID_RE,
+    _jobs_dir,
+    _remove_job_artifacts,
+    _storage_bytes,
+    _validate_job_id,
+    job_paths,
+)
 
 
 JOB_SCHEMA_VERSION = 1
+FOREGROUND_HANDOFF = "foreground_handoff"
+MAX_BACKGROUND_JOB_RECORD_BYTES = 128 * 1024
 JOB_TERMINAL_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "interrupted"}
 )
 JOB_ACTIVE_STATUSES = frozenset({"starting", "running", "cancelling"})
+_UNKNOWN_EXIT = {"background_identity_unknown", "background_timeout_identity_unknown"}
 MAX_ACTIVE_BACKGROUND_JOBS_PER_USER = 8
 MAX_BACKGROUND_JOB_RECORDS_PER_USER = 256
 MAX_BACKGROUND_JOB_STORAGE_BYTES = 256 * 1024 * 1024
 BACKGROUND_JOB_RETENTION_SECONDS = 7 * 24 * 60 * 60
 BACKGROUND_JOB_RECONCILE_GRACE_SECONDS = 30.0
 MAX_BACKGROUND_JOB_LOG_BYTES = 16 * 1024 * 1024
-_JOB_ID_RE = re.compile(r"^job_[a-f0-9]{32}$")
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_JOB_ARTIFACT_SUFFIXES = (".json", ".request.json", ".stdout.log", ".stderr.log")
 _RECORD_READ_RETRY_DELAYS = (0.02, 0.05, 0.1)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _is_reparse_point(path: Path) -> bool:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        raise ValueError("后台作业目录不可检查") from exc
-    return bool(stat.S_ISLNK(info.st_mode)) or bool(
-        getattr(info, "st_file_attributes", 0) & _REPARSE_POINT
-    )
-
-
-def _assert_safe_directory_chain(root: Path, user: str) -> Path:
-    root = root.resolve()
-    users_root = root / "users"
-    base = user_dir(user, root)
-    for candidate in (users_root, base):
-        if _is_reparse_point(candidate):
-            raise ValueError("用户目录不能是符号链接或目录联接")
-    try:
-        resolved_users = users_root.resolve(strict=True)
-        resolved_base = base.resolve(strict=True)
-        resolved_base.relative_to(resolved_users)
-    except (FileNotFoundError, ValueError) as exc:
-        raise ValueError("用户目录越出 users 根目录") from exc
-    return resolved_base
-
-
-def _jobs_dir(root: Path, user: str) -> Path:
-    base = _assert_safe_directory_chain(root, user)
-    directory = base / "runtime" / "background_jobs"
-    runtime = base / "runtime"
-    if _is_reparse_point(runtime) or _is_reparse_point(directory):
-        raise ValueError("后台作业目录不能是符号链接或目录联接")
-    directory.mkdir(parents=True, exist_ok=True)
-    resolved = directory.resolve()
-    try:
-        resolved.relative_to(base)
-    except ValueError as exc:
-        raise ValueError("后台作业目录越出用户目录") from exc
-    return resolved
-
-
-def _validate_job_id(job_id: Any) -> str:
-    value = str(job_id or "").strip()
-    if not _JOB_ID_RE.fullmatch(value):
-        raise ValueError("job_id 格式无效")
-    return value
-
-
-def job_paths(root: Path, user: str, job_id: str) -> dict[str, Path]:
-    normalized = _validate_job_id(job_id)
-    directory = _jobs_dir(root, user)
-    return {
-        "record": directory / f"{normalized}.json",
-        "request": directory / f"{normalized}.request.json",
-        "stdout": directory / f"{normalized}.stdout.log",
-        "stderr": directory / f"{normalized}.stderr.log",
-    }
 
 
 def _iter_job_records(directory: Path) -> list[tuple[Path, dict[str, Any]]]:
@@ -125,20 +70,6 @@ def _iter_job_records(directory: Path) -> list[tuple[Path, dict[str, Any]]]:
     return records
 
 
-def _artifact_paths(directory: Path, job_id: str) -> tuple[Path, ...]:
-    normalized = _validate_job_id(job_id)
-    return tuple(directory / f"{normalized}{suffix}" for suffix in _JOB_ARTIFACT_SUFFIXES)
-
-
-def _remove_job_artifacts(directory: Path, job_id: str) -> None:
-    for path in _artifact_paths(directory, job_id):
-        try:
-            if path.is_file() or path.is_symlink():
-                path.unlink()
-        except OSError:
-            continue
-
-
 def _parse_timestamp(value: Any) -> float | None:
     text = str(value or "").strip()
     if not text:
@@ -149,20 +80,36 @@ def _parse_timestamp(value: Any) -> float | None:
         return None
 
 
-def _storage_bytes(directory: Path) -> int:
-    total = 0
-    try:
-        candidates = tuple(directory.iterdir())
-    except OSError:
-        return 0
-    for path in candidates:
-        try:
-            info = os.lstat(path)
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode):
-            total += max(0, int(info.st_size))
-    return total
+def required_shell_state(record: dict[str, Any], *, expects_receipt: bool = False) -> str:
+    if record.get("completion_mode") != "required":
+        return ""
+    if (record.get("source") == "web" and not record.get("execution_exit_confirmed")
+            and (record.get("stop_reason") in _UNKNOWN_EXIT or record.get("execution_exit_unverified"))):
+        return "owner_unknown"
+    if record.get("status") in JOB_ACTIVE_STATUSES:
+        return "required_shell"
+    if record.get("status") not in JOB_TERMINAL_STATUSES:
+        return "owner_unknown"
+    if (expects_receipt or record.get("cardstream_integration_id")) and not record.get("card_result_seq"):
+        return "result_pending"
+    return ""
+
+
+def _job_collectible(record: dict[str, Any]) -> bool:
+    return (record.get("status") in JOB_TERMINAL_STATUSES
+            and not required_shell_state(record, expects_receipt=_legacy_web_binding(record)))
+
+
+def _legacy_web_binding(record: dict[str, Any]) -> bool:
+    return bool(record.get("source") == "web" and record.get("notification_enabled")
+                and (record.get("owner_task_id") or record.get("root_task_id")))
+
+
+def web_shell_sessions(root: Path, user: str) -> set[str]:
+    return {record["session_id"] for _, record in _iter_job_records(_jobs_dir(root, user, create=False))
+            if record.get("source") == "web" and record.get("user") == user
+            and record.get("session_id") and record.get("notification_enabled")
+            and required_shell_state(record, expects_receipt=_legacy_web_binding(record))}
 
 
 def _cleanup_background_jobs(directory: Path, *, now: float | None = None) -> None:
@@ -170,7 +117,7 @@ def _cleanup_background_jobs(directory: Path, *, now: float | None = None) -> No
     records = _iter_job_records(directory)
     cutoff = current_time - BACKGROUND_JOB_RETENTION_SECONDS
     for _, record in records:
-        if record.get("status") not in JOB_TERMINAL_STATUSES:
+        if not _job_collectible(record):
             continue
         finished_at = _parse_timestamp(record.get("finished_at"))
         if finished_at is not None and finished_at <= cutoff:
@@ -185,7 +132,7 @@ def _cleanup_background_jobs(directory: Path, *, now: float | None = None) -> No
     terminal = [
         item
         for item in records
-        if item[1].get("status") in JOB_TERMINAL_STATUSES
+        if _job_collectible(item[1])
     ]
     terminal.sort(
         key=lambda item: (
@@ -217,7 +164,8 @@ def _stale_active_job_ids(
     cutoff = current_time - BACKGROUND_JOB_RECONCILE_GRACE_SECONDS
     result: list[str] = []
     for _, record in records:
-        if record.get("status") not in JOB_ACTIVE_STATUSES:
+        if (record.get("owner_kind") == FOREGROUND_HANDOFF
+                or record.get("status") not in JOB_ACTIVE_STATUSES):
             continue
         updated_at = _parse_timestamp(record.get("updated_at")) or _parse_timestamp(
             record.get("started_at")
@@ -231,14 +179,15 @@ def _stale_active_job_ids(
     return result
 
 
+def _job_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            "utf-8",
-        )
+        temporary.write_text(_job_json(payload), "utf-8")
         try:
             os.chmod(temporary, 0o600)
         except OSError:
@@ -273,6 +222,27 @@ def _read_record(path: Path) -> dict[str, Any]:
     return value
 
 
+def _reconcile_stale_jobs(root: Path, user: str, directory: Path) -> None:
+    with index_lock(root, user):
+        _cleanup_background_jobs(directory)
+        stale_active = _stale_active_job_ids(_iter_job_records(directory))
+    # Reconciliation can inspect and stop a legacy worker. Do it outside the
+    # directory lock; reserving a slot still requires a fresh check under it.
+    for job_id in stale_active:
+        try:
+            reconcile_background_job(root, user, job_id)
+        except (KeyError, OSError, RuntimeError, ValueError):
+            continue
+
+
+def _require_active_job_slot(directory: Path) -> None:
+    active_count = sum(
+        1 for _, record in _iter_job_records(directory) if record.get("status") in JOB_ACTIVE_STATUSES
+    )
+    if active_count >= MAX_ACTIVE_BACKGROUND_JOBS_PER_USER:
+        raise ValueError("后台活动作业数量已达到用户上限")
+
+
 def prepare_background_job(
     root: Path,
     user: str,
@@ -291,16 +261,6 @@ def prepare_background_job(
         raise ValueError("completion_mode 必须是 required/detached")
     from run.infra import diagnostic_text
     ownership = dict(ownership or {})
-    # Child Shell calls bypass the main ToolRuntime. Bind them while their
-    # task still exists, before taking the job-directory write lock.
-    if not ownership.get("cardstream_integration_id") and ownership.get("owner_task_id"):
-        from run.agents import TaskLedger
-        ledger = TaskLedger(root, user)
-        task = (ledger.get(str(ownership["owner_task_id"]), source, session_id)
-                if ledger.path.exists() else None)
-        if task:
-            for key in ("cardstream_integration_id", "cardstream_generation", "cardstream_meter_key"):
-                ownership[key] = task.get(key, "")
     job_id = f"job_{uuid.uuid4().hex}"
     paths = job_paths(root, user, job_id)
     now = _now()
@@ -352,26 +312,11 @@ def prepare_background_job(
         ) if key in ownership},
     }
     directory = paths["record"].parent
+    _reconcile_stale_jobs(root, user, directory)
     with index_lock(root, user):
+        _bind_job_owner(root, user, record)
         _cleanup_background_jobs(directory)
-        stale_active = _stale_active_job_ids(_iter_job_records(directory))
-    # Reconciliation reads process identity and performs its own atomic record
-    # updates.  Keep it outside the directory lock so process inspection never
-    # stalls unrelated job metadata operations.  The final quota check below is
-    # repeated under the lock and remains authoritative across processes.
-    for stale_job_id in stale_active:
-        try:
-            reconcile_background_job(root, user, stale_job_id)
-        except (KeyError, OSError, RuntimeError, ValueError):
-            continue
-    with index_lock(root, user):
-        _cleanup_background_jobs(directory)
-        records = _iter_job_records(directory)
-        active_count = sum(
-            1 for _, existing in records if existing.get("status") in JOB_ACTIVE_STATUSES
-        )
-        if active_count >= MAX_ACTIVE_BACKGROUND_JOBS_PER_USER:
-            raise ValueError("后台活动作业数量已达到用户上限")
+        _require_active_job_slot(directory)
         reserved = MAX_BACKGROUND_JOB_LOG_BYTES * 2
         if _storage_bytes(directory) + reserved > MAX_BACKGROUND_JOB_STORAGE_BYTES:
             raise ValueError("后台作业日志空间已达到用户上限，请先清理历史作业")
@@ -379,15 +324,57 @@ def prepare_background_job(
     return record, paths
 
 
+def _bind_job_owner(root: Path, user: str, record: dict[str, Any]) -> None:
+    """Runs under the same cross-process index lock as Web retirement."""
+    source, sid, task_id = record["source"], record["session_id"], record["owner_task_id"]
+    task = None
+    web_required = source == "web" and record["completion_mode"] == "required"
+    if task_id and (not record.get("cardstream_integration_id") or web_required):
+        from run.agents import TaskLedger
+        task = TaskLedger(root, user).peek(task_id, source, sid)
+        if task and not record.get("cardstream_integration_id"):
+            for key in ("cardstream_integration_id", "cardstream_generation", "cardstream_meter_key"):
+                record[key] = task.get(key, "")
+    if not web_required or not record.get("cardstream_integration_id"):
+        return
+    from run.cards import CardConflictError, CardStore, IntegrationStore
+    child_live = False
+    if task_id:
+        child_live = bool(task and task.get("root_task_id") == record["root_task_id"]
+                          and task.get("cardstream_integration_id") == record["cardstream_integration_id"]
+                          and task.get("cardstream_generation") == record.get("cardstream_generation")
+                          and (task.get("execution_live") or task.get("status") == "running"))
+        if not child_live:
+            raise CardConflictError("子任务已退出或归属已改变，不能登记后台作业")
+    IntegrationStore(CardStore(root, user), source, sid, record["cardstream_integration_id"]).require_dependency_owner(
+        record.get("cardstream_generation"), tool_call_id=record.get("tool_call_id", ""), child_live=child_live,
+    )
+
+
 def write_job_request(path: Path, payload: dict[str, Any]) -> None:
     _atomic_json(path, payload)
 
 
+def background_job_visible(root: Path, user: str, record: dict[str, Any]) -> bool:
+    if record.get("owner_kind") != FOREGROUND_HANDOFF:
+        return True
+    from run.tools.foreground_handoff import find_handoff_receipt
+    return record.get("user") == user and find_handoff_receipt(
+        root, user, record["source"], record["session_id"],
+        record["cardstream_integration_id"], record["cardstream_generation"],
+        record["execution_id"], job_id=record["job_id"],
+    ) is not None
+
+
 def read_background_job(root: Path, user: str, job_id: str) -> dict[str, Any]:
     paths = job_paths(root, user, job_id)
-    # Writers publish with atomic replace; a reader sees either complete
-    # version and must not contend for the user's cross-process write lock.
-    return _read_record(paths["record"])
+    # Atomic replace gives readers a complete snapshot without a write lock.
+    record = _read_record(paths["record"])
+    if record.get("owner_kind") == FOREGROUND_HANDOFF and (
+        record.get("job_id") != paths["record"].stem or not background_job_visible(root, user, record)
+    ):
+        raise KeyError("后台作业不存在")
+    return record
 
 
 def assert_background_job_access(
@@ -411,10 +398,14 @@ def update_background_job(
     user: str,
     job_id: str,
     mutator: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    expected: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     paths = job_paths(root, user, job_id)
     with index_lock(root, user):
         current = _read_record(paths["record"])
+        if expected is not None and current != expected:
+            return current
         rendered = mutator(dict(current))
         if not isinstance(rendered, dict):
             raise TypeError("后台作业 mutator 必须返回对象")
@@ -434,7 +425,8 @@ def publish_background_result(root: Path, user: str, record: dict[str, Any]) -> 
     if (record.get("status") not in JOB_TERMINAL_STATUSES
             or record.get("completion_mode") == "detached"
             or not record.get("cardstream_integration_id")
-            or record.get("card_result_seq")):
+            or record.get("card_result_seq")
+            or required_shell_state(record) == "owner_unknown"):
         return record
     from run.tools.background_notifications import persist_shell_result
     try:
@@ -571,8 +563,47 @@ def _settle_identity_unknown(
     return record
 
 
+def _record_worker_lost(record: dict[str, Any]) -> dict[str, Any]:
+    cancelled = bool(record.get("cancel_requested")) and not record.get("timeout_requested")
+    record.update(status="cancelled" if cancelled else "interrupted", finished_at=_now(),
+                  stop_reason="cancelled_without_live_process" if cancelled else "background_worker_lost",
+                  error=None if cancelled else {"code": "background_worker_lost",
+                        "message": "已登记的后台命令及管理进程均已退出；未重放命令"})
+    return record
+
+
+def settle_required_shell_exit(root: Path, user: str, record: dict[str, Any], *, now: float) -> dict[str, Any]:
+    """Recover an orphan without enforcing the job deadline or signalling a PID."""
+    stamp = _parse_timestamp(record.get("updated_at")) or _parse_timestamp(record.get("started_at"))
+    if stamp is None or now - stamp < BACKGROUND_JOB_RECONCILE_GRACE_SECONDS:
+        return record
+    # Between Popen and identity publication a missing PID says nothing about
+    # whether the worker or its command started. Check both stored identities.
+    for pid_key, start_key in (("pid", "process_started_at"), ("worker_pid", "worker_started_at")):
+        started = record.get(start_key)
+        if not started or not record.get(pid_key):
+            return record
+        try:
+            observed = process_snapshot(int(record[pid_key]))
+        except (OSError, ValueError, TypeError, OverflowError):
+            return record
+        if process_identity_matches(observed, process_started_at=started) is not False:
+            return record
+
+    def settle(current):
+        if current["status"] in JOB_ACTIVE_STATUSES:
+            _record_worker_lost(current)
+        current["execution_exit_confirmed"] = True
+        return current
+
+    return update_background_job(root, user, record["job_id"], settle, expected=record)
+
+
 def reconcile_background_job(root: Path, user: str, job_id: str) -> dict[str, Any]:
     current = read_background_job(root, user, job_id)
+    if current.get("owner_kind") == FOREGROUND_HANDOFF:
+        # The original execution still owns the deadline and process tree.
+        return current
     if current.get("status") in JOB_TERMINAL_STATUSES:
         return publish_background_result(root, user, current)
     process_alive, process = _identity_alive(current)
@@ -618,7 +649,9 @@ def reconcile_background_job(root: Path, user: str, job_id: str) -> dict[str, An
             }
             return record
 
-        return update_background_job(root, user, job_id, settle_timeout)
+        if _needs_web_exit_evidence(current, process, worker):
+            return current
+        return update_background_job(root, user, job_id, settle_timeout, expected=current)
     if process_alive or worker_alive:
         return {
             **current,
@@ -633,28 +666,19 @@ def reconcile_background_job(root: Path, user: str, job_id: str) -> dict[str, An
             _settle_identity_unknown,
         )
 
-    def settle(record: dict[str, Any]) -> dict[str, Any]:
-        if record.get("status") in JOB_TERMINAL_STATUSES:
-            return record
-        cancelled = bool(record.get("cancel_requested")) and not bool(
-            record.get("timeout_requested")
-        )
-        record["status"] = "cancelled" if cancelled else "interrupted"
-        record["finished_at"] = _now()
-        record["stop_reason"] = (
-            "cancelled_without_live_process" if cancelled else "background_worker_lost"
-        )
-        record["error"] = (
-            None
-            if cancelled
-            else {
-                "code": "background_worker_lost",
-                "message": "后台作业及其管理进程均已不存在",
-            }
-        )
-        return record
+    if _needs_web_exit_evidence(current, process, worker):
+        return current
+    return update_background_job(root, user, job_id, _record_worker_lost, expected=current)
 
-    return update_background_job(root, user, job_id, settle)
+
+def _needs_web_exit_evidence(record, *snapshots):
+    if not (record.get("source") == "web" and record.get("completion_mode") == "required"
+            and record.get("cardstream_integration_id")):
+        return False
+    for snapshot, key in zip(snapshots, ("process_started_at", "worker_started_at")):
+        if not record.get(key) or process_identity_matches(snapshot, process_started_at=record[key]) is not False:
+            return True
+    return False
 
 
 def cancel_background_job(root: Path, user: str, job_id: str) -> dict[str, Any]:
@@ -668,6 +692,14 @@ def cancel_background_job(root: Path, user: str, job_id: str) -> dict[str, Any]:
             record["cancel_requested"] = True
             record["stop_reason"] = "user_cancel"
         return record
+
+    if current.get("owner_kind") == FOREGROUND_HANDOFF:
+        def request_owner_stop(record: dict[str, Any]) -> dict[str, Any]:
+            if record.get("status") in JOB_ACTIVE_STATUSES:
+                record["cancel_requested"] = True
+            return record
+
+        return update_background_job(root, user, current["job_id"], request_owner_stop)
 
     current = update_background_job(root, user, job_id, request)
     alive, snapshot = _identity_alive(current)
@@ -722,6 +754,9 @@ def public_background_job(
         "observation",
     )
     result = {key: record.get(key) for key in allowed if key in record}
+    if record.get("owner_kind") == FOREGROUND_HANDOFF and record.get("status") in JOB_TERMINAL_STATUSES:
+        result["output"] = record["output"]
+        result["output_truncated"] = record["output_truncated"]
     if root is not None:
         base = root.resolve()
         for key in ("working_dir", "stdout_path", "stderr_path"):
