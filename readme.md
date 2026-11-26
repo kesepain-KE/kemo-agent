@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-2.0.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-2.1.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="在线文档"></a>
 </p>
@@ -172,7 +172,7 @@ kemo-agent 并不试图成为一个无所不能、替用户做出所有决定的
 
 ## 当前状态
 
-当前版本 `2.0.0`，兼容 Kemo 网关 `1.0.0`。
+当前版本 `2.1.0`，兼容 Kemo 网关 `1.0.0`。
 
 2.0.0 是破坏性更新：CardStream、YAML 配置与模块热加载、真实路径知识库。
 完整变更与功能清单见 [Releases](https://github.com/kesepain-KE/kemo-agent/releases)
@@ -191,7 +191,7 @@ kemo-agent 不是一座孤岛。围绕它，还有几个独立维护、通过稳
   知识图谱与 RAG 检索项目，可外挂为 kemo-agent 的超级文档站：注册文档库后，通过 `expand_call` 按需查询、同步与维护，不替换框架内置的知识库与记忆。
 
 - [kemo-agent-app](https://github.com/kesepain-KE/kemo-agent-app)
-  kemo-agent 的 Android 生态客户端：连接已部署的 kemo-agent 与 Kemo 网关后，对话、任务、文件、拓展感知、运行状态与智能体配置都可以在手机上继续。通过 kemo-agent 内的 `kemo_app` 桥接服务（HTTP/SSE/WebSocket）完成两级认证与传输。
+  kemo-agent 的 Android 生态客户端。新版通过 `kemo_bridge` 的设备通道（HTTP/SSE/WebSocket）使用对话、任务、文件和运行状态；需要在桥接管理台注册设备，并使用对应的 peer ID 与密钥。旧版客户端凭据不能用于新版桥接。
 
 - [kemo-agent-doc](https://github.com/kesepain-KE/kemo-agent-doc)
   kemo-agent 的 VitePress 文档站：安装、配置、使用与扩展开发指南，已部署为 [在线文档](https://kesepain-ke.github.io/kemo-agent-doc/)。

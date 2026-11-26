@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-2.0.0-blue" alt="version"></a>
+  <a href="https://github.com/kesepain-KE/kemo-agent"><img src="https://img.shields.io/badge/version-2.1.0-blue" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="license"></a>
   <a href="https://kesepain-ke.github.io/kemo-agent-doc/"><img src="https://img.shields.io/badge/docs-online-5966d9?logo=readthedocs&logoColor=white" alt="online documentation"></a>
 </p>
@@ -172,7 +172,7 @@ A genuinely long-term intelligent relationship should not depend on one impressi
 
 ## Current status
 
-Current version: `2.0.0`, compatible with Kemo gateway `1.0.0`.
+Current version: `2.1.0`, compatible with Kemo gateway `1.0.0`.
 
 2.0.0 is a breaking update: CardStream, YAML configuration and module hot loading, and path-based knowledge libraries.
 See [Releases](https://github.com/kesepain-KE/kemo-agent/releases)
@@ -191,7 +191,7 @@ kemo-agent is not an island. Around it, several independently maintained project
   A knowledge-graph and RAG retrieval project that can be attached to kemo-agent as an external document station: after registering a document library, you query, sync, and maintain it on demand through `expand_call`, without replacing the framework's built-in knowledge base or memory.
 
 - [kemo-agent-app](https://github.com/kesepain-KE/kemo-agent-app)
-  The Android client of the kemo ecosystem: after connecting to a deployed kemo-agent and Kemo gateway, conversations, tasks, files, extension perception, runtime status, and agent configuration can all continue on your phone. It communicates through the `kemo_app` bridge inside kemo-agent (HTTP/SSE/WebSocket) with two-level authentication and transport.
+  The Android client of the kemo ecosystem. Compatible builds use the `kemo_bridge` device channel (HTTP/SSE/WebSocket) for conversations, tasks, files, and runtime status. Register the device in the Bridge admin console and use its peer ID and key. Credentials from the previous bridge are not accepted.
 
 - [kemo-agent-doc](https://github.com/kesepain-KE/kemo-agent-doc)
   The VitePress documentation site for kemo-agent: installation, configuration, usage, and extension development guides, deployed as [online documentation](https://kesepain-ke.github.io/kemo-agent-doc/).
