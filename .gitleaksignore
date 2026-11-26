@@ -4,3 +4,7 @@
 # 用来断言 expand_creater 插件会拒绝疑似凭据；该字符串是测试夹具，不是真实凭据。
 # 文件在当前 HEAD 中已不存在，该指印只会在全历史扫描里命中。
 da8f49a95d3db3efbb21272de212a17d5a1777e0:tests/test_expand_creater_plugin.py:generic-api-key:168
+# 提交 7e5764b 的 provider/tokenizer.py 第 16 行：TOKENIZER_ID 是 tokenizer.json 的 SHA-256 前 32 位，
+# 属于校验和标识而非凭据；完整哈希记录在 provider/assets/README.md 中。
+# 该文件仍在 HEAD 中，规则级 allowlist 同时生效；此指纹用于锁定这条历史命中。
+7e5764be638186ec211150c9d1d85e98b6a27287:provider/tokenizer.py:generic-api-key:16

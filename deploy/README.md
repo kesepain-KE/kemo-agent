@@ -2,10 +2,10 @@
 
 此目录包含部署器、测试、打包工具和四种渠道入口。**不导入主框架，不改动主框架文件；只有部署器本身零第三方依赖，应用运行依赖仍须安装。**
 
-> 当前主框架稳定版本 **2.0.0（2026-11-05 正式定档）**，配套网关为 **1.0.0**，知识图谱基线为 **1.6.0**。本页远程命令仅在
+> 当前主框架稳定版本 **2.1.0（源码定档）**，配套网关为 **1.0.0**，知识图谱基线为 **1.6.0**。本页远程命令仅在
 > 安装脚本及对应 Release/npm/GHCR 产物发布后可用；Git push 不会自动发布这些资产。
 > 中英文快速开始分别见 `../readme.md`、`../README_EN.md`，日常命令与渠道选择见
-> `../knowledge/global/release/deployment-and-release.md`。1.3.2、1.5.1、1.5.2 或 1.5.3 本地验收包不能改名充当 2.0.0，须重新构建打包。
+> `../knowledge/global/release/deployment-and-release.md`。1.3.2、1.5.1、1.5.2 或 1.5.3 本地验收包不能改名充当 2.1.0，须重新构建打包。
 
 ## 1. 发布合同：一个版本、一份应用包
 
@@ -114,8 +114,8 @@ npm 命名空间、GHCR 权限、镜像标签和 Release 资产由发布者管�
 需要 Python 3.10+；Linux 发行版还须提供可用的 `venv`/`ensurepip`。
 
 ```powershell
-python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-2.0.0.zip" --install-root "D:\apps\kemo-agent" --yes
-python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-2.0.0.zip" --install-root "D:\apps\kemo-agent" --dry-run
+python deploy/deploy.py install windows --source "D:\packages\kemo-agent-release-2.1.0.zip" --install-root "D:\apps\kemo-agent" --yes
+python deploy/deploy.py update --platform windows --source "D:\packages\kemo-agent-release-2.1.0.zip" --install-root "D:\apps\kemo-agent" --dry-run
 ```
 
 Windows 默认安装根为 `%USERPROFILE%\.kemo-agent`；Linux 和 npm 为
@@ -301,12 +301,12 @@ requirements 存在版本范围，因此这不是依赖可复现锁定方案。
 
 ## 7. 验证
 
-2.0.0 定档的当前版本、四个组件、CLI、前端 package/lock 和文档需同时通过版本门禁。
+2.1.0 定档的当前版本、四个组件、CLI、前端 package/lock 和文档需同时通过版本门禁。
 `deploy/npm/package.json` 仍为无独立版本的 private 模板；实际 npm、Release 和 Docker 构建上下文
 由 `pack.py` 从根版本生成，不手工改模板号、不重命名旧包。
 
 ```sh
-python .github/scripts/check_versions.py --tag v2.0.0
+python .github/scripts/check_versions.py --tag v2.1.0
 python -m pytest tests/deploy -q
 # 兼容仅在 deploy 子系统中运行的旧入口：
 python -B -m unittest discover -s deploy/tests -v
@@ -320,7 +320,7 @@ dry-run、锁冲突、异常回滚、子进程强制退出后恢复、成功备�
 完整本机定档验收：
 
 ```powershell
-python "开发临时目录/release_check.py" --timeout 3600 --report "tmp/release-check-2.0.0.json"
+python "开发临时目录/release_check.py" --timeout 3600 --report "tmp/release-check-2.1.0.json"
 ```
 
 构建后分发验收除原有安装链路外，还检查通用子代理、

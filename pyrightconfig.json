@@ -82,9 +82,9 @@
       ]
     },
     {
-      "root": "expand/global/kemo_app",
+      "root": "expand/global/kemo_bridge",
       "extraPaths": [
-        "expand/global/kemo_app",
+        "expand/global/kemo_bridge",
         "."
       ]
     },

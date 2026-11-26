@@ -81,8 +81,8 @@ expand/global/*
 !expand/global/kemo_gateway_status/**
 !expand/global/kemo_graph/
 !expand/global/kemo_graph/**
-!expand/global/kemo_app/
-!expand/global/kemo_app/**
+!expand/global/kemo_bridge/
+!expand/global/kemo_bridge/**
 # Built-in module source is tracked, but private runtime configuration is not.
 expand/global/**/.env
 expand/global/**/.env.*
@@ -110,7 +110,7 @@ config/module_ui_grants.json
 !template/sense-web/ui/dist/**
 !expand/global/kemo_gateway_status/ui/dist/
 !expand/global/kemo_gateway_status/ui/dist/**
-!expand/global/kemo_app/ui/dist/
-!expand/global/kemo_app/ui/dist/**
+!expand/global/kemo_bridge/ui/dist/
+!expand/global/kemo_bridge/ui/dist/**
 !expand/global/kemo_graph/ui/dist/
 !expand/global/kemo_graph/ui/dist/**

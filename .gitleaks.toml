@@ -1,21 +1,24 @@
 # gitleaks 配置（Security 工作流全历史扫描使用）
 #
-# 保留官方默认规则集，只对一处历史负向测试夹具做定点豁免：
-# 提交 da8f49a 的 tests/test_expand_creater_plugin.py 用例，故意传入形如密钥的
-# 参数值，用来断言 expand_creater 插件会拒绝疑似凭据。该字符串是测试夹具，
-# 不是真实凭据；文件在当前 HEAD 中已不存在，只会在全历史扫描里出现。
+# 保留官方默认规则集，仅对两处已确认的误报做行级豁免。
 #
-# 豁免同时限定「文件路径 + 该行文本形态」，不影响其他文件与其他提交，
-# 也不放宽 generic-api-key 规则本身。
+# 刻意不使用 paths：gitleaks 的 path allowlist 在扫描前就把整个文件排除，
+# 一旦某文件被 paths 命中，即使同时写了 regexes + condition="AND"，
+# 该文件里的任何内容都不会再被检查（2026-11-24 用 8.24.3 实测确认）。
+# 只用 regexTarget="line" 做行级匹配，同文件其他行仍照常扫描。
+#
+# 另外：全局豁免必须用单数 [allowlist]。复数 [[allowlists]] 只在
+# [rules.allowlists] 层级合法，写在顶层会被静默忽略、配了等于没配。
 
 title = "kemo-agent"
 
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "历史负向用例夹具（da8f49a）：故意传入密钥形态参数以断言插件拒绝该输入"
-paths = ["""tests/test_expand_creater_plugin.py"""]
+[allowlist]
+description = "两处已确认误报：历史负向用例夹具、provider tokenizer 资产标识（均为校验和/测试夹具，非凭据）"
 regexTarget = "line"
-regexes = ['''explain="api_key=[A-Za-z0-9]+"''']
-condition = "AND"
+regexes = [
+  '''explain="api_key=[A-Za-z0-9]+"''',
+  '''TOKENIZER_ID = "deepseek-v4-[0-9a-f]{32}"''',
+]
