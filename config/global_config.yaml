@@ -1,6 +1,6 @@
 schema_version: 1
 provider_runtime:
-  max_concurrent_requests: 10
+  max_concurrent_requests: 20
   request_semaphore_timeout: 300
   max_retries: 5
 tools:
@@ -59,6 +59,7 @@ agent_runtime:
   queue_maxsize: 50
   default_timeout: 600
   timeout_survival_seconds: 120
+  completion_drain_timeout_seconds: 1200
 task_plan:
   max_steps: 20
   auto_retry_on_fix: false
