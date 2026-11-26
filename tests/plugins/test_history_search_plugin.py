@@ -1,14 +1,19 @@
 """History search exposes RAW identities, bounded pages and full original text."""
 import json
+import tracemalloc
 from pathlib import Path
+from time import perf_counter
 from unittest.mock import patch
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from plugins.history_search.tool import run
 from plugins.manifest import discover_plugin_manifests
 from run.cards import CardStore
-from run.history import delete_session
+from run.history import close_session, delete_session
+from run.history.archive_query_common import decode_token, encode_token
+from run.tools import ToolValidationError, validate_arguments
 from tests.card_history_support import seed_history
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -232,3 +237,357 @@ def test_manifest_preserves_discoverable_search_and_archive_actions():
     assert manifest.tool["version"] == "1.3.0"
     assert manifest.tool["input_schema"]["required"] == []
     assert set(manifest.tool["input_schema"]["properties"]["action"]["enum"]) == {"search", "dates", "list", "read"}
+
+
+def test_search_hit_reads_five_text_cards_per_side_past_tool_gaps(root):
+    store = CardStore(root, "alice")
+    store.ensure_session("web", "s1")
+    bodies = []
+    for i in range(13):
+        if i in (6, 7):
+            for j in range(3):
+                call_id = f"gap-{i}-{j}"
+                store.append("web", "s1", "mixed", "tool_call", {"name": "example"}, tool_call_id=call_id)
+                store.append("web", "s1", "mixed", "tool_result", {"text": "private tool data"}, tool_call_id=call_id)
+        text = "定位正文" if i == 6 else f"相邻正文 {i}"
+        bodies.append(store.append("web", "s1", "mixed", "user_text", {"text": text}))
+
+    hit = search(root, "定位正文", match_mode="fulltext")["matches"][0]
+    result = search(root, action="read", anchor_card_id=hit["card_id"], role="assistant", limit=1)
+    assert result["mode"] == "anchor"
+    assert result["anchor"] == {"card_id": bodies[6].card_id, "seq": bodies[6].seq, "index": 5}
+    assert [item["seq"] for item in result["messages"]] == [card.seq for card in bodies[1:12]]
+    assert [item["content"] for item in result["messages"]] == [card.raw_payload["text"] for card in bodies[1:12]]
+    assert result["archive"]["archive_id"]
+    assert "next_cursor" not in result
+    assert not result["window_clipped"] and not result["page_limited_by_chars"]
+
+
+@pytest.mark.parametrize(("position", "before", "after", "start", "stop"), [
+    (0, 5, 2, 0, 3),
+    (3, 2, 5, 1, 4),
+    (1, 0, 2, 1, 4),
+    (2, 2, 0, 0, 3),
+    (1, 0, 0, 1, 2),
+])
+def test_anchor_window_is_asymmetric_and_natural_ends_are_not_clipping(
+    root, history_with_tools, position, before, after, start, stop,
+):
+    _, bodies = history_with_tools
+    result = search(root, action="read", anchor_card_id=bodies[position].card_id, before=before, after=after)
+    assert [item["card_id"] for item in result["messages"]] == [card.card_id for card in bodies[start:stop]]
+    assert result["anchor"]["index"] == position - start
+    assert not result["window_clipped"] and not result["page_limited_by_chars"]
+
+
+def test_anchor_resolves_exact_user_source_and_archive_generation(root):
+    web = seed(root, texts=("Alice web",)).cards[0]
+    cli = seed(root, texts=("Alice cli",), source="cli").cards[0]
+    bob = seed_history(root, "bob", "web", "s1", [{"role": "user", "content": "Bob web"}]).cards[0]
+    assert web.seq == cli.seq == bob.seq == 1
+
+    args = {"action": "read", "anchor_card_id": web.card_id}
+    page = search(root, **args)
+    other = search(root, action="read", anchor_card_id=cli.card_id)
+    archive_id = page["archive"]["archive_id"]
+    assert page["archive"]["session_id"] == other["archive"]["session_id"] == "s1"
+    assert (page["archive"]["source"], other["archive"]["source"]) == ("web", "cli")
+    assert [item["content"] for item in page["messages"]] == ["Alice web"]
+    assert search(root, **args, archive_id=archive_id) == page
+
+    parts = decode_token(archive_id, "card-archive-v1")
+    stale_id = encode_token([*parts[:-1], "stale-generation"])
+    for wrong_id in (other["archive"]["archive_id"], stale_id):
+        with pytest.raises(ValueError, match="同一归档代际"):
+            search(root, **args, archive_id=wrong_id)
+
+    bob_context = {"root": str(root), "user": "bob"}
+    with pytest.raises(ValueError, match="不存在或不可见"):
+        run(**args, context=bob_context)
+    with pytest.raises(ValueError, match="当前用户"):
+        run(action="read", anchor_card_id=bob.card_id, archive_id=archive_id, context=bob_context)
+
+    delete_session(root, "alice", "web", "s1")
+    with pytest.raises(ValueError, match="不存在或不可见"):
+        search(root, **args, archive_id=archive_id)
+
+
+def test_anchor_reads_closed_archive_and_empty_text_without_reopening(root):
+    history = seed(root, texts=("before", ""))
+    anchor = history.cards[-1]
+    close_session(root, "alice", "web", "s1")
+    closed = history.store.session("web", "s1")
+    assert closed["lifecycle"] == "closed"
+    result = search(root, action="read", anchor_card_id=anchor.card_id)
+    message = result["messages"][result["anchor"]["index"]]
+    assert (message["card_id"], message["content"], message["partial"]) == (anchor.card_id, "", False)
+    assert history.store.session("web", "s1") == closed
+
+
+def test_invalid_and_tool_anchors_never_fall_back_to_archive_paging(root, history_with_tools):
+    store, _ = history_with_tools
+    archive_id = search(root, action="list")["archives"][0]["archive_id"]
+    tool_ids = [card.card_id for card in store.raw_page("web", "s1") if card.raw_kind.startswith("tool_")]
+    assert tool_ids
+    for card_id in [*tool_ids, "card_missing"]:
+        with pytest.raises(ValueError, match="不存在或不可见"):
+            search(root, action="read", archive_id=archive_id, anchor_card_id=card_id)
+
+
+@pytest.mark.parametrize(("extra", "field"), [
+    ({"before": -1}, "before"),
+    ({"after": 21}, "after"),
+    ({"before": 10**100}, "before"),
+    ({"before": True}, "before"),
+    ({"after": False}, "after"),
+    ({"cursor": "cursor"}, "cursor 不能同时使用"),
+])
+def test_read_anchor_rejects_invalid_window_and_cursor(root, history_with_tools, extra, field):
+    _, bodies = history_with_tools
+    with pytest.raises(ValueError, match=field):
+        search(root, action="read", anchor_card_id=bodies[0].card_id, **extra)
+
+
+@pytest.mark.parametrize("args", [
+    {"action": "search", "anchor_card_id": "card_other"},
+    {"action": "list", "anchor_card_id": "card_other"},
+    {"action": "read", "before": 0},
+])
+def test_anchor_parameters_require_anchored_read(root, args):
+    with pytest.raises(ValueError, match="仅适用于带 anchor_card_id"):
+        search(root, **args)
+
+
+@pytest.mark.parametrize("long_anchor", [False, True])
+def test_anchor_gets_budget_before_neighbors_after_utf8_and_json_escaping(root, long_anchor):
+    unit = '中文🙂"\\\n'
+    text = unit * (1000 if long_anchor else 1)
+    neighbor = unit * 1000
+    anchor = seed(root, texts=(neighbor, text, neighbor)).cards[1]
+    page = search(root, action="read", anchor_card_id=anchor.card_id, page_char_limit=1000)
+
+    assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1000
+    assert page["window_clipped"] and page["page_limited_by_chars"]
+    entry = page["messages"][page["anchor"]["index"]]
+    assert entry["card_id"] == anchor.card_id and entry["partial"] is long_anchor
+    assert unit in entry["content"] and text.startswith(entry["content"])
+    if long_anchor:
+        assert page["messages"] == [entry]
+        alone = search(root, action="read", anchor_card_id=anchor.card_id, before=0, after=0, page_char_limit=1000)
+        assert alone["page_limited_by_chars"] and not alone["window_clipped"]
+    else:
+        assert entry["content"] == text
+
+
+def test_anchor_fails_when_budget_cannot_include_anchor(root):
+    history = seed_history(root, "alice", "web", "s1", [{"role": "user", "content": "正文"}],
+                           metadata={"title": "标题" * 100, "summary": "摘要" * 250})
+    with pytest.raises(ValueError, match="page_char_limit 太小，无法容纳锚点正文"):
+        search(root, action="read", anchor_card_id=history.cards[0].card_id, page_char_limit=1000)
+
+
+def test_anchor_read_does_not_create_missing_history_store(root):
+    path = CardStore(root, "alice").path
+    with pytest.raises(ValueError, match="不存在或不可见"):
+        search(root, action="read", anchor_card_id="card_missing")
+    assert not path.exists()
+
+
+def test_manifest_and_tool_validator_accept_text_and_tool_anchor_parameters():
+    manifest = next(m for m in discover_plugin_manifests(PROJECT_ROOT) if m.tool["name"] == "history_search")
+    schema = manifest.tool["input_schema"]
+    args = {"action": "read", "anchor_card_id": "card_example", "before": 0, "after": 20}
+    validate_arguments(schema, args)
+    for name in ("before", "after"):
+        assert schema["properties"][name]["default"] == 5
+    assert schema["properties"]["include_tools"]["default"] is False
+    assert schema["properties"]["max_tool_chars"]["default"] == 2000
+    validator = Draft202012Validator(schema)
+    for cap in (0, 200, 20_000):
+        options = {**args, "include_tools": True, "max_tool_chars": cap}
+        validate_arguments(schema, options)
+        assert validator.is_valid(options)
+    for cap in (1, 199, 20_001):
+        assert not validator.is_valid({**args, "max_tool_chars": cap})
+    for extra in ({"after": 21}, {"before": True}, {"anchor_seq": 1}, {"include_tools": 1}):
+        with pytest.raises(ToolValidationError):
+            validate_arguments(schema, {**args, **extra})
+
+
+def _result_card(store, value, *, call_id="call-1", status="completed", live=False):
+    return store.append("web", "s1", "mixed", "tool_result", {
+        "original_call": {"name": "file"},
+        "result": value,
+        "execution": {"status": status, "execution_live": live},
+    }, tool_call_id=call_id)
+
+
+def test_tool_preview_interleaves_only_the_original_text_window(root):
+    store = CardStore(root, "alice")
+    store.ensure_session("web", "s1")
+    lead = _result_card(store, {"ok": True, "result": "outside left"}, call_id="outside-left")
+    before = store.append("web", "s1", "mixed", "user_text", {"text": "before"})
+    args = {"query": "中文🙂" * 90}
+    call = store.append("web", "s1", "mixed", "tool_call", {"name": "file", "arguments": args}, tool_call_id="call-1")
+    running = _result_card(store, {"accepted": True, "ok": True}, status="running", live=True)
+    anchor = store.append("web", "s1", "mixed", "agent_text", {"text": "anchor"})
+    value = {"items": ["正文" * 150]}
+    done = _result_card(store, {"ok": False, "result": value})
+    missing_ok = _result_card(store, {"result": "plain text"}, call_id="call-2")
+    non_boolean = _result_card(store, {"ok": 1, "result": None}, call_id="call-3")
+    after = store.append("web", "s1", "mixed", "agent_text", {"text": "after"})
+    tail = _result_card(store, {"ok": True, "result": "outside right"}, call_id="outside-right")
+
+    opts = {"action": "read", "anchor_card_id": anchor.card_id}
+    plain = search(root, **opts)
+    assert search(root, **opts, include_tools=False, max_tool_chars=0) == plain
+    page = run(**opts, include_tools=True, max_tool_chars=200,
+               context={"root": str(root), "user": "alice", "source": "message"})
+    messages = page["messages"]
+    assert [row["card_id"] for row in messages] == [
+        card.card_id for card in (before, call, running, anchor, done, missing_ok, non_boolean, after)]
+    assert [row for row in messages if "kind" not in row] == plain["messages"]
+    assert page["anchor"]["index"] == 3
+    assert not page["window_clipped"] and not page["page_limited_by_chars"]
+
+    assert messages[1] == {
+        "card_id": call.card_id, "seq": call.seq, "kind": "tool_call", "tool_name": "file", "tool_call_id": "call-1",
+        "arguments_preview": json.dumps(args, ensure_ascii=False, separators=(",", ":"))[:200],
+        "arguments_truncated": True,
+    }
+    notice = messages[2]
+    assert notice["ok"] is True and notice["execution_live"] is True and notice["execution_status"] == "running"
+    assert json.loads(notice["result_preview"]) == {"accepted": True, "ok": True}
+    assert not notice["result_truncated"]
+    final = messages[4]
+    assert final == {
+        "card_id": done.card_id, "seq": done.seq, "kind": "tool_result", "tool_name": "file", "tool_call_id": "call-1",
+        "ok": False, "execution_status": "completed", "execution_live": False,
+        "result_preview": json.dumps(value, ensure_ascii=False, separators=(",", ":"))[:200],
+        "result_truncated": True, "raw_card_bytes": len(done.raw_payload_json.encode("utf-8")),
+    }
+    assert messages[5]["ok"] is None and messages[5]["result_preview"] == "plain text"
+    assert messages[6]["ok"] is None and messages[6]["result_preview"] == "null"
+
+    one_side = search(root, **opts, include_tools=True, before=0, after=1)
+    assert [row["seq"] for row in one_side["messages"]] == [anchor.seq, done.seq, missing_ok.seq,
+                                                            non_boolean.seq, after.seq]
+    assert lead.seq < before.seq and after.seq < tail.seq
+    alone = search(root, **opts, include_tools=True, before=0, after=0)
+    assert [row["seq"] for row in alone["messages"]] == [anchor.seq]
+
+
+def test_tool_preview_allocates_page_budget_after_anchor_before_neighbors(root):
+    store = CardStore(root, "alice")
+    store.ensure_session("web", "s1")
+    store.append("web", "s1", "mixed", "user_text", {"text": "x" * 3000})
+    call = store.append("web", "s1", "mixed", "tool_call", {"name": "file", "arguments": {}}, tool_call_id="call-1")
+    _result_card(store, {"ok": True, "result": "y" * 2000})
+    anchor = store.append("web", "s1", "mixed", "agent_text", {"text": "anchor takes priority"})
+    page = search(root, action="read", anchor_card_id=anchor.card_id, include_tools=True, page_char_limit=1200)
+    assert [row["seq"] for row in page["messages"]] == [call.seq, anchor.seq]
+    assert page["messages"][page["anchor"]["index"]]["content"] == "anchor takes priority"
+    assert page["window_clipped"] and page["page_limited_by_chars"]
+    assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1200
+
+
+def test_full_tool_probe_preserves_complete_arguments_and_result(root):
+    store = CardStore(root, "alice")
+    store.ensure_session("web", "s1")
+    anchor = store.append("web", "s1", "mixed", "user_text", {"text": "anchor"})
+    args, text = {"query": "input" * 600}, '中文🙂"\n' * 650
+    store.append("web", "s1", "mixed", "tool_call", {"name": "file", "arguments": args}, tool_call_id="call-1")
+    _result_card(store, {"ok": True, "result": text})
+    store.append("web", "s1", "mixed", "agent_text", {"text": "after"})
+
+    page = search(root, action="read", anchor_card_id=anchor.card_id, include_tools=True, max_tool_chars=0)
+    call, result = page["messages"][1:3]
+    assert json.loads(call["arguments_preview"]) == args and not call["arguments_truncated"]
+    assert result["result_preview"] == text and not result["result_truncated"]
+    assert not page["window_clipped"]
+    assert not (root / "users/alice/download/tool_results").exists()
+
+
+@pytest.mark.parametrize(("values", "error"), [
+    (['"\n' * 14_000] * 2, "超过十万字符上限"),
+    (["中" * 500], "超过 page_char_limit"),
+])
+def test_full_tool_probe_errors_on_serialized_total_or_page_budget(root, values, error):
+    store = CardStore(root, "alice")
+    store.ensure_session("web", "s1")
+    anchor = store.append("web", "s1", "mixed", "user_text", {"text": "anchor"})
+    for i, value in enumerate(values):
+        _result_card(store, {"ok": True, "result": value}, call_id=f"call-{i}")
+    store.append("web", "s1", "mixed", "agent_text", {"text": "after"})
+    with pytest.raises(ValueError, match=error):
+        search(root, action="read", anchor_card_id=anchor.card_id, include_tools=True,
+               max_tool_chars=0, page_char_limit=1000)
+    assert not (root / "users/alice/download/tool_results").exists()
+
+
+def test_30mb_tool_preview_keeps_raw_payload_out_of_python_and_never_writes_artifact(root):
+    store = CardStore(root, "alice")
+    state = store.ensure_session("web", "s1")
+    anchor = store.append("web", "s1", "mixed", "user_text", {"text": "anchor"})
+    # Seed RAW directly: the normal execution writer would create a VIEW artifact.
+    prefix = ('{"execution":{"status":"completed","execution_live":false},'
+              '"original_call":{"name":"file"},"result":{"ok":true,"result":{"body":"')
+    suffix = '"}}}'
+    size = 31_866_927
+    with store.db(write=True) as db:
+        db.execute("INSERT INTO context_cards(card_id,session_key,integration_id,seq,raw_kind,raw_payload,"
+                   "raw_tokens,tool_call_id,meter_key,created_at) VALUES "
+                   "('synthetic-large',?,'mixed',2,'tool_result',?||printf('%.*c',?,'x')||?,0,'large',?,?)",
+                   (anchor.session_key, prefix, size - len(prefix + suffix), suffix,
+                    state["meter_key"], anchor.created_at))
+        db.execute("UPDATE card_sessions SET last_seq=2 WHERE session_key=?", (anchor.session_key,))
+    store.append("web", "s1", "mixed", "agent_text", {"text": "after"})
+    opts = {"action": "read", "anchor_card_id": anchor.card_id, "include_tools": True}
+
+    for cap in (2000, 0):
+        tracemalloc.start()
+        start = perf_counter()
+        try:
+            if cap:
+                page = search(root, **opts)
+            else:
+                with pytest.raises(ValueError, match="超过十万字符上限"):
+                    search(root, **opts, max_tool_chars=0)
+            elapsed, peak = perf_counter() - start, tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        print(f"synthetic RAW {size} B, max_tool_chars={cap}: {elapsed:.3f} s; Python peak {peak:,} B")
+        assert peak < 8 * 1024 * 1024  # full RAW returned by sqlite3 alone would allocate ~30 MiB
+        assert not (root / "users/alice/download/tool_results").exists()
+
+    tool = page["messages"][1]
+    assert (tool["raw_card_bytes"], len(tool["result_preview"]), tool["result_truncated"]) == (size, 2000, True)
+    assert tool["result_preview"].startswith('{"body":"xxx')
+
+
+def test_tool_options_require_anchored_read_including_explicit_defaults(root, history_with_tools):
+    archive_id = search(root, action="list")["archives"][0]["archive_id"]
+    first = search(root, action="read", archive_id=archive_id, limit=1)
+    assert first["next_cursor"]
+    for opts in ({"include_tools": False}, {"include_tools": True}, {"max_tool_chars": 2000}, {"max_tool_chars": 0}):
+        with pytest.raises(ValueError, match="仅适用于带 anchor_card_id 的 read"):
+            search(root, action="read", archive_id=archive_id, cursor=first["next_cursor"], **opts)
+        with pytest.raises(ValueError, match="仅适用于带 anchor_card_id 的 read"):
+            search(root, query="needle", **opts)
+    second = search(root, action="read", archive_id=archive_id, cursor=first["next_cursor"])
+    assert second["messages"][0]["seq"] > first["messages"][0]["seq"]
+
+
+@pytest.mark.parametrize(("opts", "field"), [
+    ({"include_tools": 1}, "include_tools"),
+    ({"include_tools": None}, "include_tools"),
+    ({"max_tool_chars": True}, "max_tool_chars"),
+    ({"max_tool_chars": -1}, "max_tool_chars"),
+    ({"max_tool_chars": 1}, "max_tool_chars"),
+    ({"max_tool_chars": 199}, "max_tool_chars"),
+    ({"max_tool_chars": 20_001}, "max_tool_chars"),
+])
+def test_anchored_tool_options_reject_invalid_types_and_limits(root, history_with_tools, opts, field):
+    _, bodies = history_with_tools
+    with pytest.raises(ValueError, match=field):
+        search(root, action="read", anchor_card_id=bodies[0].card_id, **opts)

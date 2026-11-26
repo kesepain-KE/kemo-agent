@@ -41,7 +41,7 @@ from plugins.shell.tool import (
     _shell_environment,
 )
 from plugins.shell.tool import run as run_shell
-from run.tools.background_worker import MAX_LOG_BYTES, _capture_stream
+from run.tools.background_worker import MAX_LOG_BYTES, _capture_stream, run as run_background_worker
 from plugins.task_time.tool import run as run_task_time
 from plugins.wait_for_condition.tool import run as run_wait_for_condition
 from plugins.web_search.tool import run as run_web_search
@@ -52,10 +52,11 @@ from run.tools.background_jobs import (
     read_background_job,
     reconcile_background_job,
     update_background_job as persist_background_job,
+    write_job_request,
 )
 from run.tools.background_worker import MAX_LOG_BYTES, _capture_stream
 from run.scheduler import CronStore
-from run.tools import discover_tools, execute_tool, validate_arguments
+from run.tools import ToolValidationError, discover_tools, execute_tool, resolve_tool_timeout, validate_arguments
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -163,7 +164,7 @@ class PluginManifestTests(unittest.TestCase):
         self.assertFalse(expand_call.openai_schema()["function"]["strict"])
         self.assertEqual(
             registry.get("subagent_dispatch").timeout_policy,
-            "agent_runtime",
+            "submission",
         )
         expand_schema = registry.get("expand_creater").input_schema
         self.assertEqual(
@@ -1118,6 +1119,8 @@ class ShellPluginTests(unittest.TestCase):
         self.assertIn("background", schema["properties"])
         self.assertIn("show_terminal", schema["properties"])
         self.assertIn("job_id", schema["properties"])
+        self.assertEqual(schema["properties"]["wait"]["type"], "boolean")
+        self.assertIs(schema["properties"]["wait"]["default"], False)
         self.assertEqual(
             schema["properties"]["shell_type"]["enum"],
             [
@@ -1136,7 +1139,30 @@ class ShellPluginTests(unittest.TestCase):
         )
         validate_arguments(schema, {})
         validate_arguments(schema, {"action": "status", "job_id": "job_example"})
+        validate_arguments(schema, {"action": "status", "job_id": "job_example", "wait": True, "timeout": 2})
         validate_arguments(schema, {"command": "pwd", "show_terminal": True})
+
+    def test_shell_status_wait_timeout_bounds_and_watchdog_scope(self) -> None:
+        definition = discover_tools(PROJECT_ROOT, "alice").get("shell")
+        wait_status = {"action": "status", "wait": True}
+        for timeout, watchdog in ((None, 35), (1, 6), (2, 7), (60, 65)):
+            arguments = wait_status if timeout is None else {**wait_status, "timeout": timeout}
+            with self.subTest(timeout=timeout):
+                self.assertEqual(resolve_tool_timeout(definition, arguments, default_timeout=10), watchdog)
+        for arguments in (
+            {"action": "status", "timeout": 61},
+            {"action": "status", "wait": False, "timeout": 61},
+            {"action": "run", "timeout": 61},
+            {"action": "cancel", "timeout": 61},
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(resolve_tool_timeout(definition, arguments, default_timeout=10), 61)
+        for timeout in (0, 61):
+            with self.subTest(invalid_timeout=timeout):
+                with self.assertRaisesRegex(ValueError, r"timeout.*1\.\.60"):
+                    run_shell(action="status", wait=True, timeout=timeout, context=self._context())
+                with self.assertRaisesRegex(ToolValidationError, r"timeout.*1\.\.60"):
+                    resolve_tool_timeout(definition, {**wait_status, "timeout": timeout}, default_timeout=10)
 
     def test_shell_hides_sync_console_by_default_and_allows_explicit_visibility(self) -> None:
         completed = SimpleNamespace(stdout=b"ok", stderr=b"", returncode=0)
@@ -1229,6 +1255,78 @@ class ShellPluginTests(unittest.TestCase):
             )
             self.assertEqual(status["status"], "completed")
 
+    def test_shell_status_wait_returns_live_snapshot_and_resumes_same_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            context = self._context(root, source="test", session_id="space-a")
+            thread_context = {**context, "cancel_event": threading.Event()}
+            release = root / "release"
+            (root / "wait_job.py").write_text(
+                "import time\n"
+                "from pathlib import Path\n"
+                "while not Path('release').exists():\n"
+                "    time.sleep(0.05)\n"
+                "print('job finished')\n",
+                encoding="utf-8",
+            )
+            started = run_shell(
+                self._python_command("import runpy; runpy.run_path('wait_job.py')"),
+                background=True, timeout=30, context=context,
+            )
+            job_id = started["job_id"]
+            query = {"action": "status", "job_id": job_id}
+            try:
+                self.assertEqual(started["status"], "running", started)
+                snapshot = run_shell(**query, context=context)
+                self.assertEqual(run_shell(**query, wait=False, context=context), snapshot)
+                self.assertNotIn("wait_outcome", snapshot)
+                self.assertEqual(snapshot["status"], "running")
+                self.assertIs(snapshot["cancel_requested"], False)
+                self.assertIs(snapshot["timeout_requested"], False)
+                self.assertEqual(snapshot["deadline_at"], started["deadline_at"])
+
+                for foreign in ({"source": "web"}, {"session_id": "space-b"}):
+                    with self.subTest(foreign=foreign):
+                        with self.assertRaisesRegex(KeyError, "后台作业不存在"):
+                            run_shell(**query, wait=True, timeout=1, context={**context, **foreign})
+
+                before = time.monotonic()
+                without_event = run_shell(**query, wait=True, timeout=1, context=context)
+                self.assertGreaterEqual(time.monotonic() - before, 1)
+                self.assertEqual(without_event, {**snapshot, "wait_outcome": "timeout"})
+
+                definition = discover_tools(PROJECT_ROOT, "alice").get("shell")
+                before = time.monotonic()
+                timed_out = execute_tool(
+                    definition, {**query, "wait": True, "timeout": 2}, context=context, timeout=30,
+                )
+                self.assertGreaterEqual(time.monotonic() - before, 2)
+                self.assertEqual(timed_out, {**snapshot, "wait_outcome": "timeout"})
+
+                timer = threading.Timer(0.25, release.touch)
+                timer.start()
+                try:
+                    finished = run_shell(**query, wait=True, timeout=6, context=thread_context)
+                finally:
+                    timer.cancel()
+                    timer.join()
+                self.assertEqual(finished["wait_outcome"], "finished")
+                self.assertEqual(finished["job_id"], job_id)
+                self.assertEqual(finished["status"], "completed")
+                self.assertEqual(finished["exit_code"], 0)
+                self.assertIn("job finished", (root / finished["stdout_path"]).read_text("utf-8"))
+            finally:
+                release.touch()
+                record = read_background_job(root, "alice", job_id)
+                if record.get("worker_pid"):
+                    # On Windows the detached worker may still hold directory handles.
+                    exited = run_wait_for_condition(
+                        "process_exit", 5, check_interval=0.1, pid=record["worker_pid"],
+                        process_started_at=record["worker_started_at"], context=thread_context,
+                    )
+                    self.assertEqual(exited["status"], "triggered")
+
     def test_background_start_cancel_is_not_reported_as_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1242,6 +1340,35 @@ class ShellPluginTests(unittest.TestCase):
             )
             self.assertFalse(result["ok"], result)
             self.assertIn(result["status"], {"cancelled", "cancelling"})
+
+    def test_expired_background_worker_does_not_start_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "users" / "alice").mkdir(parents=True)
+            record, paths = prepare_background_job(
+                root, "alice", working_dir=str(root), shell_type="cmd",
+                command_digest="deadline-test", timeout_seconds=1,
+            )
+            deadline = time.time() - 1
+            job_id = record["job_id"]
+            persist_background_job(
+                root, "alice", job_id, lambda job: {**job, "deadline_at": deadline},
+            )
+            write_job_request(paths["request"], {
+                "schema_version": 1, "root": str(root), "user": "alice",
+                "job_id": job_id, "cwd": str(root),
+                "process_command": [sys.executable, "-c", "pass"],
+                "deadline_at": deadline,
+            })
+
+            with patch("run.tools.background_worker.subprocess.Popen",
+                       return_value=SimpleNamespace(poll=lambda: 0, returncode=0)) as spawn:
+                self.assertEqual(run_background_worker(paths["request"]), 0)
+            spawn.assert_not_called()
+            result = read_background_job(root, "alice", job_id)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["stop_reason"], "background_timeout")
+            self.assertEqual(result["pid"], 0)
 
     def test_managed_background_job_enforces_explicit_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
