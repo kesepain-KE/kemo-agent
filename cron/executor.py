@@ -21,6 +21,7 @@ from run.history import close_session, new_conversation_id, queue_memory_extract
 from run.extensions import record_expand_runtime
 from run.extensions import (
     module_update_timeout as _module_update_timeout,
+    purge_expired_media_assets,
     record_module_health as _record_module_health,
     run_module_updater,
 )
@@ -311,15 +312,23 @@ def _update_modules(
         }
 
     entries = sorted(modules_dir.iterdir(), key=lambda item: item.name) if _entries is None else _entries
-    if category == "expand" and _entries is None and len(entries) > 1:
+    if category in {"expand", "sense"} and _entries is None and len(entries) > 1:
         def refresh(entry: Path) -> dict[str, Any]:
             return _update_modules(
                 modules_dir, category, config=config, cancel_event=cancel_event,
                 module_prefix=module_prefix, _entries=[entry],
             )
 
-        with ThreadPoolExecutor(max_workers=min(4, len(entries)), thread_name_prefix="expand-refresh") as executor:
-            return _merge_module_results(list(executor.map(refresh, entries)), category=category)
+        with ThreadPoolExecutor(max_workers=min(4, len(entries)), thread_name_prefix=f"{category}-refresh") as executor:
+            result = _merge_module_results(list(executor.map(refresh, entries)), category=category)
+        if category == "sense" and cancel_event is not None and cancel_event.is_set():
+            # Cancellation may reach every updater after all entries have started.
+            if result["status"] == "cancelled" or any(
+                item.get("exception_type") == "ModuleRuntimeCancelled" for item in result["errors"]
+            ):
+                result["status"] = "cancelled"
+                result.pop("data_changed")
+        return result
 
     updated: list[str] = []
     failed: list[str] = []
@@ -487,25 +496,16 @@ def _execute_expand_update(
     """Refresh shared roots once and user roots under their own identity."""
 
     if user == "__system__":
-        result = _merge_module_results(
-            [
-                _update_modules(
-                    root / "expand" / "global",
-                    "expand",
-                    config=config,
-                    cancel_event=cancel_event,
-                    module_prefix="global/",
-                ),
-                _update_modules(
-                    root / "expand" / "share",
-                    "expand",
-                    config=config,
-                    cancel_event=cancel_event,
-                    module_prefix="shared/",
-                ),
-            ],
-            category="expand",
-        )
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="expand-group") as executor:
+            global_run = executor.submit(
+                _update_modules, root / "expand" / "global", "expand",
+                config=config, cancel_event=cancel_event, module_prefix="global/",
+            )
+            shared_run = executor.submit(
+                _update_modules, root / "expand" / "share", "expand",
+                config=config, cancel_event=cancel_event, module_prefix="shared/",
+            )
+            result = _merge_module_results([global_run.result(), shared_run.result()], category="expand")
         result["scope"] = "global_shared"
         return result
 
@@ -597,7 +597,9 @@ def _execute_system_task(
             cancel_event=cancel_event,
         )
     if action == "session_lifecycle_sweep":
-        return execute_session_sweep(root, user, config=config)
+        result = execute_session_sweep(root, user, config=config)
+        purge_expired_media_assets(root)
+        return result
     raise CronValidationError(f"未注册的系统 cron 动作：{action}")
 
 
