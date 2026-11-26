@@ -1,6 +1,6 @@
 # 工程操作与运行机制（按需查阅）
 
-> 当前稳定版本：`kemo-agent 2.0.0`（2026-11-07 再次定档），配套 `kemo-adapter-api 1.0.0`，使用 Kemo 2.0。本版收敛插件权限与工具合同；版本与完整更新说明见 `knowledge/global/overview/project-introduction.md`，各项机制仍按下表进入专题文档。Release、npm 与 GHCR 产物须另行构建和发布。
+> 当前稳定版本：`kemo-agent 2.1.0`（源码定档），配套 `kemo-adapter-api 1.0.0`，使用 Kemo 2.0。2.0.0 收敛插件权限与工具合同；版本与完整更新说明见 `knowledge/global/overview/project-introduction.md`，各项机制仍按下表进入专题文档。Release、npm 与 GHCR 产物须另行构建和发布。
 
 ## 0. 本手册怎么用
 
@@ -168,7 +168,7 @@ A 类按「同一主体、同一属性轴」合并，允许写到几百字；B �
 [入口 / L1] `subagent_dispatch` 适合边界清晰、可独立交付的并行工作；给足目标、输入、限制与验收，不假设它有主历史。`general_worker` 承接通用执行，插件/技能/知识取当前用户授权交集；拓展/感知不自动注入但可按需使用。子代理不得再次委派，不能借 file/shell 绕过。
 `general_worker` 的约束和验收可传文字或字符串数组；准确字段见 `plugins/subagent_dispatch/SKILL.md`，输入错误展示见前端专题。
 
-[机制 / L1] 普通公开本地非串行 LLM 子代理的 call/resume 省略 wait 默认后台提交；显式 wait=true 仍同步，特殊同步规划、串行维护与外部代理默认同步。后台提交不解除主任务完成屏障；主任务仍须收齐必要依赖结果。list 的 default_wait 披露实际缺省策略，前端“等待提交”不代表已入队。call 的 invalid_input 返回有界字段提示，不入队或创建任务；取不到schema时交原执行链，详见协作专题。
+[机制 / L1] 子代理 call/resume 成功入队即返回回执；旧 wait=true 仍合法但不再等待。提交不解除主任务完成屏障，任务计划以真实落库结果进入审批。前端“等待提交”不代表已入队。call 的 invalid_input 返回有界字段提示，不入队或创建任务；取不到schema时交原执行链，详见协作专题。
 
 内置专项入口：`history_summary` 处理历史标题/摘要；`memory_temporary_important` 维护热画像；`self_improve` 提取记忆/技能；`task_plan` 子代理生成计划；`time_plan` 解析定时需求。CardStream 摘要由运行时使用 Provider 原生请求生成，不再调用上下文压缩子代理。
 
@@ -176,20 +176,20 @@ A 类按「同一主体、同一属性轴」合并，允许写到几百字；B �
 
 [机制 / L2] 运行中用 revise_remaining 修正连续 pending 后缀，显式提供依赖；已开始步骤不得删改，删除采用物理删除。修正后无失败步骤则自动继续，retry_failed=true 才重置失败步骤；旧 revision 返回 plan_revision_conflict，重读后再提交。显式 skip_step 仅跳过 pending 非关键分支。
 
-[机制 / L1] 子代理默认只交付结论、必要证据、产物和未完成事项，不返回工具轨迹。公开本地 LLM 非串行业务任务支持时间/工具预算停止后保存现场与已有结论；实际退出且安全快照有效时可显式 resume。`output_truncated` 按累计 Provider 重试额度自动重试，最多额外5次；保留请求前上下文和已完成调用，不接受截断内容或执行截断调用。耗尽后仅允许有有效请求前快照的任务显式续跑，其他失败不获恢复权。call/resume 的 max_tool_calls 为每段额度，正整数覆盖默认、0 不限次数，timeout 指定本段秒数。续跑重新计时并获得新段额度，累计次数/用量保留；内部重试不重置额度。list 披露预算与有效插件，guide 安全点引导，split 显式拆分剩余工作；不自动无限续跑或重派，不扩权、不重复已有副作用，先核对关联后台 Shell。详见 `run/agents/`。
+[机制 / L1] 子代理默认只交付结论、必要证据、产物和未完成事项，不返回工具轨迹。公开本地 LLM 非串行业务任务支持工具额度停止及历史超时快照；实际退出且安全快照有效时可显式 resume。`output_truncated` 按累计 Provider 重试额度自动重试，最多额外5次；保留请求前上下文和已完成调用，不接受截断内容或执行截断调用。耗尽后仅允许有有效请求前快照的任务显式续跑，其他失败不获恢复权。call/resume 的 max_tool_calls 为每段额度，正整数覆盖默认、0 不限次数，托管模型循环不使用旧 timeout。续跑重新计时并获得新段额度，累计次数/用量保留；内部重试不重置额度。list 披露预算与有效插件，guide 安全点引导，split 显式拆分剩余工作；不自动无限续跑或重派，不扩权、不重复已有副作用，先核对关联后台 Shell。详见 `run/agents/`。
 结论投影先移除运行时封装，保留业务 Schema 的同名字段，继续脱敏凭据和限制输出。
 
 [机制 / L2] 主任务所有退出路径由finally兜底幂等收尾，limited按受限结束记录，不悬挂为waiting_children或冒称成功；正常completed须在历史提交成功后封口。重复收尾不覆盖既有终态或结束时间，取消仍须尊重子执行器真实退出。limited结束后，同会话后续主任务可按原条件显式resume/split；不抢占活跃父任务。
 
-[机制 / L2] 正常工具、必需Shell及子任务按各自预算等待；主请求动态尾部披露剩余依赖数与状态。仅取消收尾或只剩超时／取消仍未退出等受阻依赖时，启用绝对deadline（max(1秒, 2×agent_runtime.default_timeout)）。收尾到点保存已有正文为partial并列出未完成项；存活执行仍占槽并保护同一会话，新请求报SessionExecutionBusyError且不自动重跑。实际退出后解除保护，迟到结果不重启主响应、不改写收口时间。
+[机制 / L2] 托管本地模型循环不设任务总时限；600 秒心跳在安全点产生、经主 Provider 路由发送，缺失不判死。仅取消／异常收尾启用独立上界 agent_runtime.completion_drain_timeout_seconds（默认 1200 秒）。收尾到点保存已有正文为partial并列出未完成项；存活执行仍占槽并保护同一会话，新请求报SessionExecutionBusyError且不自动重跑。实际退出后解除保护，迟到结果不重启主响应、不改写收口时间。
 
 长任务保持同一Run、整合与引导邮箱；partial保留原响应与未完成项，不另起Run自动续跑，也不解除残留子任务的真实执行保护。详见 `run/conversation/main_orchestration.py` 与 `run/scheduler/runtime_host.py`。
 
 自然语言创建/编辑定时任务，必须先用 `time_plan`，不得直接猜测时间参数，再用 `task_time` 的 create/update；删除前先 `task_time get`。先读 `agents/time_plan/trigger.md`；仅内部程序/API 已确定完整参数时可直接调度。任务未获授权不因生成计划自动获得执行授权。
 
 <!-- rule:agent-timeout -->
-[机制] `agent_runtime.default_timeout` 仓库配置为 600 秒（`config/global_config.yaml`）；这是子代理运行预算基准，不是所有工具外层看门狗的统一期限。
-显式 timeout、清单宽限与工具策略共同决定外层看门狗，详见 `run/tools/__init__.py`。不保证到点实际退出；实际退出前保留完成屏障对应的执行保护、执行槽与会话写保护；主响应可按上述deadline以partial结束，不能写假执行终态。
+[机制] `agent_runtime.default_timeout` 仓库配置为 600 秒（`config/global_config.yaml`），用于有界子代理执行；托管本地模型循环不设任务总时限。等待查询使用独立看门狗，不修改原任务期限。
+调度提交仍使用 `tools.timeout` 看门狗。仅 `shell` / `subagent_dispatch` 的 `status` 和 `user_decision` 的 `get` 在 `wait=true` 时使用查询等待秒数（默认 30，整数 1..60）加 5 秒作为外层看门狗；这 5 秒用于启动与回传，不延长查询本身。显式 timeout 不会缩短托管模型循环。不保证到点实际退出；实际退出前保留完成屏障对应的执行保护、执行槽与会话写保护；主响应可按收尾期限以 partial 结束，不能写假执行终态。
 <!-- /rule -->
 
 ### 模块、连接与外部消息
@@ -216,7 +216,8 @@ Kemo 网关状态是独立只读连接，未激活不得猜测地址、扫描端
 [机制 / L2] Schema 未提供的参数不能发送；工具开关、白名单和知识开关仍要满足。返回 status 要区分 limited、temporarily_unavailable、identical_call_blocked、duplicate_blocked；详细分支见 `knowledge/global/modules/plugin-development.md`。查询调用每次真实执行以取得最新状态；已知副作用按同签名防重，拦截回执不包含旧结果。只有返回对象显式 `ok=true` 才算业务成功；缺失或非布尔真值按失败统计且不缓存，不能外层包装成成功。子代理超时/额度停止保留部分结论但不是成功确认，插件 duplicate/cached 标记须连同模型可见解释判读。
 
 <!-- rule:tool-result -->
-[机制] 主整合工具结果完整写入 CardStream RAW；主整合 VIEW 与子代理内联结果统一预算为 100,000 JSON 字符（`run/tools/result_limits.py` 的 `MAX_TOOL_RESULT_CHARS`）。
+[机制] 主整合工具回执完整写入 CardStream RAW；主整合 VIEW 与子代理内联结果统一预算为 100,000 JSON 字符（`run/tools/result_limits.py` 的 `MAX_TOOL_RESULT_CHARS`）。前台 Shell 移交成功后，原调用只写移交回执，命令终态另存到同一个后台作业。
+移交回执携带 `job_id`，不伪造退出码；原执行持有者继续接收结果并清理。通过 `shell(status)` 查询实际终态和有界输出，不向原调用补发结果卡。未提交移交时仍走原结果路径。
 主整合结果始终携带 original_call、tool_call_id、execution_id 和执行状态，原调用被摘要吸收也能独立理解，快照不是新的执行指令。超限时保存完整结果文件，模型只接收部分预览、省略标记与路径；过长重复参数仅省略 VIEW，RAW 不变。旧对话在下一请求前更新 VIEW 并重新计量；子代理请求边界也覆盖包装和续跑结果。主整合导出失败仍保留 RAW 并明示错误，无 RAW 归档的调用缺有效上下文或落文件失败才报 ToolResultTooLargeError。已执行不等于业务成功，原 ok=false 或缺显式 ok=true 不能提升为成功；收到 execution_completed 先核对结果，不要盲目重试。
 <!-- /rule -->
 
@@ -262,7 +263,7 @@ Kemo 网关状态是独立只读连接，未激活不得猜测地址、扫描端
 [入口 / L2] 结构化或交互表达确有帮助时可用正文内联组件；必须先读取 `knowledge/global/web/inline-widgets.md`，不要凭记忆复制或发明字段、动作、组件名称。完整声明前后保留自然语言和可读降级，不能以 HTML/JavaScript/CSS/iframe/外部脚本替代正文。
 
 任务计划卡悬浮在聊天区左侧，桌面导航侧栏展开时从右侧收窄至不越过智能体头像右边缘；右侧工作面板打开时隐藏计划浮层，收起后恢复。计划不移到消息顶部，显示或折叠不改变正文与输入框的宽度和位置，浮层不得覆盖输入框；步骤说明按需展开；见前端专题。
-右侧轮次导航从首条正式用户发言起显示，一次取得当前空间全部正式用户发言索引，展开时完整保留卡片；正文仍按 RAW seq 分页，激活旧发言后补页并定位，预选不触发加载；见前端专题。
+右侧轮次导航从首条正式用户发言起显示，一次取得当前空间全部正式用户发言索引，展开时只挂载当前轮及其前后各十张卡片；正文仍按 RAW seq 分页，激活旧发言后补页并定位，预选不触发加载；见前端专题。
 输入坞圆环左侧展示当前对话累计缓存命中率，固定两位小数；随 Provider usage 实时更新，不等整合结束，缺失显示“—”。文字与圆环共用用量面板，以圆环中心居中并按视口避让，详见前端专题。
 
 组件不新增事实来源、工具权限或执行权。非 Web、数据不足、协议不确定或无法完整闭合时回退 Markdown；UI 的媒体预览、工作面板或标签关闭不代表调用模型或结束后台任务。

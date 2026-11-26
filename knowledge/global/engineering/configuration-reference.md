@@ -275,6 +275,7 @@ media_assets:
 专用多模态与主模型保存的输出、`expand_call` 成功发布的拓展产物，统一登记到当前用户的 `runtime/media_assets.sqlite3`。
 登记从附件进入当前对话或本地路径装载时开始计时，生成产物从保存并校验成功时开始计时；
 附件与产物的 `reference_expires_at` 给出到期时间。只上传但未提交对话的文件不占用引用期限。
+现有的每小时会话清扫也会删除数据库中已到期的引用行，不删除附件和产物文件。
 
 同一安装、用户、来源和对话空间的后续 Run、隔离工具进程及获准子代理均可通过
 `attach_media` 和 `multimodal` 接续；来源 `app`、`web`、`message:<platform>` 彼此隔离。
@@ -409,7 +410,8 @@ profile/domains 由宿主传给 self_improve，不放入参与幂等摘要的 so
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `queue_maxsize` | int | `50` | 用户级总等待上限；0 为无界。有界时自动启用空间入队保护，见下方说明 |
-| `default_timeout` | int | `600` | 子代理每段默认运行预算秒数；可恢复业务任务到期转入有限收尾并保存超时停止现场，其他执行器遵循既有取消与清理合同；同步调度不被普通工具默认超时提前截断 |
+| `default_timeout` | int | `600` | 直调、非托管及纯 Python 执行的默认时限；托管本地模型循环不使用这个任务总时限 |
+| `completion_drain_timeout_seconds` | number | `1200` | 主任务取消／异常收尾等待上界，独立于 default_timeout；到点不代表执行退出 |
 | `timeout_survival_seconds` | number | `120` | 到期后的有限收尾期；可恢复业务任务保存部分结论并标记 `timed_out`，非恢复执行器自然完成才标记 `completed_after_timeout`；0 表示禁用收尾宽限 |
 
 业务子代理的任务级预算不是新的用户配置项：主智能体在 `subagent_dispatch`
@@ -864,7 +866,8 @@ memory:
 | 字段 | 类型 | 全局默认值 | 说明 |
 |------|------|-----------|------|
 | `queue_maxsize` | int | 50 | 用户级总等待上限；0 为无界。有界时自动启用空间入队保护，见“对话空间公平与多窗口余量” |
-| `default_timeout` | int | 600 | 子代理每段默认运行预算（秒）；可恢复业务任务到期保存超时停止现场，其他执行器仍按既有取消与清理合同；不受普通工具默认超时提前截断 |
+| `default_timeout` | int | 600 | 有界子代理执行的默认时限（秒）；不限制主对话托管的本地模型循环 |
+| `completion_drain_timeout_seconds` | number | 1200 | 取消／异常收尾等待上界（秒），不等于任务时限或强制退出 |
 | `timeout_survival_seconds` | number | 120 | 到期后的有限收尾期（秒）；可恢复业务任务保存结论并标记 `timed_out`，非恢复执行器自然完成才标记 `completed_after_timeout`；0 表示禁用收尾宽限 |
 
 ---
