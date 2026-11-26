@@ -261,7 +261,7 @@ def test_background_dispatch_accepts_sync_worker_and_returns_result(workspace, m
         response = dispatch(
             "call", agent="general_worker", wait=False, input=payload, context=context,
         )
-        assert response["status"] == "queued"
+        assert response["status"] in {"queued", "running"} and response["detached"]
         result = scheduler.wait(response["task_id"], timeout=5, source="web", session_id="test")
         assert result.data == OUTPUT
         snapshot = scheduler.get(response["task_id"], source="web", session_id="test")

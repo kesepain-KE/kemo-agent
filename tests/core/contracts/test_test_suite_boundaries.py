@@ -67,7 +67,7 @@ class TestSuiteBoundaryTests(unittest.TestCase):
         private_rule = lines.index("expand/global/**/.env")
         variant_rule = lines.index("expand/global/**/.env.*")
         example_rule = lines.index("!expand/global/**/.env.example")
-        for module in ("kemo_graph", "kemo_app"):
+        for module in ("kemo_graph", "kemo_bridge"):
             source_rule = lines.index(f"!expand/global/{module}/**")
             self.assertGreater(private_rule, source_rule)
             self.assertGreater(variant_rule, source_rule)

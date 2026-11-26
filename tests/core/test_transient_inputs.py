@@ -174,7 +174,10 @@ def test_media_survives_tool_argument_correction_until_a_valid_response(
 
 @pytest.mark.parametrize("provider_type", ["chat", "kemo"])
 def test_subagent_tool_loop_consumes_attached_media_before_final_body(tmp_path, provider_type):
+    import base64
+
     from run.agents import AgentRunner
+    from run.agents.card_stream import SOURCE, agent_store
     from tests.agents.test_general_worker import OUTPUT
 
     config, image = make_root(tmp_path, provider_type=provider_type)
@@ -187,8 +190,14 @@ def test_subagent_tool_loop_consumes_attached_media_before_final_body(tmp_path, 
         ChatResponse(text="", tool_calls=[ToolCall("echo", "echo", {"step": 2})]),
         ChatResponse(text=json.dumps(OUTPUT)),
     ])
+    task_id = "agent-task-" + "7" * 32
     result = AgentRunner(tmp_path, "alice", config=config, provider_factory=lambda _: provider).run(
         "general_worker", {"task": f"inspect {image}"}, source="web", session_id="child-media",
+        task_id=task_id,
     )
     assert result.data == OUTPUT
     assert [len(native_blocks(sent)) for sent in provider.requests] == [0, 1, 0]
+    raw = agent_store(tmp_path, "alice", task_id).raw_page(SOURCE, task_id)
+    image_data = base64.b64encode(image.read_bytes()).decode("ascii")
+    assert all(image_data not in card.raw_payload_json for card in raw)
+    assert [c.raw_payload["name"] for c in raw if c.raw_kind == "tool_call"] == ["attach_media", "echo"]

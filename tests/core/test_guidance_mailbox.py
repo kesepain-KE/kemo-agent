@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 import unittest
 
@@ -56,6 +57,27 @@ class GuidanceMailboxTests(unittest.TestCase):
         self.assertEqual(mailbox.offer(guidance), (True, 1))
         self.assertEqual(mailbox.drain(), [guidance])
         self.assertEqual(guidance.display_text, "附件引导：clip.mp4")
+
+    def test_guidance_dictionary_keeps_mode_and_falls_back_for_invalid_values(self) -> None:
+        for fields, expected in (
+            ({"mode": "background"}, "background"),
+            ({"mode": "interrupt"}, "interrupt"),
+            ({}, "interrupt"),
+            ({"mode": "unknown"}, "interrupt"),
+            ({"mode": []}, "interrupt"),
+        ):
+            with self.subTest(fields=fields):
+                mailbox = GuidanceMailbox()
+                mailbox.offer({"guidance_id": "g", "guidance": " update ", **fields})
+                self.assertEqual(mailbox.drain(), [GuidanceInput(id="g", text="update", mode=expected)])
+
+    def test_background_guidance_does_not_bypass_mailbox_capacity(self) -> None:
+        mailbox = GuidanceMailbox(maxsize=1)
+        self.assertEqual(mailbox.offer({"text": "later", "mode": "background"}), (True, 1))
+        with self.assertRaises(queue.Full):
+            mailbox.offer("now")
+        self.assertEqual(mailbox.drain()[0].mode, "background")
+        self.assertEqual(mailbox.offer("now"), (True, 1))
 
 
 if __name__ == "__main__":

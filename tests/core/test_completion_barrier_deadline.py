@@ -25,7 +25,7 @@ STARTUP_TIMEOUT = 15
 def bounded_config(root):
     path = root / "config/global_config.yaml"
     config = json.loads(path.read_text("utf-8"))
-    config["agent_runtime"] = {"default_timeout": .1}
+    config["agent_runtime"] = {"default_timeout": .1, "completion_drain_timeout_seconds": 1.0}
     path.write_text(json.dumps(config), "utf-8")
 
 
@@ -33,6 +33,19 @@ def integration_record(root):
     with CardStore(root, "alice").db() as db:
         row = db.execute("SELECT * FROM card_integrations ORDER BY created_at DESC LIMIT 1").fetchone()
         return dict(row), json.loads(row["record_json"])
+
+
+def test_drain_default_is_independent_of_legacy_agent_timeout(setup):
+    root, _ = setup
+    path = root / "config/global_config.yaml"
+    config = json.loads(path.read_text("utf-8"))
+    config["agent_runtime"] = {"default_timeout": 0}
+    path.write_text(json.dumps(config), "utf-8")
+    coordinator = TaskCoordinator(root, "alice", "web", "drain", "run", request())
+    before = time.monotonic()
+    deadline = coordinator._deadline()
+    assert coordinator._deadline_seconds == 1200
+    assert before + 1200 <= deadline <= time.monotonic() + 1200
 
 
 @pytest.mark.parametrize("route", ["limited", "failed", "cancelled", "waiting"])

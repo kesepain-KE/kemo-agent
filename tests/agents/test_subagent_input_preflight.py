@@ -137,7 +137,7 @@ def test_valid_calls_keep_consecutive_submission_order_and_invalid_calls_use_no_
         first = dispatch.run("call", "general_worker", input={"task": "one"}, wait=False, context=ctx(tmp_path))
         invalid = dispatch.run("call", "general_worker", input={"goal": "bad"}, wait=False, context=ctx(tmp_path))
         second = dispatch.run("call", "general_worker", input={"task": "two"}, wait=False, context=ctx(tmp_path))
-        assert first["status"] == second["status"] == "queued"
+        assert all(r["status"] in {"queued", "running"} and r["detached"] for r in (first, second))
         assert invalid["status"] == "invalid_input" and "task_id" not in invalid
         scheduler.wait(first["task_id"], 2, source="web", session_id="input-preflight")
         scheduler.wait(second["task_id"], 2, source="web", session_id="input-preflight")
@@ -179,7 +179,8 @@ def test_invalid_input_in_real_main_run_neither_registers_tasks_nor_enters_barri
 ])
 def test_strict_and_loose_builtin_schemas_keep_their_rules(tmp_path, monkeypatch, agent, data, invalid):
     setup_agents(tmp_path)
-    scheduler = SimpleNamespace(submit=Mock(return_value="offline-task"))
+    scheduler = SimpleNamespace(submit=Mock(return_value="offline-task"),
+                                get=Mock(return_value={"agent": agent, "status": "queued"}))
     monkeypatch.setattr(dispatch, "get_agent_scheduler", lambda *_args, **_kwargs: scheduler)
     result = dispatch.run("call", agent, input=data, wait=False, context=ctx(tmp_path))
     assert result["ok"] is not invalid
@@ -203,7 +204,8 @@ def test_unavailable_plugin_schema_fails_open(tmp_path, monkeypatch, mode):
                 raise OSError("schema unavailable")
         definition = Unavailable()
     monkeypatch.setattr(dispatch, "_public", lambda *_: [definition])
-    scheduler = SimpleNamespace(submit=Mock(return_value="offline-plugin"))
+    scheduler = SimpleNamespace(submit=Mock(return_value="offline-plugin"),
+                                get=Mock(return_value={"agent": "plugin_agent", "status": "queued"}))
     monkeypatch.setattr(dispatch, "get_agent_scheduler", lambda *_args, **_kwargs: scheduler)
     result = dispatch.run("call", "plugin_agent", input={"opaque": "payload"}, wait=False, context=ctx(tmp_path))
     assert result["ok"] is True and result["status"] == "queued"
@@ -213,9 +215,9 @@ def test_unavailable_plugin_schema_fails_open(tmp_path, monkeypatch, mode):
 def test_external_binding_schema_is_not_newly_rejected(tmp_path, monkeypatch):
     setup_agents(tmp_path)
     monkeypatch.setattr(dispatch, "resolve_external_agent", lambda *_: SimpleNamespace(timeout=1))
-    scheduler = SimpleNamespace(submit_callable=Mock(return_value="offline-external"))
+    scheduler = SimpleNamespace(submit_callable=Mock(return_value="offline-external"),
+                                get=Mock(return_value={"agent": "external:opaque", "status": "queued"}))
     monkeypatch.setattr(dispatch, "get_agent_scheduler", lambda *_args, **_kwargs: scheduler)
-    monkeypatch.setattr(dispatch, "_wait_for_task", lambda *_args, **_kwargs: (True, {"ok": True, "answer": "offline"}))
     result = dispatch.run("call", "external:opaque", input={"opaque": "payload"}, context=ctx(tmp_path))
     assert result["ok"] is True
     scheduler.submit_callable.assert_called_once()
@@ -299,24 +301,22 @@ def test_task_plan_schema_is_discoverable_in_dispatch_list(tmp_path, monkeypatch
     schema = plan['input_schema']
     assert schema['required'] == ['action']
     assert schema['properties']['action']['enum'] == ['create', 'edit']
-    assert plan['default_wait'] is True
+    assert plan['default_wait'] is False
 
 
 def test_task_plan_schema_is_checked_after_existing_host_preparation(tmp_path, monkeypatch):
     setup_agents(tmp_path)
-    from run.agents import AgentRunResult, PreparedSubagentInvocation
+    from run.agents import PreparedSubagentInvocation
     definition = next(item for item in dispatch._public(tmp_path, "alice") if item.name == "task_plan")
     assert definition.input_schema.get("additionalProperties") is True
-    # Preserve the synchronous branch; isolate plan-generation business setup.
     monkeypatch.setattr(dispatch, "prepare_main_agent_invocation",
-                        lambda **kwargs: PreparedSubagentInvocation(kwargs["input_data"], synchronous_only=True))
-    scheduler = SimpleNamespace(submit=Mock(return_value="offline-plan"))
+                        lambda **kwargs: PreparedSubagentInvocation(kwargs["input_data"]))
+    scheduler = SimpleNamespace(submit=Mock(return_value="offline-plan"),
+                                get=Mock(return_value={"agent": "task_plan", "status": "queued"}))
     monkeypatch.setattr(dispatch, "get_agent_scheduler", lambda *_args, **_kwargs: scheduler)
-    monkeypatch.setattr(dispatch, "_wait_for_task",
-                        lambda *_args, **_kwargs: (True, AgentRunResult("task_plan", {}, "", {}, "offline")))
     payload = {"action": "create", "custom_field": "accepted"}
     result = dispatch.run("call", "task_plan", input=payload, wait=True, context=ctx(tmp_path))
-    assert result["ok"] is True and result["status"] == "completed"
+    assert result["ok"] is True and result["status"] == "queued" and result["detached"] is True
     assert scheduler.submit.call_args.args[1] == payload
 
 

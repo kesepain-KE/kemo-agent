@@ -7,6 +7,7 @@ from __future__ import annotations
 from tests.card_history_support import session_history
 
 import copy
+import json
 import logging
 import threading
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 
 from plugins.subagent_dispatch import tool as dispatch
+from provider.protocol.models import MessageItem, text_from_content
 from provider.schema import ChatResponse, ToolCall
 from run.agents import AgentRunResult
 from run.agents import TaskCoordinator
@@ -93,17 +95,22 @@ def test_t3_timed_out_child_is_failed_and_not_acknowledged_as_success(tmp_path, 
         dispatch, "prepare_main_agent_invocation",
         lambda **kwargs: SimpleNamespace(synchronous_only=False, payload={}),
     )
-    # The scheduler's returned segment has really exited. No live execution or
-    # fabricated terminal ledger row is involved in this return-contract test.
-    scheduler = SimpleNamespace(
-        submit=lambda *args, **kwargs: "timed-out-task",
-        wait=lambda *args, **kwargs: AgentRunResult(
-            agent="worker", data={"answer": "partial"}, raw_text="partial",
-            usage={}, model="offline-test",
-            metadata={"partial": True, "stop_reason": stop_reason, "resumable": True},
-        ),
-    )
-    monkeypatch.setattr(dispatch, "get_agent_scheduler", lambda *args, **kwargs: scheduler)
+    from run.agents import AgentRunner, AgentScheduler, AgentTimeoutError, AgentToolLimitError, TaskLedger
+
+    scheduler = AgentScheduler(AgentRunner(tmp_path, "alice"))
+
+    def job(_):
+        partial = AgentRunResult("worker", {"answer": "partial"}, "partial", {}, "offline-test")
+        if stop_reason == "timeout":
+            raise AgentTimeoutError("old segment timed out", process_terminated=True, partial_result=partial)
+        raise AgentToolLimitError("tool budget exhausted", partial_result=partial)
+
+    def submit(agent, payload, **kwargs):
+        return scheduler.submit_callable(agent, payload, job, ownership=kwargs["ownership"],
+                                         source=kwargs["source"], session_id=kwargs["session_id"])
+
+    monkeypatch.setattr(dispatch, "get_agent_scheduler", lambda *args, **kwargs:
+                        SimpleNamespace(submit=submit, get=scheduler.get))
     acknowledge = Mock()
     monkeypatch.setattr(TaskCoordinator, "acknowledge_sync", acknowledge)
     tool = ToolDefinition(
@@ -119,18 +126,35 @@ def test_t3_timed_out_child_is_failed_and_not_acknowledged_as_success(tmp_path, 
         )]),
         ChatResponse(text="The child timed out."),
     ])
-    events = list(iter_request_events(
-        {"user": "alice", "source": "web", "session_id": "timeout", "prompt": "work"},
-        root=tmp_path, provider_factory=lambda _: provider,
-        tool_registry_factory=lambda *args: ToolRegistry({"subagent_dispatch": tool}),
-    ))
-    result = next(event for event in events
-                  if event.type == "tool_call_result" and not event.metadata["execution_live"])
-    assert "result" in result.result, result.result
-    assert result.result["ok"] is False
-    assert result.result["result"]["ok"] is False
-    assert result.metadata["status"] == "failed"
-    acknowledge.assert_not_called()
+    try:
+        events = list(iter_request_events(
+            {"user": "alice", "source": "web", "session_id": "timeout", "prompt": "work"},
+            root=tmp_path, provider_factory=lambda _: provider,
+            tool_registry_factory=lambda *args: ToolRegistry({"subagent_dispatch": tool}),
+        ))
+        result = next(event for event in events
+                      if event.type == "tool_call_result" and not event.metadata["execution_live"])
+        assert result.result["result"]["detached"] is True
+        assert result.result["result"]["status"] in {"queued", "running"}
+        task_id = result.result["result"]["task_id"]
+        record = TaskLedger(tmp_path, "alice").get(task_id, "web", "timeout")
+        assert record["status"] == ("timed_out" if stop_reason == "timeout" else "tool_limit")
+        assert record["result"] == {"answer": "partial"} and record["handled"]
+        notices = []
+        for request in provider.requests[1:]:
+            for item in request.input:
+                if isinstance(item, MessageItem):
+                    text = text_from_content(item.content)
+                    if text.startswith("[CardStream dynamic_tail:"):
+                        tail = json.loads(text.split("\n", 1)[1])
+                        if content := tail.get("subagent_events", {}).get("content"):
+                            notices.extend(json.loads(content.splitlines()[1]))
+        receipt, = [notice for notice in notices if notice["task_id"] == task_id]
+        assert receipt["ok"] is False and receipt["result"] == {"answer": "partial"}
+        assert receipt["stop_reason"] == stop_reason
+        acknowledge.assert_not_called()
+    finally:
+        scheduler.close(wait=True, cancel_pending=True)
 
 
 def test_t5_stale_plan_revision_is_rejected_without_overwriting_newer_plan(tmp_path, monkeypatch):

@@ -16,7 +16,7 @@ IGNORED_PARTS = {
 # These are cohesive declaration/protocol or page-composition roots rather than
 # multi-domain implementation modules.  Every exception must carry a rationale.
 COHESIVE_LONG_MODULES = {
-    "expand/global/kemo_app/start_expand.py": "single Kemo App control dispatcher and panel entry",
+    "expand/global/kemo_bridge/start_expand.py": "single Kemo Bridge control dispatcher and panel entry",
     "expand/global/kemo_gateway_status/gateway_status.py": "single gateway status collection and rendering domain",
     "provider/adapters/compat.py": "single provider compatibility conversion layer",
     "provider/protocol/models.py": "provider protocol data declarations without orchestration",

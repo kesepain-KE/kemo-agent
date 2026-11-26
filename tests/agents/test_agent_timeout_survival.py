@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from plugins.subagent_dispatch.tool import _wait_for_task, run as dispatch_subagent
+from plugins.subagent_dispatch.tool import run as dispatch_subagent
 from run.agents import AgentScheduler
 from run.tools import execution_watchdog_snapshot
 from run.agents import (
@@ -18,7 +18,6 @@ from run.agents import (
     AgentRunResult,
     AgentRunner,
     AgentTaskNotFoundError,
-    AgentTaskWaitTimeout,
     AgentTimeoutError,
 )
 from run.agents import AgentError, discover_agents
@@ -234,7 +233,6 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
                 "session_id": "timeout-validation",
             }
             definition = SimpleNamespace(name="custom", timeout=10.0)
-            result = AgentRunResult("custom", {"ok": True}, "{}", {}, "mock")
             submitted: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
             class RecordingScheduler:
@@ -242,10 +240,11 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
                     submitted.append((args, kwargs))
                     return "agent-task-test"
 
-                def wait(self, task_id, timeout=None, **kwargs):
-                    self.last_wait = (task_id, timeout)
-                    del kwargs
-                    return result
+                def wait(self, *args, **kwargs):
+                    raise AssertionError("dispatch must not wait")
+
+                def get(self, task_id, **kwargs):
+                    return {"id": task_id, "agent": "custom", "status": "queued"}
 
             with (
                 patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
@@ -257,10 +256,6 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
                 patch(
                     "plugins.subagent_dispatch.tool.get_agent_scheduler",
                     return_value=RecordingScheduler(),
-                ),
-                patch(
-                    "plugins.subagent_dispatch.tool.persist_main_agent_result",
-                    return_value=None,
                 ),
             ):
                 dispatched = dispatch_subagent(
@@ -274,39 +269,39 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
             self.assertEqual(submitted[0][0], ("custom", {}))
             self.assertEqual(submitted[0][1]["timeout"], 3.0)
             self.assertEqual(submitted[0][1]["allow_sync"], True)
-            self.assertEqual(dispatched["status"], "completed")
+            self.assertEqual(dispatched["status"], "queued")
+            self.assertTrue(dispatched["detached"])
 
             with (
                 patch("plugins.subagent_dispatch.tool._public", return_value=[definition]),
                 patch("plugins.subagent_dispatch.tool.load_config", return_value={}),
-                self.assertRaisesRegex(AgentError, "timeout 必须是正数"),
+                self.assertRaisesRegex(AgentError, "timeout 必须是非负有限数"),
             ):
                 dispatch_subagent(
                     "call",
                     agent="custom",
                     input={},
-                    timeout=0,
+                    timeout=-1,
                     context=context,
                 )
 
-    def test_wait_returns_timed_out_running_snapshot_instead_of_losing_task_id(self) -> None:
-        class TimedOutRunningScheduler:
-            def get(self, task_id):
-                return {"id": task_id, "status": "timed_out_running"}
+    def test_internal_wait_keeps_timed_out_running_snapshot_and_task_id(self) -> None:
+        future = Future()
 
-            def wait(self, task_id, timeout=None):
-                del task_id, timeout
-                raise AgentQueueError("仍在运行")
+        def job(_):
+            raise AgentTimeoutError("仍在运行", process_terminated=False, completion_future=future)
 
-        completed, snapshot = _wait_for_task(
-            TimedOutRunningScheduler(),
-            "agent-task-still-running",
-            timeout=0,
-        )
-
-        self.assertFalse(completed)
-        self.assertEqual(snapshot["status"], "timed_out_running")
-        self.assertEqual(snapshot["id"], "agent-task-still-running")
+        scheduler = AgentScheduler(AgentRunner(self.root, "kesepain", config=_CONFIG))
+        self.addCleanup(scheduler.close, wait=True, cancel_pending=True)
+        task_id = scheduler.submit_callable("custom", {}, job)
+        try:
+            with self.assertRaisesRegex(AgentQueueError, "仍在运行"):
+                scheduler.wait(task_id, timeout=2)
+            snapshot = scheduler.get(task_id)
+            self.assertEqual(snapshot["status"], "timed_out_running")
+            self.assertEqual(snapshot["id"], task_id)
+        finally:
+            future.set_result(_result())
 
     def test_dispatch_timeout_returns_task_that_status_and_cancel_can_follow(self) -> None:
         definition = SimpleNamespace(
@@ -326,12 +321,12 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
 
             def wait(self, task_id, timeout=None, **scope):
                 del task_id, timeout
-                self.wait_scope = scope
-                raise AgentTaskWaitTimeout("等待超时")
+                raise AssertionError("dispatch must not wait")
 
             def get(self, task_id, **scope):
                 self.get_scope = scope
-                return {"id": task_id, "status": self.status}
+                error = {"cancel_requested": True, "process_terminated": True} if self.cancelled else None
+                return {"id": task_id, "agent": "custom", "status": self.status, "error": error}
 
             def cancel(self, task_id, **scope):
                 self.cancel_scope = scope
@@ -381,7 +376,8 @@ class AgentTimeoutSurvivalTests(unittest.TestCase):
         self.assertEqual(status["status"], "running")
         self.assertTrue(cancelled["cancelled"])
         self.assertTrue(scheduler.cancelled)
-        self.assertEqual(scheduler.wait_scope, {"source": "web", "session_id": "subagent-timeout-test"})
+        self.assertEqual(cancelled["cancel_state"], "exited")
+        self.assertTrue(running["detached"])
         self.assertEqual(scheduler.get_scope, {"source": "web", "session_id": "subagent-timeout-test"})
         self.assertEqual(scheduler.cancel_scope, {"source": "web", "session_id": "subagent-timeout-test"})
 

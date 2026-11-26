@@ -400,7 +400,7 @@ class SubAgentHotPlugTests(unittest.TestCase):
                     "output_schema": {"type": "object"},
                     "agent_config": {
                         "schema_version": 1,
-                        "tools": {"plugins": {"allow": []}, "max_iterations": 0},
+                        "tools": {"plugins": {"allow": []}, "max_iterations": -1},
                     },
                 },
                 context={"root": str(root), "user": "alice"},

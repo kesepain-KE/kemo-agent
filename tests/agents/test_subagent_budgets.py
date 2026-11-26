@@ -11,12 +11,12 @@ from provider.protocol.enums import IncompleteReason, ResponseStatus
 from provider.protocol.models import KemoResponse, Usage
 from run.agents import AgentRunner, AgentScheduler, AgentQueueError, AgentProviderError
 from run.agents.budgets import effective_limit
-from run.agents.continuation import CheckpointStore, restore_items
+from run.agents.card_stream import SOURCE, agent_store
 from run.agents.controls import describe_agent, guide_task, split_task, failure_advice
 from run.agents import TaskCoordinator
 from tests.agents.test_general_worker import workspace, OUTPUT, plugin  # noqa: F401
-from tests.agents.test_subagent_continuation import Provider, call, write_plugin
-from provider.protocol.models import ToolCallItem, ToolResultItem
+from tests.agents.test_subagent_continuation import Provider, call, card_checkpoint, legacy_task, write_plugin
+from provider.protocol.models import JsonContent, ToolCallItem, ToolResultItem
 
 
 TASK_TIMEOUT = 10
@@ -52,8 +52,7 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
         assert record["usage"]["provider_request_count"] == 2
         assert record["stop_reason"] == "tool_budget_exhausted"
         assert record["budget"]["tool_calls_used"] == record["budget"]["total_tool_calls"] == 2
-        snapshot = CheckpointStore(root, "alice", task_id).load(source="web", session_id="scope")
-        items = restore_items(snapshot)
+        _, items = card_checkpoint(root, task_id)
         assert {i.call_id for i in items if isinstance(i, ToolCallItem)} == {
             i.call_id for i in items if isinstance(i, ToolResultItem)}
         assert "工具预算收尾指令" in provider.requests[1].model_dump_json()
@@ -65,7 +64,7 @@ def test_budget_stop_retains_usage_results_and_resume_gets_new_segment(workspace
         assert second["budget"]["tool_calls_used"] == 2
         assert second["budget"]["total_tool_calls"] == 4
         assert second["budget"]["max_tool_calls"] == 2
-        assert second["budget"]["timeout"] == 10
+        assert second["budget"]["timeout"] is None
         assert second["usage"]["total_tokens"] == 12
         assert (root / "effects.txt").read_text().splitlines() == ["a", "b", "c", "d"]
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership,
@@ -93,7 +92,7 @@ def test_segment_budget_is_independent_of_retired_global_limit(workspace, limit)
         assert scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope").data == OUTPUT
         budget = parent.ledger.get(task_id, "web", "scope")["budget"]
         assert budget["max_tool_calls"] == (80 if limit is None else limit)
-        assert budget["tool_calls_used"] == 2 and budget["timeout"] == 10
+        assert budget["tool_calls_used"] == 2 and budget["timeout"] is None
     finally:
         scheduler.close(wait=True, cancel_pending=True)
 
@@ -183,10 +182,7 @@ def test_output_truncation_recovers_without_replaying_tools(
             assert record["error"]["retry_budget_exhausted"] is True
             assert record["error"]["process_terminated"] is True
             assert record["result"]["status"] == "partial"
-            saved = CheckpointStore(root, "alice", task_id).load(
-                source="web", session_id="scope",
-            )
-            items = restore_items(saved)
+            _, items = card_checkpoint(root, task_id)
             completed_results = [
                 item for item in items
                 if isinstance(item, ToolResultItem) and item.name == "write"
@@ -267,6 +263,9 @@ def test_running_guidance_is_scope_bound_and_delivered_at_next_request(workspace
         release.set()
         scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
         assert "只整理现有结果" in provider.requests[1].model_dump_json()
+        guides = [card for card in agent_store(root, "alice", task_id).raw_page(SOURCE, task_id)
+                  if card.raw_level == "guidance"]
+        assert len(guides) == 1 and "只整理现有结果" in guides[0].raw_payload["text"]
         public = parent.ledger.public(parent.ledger.get(task_id, "web", "scope"))
         assert "_guidance" not in public
     finally:
@@ -390,7 +389,9 @@ def test_dispatch_budget_status_and_resume_no_tool_history(workspace, monkeypatc
         assert response["status"] == "tool_limit" and response["resumable"]
         assert response["usage"]["total_tokens"] == 6
         response = dispatch("resume", task_id=task_id, max_tool_calls=0, wait=True, context=context)
-        assert response["status"] == "completed"
+        assert response["status"] in {"queued", "running"} and response["detached"]
+        assert scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope").data == OUTPUT
+        assert dispatch("status", task_id=task_id, context=context)["status"] == "completed"
         assert not {"metadata", "events", "tool_calls", "arguments"} & set(response)
     finally:
         scheduler.close(wait=True, cancel_pending=True)
@@ -424,7 +425,7 @@ def test_main_receives_soft_threshold_progress_once_after_accepted_response(work
         scheduler.close(wait=True, cancel_pending=True)
 
 
-def test_unlimited_tools_still_stops_at_runtime_deadline(workspace):
+def test_owned_model_loop_with_unlimited_tools_has_no_runtime_deadline(workspace):
     import time
     root, config = workspace
     def slow(_):
@@ -434,8 +435,8 @@ def test_unlimited_tools_still_stops_at_runtime_deadline(workspace):
     try:
         scheduler.wait(task_id, 5, source="web", session_id="scope")
         record = parent.ledger.get(task_id, "web", "scope")
-        assert record["status"] == "timed_out" and record["resumable"]
-        assert record["budget"]["unlimited"]
+        assert record["status"] == "completed" and not record["resumable"]
+        assert record["budget"]["unlimited"] and record["budget"]["timeout"] is None
     finally:
         scheduler.close(wait=True, cancel_pending=True)
 
@@ -597,19 +598,20 @@ def test_main_model_can_guide_its_running_subagent(workspace, monkeypatch):
 def test_legacy_tool_limit_failure_can_resume_only_with_valid_matching_checkpoint(workspace):
     root, config = workspace
     write_plugin(root)
-    provider = Provider([[call(value="a"), call(value="b", index=2)], {**OUTPUT, "status": "partial"}, OUTPUT])
-    scheduler, parent, ownership, task_id = start(root, config, provider, limit=1)
+    provider = Provider([OUTPUT])
+    first = call(value="a")
+    second = call(value="b", index=2)
+    receipts = [
+        ToolResultItem(id="result_v1_first", call_id=first.call_id, name="write",
+                       content=[JsonContent(data={"ok": True, "result": {"written": "a"}})]),
+        ToolResultItem(id="result_v1_second", call_id=second.call_id, name="write", is_error=True,
+                       content=[JsonContent(data={"ok": False, "not_executed": True})]),
+    ]
+    scheduler, parent, ownership, task_id, _ = legacy_task(
+        root, config, provider, [first, second, *receipts],
+    )
+    (root / "effects.txt").write_text("a\n", encoding="utf-8")
     try:
-        scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
-        # Recreate the exact old failure envelope without touching any real user.
-        scheduler._tasks[task_id].status = "failed"
-        scheduler._tasks[task_id].resumable = False
-        parent.ledger.update(task_id, status="failed", resumable=False,
-            error={"exception_type": "AgentToolLimitError", "message": "old limit"})
-        store = CheckpointStore(root, "alice", task_id)
-        data = store.load(source="web", session_id="scope")
-        data.pop("budget", None)
-        store.write(data)
         scheduler.resume(task_id, source="web", session_id="scope", ownership=ownership,
                          config=config, max_tool_calls=2)
         scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
@@ -639,7 +641,7 @@ def test_invalid_resume_budget_and_split_batch_do_not_mutate_stopped_task(worksp
         scheduler.close(wait=True, cancel_pending=True)
 
 
-def test_synchronous_failed_call_returns_partial_usage_without_claiming_success(workspace, monkeypatch):
+def test_async_dispatch_failure_delivers_partial_usage_without_claiming_success(workspace, monkeypatch):
     root, config = workspace
     write_plugin(root)
     monkeypatch.setattr("run.agents.runner._MAX_AGENT_RETRY_ATTEMPTS", 1)
@@ -654,6 +656,11 @@ def test_synchronous_failed_call_returns_partial_usage_without_claiming_success(
     try:
         response = dispatch("call", agent="general_worker", input={"task": "work"},
                             wait=True, timeout=10, context=context)
+        assert response["status"] in {"queued", "running"} and response["detached"]
+        task_id = response["task_id"]
+        with pytest.raises(AgentQueueError, match="business error"):
+            scheduler.wait(task_id, TASK_WAIT_TIMEOUT, source="web", session_id="scope")
+        response = dispatch("status", task_id=task_id, context=context)
         assert response["status"] == "failed" and response["ok"] is False
         assert response["data"]["status"] == "partial"
         assert response["usage"]["total_tokens"] == 3

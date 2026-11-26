@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import provider.factory as factory
-from plugins.subagent_dispatch.tool import run as dispatch, _effective_wait
+from plugins.subagent_dispatch.tool import run as dispatch
 from provider.schema import ChatResponse, ToolCall
 from run.agents import AgentRunner, AgentScheduler
 from run.agents.task_ledger import TaskLedger
@@ -29,18 +29,30 @@ def eventually(test, timeout=10):
     assert test()
 
 
-@pytest.mark.parametrize("executor,execution,special,expected", [
-    ("builtin:llm", "sync", False, False),
-    ("builtin:llm", "background", False, False),
-    ("builtin:llm", "background_serial", False, True),
-    ("executor.py:run", "sync", False, True),
-    ("builtin:llm", "sync", True, True),
+@pytest.mark.parametrize("agent,wait", [
+    ("general_worker", None), ("general_worker", True), ("general_worker", False),
+    ("task_plan", None), ("task_plan", False),
 ])
-def test_wait_policy_preserves_explicit_and_special_contracts(executor, execution, special, expected):
-    definition = SimpleNamespace(executor=executor, execution=execution)
-    assert _effective_wait(None, definition, synchronous_only=special) is expected
-    assert _effective_wait(True, definition, synchronous_only=special) is True
-    assert _effective_wait(False, definition, synchronous_only=special) is False
+def test_dispatch_wait_values_always_submit(agent, wait, workspace, monkeypatch):
+    import plugins.subagent_dispatch.tool as tool
+
+    root, _ = workspace
+    definition = SimpleNamespace(name=agent, input_schema={})
+    submissions = []
+    scheduler = SimpleNamespace(
+        submit=lambda *args, **kwargs: submissions.append((args, kwargs)) or "task",
+        get=lambda *args, **kwargs: {"id": "task", "agent": agent, "status": "queued"},
+        wait=lambda *args, **kwargs: pytest.fail("dispatch must not wait"),
+    )
+    monkeypatch.setattr(tool, "_public", lambda *a: [definition])
+    monkeypatch.setattr(tool, "prepare_main_agent_invocation", lambda **kw: SimpleNamespace(payload=kw["input_data"]))
+    monkeypatch.setattr(tool, "get_agent_scheduler", lambda *a, **kw: scheduler)
+    receipt = dispatch("call", agent, input={}, wait=wait, context={
+        "root": str(root), "user": "alice", "source": "web", "session_id": "scope",
+    })
+    assert len(submissions) == 1
+    assert receipt["task_id"] == "task" and receipt["status"] == "queued" and receipt["detached"] is True
+    assert ("wait=true" in receipt["message"]) == (wait is True)
 
 
 def test_default_five_calls_register_before_first_finishes_and_share_pool(workspace, monkeypatch):
@@ -107,7 +119,7 @@ def test_default_five_calls_register_before_first_finishes_and_share_pool(worksp
         scheduler.close(wait=True, cancel_pending=True)
 
 
-def test_explicit_wait_true_still_waits_for_completion(workspace, monkeypatch):
+def test_explicit_wait_true_returns_before_completion(workspace, monkeypatch):
     root, config = workspace
     entered, release = threading.Event(), threading.Event()
     class Child(ScriptedProvider):
@@ -125,10 +137,13 @@ def test_explicit_wait_true_still_waits_for_completion(workspace, monkeypatch):
     try:
         thread.start()
         assert entered.wait(5)
-        assert not result and thread.is_alive()
+        thread.join(3)
+        assert not thread.is_alive()
+        assert result[0]["status"] in {"queued", "running"} and result[0]["detached"] is True
+        task_id = result[0]["task_id"]
+        assert not scheduler._tasks[task_id].done_event.is_set()
         release.set()
-        thread.join(10)
-        assert result[0]["status"] == "completed"
+        assert scheduler.wait(task_id, timeout=5, source="web", session_id="scope").data == OUTPUT
     finally:
         release.set()
         thread.join(10)
@@ -145,7 +160,8 @@ def test_default_resume_returns_without_waiting_and_list_exposes_default(workspa
     )
     monkeypatch.setattr("plugins.subagent_dispatch.tool.get_agent_scheduler", lambda *a, **k: scheduler)
     context = {"root": str(root), "user": "alice", "source": "web", "session_id": "scope"}
-    response = dispatch("resume", task_id=snapshot["id"], context=context)
-    assert response["status"] == "running"
+    response = dispatch("resume", task_id=snapshot["id"], wait=True, context=context)
+    assert response["status"] == "running" and response["detached"] is True
     worker = next(a for a in dispatch("list", context=context)["agents"] if a["name"] == "general_worker")
     assert worker["default_wait"] is False
+    assert worker["default_timeout"] is None

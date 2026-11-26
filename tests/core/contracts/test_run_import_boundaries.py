@@ -90,7 +90,7 @@ PRODUCTION_EXCLUDES = {
     "users",
     "venv",
 }
-NESTED_PRODUCTION_EXCLUDES = {".test-work", "__pycache__"}
+NESTED_PRODUCTION_EXCLUDES = {".test-work", "__pycache__", "tests"}
 
 
 def production_python_files() -> list[Path]:

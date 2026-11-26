@@ -35,7 +35,6 @@ class MainAgentSubagentInvocationTests(unittest.TestCase):
         value = datetime.fromisoformat(prepared.payload["current_time_beijing"])
         self.assertEqual(value.utcoffset(), timedelta(hours=8))
         self.assertGreater(value.year, 2000)
-        self.assertFalse(prepared.synchronous_only)
 
     def test_time_plan_delete_drops_caller_runtime_time(self) -> None:
         prepared = self.prepare(

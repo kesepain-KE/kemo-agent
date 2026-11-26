@@ -10,7 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from plugins.subagent_dispatch.tool import run as dispatch
-from run.agents import close_agent_schedulers
+from run.agents import close_agent_schedulers, get_agent_scheduler
+from run.config import load_config
 from run.agents.external import (
     ExternalAgentError,
     call_external_agent,
@@ -162,7 +163,11 @@ class ExternalAgentBridgeTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(result["ok"])
+        self.assertTrue(result["ok"] and result["detached"])
+        context = {"root": str(self.root), "user": "alice", "source": "web", "session_id": "external-delivery"}
+        scheduler = get_agent_scheduler(self.root, "alice", config=load_config("alice", self.root))
+        scheduler.wait(result["task_id"], timeout=5, source="web", session_id="external-delivery")
+        result = dispatch("status", task_id=result["task_id"], context=context)
         self.assertEqual(result["status"], "completed")
         self.assertEqual(
             result["data"],
@@ -170,20 +175,17 @@ class ExternalAgentBridgeTests(unittest.TestCase):
         )
         self.assertNotIn("metadata", result)
 
-    def test_external_binding_rejects_background_call(self) -> None:
-        with self.assertRaisesRegex(Exception, "只支持同步调用"):
-            dispatch(
-                "call",
-                agent=self.handle,
-                input={"value": "x"},
-                wait=False,
-                context={
-                    "root": str(self.root),
-                    "user": "alice",
-                    "source": "web",
-                    "session_id": "external-control",
-                },
-            )
+    def test_external_binding_accepts_background_call(self) -> None:
+        self.addCleanup(close_agent_schedulers)
+        result = dispatch(
+            "call", agent=self.handle, input={"value": "x"}, wait=False,
+            context={"root": str(self.root), "user": "alice", "source": "web", "session_id": "external-control"},
+        )
+        self.assertTrue(result["detached"])
+        self.assertIn(result["status"], {"queued", "running"})
+        scheduler = get_agent_scheduler(self.root, "alice", config=load_config("alice", self.root))
+        terminal = scheduler.wait(result["task_id"], timeout=5, source="web", session_id="external-control")
+        self.assertEqual(terminal["data"], {"answer": "x"})
 
     def test_external_binding_rejects_invalid_input_before_expand(self) -> None:
         with self.assertRaises(ExternalAgentError):
@@ -204,7 +206,7 @@ class ExternalAgentBridgeTests(unittest.TestCase):
         self.assertEqual(discover_external_agents(self.root, "alice"), ())
 
     def test_dispatch_rejects_boolean_timeout(self) -> None:
-        with self.assertRaisesRegex(Exception, "timeout 必须是正数"):
+        with self.assertRaisesRegex(Exception, "timeout 必须是非负有限数"):
             dispatch(
                 "call",
                 agent=self.handle,
@@ -228,7 +230,7 @@ class ExternalAgentBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ExternalAgentError, "未完成状态"):
             call_external_agent(self.root, "alice", self.handle, {"value": "x"})
 
-    def test_dispatch_external_timeout_keeps_configured_survival_window(self) -> None:
+    def test_dispatch_external_keeps_bounded_transport_timeout_without_survival_extension(self) -> None:
         binding = SimpleNamespace(handle=self.handle, timeout=3_600.0)
         handle = self.handle
         submitted: dict[str, Any] = {}
@@ -239,14 +241,11 @@ class ExternalAgentBridgeTests(unittest.TestCase):
                 submitted["kwargs"] = kwargs
                 return "agent-task-external"
 
-            def wait(self, task_id, timeout=None, **kwargs):
-                del task_id, timeout
-                del kwargs
-                return {
-                    "status": "completed",
-                    "agent": handle,
-                    "data": {"answer": "ok"},
-                }
+            def wait(self, *args, **kwargs):
+                raise AssertionError("external submission must not wait")
+
+            def get(self, task_id, **scope):
+                return {"id": task_id, "agent": handle, "status": "queued"}
 
         scheduler = RecordingScheduler()
         config = {"agent_runtime": {"timeout_survival_seconds": 120}}
@@ -274,8 +273,12 @@ class ExternalAgentBridgeTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(submitted["kwargs"]["timeout"], 3_720.0)
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(result["detached"])
+        self.assertEqual(submitted["kwargs"]["timeout"], 3_600.0)
+        with patch("plugins.subagent_dispatch.tool.call_external_agent") as transfer:
+            submitted["args"][2](None)
+            self.assertEqual(transfer.call_args.kwargs["timeout"], 3_600.0)
 
     def test_dispatch_external_rejects_timeout_above_contract_limit(self) -> None:
         with (
