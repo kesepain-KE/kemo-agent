@@ -6,7 +6,7 @@
 
 ## 先选择更新入口
 
-当前代码稳定版本为 **2.0.0**，网关兼容基线为 **1.0.0**，知识图谱基线为 **1.6.0**。源码版本定义不等于 Release、npm 或 GHCR 产物已经发布。
+当前代码稳定版本为 **2.1.0**，网关兼容基线为 **1.0.0**，知识图谱基线为 **1.6.0**。源码版本定义不等于 Release、npm 或 GHCR 产物已经发布。
 本页后续命令和业务迁移描述只适用于源码安装的旧更新器，不适用于 `deploy/`：
 
 | 安装方式 | 更新操作（均先停止应用） |
@@ -27,16 +27,16 @@ Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故�
 ```json
 {
   "name": "kemo-agent",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "schema_version": 1,
   "compatibility": {
     "kemo-adapter-api": "1.0.0"
   },
   "components": {
-    "core": {"version": "2.0.0"},
-    "agents": {"version": "2.0.0"},
-    "plugins": {"version": "2.0.0"},
-    "web": {"version": "2.0.0"}
+    "core": {"version": "2.1.0"},
+    "agents": {"version": "2.1.0"},
+    "plugins": {"version": "2.1.0"},
+    "web": {"version": "2.1.0"}
   }
 }
 ```
@@ -45,7 +45,7 @@ Docker 数据卷不得通过 `down -v` 删除。首装命令、安装根、故�
 
 组件版本不要求始终与根版本相同；只修改某个板块时，可以只推进对应组件版本。更新器以 `version.json` 中的根版本和所选组件版本为准，并拒绝降级。
 
-本次 2.0.0 为全仓源码版本定义，core、agents、plugins、web 四个组件统一推进至 2.0.0；
+本次 2.1.0 为全仓源码版本定义，core、agents、plugins、web 四个组件统一推进至 2.1.0；
 前端 package/lock、CLI、操作手册和当前版本文档同步更新，第三方依赖与网关协议版本不随之改号。
 历史验收、旧版迁移夹具和已生成产物保留其原版本，不通过批量替换伪造新版本证据。
 
@@ -143,7 +143,8 @@ CLI 及本安装内的自定义解释器进程均保守视为可能写者；其�
 - `cron/task_cron_system/*.json` 更新静态任务定义时保留部署机的 `next_run_at`、`latest_run_at` 和 `status`；本地独有系统任务及日志不删除。
 - `config/global_config.yaml` 在 schema 相同时默认递归补入远程新增默认值，并完整保留本地已有值；schema 不同时停止更新，只有显式使用 `--replace-global-config` 才覆盖。1.3.2 有一个窄范围旧默认迁移：当本地框架版本不高于 1.3.1、目标版本不低于 1.3.2，且 `cron.session_idle_close_seconds` 仍精确等于旧默认值 `86400`、新版本默认值为 `5400` 时，自动改为 `5400`；其他自定义值不变。
 - 更新 `expand/global/register.py`、`sense/register.py`、`expand/share/register.py`、`skills/register.py`，不会删除这些资源根目录中的自定义模块。
-- `expand/global/kemo_app/`、`expand/global/kemo_gateway_status/` 与 `expand/global/kemo_graph/` 是三个系统内置拓展：core 同步其全部运行代码、`module/panel.json` 和模块说明；新增 Python 文件若未进入内置清单，正式基准测试会失败。`module.yaml` 按本地激活状态合并，`module/panel.values.json` 只在缺失时用发布默认值初始化；真实配置、凭据、`module/status.json`、状态摘要、采集数据、图表、数据库和运行锁继续保留。
+- `expand/global/kemo_bridge/`、`expand/global/kemo_gateway_status/` 与 `expand/global/kemo_graph/` 是三个内置拓展。core 按清单更新运行代码、面板和说明；Bridge 的宿主工作台与独立管理台静态资源也在清单内。`module.yaml` 保留本地注入开关、健康状态和最近采集时间；本地凭据、数据库（含 SQLite 伴随文件）、运行锁、状态与面板设定不覆盖。`config/module_ui_grants.json` 由 Web 工作台管理，不随源码更新或回滚。
+- 已运行 Bridge 2.1.0 的安装可原地更新，既有 peer、审计、文件授权、运行回放和设备指令保留。从 1.1.5 切换时，先停止旧桥接与宿主，将旧拓展目录移到 `expand/global/` 之外妥善备份，再安装并初始化新模块。更新器不会自动卸载旧模块或迁移旧凭据；须重新注册对端并为新工作台授权。
 - core 源码同步成功后先执行 `pip install -r requirements.txt`；依赖刷新成功后才补齐现有用户骨架，并初始化缺失的记忆、历史、任务计划和运行日志数据库。这样，前端构建或依赖安装失败时不会先改用户数据库。初始化失败时自动进入恢复流程；更新器不扫描或导入其他存储格式。
 
 ## agents — 内置子智能体
