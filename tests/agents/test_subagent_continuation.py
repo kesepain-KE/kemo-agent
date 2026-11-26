@@ -49,19 +49,19 @@ class Provider(MockProvider):
         )
 
 
-def timeout_from_provider_entry(monkeypatch, provider):
+def timeout_from_entry(monkeypatch, target, method):
     """Keep tiny in-flight timeout scenarios independent of startup latency."""
     from types import SimpleNamespace
     origin = time.monotonic()
     entered = []
-    create = provider.create
+    invoke = getattr(target, method)
     def clock():
         return origin + (time.monotonic() - entered[0] if entered else 0)
     def start(*args, **kwargs):
         if not entered:
             entered.append(time.monotonic())
-        return create(*args, **kwargs)
-    monkeypatch.setattr(provider, "create", start)
+        return invoke(*args, **kwargs)
+    monkeypatch.setattr(target, method, start)
     clock_module = SimpleNamespace(monotonic=clock, sleep=time.sleep)
     monkeypatch.setattr("run.agents.runner.time", clock_module)
     monkeypatch.setattr("run.agents.budgets.time", clock_module)
@@ -71,7 +71,7 @@ def timeout_from_provider_entry(monkeypatch, provider):
 def stable_inflight_timeout_scenarios(monkeypatch):
     # These tests target provider/tool in-flight expiry. Production initialization
     # accounting is covered separately in test_subagent_budgets.py.
-    timeout_from_provider_entry(monkeypatch, Provider)
+    timeout_from_entry(monkeypatch, Provider, "create")
 
 
 def call(name="write", value="first", index=1):
@@ -548,7 +548,8 @@ def test_live_tool_future_is_drained_and_checkpoint_contains_its_actual_result(w
 def test_dispatch_call_status_and_resume_do_not_return_tool_history(workspace, monkeypatch):
     root, config, provider, scheduler, coordinator, ownership, task_id = timed_out_task(workspace)
     monkeypatch.setattr("plugins.subagent_dispatch.tool.get_agent_scheduler", lambda *a, **k: scheduler)
-    provider.steps.append(OUTPUT)
+    # The first segment may expire without consuming its wrap-up reply.
+    provider.steps[:] = [OUTPUT]
     context = {"root": str(root), "user": "alice", "source": "web", "session_id": "scope",
                "task_ownership": ownership}
     try:
@@ -619,6 +620,7 @@ def test_completed_parent_can_transfer_resume_to_new_same_session_parent(workspa
 
 
 def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(workspace, monkeypatch):
+    from run.agents import model_loop
     from run.engine import iter_request_events
     import shutil
     from pathlib import Path
@@ -641,9 +643,9 @@ def test_main_model_receives_timeout_conclusion_resumes_same_task_and_finishes(w
     # Survival may expire before wrap-up HTTP starts. Route the fake reply by
     # the actual segment, not by assuming that wrap-up consumed a queue entry.
     child = Provider([[call()], finish_child, finish_child])
-    # The main fake model uses the same class; start this scenario's clock only
-    # when its child model enters, rather than on the parent's dispatch response.
-    timeout_from_provider_entry(monkeypatch, child)
+    # This scenario requires the first real tool effect. Do not spend its short
+    # in-flight timeout on either Provider setup or the initial card commits.
+    timeout_from_entry(monkeypatch, model_loop, "execute_tool")
     scheduler = legacy_scheduler(AgentRunner(root, "alice", config=config, provider_factory=lambda _: child))
     monkeypatch.setattr("plugins.subagent_dispatch.tool.get_agent_scheduler", lambda *a, **k: scheduler)
     observed = {}

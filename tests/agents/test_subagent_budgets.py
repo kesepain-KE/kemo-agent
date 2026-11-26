@@ -460,6 +460,7 @@ def test_main_model_receives_budget_conclusion_and_resumes_without_replaying(wor
     import shutil
     from pathlib import Path
     from run.engine import iter_request_events
+    from run.agents import model_loop
     from run.agents.task_ledger import TaskLedger
     root, config = workspace
     write_plugin(root)
@@ -476,16 +477,35 @@ def test_main_model_receives_budget_conclusion_and_resumes_without_replaying(wor
     scheduler = AgentScheduler.from_runner(AgentRunner(root, "alice", config=config,
                                                      provider_factory=lambda _: child))
     monkeypatch.setattr("plugins.subagent_dispatch.tool.get_agent_scheduler", lambda *a, **k: scheduler)
+    warning_seen = threading.Event()
+    execute = model_loop.execute_tool
+
+    def wait_for_warning(tool, arguments, **kwargs):
+        # The current tool has already counted towards the threshold and
+        # published progress; let the parent observe it before the child concludes.
+        if tool.name == "write" and arguments["value"] == "first":
+            assert warning_seen.wait(TASK_WAIT_TIMEOUT), "parent did not receive the budget warning"
+        return execute(tool, arguments, **kwargs)
+
+    monkeypatch.setattr(model_loop, "execute_tool", wait_for_warning)
     observed = {}
-    def resume(request):
+
+    def reply(request):
+        if observed:
+            return {"answer": "merged"}
+        wire = request.model_dump_json()
+        if "[框架子任务结果通知" not in wire:
+            return {"draft": "awaiting worker"}
+        if "budget_warning" in wire:
+            assert not warning_seen.is_set()
+            warning_seen.set()
+            return {"draft": "budget warning received"}
+
         records, _ = TaskLedger(root, "alice").records("web", "scope", parent=None)
         record = next(r for r in records if r["agent"] == "general_worker")
-        if record["status"] == "running":
-            assert '"budget_warning"' in request.model_dump_json() or "budget_warning" in request.model_dump_json()
-            main.steps.insert(0, resume)
-            return {"draft": "budget warning received"}
-        assert partial["summary"] in request.model_dump_json()
+        assert partial["summary"] in wire
         assert record["status"] == "tool_limit" and record["resumable"]
+        assert warning_seen.is_set()
         observed["id"] = record["id"]
         return [ToolCallItem(id="call_resume", call_id="callid_resume", name="subagent_dispatch",
             arguments={"action": "resume", "task_id": record["id"], "wait": True,
@@ -494,7 +514,7 @@ def test_main_model_receives_budget_conclusion_and_resumes_without_replaying(wor
         [ToolCallItem(id="call_dispatch", call_id="callid_dispatch", name="subagent_dispatch",
             arguments={"action": "call", "agent": "general_worker", "input": {"task": "work"},
                        "max_tool_calls": 1, "timeout": 10, "wait": False})],
-        {"draft": "awaiting worker"}, resume, {"answer": "merged"}, {"answer": "merged"}, {"answer": "merged"},
+        *[reply] * 6,
     ])
     try:
         events = list(iter_request_events(
@@ -507,6 +527,7 @@ def test_main_model_receives_budget_conclusion_and_resumes_without_replaying(wor
         assert (root / "effects.txt").read_text().splitlines() == ["first", "second"]
         assert 4 <= len(main.requests) <= 7
     finally:
+        warning_seen.set()
         scheduler.close(wait=True, cancel_pending=True)
 
 

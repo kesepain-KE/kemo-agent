@@ -1,6 +1,7 @@
 """Real Linux process groups behind the POSIX foreground Shell boundary."""
 
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
 import multiprocessing
 from multiprocessing import util as mp_util
@@ -492,7 +493,7 @@ def test_unsubscribed_shell_completes_once_and_keeps_its_original_receipt(worksp
         with ThreadPoolExecutor() as pool:
             pending = pool.submit(waiter.wait_reply, 8)
             try:
-                with pytest.raises(TimeoutError):
+                with pytest.raises(FutureTimeoutError):
                     pending.result(0.1)
             finally:
                 waiter.unsubscribe()

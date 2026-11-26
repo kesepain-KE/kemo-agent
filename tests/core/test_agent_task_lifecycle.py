@@ -138,9 +138,22 @@ def test_multiple_success_and_failure_results_are_delivered_once(setup):
     assert len(children) == 2 and all(c['handled'] for c in children)
 
 
-def test_sync_result_does_not_create_a_duplicate_notification(setup):
+def test_sync_result_does_not_create_a_duplicate_notification(setup, monkeypatch):
     root, _ = setup
-    JOBS['worker'] = lambda cancel: {'answer': 'sync-output'}
+    waiting = threading.Event()
+    wait = TaskCoordinator.wait
+
+    def observe_wait(coordinator, *args, **kwargs):
+        waiting.set()
+        return wait(coordinator, *args, **kwargs)
+
+    def work(cancel):
+        assert waiting.wait(3)
+        return {'answer': 'sync-output'}
+
+    # Keep the synchronous dispatch live through the initial receipt grace.
+    monkeypatch.setattr(TaskCoordinator, 'wait', observe_wait)
+    JOBS['worker'] = work
     thread, _, _, errors, provider = launch(root, wait=True)
     thread.join(8)
     assert not thread.is_alive() and not errors
