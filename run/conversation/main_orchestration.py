@@ -7,8 +7,6 @@ integration state machine, not its completion authority.
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -27,7 +25,6 @@ from provider.token_usage import reported_token_fields
 from run.agents import TaskCoordinator, delivery
 from run.cards import (
     CardMeter, CardStore, IntegrationStore, estimate_request_tokens,
-    json_text,
 )
 from run.config import build_prompt_bundle, load_config, read_dynamic_tail, refresh_memory_prompt_bundle
 from run.extensions import (
@@ -48,7 +45,9 @@ from run.tools import (
     validate_tool_call_batch,
 )
 from run.conversation.guidance import GuidanceInput, normalize_guidance
-from run.conversation.guidance_runtime import InterruptGuidance, guidance_failure_details, prepare_guidance
+from run.conversation.guidance_runtime import (
+    InterruptGuidance, advance_queued_guidance, guidance_failure_details, prepare_guidance,
+)
 from run.conversation.media_routing import prepare_provider_request
 from run.conversation.provider_exchange import exchange
 from run.conversation.provider_events import is_context_length_exceeded
@@ -58,9 +57,9 @@ from run.conversation.runtime_helpers import (
     close_mailbox as _close, drain as _drain, native_tools as _native_tools,
     positive as _positive, build_failure_metadata, response_payloads,
     call_is_explicitly_async as _call_is_explicitly_async,
-    duplicate_execution_should_block as _duplicate_execution_should_block, observed_exchange,
-    account_compression_failure, prepare_runtime_request, request_context_snapshot,
-    runtime_dynamic_tail,
+    observed_exchange, account_compression_failure, prepare_runtime_request, request_context_snapshot,
+    configure_tool_call, record_tool_result, settle_tool_without_execution, runtime_dynamic_tail,
+    wait_for_dependencies,
 )
 
 def run_conversation(request, *, root: Path, provider_factory, tool_registry_factory,
@@ -363,53 +362,19 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                         raise RetryCancelled("用户停止了当前整合")
                     continue
                 raw = event.result
-                status = str(event.metadata.get("status") or "")
-                synthetic_statuses = {
-                    "blocked", "duplicate_blocked", "duplicate_reused",
-                    "identical_call_blocked", "invalid_arguments",
-                    "retry_reuse_blocked", "temporarily_unavailable", "not_executed",
-                }
-                payload = copy.deepcopy(raw)
-                event.result = payload
-                signature = tool_call_signature(event.tool_name, event.arguments or {})
-                execution_live = bool(event.metadata.get("execution_live"))
-                error = raw.get("error") if isinstance(raw, dict) else None
-                error = error if isinstance(error, dict) else {}
-                capacity_limited = error.get("category") == "execution_capacity"
-                result_too_large = error.get("category") == "result_too_large"
-                if not execution_live:
-                    async_execution_ids.discard(event.metadata["execution_id"])
-                    # Synthetic duplicate receipts have their own IDs; only the
-                    # original execution's terminal receipt may release its fence.
-                    if live_signatures.get(signature) == event.metadata.get("execution_id"):
-                        live_signatures.pop(signature, None)
-                    if status not in synthetic_statuses and not capacity_limited:
-                        identical.record(event.tool_name, event.arguments or {})
-                        failures.record(
-                            event.tool_name,
-                            succeeded=payload.get("ok") is True or result_too_large,
-                        )
-                        seen.remember(
-                            event.tool_name, event.arguments or {}, payload,
-                            call_iterations.get(event.tool_call_id, iteration),
-                            retain_failure_for_retry=(status == "failed"),
-                        )
-                    event.metadata["consecutive_identical_calls"] = (
-                        identical.count if signature == identical.signature else 0
-                    )
-                provider_call_id = "callid_" + hashlib.sha256(json_text([
-                    integration.key, integration.id, event.tool_call_id,
-                ]).encode("utf-8")).hexdigest()
-                tool_records.append({"id": event.tool_call_id,
-                                     "provider_call_id": provider_call_id,
-                                     "name": event.tool_name, "arguments": event.arguments,
-                                     "result": payload, **event.metadata})
+                payload = record_tool_result(
+                    event, integration=integration, iteration=call_iterations.get(event.tool_call_id, iteration),
+                    async_execution_ids=async_execution_ids, live_signatures=live_signatures,
+                    identical=identical, failures=failures, seen=seen, tool_records=tool_records,
+                )
                 if event.tool_name == "subagent_dispatch" and isinstance(raw, dict):
                     business_result = raw.get("result")
                     if isinstance(business_result, dict) and business_result.get("task_id"):
+                        arguments = event.arguments
+                        assert arguments is not None
                         if (business_result.get("detached") is True
-                                and event.arguments.get("action") == "call"
-                                and event.arguments.get("agent") == "task_plan"):
+                                and arguments.get("action") == "call"
+                                and arguments.get("agent") == "task_plan"):
                             plan_call_id = event.tool_call_id
                         elif business_result.get("status") == "completed":
                             coordinator.acknowledge_sync(business_result["task_id"])
@@ -441,30 +406,11 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 )
                 yield RunEvent(type="done", metadata=outcome)
                 return
-            new_interrupts = []
-            for raw in _drain(channel):
-                item = normalize_guidance(raw)
-                if item is None:
-                    continue
-                if item.mode == "background":
-                    delayed_guidance.append((tool_batch, item))
-                else:
-                    item.id = item.id or "guidance_" + uuid4().hex
-                    new_interrupts.append(InterruptGuidance(item))
-            if new_interrupts:
-                interrupt_guidance.extend(new_interrupts)
-            # An offer cannot detach a call that had not been dispatched yet.
-            # Legacy bare strings have no handoff scope.
-            scoped_interrupts = [entry for entry in new_interrupts if entry.item._offered_at]
-            if scoped_interrupts and batch_dispatch_times:
-                targets = {tool["id"]: tool for tool in integration.live_executions()
-                           if tool["id"] in batch_dispatch_times and tool["id"] not in async_execution_ids}
-                for entry in scoped_interrupts:
-                    entry.targets = {key: target for key, target in targets.items()
-                                     if batch_dispatch_times[key] <= entry.item._offered_at}
-            for entry in interrupt_guidance:
-                if entry.targets:
-                    yield from entry.advance(tool_runtime)
+            yield from advance_queued_guidance(
+                _drain(channel), tool_batch=tool_batch, batch_dispatch_times=batch_dispatch_times,
+                async_execution_ids=async_execution_ids, integration=integration, runtime=tool_runtime,
+                delayed=delayed_guidance, interrupts=interrupt_guidance,
+            )
             # Child and Shell notifications are runtime state in the virtual
             # tail, not invented user history or an extra persistence mechanism.
             live, unseen = integration.pending()
@@ -527,32 +473,11 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                             "jobs": [{"job_id": job["job_id"], "status": job["status"]}
                                      for job in pending_jobs],
                         })
-                    def wake():
-                        size = getattr(channel, "qsize", None)
-                        return (tool_runtime.poll_decisions()
-                                or tool_runtime.changed.is_set()
-                                or bool(callable(size) and size())
-                                or bool(allow_notifications and not plan_waiting and shell.ready()))
-
-                    def waiting_tools():
-                        if not pending_handoffs:
-                            return integration.live_executions()
-                        # A commit can clear execution_live before its receipt
-                        # can be verified and published. Wait for that event too.
-                        tools = {tool["id"]: tool for tool in integration.live_executions()}
-                        for key in pending_handoffs - tools.keys():
-                            tools[key] = {
-                                "id": key, "status": (
-                                    "running" if tool_runtime.shell_execution(key) is not None else "result_commit_pending"
-                                ),
-                            }
-                        return list(tools.values())
-
-                    if not coordinator.wait(
-                        cancel_event, wake=wake,
-                        pending=waiting_tools,
-                        allow_notifications=allow_notifications,
-                        heartbeat_only=plan_waiting, plan_call_id=plan_call_id,
+                    if not wait_for_dependencies(
+                        coordinator, cancel_event=cancel_event, channel=channel,
+                        integration=integration, tool_runtime=tool_runtime, shell=shell,
+                        pending_handoffs=pending_handoffs, allow_notifications=allow_notifications,
+                        plan_call_id=plan_call_id,
                     ):
                         if cancel_event.is_set():
                             raise RetryCancelled("用户停止了当前整合")
@@ -777,41 +702,11 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 continuation = (continuation or explicitly_async) and not plan_generation
                 call_iterations[call.call_id] = iteration
                 signature = tool_call_signature(call.name, call.arguments)
-                if signature in batch_signatures:
-                    tool_runtime.record(call, {"ok": False, "execution": {"executed": False},
-                        "error": {"code": "duplicate_blocked",
-                                  "message": "同一工具批次已提交相同调用；本次未再次启动，也未复用前次结果"}},
-                        status="duplicate_blocked")
-                    continue
-                batch_signatures.add(signature)
-                if failures.is_unavailable(call.name):
-                    tool_runtime.record(call, {
-                        "ok": False,
-                        "error": {
-                            "code": "temporarily_unavailable",
-                            "exception_type": "ToolTemporarilyUnavailable",
-                            "consecutive_failures": failures.count,
-                            "temporarily_unavailable": True,
-                            "message": f"工具 {call.name} 本次 Run 内已连续失败，暂时不可用",
-                        },
-                    }, status="temporarily_unavailable")
-                    continue
-                if signature in live_signatures:
-                    active_execution_id = live_signatures[signature]
-                    if _duplicate_execution_should_block(
-                        integration, active_execution_id,
-                    ):
-                        tool_runtime.record(call, {"ok": False, "execution": {"executed": False},
-                            "error": {"code": "duplicate_blocked",
-                                      "message": "相同调用仍在执行；本次未再次启动工具",
-                                      "execution_id": active_execution_id}},
-                            status="duplicate_blocked")
-                        continue
-                    live_signatures.pop(signature, None)
-                dedup = seen.check(call.name, call.arguments, identical,
-                                   retry_recovery=provider_retry_recovery)
-                if dedup is not None:
-                    tool_runtime.record(call, dedup[0], status=dedup[1])
+                if settle_tool_without_execution(
+                    call, signature=signature, integration=integration, tool_runtime=tool_runtime,
+                    batch_signatures=batch_signatures, live_signatures=live_signatures,
+                    failures=failures, seen=seen, identical=identical, retry_recovery=provider_retry_recovery,
+                ):
                     continue
                 definition = registry.get(call.name)
                 context = {
@@ -825,28 +720,11 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                     "task_plan_step_id": request.get("_task_plan_step_id"),
                     "task_plan_mode": request.get("_task_plan_mode"),
                 }
-                if call.name == "external_message":
-                    context["transport_registry"] = request.get("_transport_registry")
-                if call.name == "user_decision":
-                    integration.checkpoint_decisions(request)
-                if call.name == "shell":
-                    coordinator.ensure_started()
-                if call.name == "multimodal":
-                    context.update(user_text=prompt, tool_records=copy.deepcopy(tool_records))
-                if call.name == "subagent_dispatch":
-                    callback = request.get("_subagent_event_callback")
-                    if callable(callback):
-                        context["event_callback"] = lambda event, call=call: callback(replace(
-                            event, tool_call_id=call.call_id,
-                            metadata={**event.metadata, "parent_run_id": run_id}))
-                    if call.arguments.get("action") == "call":
-                        context["task_ownership_factory"] = lambda call=call: coordinator.ownership(call.call_id)
-                    elif call.arguments.get("action") in {"resume", "guide", "split"}:
-                        context["task_ownership"] = coordinator.ownership(call.call_id)
-                transform = None
-                if call.name == "attach_media":
-                    transform = lambda value, call=call, definition=definition: media.accept(
-                        definition, call.arguments, value, call_id=call.call_id, tool_records=tool_records)
+                transform = configure_tool_call(
+                    call, definition, context, request=request, integration=integration,
+                    coordinator=coordinator, media=media, prompt=prompt, tool_records=tool_records,
+                    run_id=run_id,
+                )
                 dispatched_at = time.monotonic()
                 execution_id = tool_runtime.start(call, definition, context=context,
                     timeout=float(tool_settings.get("timeout", 240)), transform=transform)

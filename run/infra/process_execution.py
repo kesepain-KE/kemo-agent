@@ -55,12 +55,14 @@ _ISOLATED_EXECUTABLE = _configure_isolated_process_context(_PROCESS_CONTEXT)
 class _ShellGroupProcess(SpawnProcess):
     @staticmethod
     def _Popen(process_obj):
-        from multiprocessing.popen_spawn_posix import Popen
+        if os.name != "posix":
+            raise NotImplementedError("前台 Shell 进程组仅支持 POSIX")
+        from multiprocessing.popen_spawn_posix import Popen  # pyright: ignore[reportAttributeAccessIssue]
 
         class PinnedPopen(Popen):
             reap_allowed = False
 
-            def poll(self, flag=os.WNOHANG):
+            def poll(self, flag=os.WNOHANG):  # pyright: ignore[reportAttributeAccessIssue]
                 # CPython also calls poll() from _cleanup() when another
                 # process starts. Keep our PID reserved until group cleanup.
                 return super().poll(flag) if self.reap_allowed else None
@@ -74,7 +76,7 @@ class _ShellGroupProcess(SpawnProcess):
         return PinnedPopen(process_obj)
 
     def release_pid(self) -> None:
-        self._popen.reap_allowed = True
+        self._popen.reap_allowed = True  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _ensure_worker_stdio() -> None:
@@ -245,8 +247,8 @@ class IsolatedProcessCall:
             # A concurrent fork can inherit the sentinel writer, and EOF
             # alone can arrive before the kernel marks the child waitable.
             deadline = time.monotonic() + timeout
-            flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
-            while os.waitid(os.P_PID, self.process.pid, flags) is None:
+            flags = os.WEXITED | os.WNOHANG | os.WNOWAIT  # pyright: ignore[reportAttributeAccessIssue]
+            while os.waitid(os.P_PID, self.process.pid, flags) is None:  # pyright: ignore[reportAttributeAccessIssue]
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
@@ -302,11 +304,11 @@ class IsolatedProcessCall:
         if pid is None:
             return
         try:
-            os.killpg(pid, signal.SIGTERM)
+            os.killpg(pid, signal.SIGTERM)  # pyright: ignore[reportAttributeAccessIssue]
             self.wait(1)
             # The worker may already be dead while same-group descendants
             # ignore SIGTERM. Escalate before permitting any waitpid().
-            os.killpg(pid, signal.SIGKILL)
+            os.killpg(pid, signal.SIGKILL)  # pyright: ignore[reportAttributeAccessIssue]
         except ProcessLookupError:
             pass
         self.wait(1)
@@ -336,7 +338,7 @@ def start_isolated_tool(
 ) -> IsolatedProcessCall:
     own_shell_group = own_shell_group and os.name == "posix"
     # A SIGCHLD handler or SIG_IGN can bypass PinnedPopen and reap the PID.
-    if own_shell_group and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+    if own_shell_group and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:  # pyright: ignore[reportAttributeAccessIssue]
         raise RuntimeError("前台 Shell 需要宿主保留隔离进程的回收权")
     safe_context = {
         key: value

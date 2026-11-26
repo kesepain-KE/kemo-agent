@@ -85,9 +85,9 @@ def history(service, user, session_id, *, source="web", limit=None, before=None)
     key = session_key(source, identity)
     size = max(1, min(500, int(limit or 100)))
     with card_read_connection(service.root, name) as db:
-        row = db.execute("SELECT * FROM card_sessions WHERE session_key=? AND lifecycle!='deleted'",
-                         (key,)).fetchone() if db is not None else None
-        if row is None:
+        if db is None or (row := db.execute(
+            "SELECT * FROM card_sessions WHERE session_key=? AND lifecycle!='deleted'", (key,),
+        ).fetchone()) is None:
             raise NotFoundError(f"会话不存在：{identity}")
         record = session_record(db, row)
         before_seq = max(1, int(before)) if before is not None else record["last_seq"] + 1

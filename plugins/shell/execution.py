@@ -42,7 +42,7 @@ if TYPE_CHECKING:
         write_job_request as write_job_request,
     )
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 def _process_command(
     command: str,
@@ -249,7 +249,7 @@ def _execute(
             env_extra=environment,
             stdin=stdin,
             timeout=timeout,
-            is_cancelled=is_cancelled if callable(is_cancelled) else None,
+            is_cancelled=cast(Callable[[], bool], is_cancelled) if callable(is_cancelled) else None,
             shell_type=shell_type,
             show_terminal=show_terminal,
             isolated=isolated,

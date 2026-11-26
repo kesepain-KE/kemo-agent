@@ -7,7 +7,7 @@ from bisect import bisect_right
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from provider.protocol.enums import MessageRole
@@ -246,9 +246,9 @@ class AgentCardStream:
             return card
         view = card.view_payload or {}
         receipt = view.get("result")
-        private_reference = (isinstance(receipt, dict) and receipt.get("content_omitted")
-                             and receipt.get("raw_card_id") == card.card_id)
-        if arguments is None and not result_changed and not private_reference:
+        private_reference = receipt if (isinstance(receipt, dict) and receipt.get("content_omitted")
+                                        and receipt.get("raw_card_id") == card.card_id) else None
+        if arguments is None and not result_changed and private_reference is None:
             return card
         raw = card.raw_payload
         if arguments is not None and card.view_kind == "tool_call":
@@ -260,9 +260,9 @@ class AgentCardStream:
                 original["arguments"] = arguments
         if result_changed and view.get("result") == card.raw_payload.get("result"):
             view["result"] = self._results[card.card_id]
-        if private_reference:
-            del receipt["raw_card_id"]
-            receipt["instruction"] = "原文仅保存于子代理卡片库，不能通过主对话历史查找；不要因正文省略重跑工具。"
+        if private_reference is not None:
+            del private_reference["raw_card_id"]
+            private_reference["instruction"] = "原文仅保存于子代理卡片库，不能通过主对话历史查找；不要因正文省略重跑工具。"
         return replace(card, view_payload_json=json_text(view), raw_payload_json=json_text(raw))
 
     def _append(self, kind, payload, *, level=None, call_id=None, event_key=None, db=None) -> Card:
@@ -305,7 +305,7 @@ class AgentCardStream:
 
     def _register(self, call: ToolCallItem, db) -> None:
         original = {"name": call.name, "arguments": call.arguments}
-        safe = private_data(original)
+        safe = cast(dict[str, Any], private_data(original))
         execution, created = self.integration.register_tool(
             call.call_id, safe, planned=True, transaction=db,
         )
@@ -350,7 +350,7 @@ class AgentCardStream:
 
     def unknown_legacy_call(self, call: ToolCallItem) -> bool:
         return bool(self._legacy_unknown) and tool_call_signature(
-            call.name, private_data(call.arguments)) in self._legacy_unknown
+            call.name, cast(dict[str, Any], private_data(call.arguments))) in self._legacy_unknown
 
     def response(self, output: list[Any], shell_notices=()) -> None:
         reasoning: list[tuple[list[int], list[ReasoningItem]]] = []
@@ -397,7 +397,7 @@ class AgentCardStream:
         self._reasoning.extend(reasoning)
         # Controls and reasoning without a following card are request-local.
         self._control.clear()
-        self._ephemeral = {self.head: pending} if pending else {}
+        self._ephemeral = {self.head: cast(list[Item], pending)} if pending else {}
         self._media_messages = next_media
 
     def _provider_result(self, item: ToolResultItem, db) -> None:

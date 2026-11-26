@@ -9,7 +9,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, IO
 
 from .common import DeployError, atomic, digest, json_bytes, read_json, setup_subprocess_kwargs, target
 
@@ -137,7 +137,7 @@ def start_windows(root: Path, python: str, arguments: list[str]) -> int:
     return 0
 
 
-def _copy_web_log(source: BinaryIO, log: BinaryIO) -> None:
+def _copy_web_log(source: IO[bytes], log: BinaryIO) -> None:
     """Keep the recent output in place so an open log need not be renamed on Windows."""
     log.seek(0, os.SEEK_END)
     chunk = b''

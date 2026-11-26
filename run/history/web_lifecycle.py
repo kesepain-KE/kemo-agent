@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import time
-from typing import Any
+from typing import Any, Callable
 
 from run.cards import CardConflictError, CardStore, IntegrationStore, json_text, session_key
 from run.history.index_core import index_lock
@@ -174,7 +174,12 @@ def retire_scheduled_web_session(root, user, record, *, now):
     return _retire(root, user, candidate, now=now, protected=(), close_only=True)
 
 
-def queue_web_retirement(root, user, sid, *, memory, summary, reason):
+def queue_web_retirement(
+    root, user, sid, *,
+    memory: Callable[..., dict[str, Any]] | None,
+    summary: Callable[..., dict[str, Any] | None] | None,
+    reason: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     queued = memory(root, user, "web", sid, reason=reason) if memory else {}
     summarized = summary(root, user, "web", sid) if summary else None
     mutate_registry_record(root, user, "web", sid,

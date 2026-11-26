@@ -1,4 +1,6 @@
 """Public history API: immutable CardStream RAW plus session metadata."""
+from typing import TYPE_CHECKING
+
 from run.history.index import (
     chain_for_source, claim_pending_memory, claim_pending_summary, close_session,
     defer_memory_claim, defer_summary_claim, find_record, finish_memory_claim,
@@ -22,6 +24,9 @@ from run.history.store import (
 )
 from run.history.archive_query_common import raw_search_rows, raw_text_context
 from run.history.fulltext import search_rows as fulltext_search_rows
+
+if TYPE_CHECKING:
+    from run.history.web_lifecycle import queue_web_retirement as queue_web_retirement
 
 _DOMAIN_MODULES = (
     "archive_catalog", "archive_reader", "lease_presence", "web_lifecycle",

@@ -234,7 +234,7 @@ def run_model(
         capture_budget(context)
         if context.budget.limit and context.budget.used >= context.budget.limit and shell_inbox.pending():
             if not shell_inbox.wait(context.cancel_event,
-                    wrap_up=continuation.wrap_up if continuation is not None else None):
+                    wrap_up=continuation.wrap_up):
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
         take_shell_notice()
         tail = [MessageItem.text(MessageRole.USER, text) for _, text in shell_notices]
@@ -378,11 +378,10 @@ def run_model(
             agent_runner._merge_usage(total_usage, agent_runner._usage_dict(response.usage))
             retry_state.usage = copy.deepcopy(total_usage)
             final_model = response.model or runtime["model"]
-            if continuation is not None:
-                with continuation.lock:
-                    continuation.payload["usage"] = copy.deepcopy(total_usage)
-                    continuation.payload["model"] = final_model
-                    continuation.payload["response_ids"] = list(response_ids)[-160:]
+            with continuation.lock:
+                continuation.payload["usage"] = copy.deepcopy(total_usage)
+                continuation.payload["model"] = final_model
+                continuation.payload["response_ids"] = list(response_ids)[-160:]
             if response.status not in {ResponseStatus.COMPLETED, ResponseStatus.REQUIRES_ACTION}:
                 if recover_overflow(response_terminal_error(response), prepared.wire_tokens):
                     continue
@@ -418,7 +417,7 @@ def run_model(
                 )
             if invalid_error is None:
                 break
-            if continuation is not None and continuation.wrap_injected:
+            if continuation.wrap_injected:
                 raise AgentOutputError("超时收尾输出无效，不自动重跑任务")
             if (
                 invalid_tool_arguments_retries
@@ -445,19 +444,17 @@ def run_model(
         messages = [
             item for item in normalized_output if isinstance(item, MessageItem)
         ]
-        if continuation is not None:
-            public_text = "".join(text_from_content(item.content) for item in messages)
-            fragment = ({"status": "partial", "summary": public_text[:6000],
-                         "verification": ["阶段性公开正文，尚未通过最终输出校验。"]}
-                        if public_text and calls else None)
-            continuation.capture(total_usage, response_ids, conclusion=fragment)
+        public_text = "".join(text_from_content(item.content) for item in messages)
+        fragment = ({"status": "partial", "summary": public_text[:6000],
+                     "verification": ["阶段性公开正文，尚未通过最终输出校验。"]}
+                    if public_text and calls else None)
+        continuation.capture(total_usage, response_ids, conclusion=fragment)
         structured_calls = [
             call for call in calls if call.name == _STRUCTURED_OUTPUT_TOOL_NAME
         ]
-        if (not calls or (len(calls) == 1 and len(structured_calls) == 1)) and not (
-                continuation is not None and continuation.wrap_up.is_set()):
+        if (not calls or (len(calls) == 1 and len(structured_calls) == 1)) and not continuation.wrap_up.is_set():
             if not shell_inbox.wait(context.cancel_event,
-                                    wrap_up=continuation.wrap_up if continuation is not None else None):
+                                    wrap_up=continuation.wrap_up):
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
             if take_shell_notice():
                 # A proposed structured submission is not final while results
@@ -511,12 +508,11 @@ def run_model(
         for call in calls:
             if context.cancel_event.is_set():
                 raise AgentCancelledError(f"子代理 {definition.name} 已取消")
-            if continuation is not None and continuation.wrap_up.is_set():
+            if continuation.wrap_up.is_set():
                 break
             import time as _tool_time
             tool_started = _tool_time.monotonic()
             if not context.budget.consume(context, call):
-                assert continuation is not None
                 stream.settle_unstarted()
                 capture_budget(context)
                 continuation.capture(total_usage, response_ids)
@@ -694,9 +690,8 @@ def run_model(
                      elapsed_ms=duration_ms,
                      summary="执行成功" if payload.get("ok") else "执行失败")
             _record_agent_recovery(retry_state, call, payload, iteration=iteration)
-            if continuation is not None:
-                capture_budget(context)
-                continuation.capture(total_usage, response_ids)
+            capture_budget(context)
+            continuation.capture(total_usage, response_ids)
             if (
                 (
                     context.retry_ledger is None
@@ -729,8 +724,7 @@ def run_model(
             raise AgentOutputError(str(exc), raw_text=final_text) from exc
     else:
         data = final_data
-    if continuation is not None:
-        stopped_result(context, total_usage, response_ids, conclusion=data)
+    stopped_result(context, total_usage, response_ids, conclusion=data)
     current_tool_ids = {
         str(record.get("id") or "")
         for record in tool_records

@@ -33,6 +33,7 @@ from run.conversation.request_input import content_for_message, uploaded_file_co
 from run.retry import HOST_CONTROL_EXCEPTIONS
 
 if TYPE_CHECKING:
+    from run.cards import IntegrationStore
     from run.tools import ToolRuntime
 
 
@@ -119,6 +120,37 @@ class InterruptGuidance:
         if target is not None and result.metadata.get("status") == "handed_off":
             return self._notice(target, "handed_off", "已转后台", job_id=result.result["job_id"])
         return None
+
+
+def advance_queued_guidance(
+    values: Iterable[Any], *, tool_batch: int, batch_dispatch_times: dict[str, float],
+    async_execution_ids: set[str], integration: IntegrationStore, runtime: ToolRuntime,
+    delayed: list[tuple[int, GuidanceInput]], interrupts: list[InterruptGuidance],
+) -> Iterable[RunEvent]:
+    """Bind new interrupts to their foreground batch and advance pending handoffs."""
+    new_interrupts = []
+    for raw in values:
+        item = normalize_guidance(raw)
+        if item is None:
+            continue
+        if item.mode == "background":
+            delayed.append((tool_batch, item))
+        else:
+            item.id = item.id or "guidance_" + uuid4().hex
+            new_interrupts.append(InterruptGuidance(item))
+    interrupts.extend(new_interrupts)
+    # An offer cannot detach a call that had not been dispatched yet.
+    # Legacy bare strings have no handoff scope.
+    scoped_interrupts = [entry for entry in new_interrupts if entry.item._offered_at]
+    if scoped_interrupts and batch_dispatch_times:
+        targets = {tool["id"]: tool for tool in integration.live_executions()
+                   if tool["id"] in batch_dispatch_times and tool["id"] not in async_execution_ids}
+        for entry in scoped_interrupts:
+            entry.targets = {key: target for key, target in targets.items()
+                             if batch_dispatch_times[key] <= entry.item._offered_at}
+    for entry in interrupts:
+        if entry.targets:
+            yield from entry.advance(runtime)
 
 
 @dataclass(slots=True)

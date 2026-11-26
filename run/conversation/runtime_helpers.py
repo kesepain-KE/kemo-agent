@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import queue
 import threading
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from contextlib import closing
 
 from events import RunEvent
@@ -15,6 +18,101 @@ from provider.protocol.diagnostics import sanitize_provider_diagnostic
 from provider.protocol.models import MessageItem, ReasoningItem, RefusalContent, TextContent, ToolCallItem
 from run.conversation.provider_projection import final_answer_messages
 from run.infra import EngineError
+
+if TYPE_CHECKING:
+    from run.agents import TaskCoordinator
+    from run.cards import IntegrationStore
+    from run.extensions import MediaInputHost
+    from run.retry import AttemptToolDedup
+    from run.tools import (
+        ConsecutiveIdenticalToolCallTracker, ConsecutiveToolFailureTracker, ShellInbox, ToolDefinition, ToolRuntime,
+    )
+
+
+def record_tool_result(
+    event: RunEvent, *, integration: IntegrationStore, iteration: int,
+    async_execution_ids: set[str], live_signatures: dict[str, str],
+    identical: ConsecutiveIdenticalToolCallTracker, failures: ConsecutiveToolFailureTracker,
+    seen: AttemptToolDedup, tool_records: list[dict[str, Any]],
+) -> Any:
+    """Record the receipt and update duplicate protection for terminal results."""
+    from run.cards import json_text
+    from run.tools import tool_call_signature
+
+    raw = event.result
+    status = str(event.metadata.get("status") or "")
+    synthetic_statuses = {
+        "blocked", "duplicate_blocked", "duplicate_reused",
+        "identical_call_blocked", "invalid_arguments",
+        "retry_reuse_blocked", "temporarily_unavailable", "not_executed",
+    }
+    payload = copy.deepcopy(raw)
+    event.result = payload
+    arguments = event.arguments or {}
+    signature = tool_call_signature(event.tool_name, arguments)
+    execution_live = bool(event.metadata.get("execution_live"))
+    error = raw.get("error") if isinstance(raw, dict) else None
+    error = error if isinstance(error, dict) else {}
+    capacity_limited = error.get("category") == "execution_capacity"
+    result_too_large = error.get("category") == "result_too_large"
+    if not execution_live:
+        async_execution_ids.discard(event.metadata["execution_id"])
+        # Synthetic duplicate receipts have their own IDs; only the original
+        # execution's terminal receipt may release its fence.
+        if live_signatures.get(signature) == event.metadata.get("execution_id"):
+            live_signatures.pop(signature, None)
+        if status not in synthetic_statuses and not capacity_limited:
+            identical.record(event.tool_name, arguments)
+            failures.record(event.tool_name, succeeded=payload.get("ok") is True or result_too_large)
+            seen.remember(
+                event.tool_name, arguments, payload, iteration,
+                retain_failure_for_retry=(status == "failed"),
+            )
+        event.metadata["consecutive_identical_calls"] = (
+            identical.count if signature == identical.signature else 0
+        )
+    provider_call_id = "callid_" + hashlib.sha256(json_text([
+        integration.key, integration.id, event.tool_call_id,
+    ]).encode("utf-8")).hexdigest()
+    tool_records.append({"id": event.tool_call_id,
+                         "provider_call_id": provider_call_id,
+                         "name": event.tool_name, "arguments": event.arguments,
+                         "result": payload, **event.metadata})
+    return payload
+
+
+def wait_for_dependencies(
+    coordinator: TaskCoordinator, *, cancel_event: threading.Event, channel: Any,
+    integration: IntegrationStore, tool_runtime: ToolRuntime, shell: ShellInbox,
+    pending_handoffs: set[str], allow_notifications: bool, plan_call_id: str | None,
+) -> bool:
+    plan_waiting = plan_call_id is not None
+
+    def wake():
+        size = getattr(channel, "qsize", None)
+        return (tool_runtime.poll_decisions()
+                or tool_runtime.changed.is_set()
+                or bool(callable(size) and size())
+                or bool(allow_notifications and not plan_waiting and shell.ready()))
+
+    def waiting_tools():
+        if not pending_handoffs:
+            return integration.live_executions()
+        # A commit can clear execution_live before its receipt
+        # can be verified and published. Wait for that event too.
+        tools = {tool["id"]: tool for tool in integration.live_executions()}
+        for key in pending_handoffs - tools.keys():
+            tools[key] = {
+                "id": key, "status": (
+                    "running" if tool_runtime.shell_execution(key) is not None else "result_commit_pending"
+                ),
+            }
+        return list(tools.values())
+
+    return coordinator.wait(
+        cancel_event, wake=wake, pending=waiting_tools,
+        allow_notifications=allow_notifications, heartbeat_only=plan_waiting, plan_call_id=plan_call_id,
+    )
 
 
 def runtime_dynamic_tail(tail, integration, coordinator, *, dispatched, child_notice, shell_notice):
@@ -196,6 +294,77 @@ def duplicate_execution_should_block(
         item.get("execution_id") == execution_id
         for item in integration.live_executions()
     )
+
+
+def settle_tool_without_execution(
+    call: ToolCallItem, *, signature: str, integration: IntegrationStore, tool_runtime: ToolRuntime,
+    batch_signatures: set[str], live_signatures: dict[str, str], failures: ConsecutiveToolFailureTracker,
+    seen: AttemptToolDedup, identical: ConsecutiveIdenticalToolCallTracker, retry_recovery: bool,
+) -> bool:
+    if signature in batch_signatures:
+        tool_runtime.record(call, {"ok": False, "execution": {"executed": False},
+            "error": {"code": "duplicate_blocked",
+                      "message": "同一工具批次已提交相同调用；本次未再次启动，也未复用前次结果"}},
+            status="duplicate_blocked")
+        return True
+    batch_signatures.add(signature)
+    if failures.is_unavailable(call.name):
+        tool_runtime.record(call, {
+            "ok": False,
+            "error": {
+                "code": "temporarily_unavailable",
+                "exception_type": "ToolTemporarilyUnavailable",
+                "consecutive_failures": failures.count,
+                "temporarily_unavailable": True,
+                "message": f"工具 {call.name} 本次 Run 内已连续失败，暂时不可用",
+            },
+        }, status="temporarily_unavailable")
+        return True
+    if signature in live_signatures:
+        active_execution_id = live_signatures[signature]
+        if duplicate_execution_should_block(integration, active_execution_id):
+            tool_runtime.record(call, {"ok": False, "execution": {"executed": False},
+                "error": {"code": "duplicate_blocked",
+                          "message": "相同调用仍在执行；本次未再次启动工具",
+                          "execution_id": active_execution_id}},
+                status="duplicate_blocked")
+            return True
+        live_signatures.pop(signature, None)
+    dedup = seen.check(call.name, call.arguments, identical, retry_recovery=retry_recovery)
+    if dedup is not None:
+        tool_runtime.record(call, dedup[0], status=dedup[1])
+        return True
+    return False
+
+
+def configure_tool_call(
+    call: ToolCallItem, definition: ToolDefinition, context: dict[str, Any], *,
+    request: dict[str, Any], integration: IntegrationStore, coordinator: TaskCoordinator,
+    media: MediaInputHost, prompt: str, tool_records: list[dict[str, Any]], run_id: str,
+) -> Callable[[Any], Any] | None:
+    """Attach the ownership and payload handling needed by this tool."""
+    if call.name == "external_message":
+        context["transport_registry"] = request.get("_transport_registry")
+    if call.name == "user_decision":
+        integration.checkpoint_decisions(request)
+    if call.name == "shell":
+        coordinator.ensure_started()
+    if call.name == "multimodal":
+        context.update(user_text=prompt, tool_records=copy.deepcopy(tool_records))
+    if call.name == "subagent_dispatch":
+        callback = request.get("_subagent_event_callback")
+        if callable(callback):
+            context["event_callback"] = lambda event: callback(replace(
+                event, tool_call_id=call.call_id,
+                metadata={**event.metadata, "parent_run_id": run_id}))
+        if call.arguments.get("action") == "call":
+            context["task_ownership_factory"] = lambda: coordinator.ownership(call.call_id)
+        elif call.arguments.get("action") in {"resume", "guide", "split"}:
+            context["task_ownership"] = coordinator.ownership(call.call_id)
+    if call.name == "attach_media":
+        return lambda value: media.accept(
+            definition, call.arguments, value, call_id=call.call_id, tool_records=tool_records)
+    return None
 
 
 def observed_exchange(stream, *, store, source, session_id, integration_id, integration,

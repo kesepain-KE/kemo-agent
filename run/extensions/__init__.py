@@ -1,5 +1,10 @@
 """Expansion, sensing, attachment, capability and multimodal runtime domain."""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from run.extensions.expand_runtime import resolve_expand as resolve_expand
+
 _DOMAIN_MODULES = (
     "attachments",
     "media_input_request",
