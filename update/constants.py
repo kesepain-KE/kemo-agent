@@ -24,6 +24,32 @@ BACKUP_KEEP = 2
 ROOT = Path(__file__).resolve().parents[1]
 WEB_DIR = ROOT / "web" / "frontend"
 
+KEMO_BRIDGE_EXPAND = "expand/global/kemo_bridge"
+KEMO_BRIDGE_RUNTIME_FILES = (
+    "config.json",
+    "users.json",
+    "credential_registry.json",
+    "_admin_key.sha256",
+    "_workspace_credentials.yaml",
+    "_connections.json",
+    "_device_commands.json",
+    "_device_commands.json.lock",
+    *(f"{database}{suffix}"
+      for database in ("_bridge_peers.sqlite3", "_bridge_runs.sqlite3")
+      for suffix in ("", "-wal", "-shm", "-journal")),
+    "_runtime.json",
+    "_activated.json",
+    "_server.pid",
+    "_lifecycle.lock",
+    "_last_run.json",
+    ".runtime.lock",
+    "logs/",
+    "module.yaml",
+    "input_data.md",
+    "module/status.json",
+    "module/panel.values.json",
+)
+
 # Files and directories owned by a running deployment.  They are not part of
 # a source release and must not be copied into a rollback snapshot or removed
 # while restoring one.
@@ -41,6 +67,7 @@ RUNTIME_EXCLUDES = (
     "web/node_modules/",
     "web/frontend/node_modules/",
     "kemo.yaml",
+    "config/module_ui_grants.json",
     "__pycache__/",
     ".module.execution.lock",
     ".update.lock",
@@ -48,24 +75,7 @@ RUNTIME_EXCLUDES = (
     # Built-in expands contain credentials, leases, databases and operator
     # activation state.  Their static Python files are still updated by the
     # core board; these local files remain in place during rollback.
-    "expand/global/kemo_app/config.json",
-    "expand/global/kemo_app/users.json",
-    "expand/global/kemo_app/credential_registry.json",
-    "expand/global/kemo_app/_connections.json",
-    "expand/global/kemo_app/_device_commands.json",
-    "expand/global/kemo_app/_device_commands.json.lock",
-    "expand/global/kemo_app/_app_runs.sqlite3",
-    "expand/global/kemo_app/_app_runs.sqlite3-shm",
-    "expand/global/kemo_app/_app_runs.sqlite3-wal",
-    "expand/global/kemo_app/_runtime.json",
-    "expand/global/kemo_app/_activated.json",
-    "expand/global/kemo_app/_server.pid",
-    "expand/global/kemo_app/_lifecycle.lock",
-    "expand/global/kemo_app/_last_run.json",
-    "expand/global/kemo_app/.runtime.lock",
-    "expand/global/kemo_app/logs/",
-    "expand/global/kemo_app/module.yaml",
-    "expand/global/kemo_app/input_data.md",
+    *(f"{KEMO_BRIDGE_EXPAND}/{name}" for name in KEMO_BRIDGE_RUNTIME_FILES),
     "expand/global/kemo_gateway_status/gateway_config.json",
     "expand/global/kemo_gateway_status/_runtime.json",
     "expand/global/kemo_gateway_status/_last_run.json",
@@ -82,6 +92,11 @@ RUNTIME_EXCLUDES = (
     "expand/global/kemo_graph/artifacts/",
     "expand/global/kemo_graph/module.yaml",
     "expand/global/kemo_graph/input_data.md",
+    # Local runtime data and artifacts are not part of rollback.
+    "expand/global/dsh-model-system/data/",
+    "expand/global/dsh-model-system/assets/",
+    "expand/share/browser_control/_chrome_profile/",
+    "deploy/artifacts/",
 )
 
 # A backup is a restorable source snapshot, not a second user-data store.

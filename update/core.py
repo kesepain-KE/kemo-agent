@@ -23,6 +23,7 @@ from ._utils import (
     write_yaml_atomic,
     yellow,
 )
+from .constants import KEMO_BRIDGE_EXPAND
 
 
 MODULE_NAME = "core"
@@ -125,32 +126,59 @@ KEMO_GRAPH_OBSOLETE_FILES = (
     "artifacts/kemo_graph_status.png",
 )
 
-KEMO_APP_EXPAND = "expand/global/kemo_app"
-KEMO_APP_EXPAND_FILES = (
+KEMO_BRIDGE_EXPAND_FILES = (
     ".gitignore",
     "README.md",
+    "admin_console.py",
+    "admin_routes.py",
+    "agent_routes.py",
     "app.py",
-    "payload_tools.py",
+    "artifact_routes.py",
+    "artifact_store.py",
     "auth.py",
+    "bridge_auth.py",
+    "bridge_client.py",
+    "bridge_config.py",
+    "bridge_events.py",
+    "capabilities.py",
     "config.example.json",
     "conversation_routes.py",
     "credential_registry.py",
     "daemon.py",
     "data_update.py",
     "device_commands.py",
-    "events.py",
+    "expand_control.md",
+    "forensics.py",
     "initialize_config.py",
     "lifecycle.py",
-    "manage_device_token.py",
     "manage_user.py",
-    "panel_control.py",
-    "run_broker.py",
-    "server.py",
-    "start_expand.py",
-    "expand_control.md",
-    "upstream.py",
     "module/README.md",
     "module/panel.json",
+    "module/workspace.json",
+    "outbound_credentials.py",
+    "panel_control.py",
+    "payload_tools.py",
+    "peer_store.py",
+    "run_broker.py",
+    "run_terminal.py",
+    "start_expand.py",
+    "token_usage.py",
+    "ui/admin/admin.js",
+    "ui/admin/index.html",
+    "ui/admin/style.css",
+    "ui/build.py",
+    "ui/dist/admin.css",
+    "ui/dist/admin.js",
+    "ui/dist/index.html",
+    "ui/dist/main.js",
+    "ui/dist/style.css",
+    "ui/index.html",
+    "ui/src/main.js",
+    "ui/src/style.css",
+    "uploads.py",
+    "upstream.py",
+    "workbench.py",
+    "workspace_actions.py",
 )
 
 BUILTIN_GLOBAL_EXPANDS = (
@@ -161,7 +189,7 @@ BUILTIN_GLOBAL_EXPANDS = (
         "graph_config.json",
         KEMO_GRAPH_OBSOLETE_FILES,
     ),
-    (KEMO_APP_EXPAND, KEMO_APP_EXPAND_FILES, "config.json", ()),
+    (KEMO_BRIDGE_EXPAND, KEMO_BRIDGE_EXPAND_FILES, "config.json", ()),
 )
 
 
@@ -554,15 +582,10 @@ def _update_builtin_global_expand(
                 and isinstance(libraries, list)
                 and any(isinstance(item, dict) and item.get("enabled", True) for item in libraries)
             )
-        elif relative == KEMO_APP_EXPAND:
-            # App activation is an explicit, durable operator choice.  An
-            # update must not erase it merely because credentials are being
-            # migrated, temporarily incomplete, or unavailable for validation
-            # while files are copied.  Runtime readiness is still enforced by
-            # kemo_app/start_expand.py when the bridge is actually started.
-            # A fresh install and an explicitly deactivated installation both
-            # remain inactive because neither has an explicit boolean true in
-            # its existing local manifest.
+        elif relative == KEMO_BRIDGE_EXPAND:
+            # Preserve the local injection state even if configuration is
+            # temporarily invalid. Bridge lifecycle still checks _activated.json
+            # and readiness; installing source alone never activates it.
             active = current.get("input_open") is True
         manifest["input_open"] = active
         if current:
