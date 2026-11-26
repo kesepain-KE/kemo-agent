@@ -78,7 +78,7 @@
     },
     {
       "id": "tool-result",
-      "claim": "[机制] 主整合工具结果完整写入 CardStream RAW；主整合 VIEW 与子代理内联结果统一预算为 {limit:,} JSON 字符（`run/tools/result_limits.py` 的 `MAX_TOOL_RESULT_CHARS`）。",
+      "claim": "[机制] 主整合工具回执完整写入 CardStream RAW；主整合 VIEW 与子代理内联结果统一预算为 {limit:,} JSON 字符（`run/tools/result_limits.py` 的 `MAX_TOOL_RESULT_CHARS`）。前台 Shell 移交成功后，原调用只写移交回执，命令终态另存到同一个后台作业。",
       "facts": {
         "limit": {
           "kind": "python",
@@ -104,7 +104,7 @@
         {
           "path": "run/tools/runtime.py",
           "symbol": "ToolRuntime._execute",
-          "ast_sha256": "b21d5f19260a30581dcb73e2e85a27518807540c57fa5a0bfae2f42f0320d9ba"
+          "ast_sha256": "5e7ab5f46d9197e1be76f8264094545cac2b58d223c85a44a84a49befa524ca2"
         },
         {
           "path": "run/tools/result_limits.py",
@@ -338,7 +338,7 @@
         {
           "path": "run/cards/barrier.py",
           "symbol": "prepare_request",
-          "ast_sha256": "5db42c8c875517a1623641a5ccd87a0acf682ee8e82aa0e89e139b27832bbd32"
+          "ast_sha256": "1d9b71cbb3f5b9d9a34a1e103c1bd7c1677cb0fded8af7d4e4ee2c3dc10d47a9"
         },
         {
           "path": "run/cards/store.py",
@@ -349,7 +349,7 @@
     },
     {
       "id": "agent-timeout",
-      "claim": "[机制] `agent_runtime.default_timeout` 仓库配置为 {seconds} 秒（`config/global_config.yaml`）；这是子代理运行预算基准，不是所有工具外层看门狗的统一期限。",
+      "claim": "[机制] `agent_runtime.default_timeout` 仓库配置为 {seconds} 秒（`config/global_config.yaml`），用于有界子代理执行；托管本地模型循环不设任务总时限。等待查询使用独立看门狗，不修改原任务期限。",
       "facts": {
         "seconds": {
           "kind": "yaml",
@@ -369,17 +369,17 @@
         {
           "path": "run/tools/__init__.py",
           "symbol": "resolve_tool_timeout",
-          "ast_sha256": "f6c60b9821afac2c6f6cb3ef4d0d34316bd0a6a8bdcd87b3e90ba683e32e621c"
+          "ast_sha256": "f0e2926f45b0e8d0e5aff0828c460db7948c2390c45093003fb16ac7d92600d1"
         },
         {
-          "path": "run/tools/__init__.py",
-          "symbol": "_AGENT_TOOL_WATCHDOG_GRACE",
-          "ast_sha256": "6a461c15f6647ba6c8d65ae9231a714b65b4e9f468d1bef04db577309475256c"
+          "path": "run/agents/budgets.py",
+          "symbol": "execution_timeout",
+          "ast_sha256": "9092c56765be27689366ffd859c375c65c419ba31eb79e5ffe1484405304bc4a"
         },
         {
-          "path": "run/tools/__init__.py",
-          "symbol": "_SUBAGENT_DEFAULT_WATCHDOG_SECONDS",
-          "ast_sha256": "3d3a9106d45692dba668759a51d02d5c94a694ff5832b0c89caba7669a2c1d1f"
+          "path": "run/agents/coordinator.py",
+          "symbol": "TaskCoordinator._deadline",
+          "ast_sha256": "5617ab1b2874a268b3c847db9c003b7a8613dfc5f49849eb9c2d23f2e54fae99"
         }
       ]
     },
