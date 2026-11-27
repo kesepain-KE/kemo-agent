@@ -3,8 +3,84 @@ from __future__ import annotations
 import queue
 import threading
 import unittest
+from unittest import mock
 
-from run.conversation import GuidanceInput, GuidanceMailbox
+from run.conversation import GuidanceInput, GuidanceMailbox, advance_queued_guidance, next_order
+
+
+class GuidanceOrderStampTests(unittest.TestCase):
+    """Ordering must not depend on the platform monotonic clock resolution.
+
+    Windows CPython before 3.13 reads time.monotonic() from GetTickCount64 in
+    15.6 ms ticks, so a dispatch and an offer that really happened in order can
+    return equal floats. That collapsed the "was this call dispatched before the
+    guidance arrived?" test and detached calls that had not started yet.
+    """
+
+    class _Integration:
+        def __init__(self, ids):
+            self._ids = ids
+
+        def live_executions(self):
+            return [{"id": i, "name": "shell", "tool_call_id": f"call_{i}"} for i in self._ids]
+
+    class _Runtime:
+        def __init__(self):
+            self.cancel_event = threading.Event()
+            self.advanced = []
+
+        def shell_handoff_state(self, execution_id):
+            self.advanced.append(execution_id)
+            return "waiting"  # Only target binding is under test here.
+
+    def _offer(self, text):
+        mailbox = GuidanceMailbox(maxsize=4)
+        with mock.patch("run.conversation.guidance.time.monotonic", return_value=1000.0):
+            mailbox.offer(GuidanceInput(text=text))
+        item, = mailbox.drain()
+        return item
+
+    def test_offer_stamp_survives_a_frozen_clock(self) -> None:
+        one, two = self._offer("one"), self._offer("two")
+        self.assertEqual(one._offered_at, two._offered_at)  # Frozen clock collapses time.
+        self.assertLess(one._offer_order, two._offer_order)  # Order still separates them.
+
+    def test_call_dispatched_after_the_offer_is_not_a_target(self) -> None:
+        # Real order: first dispatched -> guidance offered -> second dispatched.
+        first_order = next_order()
+        offered = self._offer("between the two dispatches")
+        second_order = next_order()
+        self.assertLess(first_order, offered._offer_order)
+        self.assertLess(offered._offer_order, second_order)
+
+        runtime = self._Runtime()
+        interrupts: list = []
+        list(advance_queued_guidance(
+            [offered], tool_batch=1,
+            batch_dispatch_times={"exec_first": first_order, "exec_second": second_order},
+            async_execution_ids=set(),
+            integration=self._Integration(["exec_first", "exec_second"]),
+            runtime=runtime, delayed=[], interrupts=interrupts,
+        ))
+
+        self.assertEqual(list(interrupts[0].targets), ["exec_first"])
+        self.assertEqual(runtime.advanced, ["exec_first"])
+
+    def test_calls_dispatched_before_the_offer_all_bind(self) -> None:
+        first_order, second_order = next_order(), next_order()
+        offered = self._offer("after both dispatches")
+
+        runtime = self._Runtime()
+        interrupts: list = []
+        list(advance_queued_guidance(
+            [offered], tool_batch=1,
+            batch_dispatch_times={"exec_first": first_order, "exec_second": second_order},
+            async_execution_ids=set(),
+            integration=self._Integration(["exec_first", "exec_second"]),
+            runtime=runtime, delayed=[], interrupts=interrupts,
+        ))
+
+        self.assertEqual(sorted(interrupts[0].targets), ["exec_first", "exec_second"])
 
 
 class GuidanceMailboxTests(unittest.TestCase):
