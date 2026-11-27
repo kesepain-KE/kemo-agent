@@ -215,11 +215,20 @@ class SSEHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks[-1], b"")
 
     async def test_dense_events_stop_at_terminal_without_heartbeat_or_extra_next(self):
+        class PatientHeartbeat(Backend):
+            def sse_heartbeat_seconds(self, _user):
+                # This case proves dense events never produce keepalives. The
+                # other cases use a 20ms probe to observe heartbeats quickly,
+                # but that is shorter than a thread-pool dispatch on a loaded
+                # Windows runner, which injected a heartbeat before the first
+                # event. A generous interval keeps the intent and drops the race.
+                return 1.0
+
         iterator = self.blocked_iterator(
             [RunEvent(type="done"), RunEvent(type="text_delta", content="too late")],
             blocked=False,
         )
-        app = self.app(Backend(iterator))
+        app = self.app(PatientHeartbeat(iterator))
         chunks = []
 
         async def send(message):
