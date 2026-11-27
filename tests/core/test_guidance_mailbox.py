@@ -3,7 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import unittest
-from unittest import mock
+from dataclasses import replace
 
 from run.conversation import GuidanceInput, GuidanceMailbox, advance_queued_guidance, next_order
 
@@ -15,6 +15,9 @@ class GuidanceOrderStampTests(unittest.TestCase):
     15.6 ms ticks, so a dispatch and an offer that really happened in order can
     return equal floats. That collapsed the "was this call dispatched before the
     guidance arrived?" test and detached calls that had not started yet.
+
+    These tests deliberately do not patch time.monotonic: it is the process-wide
+    clock and other threads rely on it. Equal timestamps are produced directly.
     """
 
     class _Integration:
@@ -33,22 +36,24 @@ class GuidanceOrderStampTests(unittest.TestCase):
             self.advanced.append(execution_id)
             return "waiting"  # Only target binding is under test here.
 
-    def _offer(self, text):
+    def _offer(self, text, *, offered_at):
         mailbox = GuidanceMailbox(maxsize=4)
-        with mock.patch("run.conversation.guidance.time.monotonic", return_value=1000.0):
-            mailbox.offer(GuidanceInput(text=text))
+        mailbox.offer(GuidanceInput(text=text))
         item, = mailbox.drain()
-        return item
+        # Force the diagnostic timestamp, keeping the allocated order stamp.
+        return replace(item, _offered_at=offered_at)
 
-    def test_offer_stamp_survives_a_frozen_clock(self) -> None:
-        one, two = self._offer("one"), self._offer("two")
-        self.assertEqual(one._offered_at, two._offered_at)  # Frozen clock collapses time.
+    def test_offer_stamp_survives_equal_timestamps(self) -> None:
+        # Two offers that a coarse clock reports at the same instant.
+        one = self._offer("one", offered_at=1000.0)
+        two = self._offer("two", offered_at=1000.0)
+        self.assertEqual(one._offered_at, two._offered_at)  # Coarse clock collapses time.
         self.assertLess(one._offer_order, two._offer_order)  # Order still separates them.
 
     def test_call_dispatched_after_the_offer_is_not_a_target(self) -> None:
         # Real order: first dispatched -> guidance offered -> second dispatched.
         first_order = next_order()
-        offered = self._offer("between the two dispatches")
+        offered = self._offer("between the two dispatches", offered_at=1000.0)
         second_order = next_order()
         self.assertLess(first_order, offered._offer_order)
         self.assertLess(offered._offer_order, second_order)
@@ -68,7 +73,7 @@ class GuidanceOrderStampTests(unittest.TestCase):
 
     def test_calls_dispatched_before_the_offer_all_bind(self) -> None:
         first_order, second_order = next_order(), next_order()
-        offered = self._offer("after both dispatches")
+        offered = self._offer("after both dispatches", offered_at=1000.0)
 
         runtime = self._Runtime()
         interrupts: list = []
