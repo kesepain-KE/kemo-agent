@@ -195,8 +195,11 @@ def test_zero_manifest_budget_projects_200_tools_without_stopping(workspace, mon
 
     monkeypatch.setattr("run.agents.model_loop.execute_tool", execute)
     provider = Provider([[call(value=str(i), index=i) for i in range(200)], OUTPUT])
+    # 200 dispatches plus their CardStream commits take far longer than the old
+    # 30s cap on a loaded Windows runner. The scenario is "unlimited budget does
+    # not stop", not "finishes inside 30 seconds".
     result = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider).run(
-        "general_worker", {"task": "work"}, timeout=30,
+        "general_worker", {"task": "work"}, timeout=180,
     )
     assert result.data == OUTPUT and count == 200
     assert result.metadata["budget"]["unlimited"]
