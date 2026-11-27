@@ -137,7 +137,7 @@ def write_plugin(root):
         "from pathlib import Path\nimport time\n"
         "def run(value, *, context):\n"
         "    with (Path(context['root']) / 'effects.txt').open('a') as f: f.write(value+'\\n')\n"
-        "    if value == 'first': time.sleep(.4)\n"
+        "    if value == 'first': time.sleep(1.0)\n"
         "    return {'ok': True, 'written': value}\n", "utf-8")
 
 
@@ -155,7 +155,7 @@ def legacy_scheduler(runner):
     return scheduler
 
 
-def start(root, config, provider, *, timeout=.2, survival=.6, legacy=True):
+def start(root, config, provider, *, timeout=.5, survival=1.5, legacy=True):
     config["agent_runtime"] = {"default_timeout": timeout, "timeout_survival_seconds": survival}
     runner = AgentRunner(root, "alice", config=config, provider_factory=lambda _: provider)
     scheduler = legacy_scheduler(runner) if legacy else AgentScheduler.from_runner(runner)
@@ -187,7 +187,7 @@ def test_timeout_conclusions_then_same_task_resume_retimes_and_does_not_replay(w
 
     def phase_clock():
         deadline_armed.set()
-        return origin + (.21 if first_tool_started.is_set() else 0)
+        return origin + (.55 if first_tool_started.is_set() else 0)
 
     def execute_after_deadline_armed(definition, arguments, **kwargs):
         assert deadline_armed.wait(2)
@@ -776,7 +776,7 @@ def test_checkpoint_hardlinks_and_unsafe_task_ids_are_rejected(workspace):
 def test_resumable_business_timeout_stays_stopped_even_if_inflight_request_returns_complete(workspace):
     root, config = workspace
     def late(_):
-        time.sleep(.4)
+        time.sleep(1.0)
         return OUTPUT
     provider = Provider([late])
     scheduler, coordinator, _, task_id = start(root, config, provider)
