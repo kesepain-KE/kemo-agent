@@ -123,7 +123,7 @@ class InterruptGuidance:
 
 
 def advance_queued_guidance(
-    values: Iterable[Any], *, tool_batch: int, batch_dispatch_times: dict[str, float],
+    values: Iterable[Any], *, tool_batch: int, batch_dispatch_times: dict[str, int],
     async_execution_ids: set[str], integration: IntegrationStore, runtime: ToolRuntime,
     delayed: list[tuple[int, GuidanceInput]], interrupts: list[InterruptGuidance],
 ) -> Iterable[RunEvent]:
@@ -141,13 +141,15 @@ def advance_queued_guidance(
     interrupts.extend(new_interrupts)
     # An offer cannot detach a call that had not been dispatched yet.
     # Legacy bare strings have no handoff scope.
-    scoped_interrupts = [entry for entry in new_interrupts if entry.item._offered_at]
+    scoped_interrupts = [entry for entry in new_interrupts if entry.item._offer_order]
     if scoped_interrupts and batch_dispatch_times:
         targets = {tool["id"]: tool for tool in integration.live_executions()
                    if tool["id"] in batch_dispatch_times and tool["id"] not in async_execution_ids}
         for entry in scoped_interrupts:
+            # Compare dispatch order, not wall time: Windows CPython before 3.13
+            # has a 15.6 ms monotonic tick, which would collapse both sides.
             entry.targets = {key: target for key, target in targets.items()
-                             if batch_dispatch_times[key] <= entry.item._offered_at}
+                             if batch_dispatch_times[key] <= entry.item._offer_order}
     for entry in interrupts:
         if entry.targets:
             yield from entry.advance(runtime)

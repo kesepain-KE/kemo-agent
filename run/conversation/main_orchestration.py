@@ -44,7 +44,7 @@ from run.tools import (
     system_prompt_with_tool_argument_repair, tool_call_signature,
     validate_tool_call_batch,
 )
-from run.conversation.guidance import GuidanceInput, normalize_guidance
+from run.conversation.guidance import GuidanceInput, next_order, normalize_guidance
 from run.conversation.guidance_runtime import (
     InterruptGuidance, advance_queued_guidance, guidance_failure_details, prepare_guidance,
 )
@@ -342,7 +342,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
 
         iteration, dispatched, invalid_batches, argument_corrections = 0, 0, 0, 0
         tool_batch = 0
-        batch_dispatch_times: dict[str, float] = {}
+        batch_dispatch_times: dict[str, int] = {}
         if resume_id:
             dispatched = len(prior)
         repair_pending, repair_tool_name = False, ""
@@ -694,7 +694,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                 observed_reasoning.clear()
                 continue
             invalid_batches = 0
-            started_executions: dict[str, float] = {}
+            started_executions: dict[str, int] = {}
             batch_signatures: set[str] = set()
             continuation = False
             for call, plan_generation in task_plan_creation_batch(calls, record=tool_runtime.record):
@@ -725,7 +725,7 @@ def run_conversation(request, *, root: Path, provider_factory, tool_registry_fac
                     coordinator=coordinator, media=media, prompt=prompt, tool_records=tool_records,
                     run_id=run_id,
                 )
-                dispatched_at = time.monotonic()
+                dispatched_at = next_order()
                 execution_id = tool_runtime.start(call, definition, context=context,
                     timeout=float(tool_settings.get("timeout", 240)), transform=transform)
                 started_executions[execution_id] = dispatched_at

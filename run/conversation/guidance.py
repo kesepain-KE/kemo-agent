@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import queue
 import threading
 import time
@@ -10,6 +11,17 @@ from typing import Any, Literal
 
 
 GuidanceMode = Literal["interrupt", "background"]
+
+# Ordering stamps must survive coarse platform clocks. Windows CPython before
+# 3.13 reads time.monotonic() from GetTickCount64 with a 15.6 ms tick, so a
+# tool dispatch and a guidance offer that really happened in that order can
+# return the same value and lose their order. A counter has no granularity.
+_ORDER = itertools.count(1)
+
+
+def next_order() -> int:
+    """Allocate a monotonically increasing stamp that never collapses."""
+    return next(_ORDER)
 
 
 @dataclass(slots=True)
@@ -28,6 +40,7 @@ class GuidanceInput:
     uploaded_files: list[dict[str, Any]] = field(default_factory=list)
     mode: GuidanceMode = "interrupt"
     _offered_at: float = field(default=0.0, compare=False, repr=False)
+    _offer_order: int = field(default=0, compare=False, repr=False)
 
     @property
     def display_text(self) -> str:
@@ -101,7 +114,7 @@ class GuidanceMailbox:
             # Keep bare strings as strings for compatibility with custom event
             # sources and third-party integrations that consume this mailbox.
             if not isinstance(value, str):
-                value = replace(normalized, _offered_at=time.monotonic())
+                value = replace(normalized, _offered_at=time.monotonic(), _offer_order=next_order())
             self._queue.put_nowait(value)
             return True, self._queue.qsize()
 
